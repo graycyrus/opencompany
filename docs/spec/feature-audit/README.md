@@ -15,6 +15,18 @@ The audit is grounded in the current repository:
 - the console is the Operator's primary control surface;
 - tiny.place is the optional identity, discovery, A2A, and payment adapter.
 
+## Verified status
+
+[`STATUS.md`](STATUS.md) records what each family **actually** implements, checked
+against source rather than inferred from this directory's prose. It is the
+deliverable for [issue #21](https://github.com/tinyhumansai/opencompany/issues/21).
+
+Summary: 7 of 93 audited capabilities are shipped with a test proving them.
+Strategic analysis built on it lives in [`docs/research/`](../../research/README.md).
+
+The documents below are the **claims**. `STATUS.md` is the **reality**. Where they
+disagree, `STATUS.md` is authoritative.
+
 ## Feature families
 
 | Spec | Outcome | Current foundation |
