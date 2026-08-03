@@ -553,7 +553,8 @@ function CreateTaskDialog({
 
   return (
     <Dialog open={!!column} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg">
+      {/* `sm:` — DialogContent's own `sm:max-w-sm` beats an unprefixed width. */}
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>New task</DialogTitle>
           <DialogDescription>Added to the column you pick below.</DialogDescription>
@@ -574,18 +575,23 @@ function CreateTaskDialog({
             <Label htmlFor="new-note">Note</Label>
             <Textarea
               id="new-note"
-              rows={4}
+              // Textarea is `field-sizing-content`, so `rows` is inert — a
+              // min-height is what actually gives the box room.
+              className="min-h-32 resize-y"
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder="Any detail the assignee should act on."
             />
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <div className="grid gap-1.5">
               <Label>Column</Label>
               <Select value={col} onValueChange={(v) => setCol(v ?? TASK_COLUMNS[0].id)}>
                 <SelectTrigger>
-                  <SelectValue />
+                  {/* Show the column's label, not its raw id. */}
+                  <SelectValue>
+                    {(v) => TASK_COLUMNS.find((c) => c.id === v)?.label ?? String(v ?? "")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {TASK_COLUMNS.map((c) => (
