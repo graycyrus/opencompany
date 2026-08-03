@@ -149,6 +149,15 @@ export function TasksView({
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold">Board</h2>
           <Badge variant="secondary">{tasks.length}</Badge>
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-1 h-7"
+            onClick={() => setCreatingIn(TASK_COLUMNS[0].id)}
+          >
+            <Plus className="size-4" />
+            Add task
+          </Button>
         </div>
         <p className="hidden text-xs text-muted-foreground sm:block">
           Drag a card to move it; drop into “In progress” to hand it to its assignee.
@@ -180,18 +189,9 @@ export function TasksView({
                 overCol === col.id && "border-primary/40 bg-accent/40",
               )}
             >
-              <div className="flex items-center justify-between px-3 py-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">{col.label}</span>
-                  <span className="text-xs text-muted-foreground">{items.length}</span>
-                </div>
-                <button
-                  className="text-muted-foreground hover:text-foreground"
-                  aria-label={`Add task to ${col.label}`}
-                  onClick={() => setCreatingIn(col.id)}
-                >
-                  <Plus className="size-4" />
-                </button>
+              <div className="flex items-center gap-2 px-3 py-2.5">
+                <span className="text-sm font-medium">{col.label}</span>
+                <span className="text-xs text-muted-foreground">{items.length}</span>
               </div>
               <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
                 {loading && items.length === 0 ? (
@@ -514,6 +514,9 @@ function CreateTaskDialog({
   const [note, setNote] = useState("");
   const [priority, setPriority] = useState("medium");
   const [assignee, setAssignee] = useState("");
+  // The board opens this from one button, so the column is picked here rather
+  // than by which `+` was clicked. `column` is only the starting value.
+  const [col, setCol] = useState(TASK_COLUMNS[0].id);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -522,6 +525,7 @@ function CreateTaskDialog({
       setNote("");
       setPriority("medium");
       setAssignee("");
+      setCol(column);
     }
   }, [column]);
 
@@ -534,7 +538,7 @@ function CreateTaskDialog({
       const created = await createTask(client, company, {
         title: title.trim(),
         note: note.trim() || undefined,
-        column: column ?? undefined,
+        column: col,
         priority,
         assignee: assignee.trim() || undefined,
       });
@@ -547,14 +551,12 @@ function CreateTaskDialog({
     }
   }
 
-  const columnLabel = TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
-
   return (
     <Dialog open={!!column} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>New task</DialogTitle>
-          <DialogDescription>Added to “{columnLabel}”.</DialogDescription>
+          <DialogDescription>Added to the column you pick below.</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3">
@@ -579,6 +581,21 @@ function CreateTaskDialog({
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-1.5">
+              <Label>Column</Label>
+              <Select value={col} onValueChange={(v) => setCol(v ?? TASK_COLUMNS[0].id)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {TASK_COLUMNS.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="grid gap-1.5">
               <Label>Priority</Label>
               <Select value={priority} onValueChange={(v) => setPriority(v ?? "medium")}>
