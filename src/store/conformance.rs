@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use crate::ports::artifacts::{ArtifactAuthor, ArtifactKind, ArtifactRecord, ArtifactStore};
 use crate::ports::context::ContextStore;
 use crate::ports::events::EventLog;
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
@@ -63,10 +64,24 @@ fn sample_provenance() -> TemplateProvenance {
     }
 }
 
+/// The runtime-authored workflow graph the fixture seeds every record with, so
+/// each backend (fs, sqlite, mongodb) proves it persists and rehydrates
+/// console-created workflow bodies (issue #168) — on a hosted tenant this is the
+/// ONLY copy of that graph.
+fn sample_overlay_workflow() -> crate::ports::types::OverlayWorkflow {
+    crate::ports::types::OverlayWorkflow {
+        id: "conformance_flow".to_string(),
+        toml: "id = \"conformance_flow\"\nname = \"Conformance flow\"\n\
+               [[node]]\nid = \"start\"\nkind = \"trigger\"\nname = \"Start\"\n"
+            .to_string(),
+    }
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
-/// the store round-trip covers the operator desk-hierarchy field, issue #131)
-/// and stamped with the sample template provenance (so round-trips assert it
-/// survives persistence, issue #85).
+/// the store round-trip covers the operator desk-hierarchy field, issue #131), a
+/// runtime-authored workflow body (issue #168), and stamped with the sample
+/// template provenance (so round-trips assert it survives persistence, issue
+/// #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -80,6 +95,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
             ordered: vec!["ceo".to_string(), "eng".to_string()],
         }],
         overlay_desks: Vec::new(),
+        overlay_workflows: vec![sample_overlay_workflow()],
         template_provenance: Some(sample_provenance()),
     }
 }
@@ -171,6 +187,13 @@ pub async fn assert_isolation_by_company(
             ordered: vec!["ceo".to_string(), "eng".to_string()],
         }],
         "overlay_desk_order did not survive save/load"
+    );
+    // The runtime-authored workflow body survives the store round-trip too
+    // (issue #168) — losing it would delete a hosted tenant's workflow.
+    assert_eq!(
+        loaded.overlay_workflows,
+        vec![sample_overlay_workflow()],
+        "overlay_workflows did not survive save/load"
     );
     assert_eq!(
         events
@@ -387,6 +410,13 @@ pub async fn assert_export_totality(
         Some(sample_provenance()),
         "template provenance did not round-trip through the store"
     );
+    // Issue #168: the runtime-authored graph bodies round-trip too — an export
+    // that dropped them would lose every console-created workflow.
+    assert_eq!(
+        loaded.overlay_workflows,
+        vec![sample_overlay_workflow()],
+        "overlay_workflows did not round-trip through the store"
+    );
 
     // Full event log round-trips with seqs and payloads intact.
     let read = events
@@ -527,6 +557,70 @@ pub async fn assert_inbox_store(inbox: Arc<dyn InboxStore>) {
             .unwrap()
             .is_empty()
     );
+
+    // --- has_inbound_from: the established-correspondent gate ---------------
+    //
+    // Callers use this as a SECURITY gate (a workflow may only email an address
+    // that has written in first), so the contract is asserted here rather than
+    // left to whichever backend happens to be wired. A backend that overrides
+    // the default with an indexed lookup must still satisfy every case below.
+    let from = |id: &str, mailbox: &str, sender: &str, outbound: bool| EmailRecord {
+        from_email: sender.to_string(),
+        ..email(id, mailbox, outbound, 10)
+    };
+    inbox
+        .append(&alpha, &from("c1", "ops", "ada@example.com", false))
+        .await
+        .unwrap();
+    // `grace` only ever RECEIVED mail from this company — never wrote in.
+    inbox
+        .append(&alpha, &from("c2", "ops", "grace@example.com", true))
+        .await
+        .unwrap();
+
+    assert!(
+        inbox
+            .has_inbound_from(&alpha, "ops", "ada@example.com")
+            .await
+            .unwrap(),
+        "an address that wrote in is an established correspondent"
+    );
+    assert!(
+        !inbox
+            .has_inbound_from(&alpha, "ops", "grace@example.com")
+            .await
+            .unwrap(),
+        "OUTBOUND mail must not establish a correspondent — otherwise one send \
+         would authorize the next"
+    );
+    assert!(
+        !inbox
+            .has_inbound_from(&alpha, "ops", "stranger@example.com")
+            .await
+            .unwrap()
+    );
+    // Case and surrounding whitespace do not change who someone is.
+    assert!(
+        inbox
+            .has_inbound_from(&alpha, "ops", "  Ada@EXAMPLE.com ")
+            .await
+            .unwrap()
+    );
+    // A blank needle matches nobody, rather than matching anybody.
+    assert!(!inbox.has_inbound_from(&alpha, "ops", "   ").await.unwrap());
+    // Wrong mailbox, and wrong company, both miss.
+    assert!(
+        !inbox
+            .has_inbound_from(&alpha, "ceo", "ada@example.com")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !inbox
+            .has_inbound_from(&beta, "ops", "ada@example.com")
+            .await
+            .unwrap()
+    );
 }
 
 /// Asserts the [`TaskStore`] contract: per-company isolation, upsert semantics,
@@ -543,6 +637,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         assignee: "Strategy desk".to_string(),
         updated_at_millis: at,
         origin_chat_id: None,
+        parent_task_id: None,
     };
 
     tasks
@@ -1011,6 +1106,98 @@ pub async fn assert_login_code_store(codes: Arc<dyn LoginCodeStore>) {
             .is_some(),
         "a live code must survive a purge"
     );
+}
+
+/// Asserts the [`ArtifactStore`] contract: isolation, per-task filtering,
+/// version-history round-trip, upsert, and delete.
+///
+/// The version-history assertion is the load-bearing one. An artifact's whole
+/// value is that nothing is overwritten — so a backend that stored only the
+/// latest body, or that reordered versions, would still pass a naive
+/// "upsert then read back the title" check while destroying the human-edit
+/// diff. This asserts the full ordered history survives the round-trip.
+pub async fn assert_artifact_store(artifacts: Arc<dyn ArtifactStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let mut draft = ArtifactRecord::new(
+        "a1",
+        "t-1",
+        "Launch post",
+        ArtifactKind::Markdown,
+        "agent draft",
+        "ceo",
+        1,
+    );
+    draft.push_version(
+        "operator polish",
+        ArtifactAuthor::Operator,
+        "operator",
+        2,
+        Some("operator edit before approval".to_string()),
+    );
+    artifacts.upsert(&alpha, &draft).await.unwrap();
+
+    let other_task =
+        ArtifactRecord::new("a2", "t-2", "Spec", ArtifactKind::Text, "notes", "ceo", 3);
+    artifacts.upsert(&alpha, &other_task).await.unwrap();
+
+    let leak = ArtifactRecord::new(
+        "b1",
+        "t-1",
+        "Secret",
+        ArtifactKind::Text,
+        "hidden",
+        "ceo",
+        4,
+    );
+    artifacts.upsert(&beta, &leak).await.unwrap();
+
+    // Isolation: company beta's artifact is invisible to alpha, including under
+    // the same task id.
+    assert_eq!(artifacts.list(&alpha, None).await.unwrap().len(), 2);
+    assert_eq!(artifacts.list(&beta, None).await.unwrap().len(), 1);
+    let alpha_t1 = artifacts.list(&alpha, Some("t-1")).await.unwrap();
+    assert_eq!(alpha_t1.len(), 1, "task filter narrows to one card");
+    assert_eq!(alpha_t1[0].id, "a1");
+
+    // The full ordered version history round-trips, authors intact.
+    let back = artifacts
+        .get(&alpha, "a1")
+        .await
+        .unwrap()
+        .expect("a1 exists");
+    assert_eq!(back, draft, "the whole record must round-trip verbatim");
+    assert_eq!(back.versions.len(), 2);
+    assert_eq!(back.versions[0].version, 1);
+    assert_eq!(back.versions[0].author, ArtifactAuthor::Agent);
+    assert_eq!(back.versions[0].body, "agent draft");
+    assert_eq!(back.versions[1].author, ArtifactAuthor::Operator);
+    // …and therefore the human-edit diff is still computable after a round-trip.
+    let diff = back.human_edit_diff().expect("an operator edited");
+    assert_eq!((diff.from_version, diff.to_version), (1, 2));
+
+    // A missing id reads as `None`, not an error.
+    assert!(artifacts.get(&alpha, "nope").await.unwrap().is_none());
+
+    // Upsert replaces last-write-wins.
+    let mut revised = back;
+    revised.push_version("third pass", ArtifactAuthor::Agent, "ceo", 9, None);
+    artifacts.upsert(&alpha, &revised).await.unwrap();
+    let after = artifacts.get(&alpha, "a1").await.unwrap().unwrap();
+    assert_eq!(after.versions.len(), 3);
+    assert_eq!(after.latest().unwrap().version, 3);
+    assert_eq!(
+        artifacts.list(&alpha, None).await.unwrap().len(),
+        2,
+        "upsert replaces, never duplicates"
+    );
+
+    // Delete reports whether anything went, and does not touch the sibling.
+    assert!(artifacts.delete(&alpha, "a1").await.unwrap());
+    assert!(!artifacts.delete(&alpha, "a1").await.unwrap());
+    assert_eq!(artifacts.list(&alpha, None).await.unwrap().len(), 1);
+    assert_eq!(artifacts.list(&beta, None).await.unwrap().len(), 1);
 }
 
 /// Asserts the [`FactStore`] contract: isolation, query/kind filtering, upsert,

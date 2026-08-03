@@ -194,6 +194,10 @@ export function AppShell({
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) refetches live.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // Issue #228: bumped on every `workflow_run_finished` so the Workflows view
+  // refreshes its run history live. Same shape as `taskEventTick` — a counter,
+  // not the payload, so the view owns what it refetches.
+  const [workflowRunTick, setWorkflowRunTick] = useState(0);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -354,7 +358,13 @@ export function AppShell({
         if (dup) return t;
         return {
           ...t,
-          messages: [...t.messages, makeMessage("company", event.text, { channel: event.agentId })],
+          messages: [
+            ...t.messages,
+            makeMessage("company", event.text, {
+              channel: event.agentId,
+              taskId: event.taskId,
+            }),
+          ],
         };
       }),
     );
@@ -443,6 +453,7 @@ export function AppShell({
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
     onTurnEvent,
+    onWorkflowRunEvent: useCallback(() => setWorkflowRunTick((n) => n + 1), []),
   });
 
   return (
@@ -540,8 +551,20 @@ export function AppShell({
               onSendEnd={onSendEnd}
             />
           )}
-          {view === "inbox" && <InboxView company={company} />}
-          {view === "tasks" && <TasksView client={client} company={company} />}
+          {view === "inbox" && <InboxView client={client} company={company} />}
+          {view === "tasks" && (
+            <TasksView
+              client={client}
+              company={company}
+              // Issue #246: the card → chat half of the round trip. A card
+              // opened from a conversation remembers which one, so its detail
+              // screen can put the operator back in that thread.
+              onOpenThread={(threadId) => {
+                setActiveThreadId(threadId);
+                setView("conversation");
+              }}
+            />
+          )}
           {view === "team" && <TeamView client={client} company={company} />}
           {view === "desks" && <DesksView client={client} company={company} />}
           {view === "people" && <PeopleView client={client} company={company} />}
@@ -575,7 +598,11 @@ export function AppShell({
                 </div>
               }
             >
-              <WorkflowsView client={client} company={company} />
+              <WorkflowsView
+                client={client}
+                company={company}
+                runEventTick={workflowRunTick}
+              />
             </Suspense>
           )}
           {view === "usage" && (

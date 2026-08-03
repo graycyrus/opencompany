@@ -137,7 +137,9 @@ type Company {
 	"""
 	memory(query: String, kind: MemoryKind, first: Int! = 50, offset: Int! = 0): MemoryFactPage!
 	"""
-	The enabled workflows, as one-line summaries.
+	The company's saved workflows, as one-line summaries — seed graphs and
+	runtime-authored ones alike. Each carries an `enabled` flag reporting
+	manifest membership; listing is not gated on it.
 	"""
 	workflows: [WorkflowSummary!]!
 	"""
@@ -476,6 +478,14 @@ type Message {
 	parity). Empty for operator messages and tool-less replies.
 	"""
 	steps: [MessageStep!]!
+	"""
+	The board card this reply is about (issue #246): the card the turn
+	opened, or the dispatched card it ran for (#185). Projected from the
+	same [`MessageView`] field the REST route reads, so the two surfaces
+	agree on which messages carry a card. Null on operator messages and on
+	every reply journaled before the field existed.
+	"""
+	taskId: ID
 }
 
 """
@@ -577,10 +587,15 @@ type RegistrySkill {
 	The publisher of the registry skill.
 	"""
 	publisher: String!
+	"""
+	The library revision this entry ships, from frontmatter. `None` for a
+	skill authored before `version` existed.
+	"""
+	version: String
 }
 
 """
-One skill installed in a company. Mirrors `frontend/src/lib/skills.ts`.
+One skill installed in a company. Mirrors the console's `@/api/skills` types.
 """
 type Skill {
 	"""
@@ -607,6 +622,10 @@ type Skill {
 	Whether the skill is enabled for the company.
 	"""
 	enabled: Boolean!
+	"""
+	The library revision this skill's document carries, when it has one.
+	"""
+	version: String
 }
 
 """
@@ -648,7 +667,8 @@ type Task {
 	"""
 	note: String
 	"""
-	The board column: `backlog` | `in_progress` | `in_review` | `done`.
+	The board column: `backlog` | `todo` | `in_progress` | `paused` |
+	`in_review` | `done`.
 	"""
 	column: String!
 	"""
@@ -836,6 +856,11 @@ type UsageTotals {
 	Number of distinct connections used.
 	"""
 	connections: Int!
+	"""
+	Total metered web searches (issue #238). Their USD cost is already
+	inside `cost_usd`; this is the call count.
+	"""
+	searchCalls: Float!
 }
 
 """
@@ -917,6 +942,14 @@ type WorkflowNode {
 	Whether the node pauses awaiting operator approval before it runs.
 	"""
 	requiresApproval: Boolean
+	"""
+	Where an `output` node's report is routed once the run finishes (issue
+	#170), as a JSON scalar: `{"kind": "owner"|"email"|"channel",
+	"target"?: "…"}`. Exposed for the same reason `config` is — so
+	`Company.workflow(id)` does not drop model data. Both keys are single
+	words, so the model shape needs no camelCase mirror the way `retry` does.
+	"""
+	destination: JSON
 }
 
 """
@@ -932,7 +965,14 @@ type WorkflowSummary {
 	"""
 	name: String!
 	"""
-	Whether the workflow is enabled in the manifest.
+	Whether the workflow id appears in the company manifest's
+	`[workflows].enabled` list.
+	
+	This is manifest membership, **not** "does this workflow exist and can it
+	run". A runtime-authored workflow is listed here whether or not it is
+	manifest-enabled, and `Company.workflow(id)` / the run routes serve any
+	saved graph regardless of this flag — nothing consults it to decide
+	whether a workflow may run. Treat it as "declared by the blueprint".
 	"""
 	enabled: Boolean!
 }

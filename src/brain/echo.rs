@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 
 use crate::Result;
-use crate::ports::brain::{Brain, CycleHost};
+use crate::ports::brain::{Brain, Cognition, CycleHost, UsageMetering};
 use crate::ports::types::{
     CompanyEvent, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup, OutboundMessage,
     ReplyTo, TokenUsage,
@@ -45,6 +45,7 @@ impl Brain for EchoBrain {
         for event in &req.events {
             if let CompanyEvent::OperatorMessage { text, .. } = event {
                 channel_responses.push(OutboundMessage {
+                    task_id: None,
                     channel: "operator".to_string(),
                     text: format!("You said: {text}"),
                     steps: Vec::new(),
@@ -73,6 +74,7 @@ impl Brain for EchoBrain {
                     (format!("webhook on {channel}"), None)
                 };
                 channel_responses.push(OutboundMessage {
+                    task_id: None,
                     channel: channel.clone(),
                     text,
                     steps: Vec::new(),
@@ -82,6 +84,7 @@ impl Brain for EchoBrain {
         }
         if channel_responses.is_empty() {
             channel_responses.push(OutboundMessage {
+                task_id: None,
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
                 steps: Vec::new(),
@@ -105,13 +108,25 @@ impl Brain for EchoBrain {
             token_usage: TokenUsage::default(),
         })
     }
+
+    /// No model is ever called here, so there is nothing to meter: a zero Usage
+    /// reading on this path is the truth, not a missing hook. Surfacing that is
+    /// what lets an operator tell "no inference configured" from "metering
+    /// broken" (issue #174).
+    fn cognition(&self) -> Cognition {
+        Cognition {
+            path: "echo",
+            provider: "none",
+            metering: UsageMetering::None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::ports::types::{
-        CompanyId, ContextOp, ContextOpResult, EffectDisposition, ToolCall, ToolResult,
+        ApprovalId, CompanyId, ContextOp, ContextOpResult, EffectDisposition, ToolCall, ToolResult,
     };
 
     /// A minimal host that records emitted effects and auto-executes them.
@@ -136,6 +151,11 @@ mod test {
         async fn emit_effect(&self, effect: Effect) -> Result<EffectDisposition> {
             self.effects.lock().unwrap().push(effect);
             Ok(EffectDisposition::Executed)
+        }
+
+        async fn park_effect(&self, effect: Effect) -> Result<ApprovalId> {
+            self.effects.lock().unwrap().push(effect);
+            Ok(ApprovalId::new("appr-parked"))
         }
     }
 

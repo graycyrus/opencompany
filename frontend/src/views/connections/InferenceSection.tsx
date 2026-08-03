@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BrainCircuit, Check, Loader2, RotateCcw, Save, Zap } from "lucide-react";
+import { AlertTriangle, BrainCircuit, Check, Loader2, RotateCcw, Save, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -8,8 +8,10 @@ import {
   revertInference,
   setInference,
   testInference,
+  type InferenceMutation,
   type InferenceProvider,
   type InferenceStatus,
+  type UsageMetering,
 } from "@/api/inference";
 import { ApiError } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
@@ -35,6 +37,16 @@ const PROVIDER_LABELS: Record<InferenceProvider, string> = {
   openrouter: "OpenRouter",
   ollama: "Ollama (local)",
   openai_compatible: "Custom (OpenAI-compatible)",
+};
+
+/**
+ * What the live cognition path's metering mode means for the Usage view — so a
+ * zero token/cost reading is legible instead of alarming (issue #174).
+ */
+const METERING_NOTES: Record<UsageMetering, string> = {
+  perTurn: "usage metered per turn",
+  perCycle: "usage metered per cycle, from what the provider reports",
+  none: "no model runs on this path, so Usage stays at zero",
 };
 
 /** Per-provider form defaults applied when the operator picks a provider. */
@@ -70,7 +82,13 @@ type TestState =
  * provider (with a source badge + tier→model rows + a "key set" indicator), a
  * live "Test" probe, and a switch form with per-provider presets. The key input
  * is **write-only** — it is sent on Save, stored server-side, and never read
- * back. A switch takes effect on the agents' next turn with no restart.
+ * back.
+ *
+ * A switch takes effect on the agents' next turn with no restart — *except* the
+ * not-configured → configured transition, where the running brain was already
+ * chosen without one. The host reports that as `restartRequired`, and this
+ * section says so in the toast and keeps saying it in the status card until the
+ * restart happens (issue #266).
  */
 export function InferenceSection({
   client,
@@ -118,26 +136,51 @@ export function InferenceSection({
 
   async function save() {
     if (busy) return;
+    // Managed is a revert, and a revert cannot carry a credential — so a key
+    // typed under a different provider and left behind by a switch would be
+    // dropped by the save below while the toast claimed success (issue #265).
+    // Refuse instead: a save that reports success must never have discarded
+    // what the operator typed. The Save button is disabled in this state; this
+    // is the guard that makes the invariant hold regardless of the button.
+    if (provider === "managed" && key.trim()) {
+      toast.error(
+        "Managed uses the platform credential and can't store a key. Choose OpenRouter or Custom (OpenAI-compatible) to save it, or discard it first.",
+      );
+      return;
+    }
     setBusy("save");
     try {
       // "Managed" means "use the platform default" — that's a revert, not a
       // runtime override with an empty credential.
+      let result: InferenceMutation;
       if (provider === "managed") {
-        await revertInference(client, company);
+        result = await revertInference(client, company);
       } else {
         const cleanModels = Object.fromEntries(
           Object.entries(models)
             .map(([t, v]) => [t, (v ?? "").trim()])
             .filter(([, v]) => v.length > 0),
         );
-        await setInference(client, company, {
+        result = await setInference(client, company, {
           provider,
           baseUrl: baseUrl.trim() || undefined,
           models: Object.keys(cleanModels).length ? cleanModels : undefined,
           key: key.trim() || undefined,
         });
       }
-      toast.success("Inference updated. Agents use it on their next turn.");
+      // Issue #266: only the host knows whether the *running* brain can act on
+      // what was just saved. Which brain a company runs is fixed when it is
+      // built, so a company that started with no inference source keeps echoing
+      // no matter what lands here — "agents use it on their next turn" was a
+      // promise the runtime could not keep for exactly the transition an
+      // operator makes first. Follow the response instead of asserting.
+      if (result.status.restartRequired) {
+        toast.warning("Inference saved — restart the company for agents to use it.", {
+          description: result.note,
+        });
+      } else {
+        toast.success("Inference updated. Agents use it on their next turn.");
+      }
       setKey("");
       setTest({ kind: "idle" });
       await refresh();
@@ -188,6 +231,10 @@ export function InferenceSection({
   if (load === "unavailable") return null;
 
   const modelRows = status ? Object.entries(status.models) : [];
+  // A credential typed under a BYOK provider survives a switch to managed (the
+  // input is hidden, the state is not). Managed has nowhere to put it, so this
+  // is the one combination that would silently lose operator input on save.
+  const managedWouldDiscardKey = provider === "managed" && key.trim().length > 0;
 
   return (
     <section className="space-y-3">
@@ -200,7 +247,9 @@ export function InferenceSection({
       <p className="text-sm text-muted-foreground">
         Choose which model provider your agents think with. Bring your own key for OpenRouter, a
         custom OpenAI-compatible endpoint, or a local Ollama server — the key is stored securely and
-        never shown again. A switch takes effect on the next turn, no restart.
+        never shown again. Switching provider or model takes effect on the agents' next turn. Giving
+        inference to a company that started without any does not: the brain is chosen at startup, so
+        that first setup needs a restart.
       </p>
 
       {load === "loading" ? (
@@ -233,6 +282,34 @@ export function InferenceSection({
                   </Button>
                 </div>
                 <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
+                {/* Issue #174: config resolving to a provider does not mean the
+                    company booted onto it. Say which cognition path is live and
+                    whether its usage is metered, so a zero Usage reading reads as
+                    "nothing was spent" rather than "accounting is broken". */}
+                <p className="text-xs text-muted-foreground">
+                  Cognition: <span className="font-mono">{status.cognition}</span> ·{" "}
+                  {METERING_NOTES[status.usageMetering] ?? "usage metering unknown"}
+                </p>
+                {/* Issue #266: a saved config the running brain cannot act on.
+                    The toast that says so is gone in seconds — and an operator
+                    who reloads the page, or comes back tomorrow, sees only a
+                    correct-looking provider next to agents that still echo. This
+                    is the surface that stays until the restart happens. */}
+                {status.restartRequired && (
+                  <div
+                    className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400"
+                    data-testid="inference-restart-required"
+                  >
+                    <RotateCcw className="mt-px size-3.5 shrink-0" />
+                    <span>
+                      <span className="font-medium">Restart required.</span> This company started
+                      with no inference source, so it is running the offline echo brain and its
+                      scheduled workflows cannot fire. The brain is chosen at startup — this
+                      configuration is saved, but agents keep echoing until the company is
+                      restarted.
+                    </span>
+                  </div>
+                )}
                 {modelRows.length > 0 && (
                   <ul className="space-y-1 rounded-md bg-muted/40 p-2">
                     {modelRows.map(([tier, model]) => (
@@ -296,7 +373,37 @@ export function InferenceSection({
                 )}
               </div>
 
-              {provider !== "managed" && (
+              {provider === "managed" ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground" data-testid="inference-managed-note">
+                    Managed runs on the platform credential, so there is no key to paste here. To
+                    bring your own key, choose OpenRouter or Custom (OpenAI-compatible).
+                  </p>
+                  {managedWouldDiscardKey && (
+                    <div
+                      className="space-y-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                      data-testid="inference-key-conflict"
+                    >
+                      <p className="flex items-start gap-1.5">
+                        <AlertTriangle className="mt-px size-3.5 shrink-0" />
+                        <span>
+                          You typed a key, and managed can&apos;t store one — saving now would throw
+                          it away. Choose OpenRouter or Custom (OpenAI-compatible) to save it, or
+                          discard it to stay on managed.
+                        </span>
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid="inference-discard-key"
+                        onClick={() => setKey("")}
+                      >
+                        Discard key
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ) : (
                 <>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {TIERS.map((tier) => (
@@ -332,7 +439,11 @@ export function InferenceSection({
               )}
 
               <div className="flex items-center gap-2">
-                <Button disabled={busy !== null} onClick={() => void save()}>
+                <Button
+                  data-testid="inference-save"
+                  disabled={busy !== null || managedWouldDiscardKey}
+                  onClick={() => void save()}
+                >
                   {busy === "save" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
                   Save
                 </Button>

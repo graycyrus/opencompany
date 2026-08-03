@@ -613,6 +613,9 @@ async fn company_events(
 /// unexpected (or secret-bearing) ever reaches the console. The actor (`by`) on
 /// `ApprovalResolved` / `LifecycleChanged` is intentionally omitted: the console
 /// renders the attention item without it, and it can carry a user id.
+///
+/// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
+/// reaches the console only by being listed here on purpose.
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
     use serde_json::json;
 
@@ -630,6 +633,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             agent_id,
             text,
             steps,
+            task_id,
         } => {
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
@@ -639,6 +643,11 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // when empty so a tool-less reply's wire form is unchanged.
             if !steps.is_empty() {
                 o["steps"] = json!(steps);
+            }
+            // Correlation key for a dispatch-produced reply (#185); omitted for
+            // an ordinary chat reply so the legacy wire shape is unchanged.
+            if let Some(task_id) = task_id {
+                o["taskId"] = json!(task_id);
             }
             o
         }
@@ -655,12 +664,34 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             tool,
             status,
             message,
+            task_id,
         } => {
             let mut o = envelope("mcp_call_failed");
             o["server"] = json!(server);
             o["tool"] = json!(tool);
             o["status"] = json!(status);
             o["message"] = json!(message);
+            // Correlation key when the failing call ran inside a dispatch
+            // (#185); omitted for a chat-turn failure.
+            if let Some(task_id) = task_id {
+                o["taskId"] = json!(task_id);
+            }
+            o
+        }
+        // The dispatch terminal (#185). `output` is the agent's own reply text
+        // — the same string already written into the card's note — never raw
+        // tool output, so it is safe to project.
+        CompanyEvent::DeskTaskCompleted {
+            task_id,
+            desk,
+            output,
+            column,
+        } => {
+            let mut o = envelope("desk_task_completed");
+            o["taskId"] = json!(task_id);
+            o["desk"] = json!(desk);
+            o["output"] = json!(output);
+            o["column"] = json!(column);
             o
         }
         CompanyEvent::ApprovalResolved {
@@ -697,6 +728,27 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["name"] = json!(name);
             o
         }
+        // Issue #259: an edited or removed workflow, so a console holding the
+        // Workflows tab open re-reads the picker instead of offering a graph
+        // that changed under it (or one that no longer exists). Same two fields
+        // and same deny-by-default actor omission as `workflow_created` — and,
+        // as the variant docs spell out, there is no graph body to leak here.
+        CompanyEvent::WorkflowUpdated {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_updated");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
+        CompanyEvent::WorkflowDeleted {
+            workflow_id, name, ..
+        } => {
+            let mut o = envelope("workflow_deleted");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o
+        }
         // Issue #111: surface an accepted operator steer so the console's
         // in-flight strip can refresh live. Only the task id + action word go on
         // the wire — the actor (`by`) and the operator's redirect `instruction`
@@ -707,6 +759,38 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             let mut o = envelope("task_steered");
             o["taskId"] = json!(task_id);
             o["action"] = json!(action);
+            o
+        }
+        // Issue #228: a finished workflow run, so the console can toast a
+        // report that did not go out *while it is happening* instead of only on
+        // the next reload of the history panel.
+        //
+        // This widens nothing. The projected fields are exactly what the run
+        // drawer already renders, and every one of them — `target` included —
+        // already reaches this same console in the manual run's HTTP response
+        // (see `RunWorkflowResponse` in `super::ops::workflows`). The stream is
+        // operator-authenticated and company-scoped, like that response.
+        //
+        // `runId` is deliberately not projected: it is always `None` today, so
+        // emitting it would put a permanently-null key on the wire.
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id,
+            scheduled,
+            deliveries,
+            pending_approvals,
+            error,
+            ..
+        } => {
+            let mut o = envelope("workflow_run_finished");
+            o["workflowId"] = json!(workflow_id);
+            o["scheduled"] = json!(scheduled);
+            o["deliveries"] = json!(deliveries);
+            o["pendingApprovals"] = json!(pending_approvals);
+            // Omitted rather than null on a run that finished, so the console's
+            // "did this fail?" check is a presence check.
+            if let Some(error) = error {
+                o["error"] = json!(error);
+            }
             o
         }
         // Not an attention signal, or carries a raw payload we never put on the
@@ -839,6 +923,7 @@ async fn run_chat(
             assignee: String::new(),
             updated_at_millis: crate::ports::now_millis(),
             origin_chat_id: None,
+            parent_task_id: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
@@ -882,6 +967,16 @@ async fn chat_and_emit(
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    // Issue #246: carry the card this turn opened onto the
+                    // durable record, so the console's "card opened" chip
+                    // survives a transcript reload instead of living only on
+                    // the live POST response. This widens the field's meaning
+                    // from "the dispatch that produced this reply" to "the card
+                    // this reply is about" — a card-creating reply now shows up
+                    // in that card's timeline alongside its dispatch replies,
+                    // which is the lineage an operator wants and costs no
+                    // schema change.
+                    task_id: response.task_id.clone(),
                     chat_id: desk.clone(),
                     agent_id: response.channel.clone(),
                     text: response.text.clone(),
@@ -996,6 +1091,12 @@ struct ChatHistoryMessageDto {
     /// empty (operator messages, tool-less replies) — keeps the legacy shape.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     steps: Vec<TurnStep>,
+    /// The board card this reply is about (issue #246), so a rehydrated
+    /// transcript renders the same "card opened" chip the live turn showed.
+    /// Omitted when absent — which is every message journaled before the field
+    /// existed — so the legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
 }
 
 impl From<MessageView> for ChatHistoryMessageDto {
@@ -1008,6 +1109,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
             at_millis: view.at_millis,
             mine: view.mine,
             steps: view.steps,
+            task_id: view.task_id,
         }
     }
 }
@@ -1249,8 +1351,11 @@ mod test {
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("opencompany-http-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-http-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest() -> CompanyManifest {
@@ -1276,6 +1381,7 @@ mod test {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await
@@ -1294,7 +1400,8 @@ mod test {
 
     #[tokio::test]
     async fn chat_returns_echoed_response() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -1316,7 +1423,6 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["responses"][0]["text"], "You said: hi");
         assert_eq!(value["responses"][0]["channel"], "operator");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// An actionable operator chat opens exactly one `backlog` task card on the
@@ -1325,7 +1431,8 @@ mod test {
     /// the handler-level wiring, not model behaviour.
     #[tokio::test]
     async fn actionable_chat_opens_a_backlog_task_card() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let id = CompanyId::new("acme");
         let runtime = state.registry().get(&id).unwrap();
@@ -1362,8 +1469,6 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
-
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// End-to-end proof of the WS4 wire: with a [`HarnessBrain`] as the runtime's
@@ -1379,7 +1484,8 @@ mod test {
         use crate::ports::CompanyStore;
         use crate::store::{FsContextStore, FsOps};
 
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let id = CompanyId::new("acme");
         let manifest: CompanyManifest = toml::from_str(
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
@@ -1396,6 +1502,7 @@ mod test {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         };
         FsCompanyStore::new(home.to_path_buf())
@@ -1412,14 +1519,17 @@ mod test {
             workspace_root: home.to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
             delegations: crate::harness::orchestrator::DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -1428,6 +1538,9 @@ mod test {
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -1470,7 +1583,6 @@ mod test {
         );
         assert_ne!(text, "You said: hi", "still routing through the echo brain");
         assert_eq!(value["responses"][0]["channel"], "operator");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// A manifest with two agents and one desk (`studio`, led by `ceo`), used by
@@ -1500,6 +1612,7 @@ mod test {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await
@@ -1536,7 +1649,8 @@ mod test {
     /// both an effective member and a removable overlay member.
     #[tokio::test]
     async fn add_desk_member_persists_and_shows_in_list() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1562,14 +1676,14 @@ mod test {
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
         assert_eq!(desks[0]["overlayMembers"][0], "eng");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest
     /// member cannot be removed (409), and an unknown overlay member is a 404.
     #[tokio::test]
     async fn remove_desk_member_drops_overlay_and_guards_manifest() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1636,7 +1750,6 @@ mod test {
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Creating a desk persists it as an overlay and surfaces it in `list_desks`
@@ -1644,7 +1757,8 @@ mod test {
     /// first. The manifest is never rewritten.
     #[tokio::test]
     async fn create_desk_persists_and_appears_in_list() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1681,14 +1795,14 @@ mod test {
         assert_eq!(arr[0]["id"], "studio"); // manifest desk first
         assert_eq!(arr[1]["id"], "growth_desk");
         assert_eq!(arr[1]["overlayCreated"], true);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
     /// manifest desk is 409, and an unknown member is 400.
     #[tokio::test]
     async fn create_desk_validates_name_id_and_members() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1717,14 +1831,14 @@ mod test {
                 .unwrap();
             assert_eq!(response.status(), want, "body {body}");
         }
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Deleting an operator-created desk drops it (and any of its overlay
     /// members); a manifest desk cannot be deleted (409); an unknown id is 404.
     #[tokio::test]
     async fn delete_desk_removes_overlay_and_guards_manifest() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1791,14 +1905,14 @@ mod test {
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Add-member validation: an unknown desk is 404, an unknown teammate is
     /// 400, and a teammate already on the desk is 409.
     #[tokio::test]
     async fn add_desk_member_validates_desk_agent_and_duplicates() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1837,7 +1951,6 @@ mod test {
                 .unwrap();
             assert_eq!(response.status(), want, "{uri} {body}");
         }
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Seeds `eng` as an overlay member of `studio` so a desk has two members to
@@ -1884,7 +1997,8 @@ mod test {
     /// as the new `members` order (the hierarchy), and an empty body resets it.
     #[tokio::test]
     async fn set_desk_order_reorders_and_resets() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1914,7 +2028,6 @@ mod test {
         let desks = get_desks(&app, &cookie).await;
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// An operator-created (overlay) desk can be reordered too — the set-order
@@ -1922,7 +2035,8 @@ mod test {
     /// not just manifest group chats. A manifest-only check used to 404 here (#133).
     #[tokio::test]
     async fn set_desk_order_reorders_an_overlay_created_desk() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -1965,14 +2079,14 @@ mod test {
             .expect("overlay desk present");
         assert_eq!(growth["members"][0], "eng");
         assert_eq!(growth["members"][1], "ceo");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Set-order validation: an unknown desk is 404, an unknown member id is 400,
     /// and a duplicate id is 400.
     #[tokio::test]
     async fn set_desk_order_validates_desk_members_and_duplicates() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -2005,14 +2119,14 @@ mod test {
             .await,
             StatusCode::BAD_REQUEST
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Removing an overlay member prunes it from the desk's order overlay, so the
     /// remaining members keep the operator's relative order without a stale id.
     #[tokio::test]
     async fn remove_desk_member_prunes_the_order_entry() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
@@ -2048,14 +2162,14 @@ mod test {
         let desks = get_desks(&app, &cookie).await;
         assert_eq!(desks[0]["members"].as_array().unwrap().len(), 1);
         assert_eq!(desks[0]["members"][0], "ceo");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn desks_route_returns_the_company_desks() {
         // The default test manifest defines no group chats, so the route answers
         // 200 with an empty list (the console then falls back to its defaults).
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2073,7 +2187,6 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Issue #65: the console's default thread addresses sends with
@@ -2083,7 +2196,8 @@ mod test {
     /// the REST route with no `?desk=` selector (the console's default read).
     #[tokio::test]
     async fn chat_history_route_reunifies_general_and_main_transcripts() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -2092,6 +2206,7 @@ mod test {
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    task_id: None,
                     chat_id: "General".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under General".to_string(),
@@ -2105,6 +2220,7 @@ mod test {
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    task_id: None,
                     chat_id: "main".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under main".to_string(),
@@ -2141,7 +2257,6 @@ mod test {
             texts.contains(&"reply under main"),
             "missing main-id reply: {texts:?}"
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     /// Regression: a reply's tool-call timeline must survive a history reload —
@@ -2150,7 +2265,8 @@ mod test {
     /// `AgentReply` and projected back through the DTO.
     #[tokio::test]
     async fn chat_history_route_rehydrates_reply_steps() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -2159,6 +2275,7 @@ mod test {
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    task_id: None,
                     chat_id: "main".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "done".to_string(),
@@ -2200,7 +2317,76 @@ mod test {
         );
         assert_eq!(reply["steps"][0]["status"], "ok");
         assert_eq!(reply["steps"][0]["elapsedMs"], 9);
-        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
+    /// Issue #246: a reply that opened a board card must still say so after a
+    /// transcript reload. The "card opened" chip is rendered from `taskId`, and
+    /// a chip that exists only on the live POST response vanishes the moment
+    /// the operator switches threads and comes back — which is exactly when
+    /// they would go looking for it.
+    #[tokio::test]
+    async fn chat_history_route_rehydrates_the_card_a_reply_opened() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        for (text, task_id) in [
+            ("opened one", Some("t-77".to_string())),
+            ("just talking", None),
+        ] {
+            runtime
+                .events()
+                .append(
+                    runtime.id(),
+                    CompanyEvent::AgentReply {
+                        task_id,
+                        chat_id: "main".to_string(),
+                        agent_id: "ceo".to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/chat/history")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let messages = value.as_array().unwrap();
+
+        let opened = messages
+            .iter()
+            .find(|m| m["text"] == "opened one")
+            .expect("the card-opening reply is in history");
+        assert_eq!(
+            opened["taskId"], "t-77",
+            "the chip's correlation key must ride back on the history DTO"
+        );
+
+        // A reply that opened nothing omits the key rather than sending null,
+        // so no bubble grows a chip it should not have — and every message
+        // journaled before this field existed reads back unchanged.
+        let chatter = messages
+            .iter()
+            .find(|m| m["text"] == "just talking")
+            .expect("the ordinary reply is in history");
+        assert!(
+            chatter.get("taskId").is_none(),
+            "an ordinary chat reply must not carry a card: {chatter}"
+        );
     }
 
     /// A desk id with no `?desk=` selector defaults to the operator/General
@@ -2208,7 +2394,8 @@ mod test {
     /// nor the General desk reads back empty rather than erroring.
     #[tokio::test]
     async fn chat_history_route_unknown_desk_is_empty_not_an_error() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2226,12 +2413,12 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn chat_by_id_matches_registered_company() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2248,12 +2435,12 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn unknown_company_is_404() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2274,12 +2461,12 @@ mod test {
         // unauthenticated caller would let anyone enumerate which companies a
         // host runs. A user of `ghost` gets a real 404.
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn paused_company_chat_is_409() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "paused").await;
         let app = router(state);
 
@@ -2296,12 +2483,12 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn list_and_status_routes_report_the_company() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2336,12 +2523,12 @@ mod test {
         let bytes = to_bytes(status.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["id"], "acme");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn approvals_list_is_empty_before_any_park() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2359,12 +2546,12 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn amended_approve_resolves_and_returns_responses() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2389,12 +2576,12 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(value["responses"].is_array());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn deny_with_amended_payload_is_400() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2416,7 +2603,6 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["code"], "invalid_request");
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
@@ -2424,7 +2610,8 @@ mod test {
         // Replaces `operator_token_guards_routes`. That token could never be
         // set, so the test only ever proved the guard worked in a state no
         // deployment could reach; every real host served this route to anyone.
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = build_state(&home, "running", AppConfig::default()).await;
 
         // No credential at all: closed.
@@ -2467,7 +2654,6 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     // ---- issue #66: the operator attention SSE feed ----
@@ -2487,6 +2673,7 @@ mod test {
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            task_id: None,
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "shipped it".into(),
@@ -2513,6 +2700,7 @@ mod test {
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            task_id: None,
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "hi".into(),
@@ -2521,6 +2709,65 @@ mod test {
         .expect("agent_reply is an attention signal");
         // A tool-less reply keeps the legacy wire shape — no `steps` key.
         assert!(v.get("steps").is_none());
+        // …and an uncorrelated reply carries no `taskId` either, so the
+        // pre-#185 wire shape is byte-for-byte what it was.
+        assert!(v.get("taskId").is_none());
+    }
+
+    /// #185: the correlation key rides the SSE stream when — and only when — the
+    /// event carries one. Both directions matter: its presence is what lets a
+    /// live console route a frame to the right task, and its absence is what
+    /// keeps the legacy shape intact for every ordinary chat reply.
+    #[test]
+    fn projects_task_id_only_when_the_event_is_correlated() {
+        let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            task_id: Some("t-1".into()),
+            chat_id: "t-1".into(),
+            agent_id: "ceo".into(),
+            text: "on it".into(),
+            steps: Vec::new(),
+        }))
+        .expect("agent_reply is an attention signal");
+        assert_eq!(reply["taskId"], serde_json::json!("t-1"));
+
+        let failure = super::project_event(&stored(CompanyEvent::McpCallFailed {
+            task_id: Some("t-1".into()),
+            server: "gh".into(),
+            tool: "issues".into(),
+            status: "credential_required".into(),
+            message: "needs auth".into(),
+        }))
+        .expect("mcp_call_failed is an attention signal");
+        assert_eq!(failure["taskId"], serde_json::json!("t-1"));
+
+        let uncorrelated = super::project_event(&stored(CompanyEvent::McpCallFailed {
+            task_id: None,
+            server: "gh".into(),
+            tool: "issues".into(),
+            status: "credential_required".into(),
+            message: "needs auth".into(),
+        }))
+        .expect("mcp_call_failed is an attention signal");
+        assert!(uncorrelated.get("taskId").is_none());
+    }
+
+    /// #185: the dispatch terminal projects all four fields. `column` is the one
+    /// that matters most — it is how a console tells a clean finish from a
+    /// cancelled or failed run without parsing `output`.
+    #[test]
+    fn projects_desk_task_completed_with_every_field() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "ceo".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert_eq!(v["type"], serde_json::json!("desk_task_completed"));
+        assert_eq!(v["taskId"], serde_json::json!("t-1"));
+        assert_eq!(v["desk"], serde_json::json!("ceo"));
+        assert_eq!(v["output"], serde_json::json!("shipped"));
+        assert_eq!(v["column"], serde_json::json!("in_review"));
     }
 
     #[test]
@@ -2536,6 +2783,7 @@ mod test {
     #[test]
     fn projects_mcp_call_failed_with_scrubbed_message() {
         let v = super::project_event(&stored(CompanyEvent::McpCallFailed {
+            task_id: None,
             server: "browserbase".into(),
             tool: "browse".into(),
             status: "tool_call_rejected".into(),
@@ -2611,6 +2859,40 @@ mod test {
         assert!(!v.to_string().contains("secret-user-id"));
     }
 
+    /// Issue #259: the edit and delete signals project the same two fields and
+    /// drop the actor, exactly like `workflow_created` above.
+    #[test]
+    fn projects_workflow_updated_and_deleted_without_the_actor() {
+        let actor = || {
+            Some(Actor {
+                kind: ActorKind::User,
+                id: "secret-user-id".into(),
+            })
+        };
+
+        let v = super::project_event(&stored(CompanyEvent::WorkflowUpdated {
+            workflow_id: "greeter".into(),
+            name: "Greeter v2".into(),
+            by: actor(),
+        }))
+        .expect("workflow_updated is an attention signal");
+        assert_eq!(v["type"], "workflow_updated");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter v2");
+        assert!(!v.to_string().contains("secret-user-id"));
+
+        let v = super::project_event(&stored(CompanyEvent::WorkflowDeleted {
+            workflow_id: "greeter".into(),
+            name: "Greeter".into(),
+            by: actor(),
+        }))
+        .expect("workflow_deleted is an attention signal");
+        assert_eq!(v["type"], "workflow_deleted");
+        assert_eq!(v["workflowId"], "greeter");
+        assert_eq!(v["name"], "Greeter");
+        assert!(!v.to_string().contains("secret-user-id"));
+    }
+
     #[test]
     fn projects_lifecycle_changed_without_the_actor() {
         let v = super::project_event(&stored(CompanyEvent::LifecycleChanged {
@@ -2640,11 +2922,94 @@ mod test {
         assert_eq!(v["memo"], "invoice #1");
     }
 
+    // ---- issue #228: the workflow-run outcome projection ----
+
+    fn delivery_row(
+        node: &str,
+        status: crate::ports::DeliveryStatus,
+    ) -> crate::ports::DeliveryReport {
+        crate::ports::DeliveryReport {
+            node: node.into(),
+            kind: "email".into(),
+            target: Some("ada@example.com".into()),
+            status,
+            detail: "this recipient has never written to the company".into(),
+            reason: crate::ports::DeliveryReason::RecipientNotEstablished,
+        }
+    }
+
+    /// The live half of #228: a finished run reaches the console as it happens,
+    /// carrying exactly the fields the run drawer already renders — so the
+    /// console can toast an undelivered report instead of waiting for a reload.
+    #[test]
+    fn projects_workflow_run_finished_with_the_fields_the_drawer_renders() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: None,
+            deliveries: vec![
+                delivery_row("owner_summary", crate::ports::DeliveryStatus::Skipped),
+                delivery_row("also_sent", crate::ports::DeliveryStatus::Sent),
+            ],
+            pending_approvals: vec!["review".into()],
+            error: None,
+        }))
+        .expect("workflow_run_finished is an attention signal");
+        assert_eq!(v["type"], "workflow_run_finished");
+        assert_eq!(v["seq"], 7);
+        assert_eq!(v["workflowId"], "digest");
+        assert_eq!(v["scheduled"], true);
+        assert_eq!(v["pendingApprovals"][0], "review");
+
+        // Per-row node/kind/target/status/detail — the same shape the manual
+        // run's HTTP response already ships to this console.
+        let rows = v["deliveries"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["node"], "owner_summary");
+        assert_eq!(rows[0]["kind"], "email");
+        assert_eq!(rows[0]["status"], "skipped");
+        assert_eq!(rows[0]["target"], "ada@example.com");
+        assert!(
+            rows[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("never written"),
+            "the detail names the fix: {v}"
+        );
+
+        // A run that finished carries no `error` key, and `runId` — always
+        // `None` today — is never a permanently-null key on the wire.
+        assert!(v.get("error").is_none(), "{v}");
+        assert!(v.get("runId").is_none(), "{v}");
+    }
+
+    /// The failure arm reaches the console too — it is the outcome that used to
+    /// produce nothing but a host-stdout warning.
+    #[test]
+    fn projects_workflow_run_finished_with_the_failure_reason() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: None,
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: Some("no inference source for agent node `worker`".into()),
+        }))
+        .expect("workflow_run_finished is an attention signal");
+        assert_eq!(v["error"], "no inference source for agent node `worker`");
+        assert_eq!(v["deliveries"].as_array().unwrap().len(), 0);
+    }
+
     #[test]
     fn drops_non_attention_and_raw_payload_events() {
         // The operator's own message, and every variant that carries a raw
         // third-party payload or is audit-only, is dropped so nothing unexpected
         // (or secret-bearing) ever reaches the console.
+        //
+        // This list is unchanged by #228: adding `workflow_run_finished` to the
+        // projection widened the wire by exactly one listed variant, and this
+        // test passing untouched is what proves the deny-by-default default
+        // still drops everything it dropped before.
         let dropped = [
             CompanyEvent::OperatorMessage {
                 text: "hi".into(),
@@ -2680,7 +3045,8 @@ mod test {
 
     #[tokio::test]
     async fn events_route_streams_text_event_stream() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2704,12 +3070,12 @@ mod test {
                 .and_then(|v| v.to_str().ok()),
             Some("text/event-stream")
         );
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn events_route_requires_a_session() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
         let app = router(state);
 
@@ -2723,6 +3089,5 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 }

@@ -24,13 +24,15 @@ use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
 use crate::ports::types::{Actor, ApprovalId, CompanyEvent, CompanyId, Verdict};
 use crate::ports::{
-    AgentEconomy, ApprovalGate, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
-    FactStore, InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore, SkillStateStore,
-    TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
+    AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
+    EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, SecretStore, SessionStore,
+    SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
 };
 
-/// The board column a task must enter to be dispatched to its assignee.
-const IN_PROGRESS: &str = "in_progress";
+/// The board column a task must enter to be dispatched to its assignee. Read
+/// from the task port (#205) so this edge and the write boundary that validates
+/// the column cannot drift onto two different literals.
+use crate::ports::tasks::COLUMN_IN_PROGRESS as IN_PROGRESS;
 
 /// Whether an upsert moves a card **into** `in_progress` (the dispatch edge).
 /// A card already in `in_progress` re-saved is not a fresh dispatch.
@@ -54,6 +56,8 @@ pub struct OpsStores {
     pub workspace: Arc<dyn WorkspaceStore>,
     /// The durable memory-facts view.
     pub facts: Arc<dyn FactStore>,
+    /// Versioned task artifacts and their human-edit history (#187).
+    pub artifacts: Arc<dyn ArtifactStore>,
     /// The usage meter (written by the WS4 cost hook, read by WS5).
     pub usage: Arc<dyn UsageMeter>,
     /// Operator deltas over the company's skills.
@@ -130,6 +134,15 @@ pub struct CompanyRuntime {
     pub(crate) steer: crate::company::steer::InflightRegistry,
     /// Held for the duration of a cycle so cycles never interleave per company.
     pub(crate) serial: TokioMutex<()>,
+    /// Held across a REST board write's read → validate → write, so two
+    /// concurrent edits cannot each validate against a snapshot that predates
+    /// the other's edge (issue #185 review).
+    ///
+    /// Deliberately **not** [`serial`](Self::serial): that lock is held for a
+    /// whole cycle, which is a live agent turn, so reusing it would park every
+    /// board edit behind an LLM call. This one is only ever held across a
+    /// couple of store round-trips.
+    pub(crate) task_writes: TokioMutex<()>,
     /// WS4: the embedded openhuman harness pool, when wired via
     /// [`RuntimeBuilder::with_harness`](crate::runtime::RuntimeBuilder::with_harness).
     /// Feature-gated so the default build is unaffected.
@@ -189,6 +202,7 @@ impl CompanyRuntime {
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             serial: TokioMutex::new(()),
+            task_writes: TokioMutex::new(()),
             #[cfg(feature = "openhuman")]
             harness: None,
             #[cfg(feature = "mcp")]
@@ -382,9 +396,25 @@ impl CompanyRuntime {
         &self.ops.facts
     }
 
+    /// This company's versioned task artifacts (#187).
+    pub fn artifacts(&self) -> &Arc<dyn ArtifactStore> {
+        &self.ops.artifacts
+    }
+
     /// This company's usage meter (written by the cost hook, read by WS5).
     pub fn usage(&self) -> &Arc<dyn UsageMeter> {
         &self.ops.usage
+    }
+
+    /// Which cognition path this company actually booted onto, and where that
+    /// path's inference usage is metered.
+    ///
+    /// The console's inference-status route surfaces this so an operator can tell
+    /// "no inference source resolved, so the company fell back to a path that
+    /// spends nothing" from "inference ran but the meter never saw it" — the
+    /// silent degradation that made issue #174 hard to read.
+    pub fn cognition(&self) -> crate::ports::Cognition {
+        self.brain.cognition()
     }
 
     /// This company's skill-state deltas.
@@ -622,5 +652,33 @@ mod tests {
         assert!(!task_enters_in_progress(Some("in_progress"), "in_review"));
         assert!(!task_enters_in_progress(None, "backlog"));
         assert!(!task_enters_in_progress(Some("in_review"), "done"));
+    }
+
+    /// Issue #246 spend gate. A card opened from chat goes through
+    /// `POST …/tasks` with **no** `column`, so what stops it from spending
+    /// money the operator never approved is that the server's default column is
+    /// not the dispatch trigger. That is two independent facts — what the
+    /// default is, and what the trigger is — living in two different modules,
+    /// so a change to either alone silently opens the gate. This pins them
+    /// together.
+    ///
+    /// The second assertion is the positive control: without it the first
+    /// would still pass if `task_enters_in_progress` were broken to always
+    /// return `false`, and the test would be guarding nothing.
+    #[test]
+    fn the_column_a_chat_created_card_defaults_to_does_not_dispatch() {
+        use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_TODO};
+
+        // `create_task` (src/server/ops/tasks.rs) defaults an omitted `column`
+        // to this one.
+        assert!(
+            !task_enters_in_progress(None, COLUMN_TODO),
+            "a chat-created card must not spend an agent turn on arrival — the \
+             human drag into in_progress is the approval gate"
+        );
+        assert!(
+            task_enters_in_progress(None, COLUMN_IN_PROGRESS),
+            "positive control: the trigger this test relies on is still live"
+        );
     }
 }

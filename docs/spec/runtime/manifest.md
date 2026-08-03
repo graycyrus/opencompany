@@ -65,7 +65,9 @@ provider = "openhuman"             # delegate to an OpenHuman channel
 
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
-allow = ["web.*", "docs.*"]        # company-wide grant; agents intersect
+allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
+                                   # `search` must be named — `*` never grants it
+search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 
 [policy]                           # see company-brain/approvals.md
 mode = "supervised"                # readonly | supervised (default) | full
@@ -112,6 +114,16 @@ prompt = "Weekly review and operator digest"
   Precedence is **runtime console override > manifest `[inference]` > managed
   default**, and a per-tenant provider re-resolves it every turn — so a console
   switch takes effect on the agents' next turn with **no restart**.
+  That holds only once the company is already on the harness cognition path.
+  *Which brain a company runs* is decided once, when the runtime is built: a
+  company that resolved no inference source at boot gets the offline echo brain
+  and an unwired workflow runner, and a credential saved afterwards reaches
+  neither. The status route reports that state as `restartRequired` — a resolved
+  config next to a non-harness `cognition` — and the console says "restart"
+  instead of "next turn" for it (issue #266).
+  Saving `managed` from the console is a *revert* (`DELETE …/inference`) and
+  carries no credential, so the console refuses that save while a key is still
+  typed in the form rather than dropping it and reporting success (issue #265).
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
@@ -157,8 +169,60 @@ prompt = "Weekly review and operator digest"
     credential configured, a `media` grant wires no tools (fail-closed). The
     Usage view surfaces a dedicated media status row (active / awaiting
     credential / not granted / not in this build).
+  - **`search`** (issue #238) is a seventh gateable namespace covering the single
+    `web_search` tool — source *discovery* for the research skills, which
+    previously ran on a belt that could read a known URL but never find one. It
+    is **priced and opt-in**: granted only by an **explicit** `search` /
+    `search.*` entry in `[tools].allow` (the `*` wildcard deliberately does
+    **not** grant it, and unlike `media`/`composio` it is **not** in the default
+    grant list either), and it runs exclusively on the **managed platform
+    credential** — the same identity as managed inference, resolved from the
+    environment, never a tenant key. The backend charges per request and reports
+    the amount, which is recorded as one `SearchCall` usage sample and rolls into
+    the window's cost.
+    Three things differ from `media` on purpose:
+    - **Individual searches do not park for approval.** Consent is the explicit
+      grant; the boundary is `[tools].search_daily_calls`, a per-company **daily
+      call cap** (default 200; `0` pauses search without editing `allow`).
+      Over-cap returns a loud "search budget exhausted" tool error, never an
+      empty result set — an agent handed silence invents citations. An operator
+      who does want a per-call gate sets
+      `[policy].always_approve = ["web_search"]`, which overrides every tier.
+    - **`[policy].mode = "readonly"` still denies it.** A search reaches a third
+      party and spends money, so a desk whose contract is that nothing is spent
+      does not get one.
+    - **There is no `search` Cargo feature.** The tool rides the `openhuman`
+      harness feature so CI's gated lane actually compiles and tests it.
+    The Usage view surfaces a `Web searches` KPI plus a search status row
+    (active / paused at cap 0 / awaiting credential / not granted / not in this
+    build).
+  - **`workspace`** (issue #237) grants the company's shared note tree — the
+    operator-owned `Standards/` / `Playbooks/` / `Product/` documents seeded
+    from `companies/<name>/workspace/**`. It is **split**, unlike every other
+    namespace: *reads* (`workspace_list`, `workspace_read`) follow the ordinary
+    rule, so a catch-all `*` confers them; *writes* (`workspace_write`) need an
+    **explicit** `workspace` or `workspace.write` entry in `[tools].allow`,
+    because a write mutates guidance every other agent then treats as the
+    company's source of truth. `workspace.read` is therefore a genuinely
+    read-only grant. Writes overwrite one **existing** note only and require an
+    `expected_updated_at` revision token taken from a prior read, so a note
+    edited in the console since the agent read it is refused rather than
+    clobbered; creating, renaming and deleting notes stay operator-only. Both
+    sides are capped at 64 KiB, which makes a larger note agent-read-only: the
+    agent sees a truncated body, and a write against it is refused rather than
+    discarding the part it could not see, so only an operator can edit it in the
+    console. Under
+    `[policy].mode = "supervised"` (the default) a write additionally parks for
+    approval, and under `readonly` it is denied — reads stay available in every
+    mode. The namespace is **not** gateable by `[plan].token_budgets`: reads
+    cost nothing and shedding them would only make agents guess at company
+    standards. The tools hit the store per call, so an operator's console edit
+    is visible to the next turn with no restart.
 - **`[[schedule]]`** entries become `ScheduleFired` events; cron syntax is
-  standard 5-field.
+  standard 5-field, interpreted in UTC. A saved *workflow* schedules itself
+  separately, with the same dialect: its `trigger` node carries a `schedule`
+  cron that the workflow scheduler fires (issue #169). A manifest schedule
+  drives a company cycle; a trigger schedule drives one workflow run.
 
 ## Layering and provenance
 

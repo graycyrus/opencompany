@@ -16,8 +16,11 @@ use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::{AppConfig, AppState};
 
-fn home() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("oc-routes-{}", crate::ports::generate_id()))
+fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("oc-routes-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 /// A manifest whose `[users] admins` bootstraps `ada` — deliberately spelled
@@ -31,6 +34,16 @@ fn manifest() -> CompanyManifest {
 }
 
 async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> AppState {
+    state_bound_to(home, &AppConfig::default().bind, connections).await
+}
+
+/// State on an explicit bind, for the tests that turn on whether the host looks
+/// reachable from anywhere but this machine.
+async fn state_bound_to(
+    home: &std::path::Path,
+    bind: &str,
+    connections: ConnectionsRuntime,
+) -> AppState {
     let store = crate::store::FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -43,6 +56,7 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -52,9 +66,12 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
         .build()
         .await
         .unwrap();
-    let state = AppState::new(AppConfig::default())
-        .with_home(home.to_path_buf())
-        .with_connections(connections);
+    let state = AppState::new(AppConfig {
+        bind: bind.to_string(),
+        ..AppConfig::default()
+    })
+    .with_home(home.to_path_buf())
+    .with_connections(connections);
     state.registry().insert(id, Arc::new(runtime));
     state
 }
@@ -202,7 +219,8 @@ async fn user_id(state: &AppState, admin: &str, email: &str) -> String {
 
 #[tokio::test]
 async fn auth_request_answers_identically_for_everyone() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
 
     // An eligible admin, a stranger, and malformed input must be
@@ -232,12 +250,12 @@ async fn auth_request_answers_identically_for_everyone() {
     let sent = sender.sent();
     assert_eq!(sent.len(), 1, "mail went to someone it shouldn't have");
     assert_eq!(sent[0].1.to, "ada@example.com");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn every_verify_failure_is_the_same_401() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, _) = state_with_mail(&home).await;
 
     let mut seen = Vec::new();
@@ -263,12 +281,12 @@ async fn every_verify_failure_is_the_same_401() {
         assert_eq!(*entry, first, "verify failures must be byte-identical");
         assert_eq!(entry.1["code"], "invalid_login");
     }
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn every_password_login_failure_is_the_same_401() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     // Give ada an account and a password first.
     let cookie = login_via_link(&state, &sender, "ada@example.com").await;
@@ -308,7 +326,6 @@ async fn every_password_login_failure_is_the_same_401() {
         assert_eq!(entry.0, StatusCode::UNAUTHORIZED);
         assert_eq!(*entry, first, "login failures must be byte-identical");
     }
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +334,8 @@ async fn every_password_login_failure_is_the_same_401() {
 
 #[tokio::test]
 async fn a_manifest_admin_can_log_in_and_is_an_admin() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     // The manifest spells it "Ada@Example.com"; normalization must match.
     let cookie = login_via_link(&state, &sender, "ada@example.com").await;
@@ -333,12 +351,12 @@ async fn a_manifest_admin_can_log_in_and_is_an_admin() {
     assert_eq!(me["role"], "admin", "the manifest bootstraps an admin");
     assert_eq!(me["company"], "acme");
     assert_eq!(me["hasPassword"], false);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn a_link_is_single_use() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let code = request_code(&state, &sender, "ada@example.com").await;
 
@@ -362,12 +380,12 @@ async fn a_link_is_single_use() {
         .await
         .unwrap();
     assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn a_second_link_within_the_throttle_window_is_not_sent() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let first_code = request_code(&state, &sender, "ada@example.com").await;
 
@@ -400,14 +418,14 @@ async fn a_second_link_within_the_throttle_window_is_not_sent() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn once_the_window_passes_a_new_link_invalidates_the_previous_one() {
     use crate::ports::LoginCodeRecord;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let id = CompanyId::new("acme");
     let runtime = state.registry().get(&id).unwrap();
@@ -461,12 +479,12 @@ async fn once_the_window_passes_a_new_link_invalidates_the_previous_one() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn setting_a_password_enables_password_login() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let cookie = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -495,12 +513,12 @@ async fn setting_a_password_enables_password_login() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!session_cookie(&response).is_empty());
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn a_weak_password_is_refused() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let cookie = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -514,12 +532,12 @@ async fn a_weak_password_is_refused() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn setting_a_password_requires_a_session() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, _) = state_with_mail(&home).await;
     let app = router(state.clone());
     let response = app
@@ -530,12 +548,12 @@ async fn setting_a_password_requires_a_session() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn the_session_cookie_is_defended() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let code = request_code(&state, &sender, "ada@example.com").await;
     let app = router(state.clone());
@@ -562,12 +580,12 @@ async fn the_session_cookie_is_defended() {
         !set.contains("Secure"),
         "http dev must not set Secure or the cookie is dropped: {set}"
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn a_https_deployment_marks_the_cookie_secure() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let sender = RecordingMailSender::new();
     let store = crate::store::FsCompanyStore::new(home.clone());
     let id = CompanyId::new("acme");
@@ -581,6 +599,7 @@ async fn a_https_deployment_marks_the_cookie_secure() {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -631,12 +650,12 @@ async fn a_https_deployment_marks_the_cookie_secure() {
         set.contains("Secure"),
         "an https host must set Secure: {set}"
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn logout_revokes_the_session_not_just_the_cookie() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let cookie = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -668,7 +687,6 @@ async fn logout_revokes_the_session_not_just_the_cookie() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +695,8 @@ async fn logout_revokes_the_session_not_just_the_cookie() {
 
 #[tokio::test]
 async fn only_an_admin_can_invite() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let admin = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -721,12 +740,12 @@ async fn only_an_admin_can_invite() {
         StatusCode::FORBIDDEN,
         "a member must not be able to invite"
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn an_uninvited_address_cannot_log_in() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, _) = state_with_mail(&home).await;
     // Not invited, not in the manifest: no code is minted at all.
     assert_eq!(
@@ -734,12 +753,12 @@ async fn an_uninvited_address_cannot_log_in() {
         None,
         "an uninvited address must not receive a code"
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn suspending_a_user_kills_their_session_at_once() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let admin = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -782,12 +801,12 @@ async fn suspending_a_user_kills_their_session_at_once() {
 
     // And he cannot get a new link either.
     assert_eq!(request_dev_code(&state, "bob@example.com").await, None);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn the_last_admin_cannot_be_demoted() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let admin = login_via_link(&state, &sender, "ada@example.com").await;
     let ada_id = user_id(&state, &admin, "ada@example.com").await;
@@ -808,12 +827,12 @@ async fn the_last_admin_cannot_be_demoted() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn an_admin_reset_forces_a_change_and_kills_sessions() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let admin = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -886,12 +905,12 @@ async fn an_admin_reset_forces_a_change_and_kills_sessions() {
         .await
         .unwrap();
     assert_eq!(body_json(response).await["mustChangePassword"], false);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn a_temporary_password_is_a_boundary_not_a_suggestion() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let admin = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -996,12 +1015,12 @@ async fn a_temporary_password_is_a_boundary_not_a_suggestion() {
         "the flag must clear once the password is replaced, got {}",
         response.status()
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn a_manifest_admin_invite_cannot_be_revoked_through_the_api() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     let admin = login_via_link(&state, &sender, "ada@example.com").await;
 
@@ -1020,7 +1039,6 @@ async fn a_manifest_admin_invite_cannot_be_revoked_through_the_api() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1047,8 @@ async fn a_manifest_admin_invite_cannot_be_revoked_through_the_api() {
 
 #[tokio::test]
 async fn no_mail_transport_still_returns_202_and_echoes_for_dev() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // No mail wired at all — the default offline build, on the default
     // loopback bind.
     let state = state_with(&home, ConnectionsRuntime::new()).await;
@@ -1037,55 +1056,107 @@ async fn no_mail_transport_still_returns_202_and_echoes_for_dev() {
         request_dev_code(&state, "ada@example.com").await.is_some(),
         "without a transport the code must be echoed so local dev works"
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn a_routable_host_never_echoes_the_code_even_with_no_mail() {
-    let home = home();
-    let store = crate::store::FsCompanyStore::new(home.clone());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            id: id.clone(),
-            manifest: manifest(),
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            template_provenance: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.clone(), manifest())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // Routable bind, no mail transport: the code cannot be delivered — and it
     // must NOT come back in the response instead. Returning a credential to
     // whoever asked is worse than nobody being able to sign in.
-    let state = AppState::new(AppConfig {
-        bind: "0.0.0.0:8080".into(),
-        ..AppConfig::default()
-    })
-    .with_home(home.clone())
-    .with_connections(ConnectionsRuntime::new());
-    state.registry().insert(id, Arc::new(runtime));
+    let state = state_bound_to(&home, "0.0.0.0:8080", ConnectionsRuntime::new()).await;
 
     assert_eq!(
         request_dev_code(&state, "ada@example.com").await,
         None,
         "a routable host must never echo a login code"
     );
-    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+#[tokio::test]
+async fn a_loopback_host_with_no_mail_reissues_inside_the_resend_window() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, ConnectionsRuntime::new()).await;
+
+    // Two sign-ins back to back, well inside the 60s resend window. Nothing is
+    // mailed here — the code is echoed — so there is no mailbox to spare, and
+    // the only thing a throttle could achieve is locking the sole local sign-in
+    // path for a minute after each use. That is issue #271: the console's
+    // Playwright bootstrap re-authenticates on every run and would fail on the
+    // second one within a minute, reporting a broken host.
+    let first = request_dev_code(&state, "ada@example.com")
+        .await
+        .expect("the first request must echo a code");
+    let second = request_dev_code(&state, "ada@example.com")
+        .await
+        .expect("a second request inside the window must still echo a code");
+    assert_ne!(first, second, "the second request must mint a fresh code");
+
+    // And the fresh one is the live one: one live code per address still holds,
+    // so the reissue invalidated its predecessor rather than leaving two open.
+    let app = router(state.clone());
+    let stale = app
+        .oneshot(post(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": first }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        stale.status(),
+        StatusCode::UNAUTHORIZED,
+        "reissuing must invalidate the previous code"
+    );
+
+    let app = router(state.clone());
+    let live = app
+        .oneshot(post(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": second }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(live.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_routable_host_still_throttles_even_with_no_mail() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    // No transport wired, but the host looks reachable from elsewhere. The
+    // reissue exemption is for the echo path only: this host echoes nothing, so
+    // it keeps the throttle and keeps the live code alone.
+    let state = state_bound_to(&home, "0.0.0.0:8080", ConnectionsRuntime::new()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+
+    assert_eq!(request_dev_code(&state, "ada@example.com").await, None);
+    let minted = runtime
+        .login_codes()
+        .latest_for_email(&id, "ada@example.com")
+        .await
+        .unwrap()
+        .expect("the first request must have minted a code");
+
+    assert_eq!(request_dev_code(&state, "ada@example.com").await, None);
+    let after = runtime
+        .login_codes()
+        .latest_for_email(&id, "ada@example.com")
+        .await
+        .unwrap()
+        .expect("the throttled request must leave the live code in place");
+    assert_eq!(
+        minted.code_hash, after.code_hash,
+        "a throttled request must not replace the live code"
+    );
 }
 
 #[tokio::test]
 async fn with_mail_wired_the_code_is_never_echoed() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let (state, sender) = state_with_mail(&home).await;
     assert_eq!(
         request_dev_code(&state, "ada@example.com").await,
@@ -1096,5 +1167,4 @@ async fn with_mail_wired_the_code_is_never_echoed() {
     let sent = sender.sent();
     assert_eq!(sent.len(), 1);
     assert!(sent[0].1.body.contains("/login?company=acme&code="));
-    tokio::fs::remove_dir_all(&home).await.ok();
 }

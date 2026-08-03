@@ -9,6 +9,7 @@
 mod ids;
 
 pub mod approvals;
+pub mod artifacts;
 pub mod brain;
 pub mod channel;
 pub mod context;
@@ -31,7 +32,11 @@ pub mod workflow_runner;
 pub mod workspace;
 
 pub use approvals::ApprovalGate;
-pub use brain::{Brain, CycleHost};
+pub use artifacts::{
+    ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactStore, ArtifactVersion,
+    DiffLine, DiffOp,
+};
+pub use brain::{Brain, Cognition, CycleHost, UsageMetering};
 pub use channel::ChannelAdapter;
 pub use context::ContextStore;
 pub use economy::AgentEconomy;
@@ -50,7 +55,9 @@ pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
 pub use users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email};
-pub use workflow_runner::{WorkflowRun, WorkflowRunner};
+pub use workflow_runner::{
+    DeliveryReason, DeliveryReport, DeliveryStatus, WorkflowRun, WorkflowRunner,
+};
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use opencompany::company::Schedule;
-use opencompany::runtime::{CompanyScheduler, SystemClock};
+use opencompany::runtime::{CompanyScheduler, SystemClock, WorkflowScheduler};
 use opencompany::{
     AppConfig, AppState, CompanyId, CompanyManifest, Result,
     app::config::{ConfigFile, ProcessEnv, resolve},
@@ -130,15 +130,6 @@ impl From<ModeArg> for LaunchMode {
     }
 }
 
-/// The default OpenCompany home: `$HOME/.opencompany/companies`, falling back
-/// to a relative path when `$HOME` is unset.
-fn default_home() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join(".opencompany").join("companies"),
-        None => PathBuf::from(".opencompany").join("companies"),
-    }
-}
-
 /// Resolves a `--company` argument to its source *directory*. `--company`
 /// accepts either the company directory (`companies/<name>`) or the manifest
 /// file inside it (`companies/<name>/company.toml`); the file form is normalized
@@ -210,7 +201,8 @@ async fn register_company(
     )
     .with_seed_dir(source_dir.clone())
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
-    .with_host_base_url(state.config().host_base_url());
+    .with_host_base_url(state.config().host_base_url())
+    .with_skills_registry(state.shared_skill_registry()?);
     if let Some(provenance) = provenance {
         builder = builder.with_template_provenance(provenance);
     }
@@ -289,6 +281,21 @@ fn spawn_scheduler(
     }
 }
 
+/// Starts the process-wide workflow scheduler: one task that fires every saved
+/// workflow whose `trigger` node carries a cron (issue #169).
+///
+/// Deliberately NOT per company, unlike [`spawn_scheduler`]. Workflow schedules
+/// are runtime data — creating a workflow in the console adds a cron with no
+/// reboot, and a hosted tenant can be registered after boot — so the scheduler
+/// re-reads the registry on every tick instead of snapshotting a company's
+/// schedules at registration time.
+fn spawn_workflow_scheduler(
+    state: &AppState,
+    shutdown: &Arc<Notify>,
+) -> tokio::task::JoinHandle<()> {
+    WorkflowScheduler::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
+}
+
 /// Starts a company's IMAP mailbox poller as a background task, if the
 /// platform injected mailbox credentials for this tenant.
 ///
@@ -347,6 +354,43 @@ fn spawn_mailbox_poller(
     }
 }
 
+/// Starts a company's Telegram `getUpdates` long-polling listener as a
+/// background task, whenever this host has an outbound Telegram transport wired
+/// (the `telegram` feature).
+///
+/// Issue #203: this is what makes inbound Telegram work on a local or
+/// self-hosted instance, where Telegram's servers can never reach an inbound
+/// `/hooks/...` URL. It is started unconditionally rather than only when a bot
+/// token is already stored — the poller idles cheaply until one appears, so an
+/// operator who pastes a token in the console is receiving DMs on the next tick
+/// with no restart. On a publicly reachable host that opted into the webhook
+/// fast-path, the poller sees the registration and stands by.
+fn spawn_telegram_poller(
+    state: &AppState,
+    id: &str,
+    shutdown: &Arc<Notify>,
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    let Some(api) = state.connections().telegram.clone() else {
+        return;
+    };
+    let Some(runtime) = state.registry().get(&CompanyId::new(id)) else {
+        return;
+    };
+    let poll_secs = std::env::var("OPENCOMPANY_TELEGRAM_POLL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(opencompany::runtime::telegram_poller::DEFAULT_POLL_SECONDS);
+    let webhook_capable = state.config().public_webhook_base_url().is_some();
+    let poller = opencompany::runtime::telegram_poller::TelegramPoller::new(
+        runtime,
+        api,
+        poll_secs,
+        webhook_capable,
+    );
+    handles.push(poller.spawn(shutdown.clone()));
+}
+
 /// Attaches an OpenHuman JSON-RPC transport when the `openhuman-rpc` feature is
 /// enabled and `OPENCOMPANY_OPENHUMAN_URL` is set (the attach path).
 ///
@@ -394,7 +438,9 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
 fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     use opencompany::app::config::ProcessEnv;
     use opencompany::harness::HarnessPool;
-    use opencompany::harness::provider::{harness_inference_from_env, media_backend_from_env};
+    use opencompany::harness::provider::{
+        harness_inference_from_env, media_backend_from_env, search_backend_from_env,
+    };
 
     let builder = builder.with_harness(Arc::new(HarnessPool::new()));
     // Issue #109: the MANAGED media-generation backend, resolved from the
@@ -402,6 +448,13 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     // even for a company that grants `media` (fail-closed).
     let builder = match media_backend_from_env(&ProcessEnv) {
         Some(media_backend) => builder.with_media_backend(media_backend),
+        None => builder,
+    };
+    // Issue #238: the MANAGED web-search backend, on the same platform identity
+    // as managed inference and resolved from the environment only. Absent ⇒
+    // `web_search` stays unwired even for a company that grants `search`.
+    let builder = match search_backend_from_env(&ProcessEnv) {
+        Some(search_backend) => builder.with_search_backend(search_backend),
         None => builder,
     };
     // The managed env default is an *optional*, lowest-precedence source; a
@@ -559,7 +612,7 @@ async fn run_export(
     include_secrets: bool,
     home: Option<PathBuf>,
 ) -> Result<()> {
-    let home = home.unwrap_or_else(default_home);
+    let home = opencompany::store::resolve_home(home)?;
     let id = CompanyId::new(company);
     let dest = out.unwrap_or_else(|| PathBuf::from(format!("{}-bundle", id.as_ref())));
     export_to_dir(&home, &id, include_secrets, &dest).await?;
@@ -580,7 +633,7 @@ async fn run_export(
 ) -> Result<()> {
     use opencompany::store::export::pack_tar;
 
-    let home = home.unwrap_or_else(default_home);
+    let home = opencompany::store::resolve_home(home)?;
     let id = CompanyId::new(company);
     let out = out.unwrap_or_else(|| PathBuf::from(format!("{}.tar", id.as_ref())));
 
@@ -637,7 +690,7 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     use opencompany::store::export::{find_bundle_root, import_bundle, restore_fs_artifacts};
     use opencompany::store::paths::Bundle;
 
-    let home = home.unwrap_or_else(default_home);
+    let home = opencompany::store::resolve_home(home)?;
     let root = find_bundle_root(dir)?;
     let (store, events, memory, context) = fs_ports(&home);
     let id = import_bundle(&root, store, events, memory, context).await?;
@@ -660,12 +713,21 @@ async fn main() -> Result<()> {
             home,
             discoverable,
         }) => {
-            let home = home.unwrap_or_else(default_home);
+            // `--home` > OPENCOMPANY_DATA_DIR > $HOME/.opencompany/companies.
+            let home = opencompany::store::resolve_home(home)?;
             // Materialize the canonical data-dir workspace layout and empty the
             // ephemeral `tmp/` scratch so nothing stale survives a restart. The
             // `[workspace]` section of `config.toml` (in the data dir) toggles
             // the tmp clear; absent config keeps the default (clear on startup).
             let data_root = opencompany::app::config::data_dir_from_env();
+            // An explicit `--home` pointing away from the data root splits one
+            // instance in two: bundles here, shared workspace there. Printed
+            // rather than `warn!`d — the default `EnvFilter` drops warnings
+            // unless RUST_LOG is set, so a `warn!` would be exactly as silent
+            // as the bug it reports.
+            if let Some(warning) = opencompany::store::home_divergence_warning(&home, &data_root) {
+                eprintln!("opencompany: {warning}");
+            }
             let workspace_cfg = ConfigFile::load(&data_root)?
                 .map(|c| c.workspace.resolve())
                 .unwrap_or_default();
@@ -721,9 +783,17 @@ async fn main() -> Result<()> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(opencompany::ports::types::SecretValue);
+            // Honor TINYHUMANS_API_URL (e.g. staging) — the config layer reads
+            // it, but this manual AppConfig build otherwise falls to the prod
+            // default, so a staging credential could never reach staging.
+            let api_url = std::env::var("TINYHUMANS_API_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| AppConfig::default().api_url);
             let mut state = AppState::new(AppConfig {
                 bind,
                 openhuman_root,
+                api_url,
                 tinyplace_api_url,
                 public_url,
                 tenant_namespace,
@@ -842,10 +912,16 @@ async fn main() -> Result<()> {
                     );
                 }
                 spawn_mailbox_poller(&state, &id, &shutdown, &mut scheduler_handles);
+                spawn_telegram_poller(&state, &id, &shutdown, &mut scheduler_handles);
             }
             if companies.is_empty() {
                 println!("serving with no companies; pass --company <dir> to load one");
             }
+
+            // One workflow scheduler for the whole process, started even with no
+            // companies loaded: it re-reads the registry each minute, so a
+            // company registered later is picked up without a restart.
+            scheduler_handles.push(spawn_workflow_scheduler(&state, &shutdown));
 
             // Stop the schedulers on Ctrl-C so background cycle work halts with
             // the process (lifecycle shutdown).
@@ -934,10 +1010,15 @@ mod test {
     use super::*;
 
     #[test]
-    fn default_home_lands_under_opencompany() {
-        let home = default_home();
-        assert!(home.ends_with("companies"));
-        assert!(home.to_string_lossy().contains(".opencompany"));
+    fn the_home_flag_is_taken_verbatim() {
+        // The binary owns no home policy of its own: it delegates to
+        // `store::resolve_home`, whose precedence chain (flag >
+        // OPENCOMPANY_DATA_DIR > $HOME/.opencompany/companies) is covered in
+        // `src/store/paths.rs`. This only pins the wiring.
+        assert_eq!(
+            opencompany::store::resolve_home(Some(PathBuf::from("/flag"))).unwrap(),
+            PathBuf::from("/flag")
+        );
     }
 
     #[tokio::test]

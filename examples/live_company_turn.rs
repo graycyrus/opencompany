@@ -88,6 +88,9 @@ async fn main() -> anyhow::Result<()> {
         lifecycle: "running".to_string(),
         overlay_agents: Vec::new(),
         overlay_desk_members: Vec::new(),
+        overlay_desk_order: Vec::new(),
+        overlay_desks: Vec::new(),
+        overlay_workflows: Vec::new(),
         template_provenance: None,
     };
 
@@ -104,12 +107,15 @@ async fn main() -> anyhow::Result<()> {
         tasks: None,
         skills: None,
         skills_source_dir: None,
+        skills_registry: std::sync::Arc::from([]),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
+        artifacts: None,
         delegations: opencompany::harness::orchestrator::DelegationQueue::default(),
         workflow_runner: opencompany::harness::orchestrator::WorkflowRunnerHandle::default(),
         mcp_failures: opencompany::harness::mcp_probe::McpFailureQueue::default(),
+        approval_requests: opencompany::harness::policy::ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -118,6 +124,9 @@ async fn main() -> anyhow::Result<()> {
         media: None,
         composio: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
+        delivery: None,
+        search: None,
+        workspace: None,
     };
 
     let pool = HarnessPool::new();

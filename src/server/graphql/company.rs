@@ -139,7 +139,9 @@ impl CompanyGql {
         memory_facts::resolve(&self.runtime, query, kind, first, offset).await
     }
 
-    /// The enabled workflows, as one-line summaries.
+    /// The company's saved workflows, as one-line summaries — seed graphs and
+    /// runtime-authored ones alike. Each carries an `enabled` flag reporting
+    /// manifest membership; listing is not gated on it.
     async fn workflows(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<WorkflowSummaryGql>> {
         workflows::resolve_summaries(ctx, &self.runtime).await
     }
@@ -408,6 +410,12 @@ pub struct MessageGql {
     /// transcript renders the same timeline the REST route returns (issue #65
     /// parity). Empty for operator messages and tool-less replies.
     pub steps: Vec<MessageStepGql>,
+    /// The board card this reply is about (issue #246): the card the turn
+    /// opened, or the dispatched card it ran for (#185). Projected from the
+    /// same [`MessageView`] field the REST route reads, so the two surfaces
+    /// agree on which messages carry a card. Null on operator messages and on
+    /// every reply journaled before the field existed.
+    pub task_id: Option<ID>,
 }
 
 /// One scrubbed step in a reply's processing timeline. GraphQL mirror of the
@@ -454,6 +462,7 @@ impl From<MessageView> for MessageGql {
             at_millis: view.at_millis,
             mine: view.mine,
             steps: view.steps.into_iter().map(MessageStepGql::from).collect(),
+            task_id: view.task_id.map(ID),
         }
     }
 }

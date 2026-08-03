@@ -17,8 +17,11 @@ use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
-fn home() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("opencompany-ops-{}", crate::ports::generate_id()))
+fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-ops-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 fn manifest() -> CompanyManifest {
@@ -42,6 +45,7 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -57,6 +61,32 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
     // tests keep asserting write behavior rather than auth.
     crate::server::test_support::seed_fixed_admin(&state, "acme").await;
     state
+}
+
+/// The repo's shared skill library (`<crate root>/skills`), the same directory
+/// the serve path derives `skills_root` from.
+fn repo_skills_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
+}
+
+/// Like [`state_with_company`], but with the repo's shared skill library wired
+/// in, so registry reads and server-authoritative installs resolve against real
+/// documents instead of degrading to the empty-registry fallback.
+async fn state_with_registry(home: &std::path::Path) -> AppState {
+    // `with_skills_root` consumes and returns the state, so the registered
+    // company and seeded admin move along with it.
+    state_with_company(home)
+        .await
+        .with_skills_root(repo_skills_root())
+}
+
+/// The operator deltas persisted for `acme` — the durable rows behind the API.
+async fn persisted_skills(state: &AppState) -> Vec<crate::ports::skills_state::SkillState> {
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company");
+    runtime.skills().list(runtime.id()).await.expect("deltas")
 }
 
 async fn send(
@@ -104,7 +134,8 @@ async fn send_auth(
 
 #[tokio::test]
 async fn tasks_crud_round_trips_under_both_scopes() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Create via the single-company alias.
@@ -117,7 +148,8 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Q2 brief");
-    assert_eq!(task["column"], "backlog");
+    // Issue #206: manual entry lands in To-do, not the backlog pool.
+    assert_eq!(task["column"], "todo");
     let id = task["id"].as_str().unwrap().to_string();
 
     // Drag (PATCH column) via the {id} scope.
@@ -157,13 +189,272 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// #205: a card may only be assigned to somebody the company actually has.
+/// Before this the board's free-text Assignee field accepted anything, the bad
+/// value was persisted verbatim, and dispatch silently handed the work to the
+/// orchestrator instead.
+#[tokio::test]
+async fn task_writes_reject_an_off_roster_assignee() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Fetch my activity", "assignee": "Shane"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.to_string().contains("Shane"),
+        "the refusal must name what was typed: {body}"
+    );
+
+    // A roster teammate is fine, matched case-insensitively…
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Q2 brief", "assignee": "CEO"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = task["id"].as_str().unwrap().to_string();
+
+    // …and so is blank — an unassigned card is not an error.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Unowned"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The same rule on PATCH, and the rejected patch leaves the card untouched.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({"title": "Renamed", "assignee": "Shane"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let card = board
+        .as_array()
+        .expect("board")
+        .iter()
+        .find(|c| c["id"] == json!(id))
+        .expect("the card survives a rejected patch")
+        .clone();
+    assert_eq!(
+        card["assignee"], "ceo",
+        "the typed key is stored as the canonical roster id"
+    );
+    assert_eq!(
+        card["title"], "Q2 brief",
+        "a rejected patch must not persist the fields it did apply"
+    );
+}
+
+/// #205: a column the board does not render is refused too. A typo'd
+/// `in-progress` used to be persisted verbatim, hiding the card from every
+/// rendered column *and* — since only the exact literal `in_progress`
+/// edge-fires a dispatch — silently never running it.
+#[tokio::test]
+async fn task_writes_reject_a_column_the_board_cannot_render() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Typo'd", "column": "in-progress"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.to_string().contains("in_progress"),
+        "the refusal must list the columns that do exist: {body}"
+    );
+
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Fine", "column": "paused"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({"column": "reviewing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(board.as_array().expect("board")[0]["column"], "paused");
+}
+
+/// Issue #206: `POST …/tasks` defaults a new card to To-do — the board's one
+/// manual-entry column — while an explicit `column` still wins, so the
+/// lifecycle paths that place a card themselves are untouched.
+#[tokio::test]
+async fn created_tasks_default_to_the_todo_column() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, defaulted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "queued work"})),
+    )
+    .await;
+    assert_eq!(defaulted["column"], crate::ports::tasks::COLUMN_TODO);
+
+    // An explicit column is still honored verbatim — `spawn_task`, the
+    // orchestrator's `revise`, and a failed run all place their own card.
+    let (_, explicit) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "parked", "column": "backlog"})),
+    )
+    .await;
+    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_BACKLOG);
+}
+
+/// Issue #246: `POST …/tasks` carries the thread a card was opened from.
+///
+/// `TaskRecord.origin_chat_id` has existed since #151 and the tool-spawn path
+/// stamped it, but this handler hardcoded `None` and no DTO projected it — so a
+/// card opened from a conversation had no way back to it, and #151's
+/// "answer where you were asked" post-back could never fire for anything the
+/// REST surface created. Both halves are checked here: the write keeps it, and
+/// **both** reads (the board list and task detail) hand it back.
+#[tokio::test]
+async fn a_task_created_from_a_thread_remembers_and_reads_back_that_thread() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Ship the brief", "originChatId": "strategy"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["originChatId"], "strategy");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // The board read (what the console lists) carries it…
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(board.as_array().unwrap()[0]["originChatId"], "strategy");
+
+    // …and so does task detail, which is where an operator asks "where did
+    // this come from?".
+    let (status, detail) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["task"]["originChatId"], "strategy");
+
+    // A card created without a thread — the board's `+` button — omits the key
+    // entirely rather than sending null, so the pre-#246 wire shape is
+    // unchanged for every card that has no conversation behind it.
+    let (_, plain) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Typed on the board"})),
+    )
+    .await;
+    assert!(
+        plain.get("originChatId").is_none(),
+        "a card with no originating thread must not grow the key: {plain}"
+    );
+
+    // A blank thread id is normalised away rather than persisted as a thread
+    // that matches nothing.
+    let (_, blank) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Blank origin", "originChatId": "   "})),
+    )
+    .await;
+    assert!(blank.get("originChatId").is_none(), "{blank}");
+}
+
+/// Issue #246 spend gate, at the HTTP boundary. The transcript's "Add to
+/// board" action omits `column` on purpose so the *server* decides where a
+/// chat-created card lands — and the one thing that must never happen is that
+/// it lands on the dispatch trigger, which spends an agent turn nobody
+/// approved. `dispatch_task` is a no-op in this build (no harness attached),
+/// so the load-bearing assertion is the landing column itself; the journal
+/// check is the belt to that braces, and would catch a create that started
+/// journaling a dispatch of its own.
+#[tokio::test]
+async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
+    use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_TODO};
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Draft the announcement", "originChatId": "main"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        created["column"], COLUMN_IN_PROGRESS,
+        "a chat-created card must never arrive already dispatched"
+    );
+    assert_eq!(
+        created["column"], COLUMN_TODO,
+        "it lands in the board's intake lane, where the human drag is the gate"
+    );
+
+    let journal = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !journal
+            .iter()
+            .any(|e| matches!(e.event, CompanyEvent::TaskDispatched { .. })),
+        "creating a card from chat must not dispatch it"
+    );
 }
 
 #[tokio::test]
 async fn steer_task_validates_statuses_and_journals_acceptance() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let company = CompanyId::new("acme");
     let runtime = state.registry().get(&company).unwrap();
@@ -191,6 +482,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 assignee: String::new(),
                 updated_at_millis: 1,
                 origin_chat_id: None,
+                parent_task_id: None,
             },
         )
         .await
@@ -269,13 +561,12 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
             ..
         } if task_id == "active" && action == "redirect" && instruction == "focus on the API"
     )));
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn memory_create_and_delete_journals_event() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, fact) = send(
@@ -297,13 +588,12 @@ async fn memory_create_and_delete_journals_event() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn memory_list_filters_stats_and_dual_write() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -400,8 +690,6 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["facts"], 4);
     assert_eq!(stats["agentChunks"], 1);
     assert_eq!(stats["taskOutcomes"], 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// The Brain's "Last updated" stat must move when *agents* write memory, not
@@ -413,7 +701,8 @@ async fn memory_list_filters_stats_and_dual_write() {
 /// never added a fact, showed "—" forever.
 #[tokio::test]
 async fn memory_stats_last_updated_covers_agent_written_context() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -500,8 +789,6 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
             .all(|r| r["updatedAt"].as_u64().unwrap() >= before),
         "each agent-written row carries the time it was stored"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// End-to-end proof that the dual-write closes the manual-ingest loop: an
@@ -513,7 +800,8 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
 async fn memory_operator_fact_is_injected_into_the_agent_turn() {
     use crate::harness::memory_loop;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -542,8 +830,6 @@ async fn memory_operator_fact_is_injected_into_the_agent_turn() {
     assert!(augmented.contains("Relevant prior work"));
     assert!(augmented.contains("we ship on Friday at noon"));
     assert!(augmented.trim_end().ends_with("when do we ship?"));
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Two-company isolation over HTTP: company B never sees company A's facts, and
@@ -556,7 +842,8 @@ async fn memory_is_isolated_between_companies() {
     };
     use std::collections::HashSet;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
     let state = AppState::new(AppConfig::default())
         .with_home(home.clone())
@@ -628,13 +915,12 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workspace_create_write_move_and_cycle_rejection() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (_, folder) = send(
@@ -709,13 +995,227 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+#[tokio::test]
+async fn skills_install_persists_the_registry_document_not_the_client_metadata() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // Deliberately hostile client metadata: if any of it reaches the persisted
+    // document, install is still trusting the client.
+    let (status, skill) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-scan/install",
+        Some(json!({
+            "name": "Not The Real Name",
+            "description": "a one-line stub the client made up",
+            "category": "Finance"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The response reflects the library's own metadata, not the request body.
+    assert_eq!(skill["name"], "Competitor Scan");
+    assert_eq!(skill["category"], "Research");
+    assert_eq!(skill["source"], "registry");
+    // The pinned revision rides on the installed projection, so a later "update
+    // available" check can diff an install against the live library.
+    assert_eq!(skill["version"], "1.0.0");
+    assert!(
+        skill["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Profile a handful of competitors"),
+        "description came from the registry, got {:?}",
+        skill["description"]
+    );
+
+    // The persisted SKILL.md carries the whole procedure — the actual bug.
+    let deltas = persisted_skills(&state).await;
+    let row = deltas
+        .iter()
+        .find(|s| s.slug == "competitor-scan")
+        .expect("the install persisted a row");
+    let doc = row.custom_doc.as_deref().expect("a document was persisted");
+    assert!(
+        doc.contains("## Steps"),
+        "body lost its Steps section: {doc}"
+    );
+    assert!(
+        doc.contains("## Output"),
+        "body lost its Output section: {doc}"
+    );
+    assert!(
+        doc.contains("version: 1.0.0"),
+        "the snapshot pins the library version: {doc}"
+    );
+    // None of the client's metadata leaked in.
+    assert!(!doc.contains("Not The Real Name"), "{doc}");
+    assert!(!doc.contains("a one-line stub the client made up"), "{doc}");
+    // The body is the real procedure, not a copy of the description.
+    let parsed = crate::company::parse_skill_md("competitor-scan", doc).expect("valid");
+    assert_ne!(
+        parsed.body.trim(),
+        parsed.description.trim(),
+        "the body must not be a degenerate copy of the description"
+    );
+}
+
+#[tokio::test]
+async fn skills_install_404s_a_slug_the_registry_lacks_and_persists_nothing() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // `competitor-analysis` was one of the console's phantom entries — it never
+    // existed in the shared library. It must now fail loudly.
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-analysis/install",
+        Some(json!({"name": "Competitor Analysis", "description": "phantom"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "a rejected install must persist nothing"
+    );
+}
+
+#[tokio::test]
+async fn skills_install_falls_back_to_client_metadata_when_no_registry_is_served() {
+    // Platform-provisioned mode: no shared library, so there is nothing to
+    // resolve against and the client's metadata is all the host has.
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, skill) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/tenant-only-skill/install",
+        Some(json!({"name": "Tenant Only", "description": "provisioned elsewhere"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an empty registry must not 404 every install"
+    );
+    assert_eq!(skill["name"], "Tenant Only");
+    assert_eq!(skill["source"], "registry");
+}
+
+/// A *configured* shared library that cannot load must not degrade to the
+/// empty-registry fallback above. Doing so would silently hand the client
+/// authorship of a registry skill's contents on exactly the hosts that meant to
+/// be server-authoritative — one malformed `SKILL.md` in the image and every
+/// install starts trusting whatever the browser posted.
+#[tokio::test]
+async fn skills_install_500s_when_the_configured_library_cannot_load() {
+    let home_dir = home();
+    // A skills root that exists but holds a `SKILL.md` with no `description`,
+    // which the parser rejects.
+    let broken_root = home_dir.path().join("broken-skills");
+    std::fs::create_dir_all(broken_root.join("web-research")).expect("skill dir");
+    std::fs::write(
+        broken_root.join("web-research/SKILL.md"),
+        "---\nname: Web Research\n---\n# Web Research\n",
+    )
+    .expect("SKILL.md");
+
+    let state = state_with_company(home_dir.path())
+        .await
+        .with_skills_root(&broken_root);
+
+    // The state itself reports the load failure rather than an empty registry.
+    assert!(
+        state.shared_skill_registry().is_err(),
+        "a configured-but-unloadable library must surface its error"
+    );
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/web-research/install",
+        Some(json!({"name": "Client Authored", "description": "not the library's"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a broken library is a server error, not a client-metadata install: {body}"
+    );
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "a failed install must persist nothing"
+    );
+
+    // The registry listing fails the same way rather than reporting "no library".
+    let (status, _) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn skills_registry_lists_the_live_library_without_bodies() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("an array");
+    // Counted from disk rather than hardcoded, so adding a skill to the shared
+    // library does not break this test — it still asserts the route lists the
+    // *whole* library.
+    let on_disk = crate::company::load_dir_skills(&repo_skills_root())
+        .expect("the shared library parses")
+        .len();
+    assert!(on_disk >= 14, "sanity: the library is populated");
+    assert_eq!(rows.len(), on_disk, "every shared skill is listed");
+
+    for row in rows {
+        assert!(
+            row.get("body").is_none(),
+            "registry rows must never carry a body: {row}"
+        );
+        assert_eq!(row["version"], "1.0.0", "{row}");
+        assert_eq!(row["publisher"], "OpenCompany", "{row}");
+    }
+
+    let scan = rows
+        .iter()
+        .find(|r| r["id"] == "competitor-scan")
+        .expect("competitor-scan is in the library");
+    assert_eq!(scan["name"], "Competitor Scan");
+    assert_eq!(scan["category"], "Research");
+
+    // The console's old hardcoded array listed slugs the host cannot serve;
+    // the live list must not contain them.
+    for phantom in ["competitor-analysis", "social-scheduler", "meeting-notes"] {
+        assert!(
+            !rows.iter().any(|r| r["id"] == phantom),
+            "phantom slug {phantom} is not in the live registry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn skills_registry_is_empty_when_no_library_is_served() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+    let (status, body) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().expect("an array").len(), 0);
 }
 
 #[tokio::test]
 async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Install from registry, carrying the entry's metadata so the host persists
@@ -799,13 +1299,12 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     assert_eq!(my_skill["source"], "custom");
     assert_eq!(my_skill["name"], "My Skill");
     assert!(!my_skill["enabled"].as_bool().unwrap());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn team_overlay_add_delete_and_manifest_delete_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // The manifest teammate shows up on the read side before any overlay add,
@@ -871,14 +1370,13 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["key"], "ceo");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn inbox_read_marks_and_reports_unread() {
     use crate::ports::inbox::EmailRecord;
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     for i in 0..2 {
@@ -917,13 +1415,294 @@ async fn inbox_read_marks_and_reports_unread() {
     let (status, body) = send(&state, "POST", "/api/v1/company/inboxes/ceo/read", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["unread"], 0);
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// Appends one received email to `inbox`, for the read-surface tests below.
+async fn append_mail(
+    runtime: &crate::company::runtime::CompanyRuntime,
+    inbox: &str,
+    id: &str,
+    subject: &str,
+    at_millis: u64,
+) {
+    use crate::ports::inbox::EmailRecord;
+    runtime
+        .inbox()
+        .append(
+            runtime.id(),
+            &EmailRecord {
+                id: id.into(),
+                inbox: inbox.into(),
+                from_name: format!("{inbox} correspondent"),
+                from_email: format!("{inbox}-sender@x.test"),
+                subject: subject.into(),
+                body: format!("body for {subject}"),
+                at_millis,
+                read: false,
+                outbound: false,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The regression for issue #173: two teammates' inboxes must read back as two
+/// *different* sets of mail. The console used to render a client-side fixture —
+/// the same four invented emails for everybody — because no per-agent read was
+/// reachable over REST at all.
+#[tokio::test]
+async fn inbox_reads_are_per_agent_and_never_shared() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // Enable two inboxes and file distinct mail in each. Inbox keys are agent
+    // ids; `cto` is an operator-added teammate as far as the toggle cares, so it
+    // takes its own key without a manifest entry.
+    for agent in ["ceo", "cto"] {
+        let (status, _) = send(
+            &state,
+            "PUT",
+            &format!("/api/v1/company/team/{agent}/inbox"),
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    append_mail(&runtime, "ceo", "c1", "board deck", 10).await;
+    append_mail(&runtime, "ceo", "c2", "investor intro", 20).await;
+    append_mail(&runtime, "cto", "t1", "on-call rotation", 30).await;
+
+    // The roster lists both, each with its own unread count.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let ceo = rows.iter().find(|r| r["key"] == "ceo").unwrap();
+    let cto = rows.iter().find(|r| r["key"] == "cto").unwrap();
+    assert_eq!(ceo["enabled"], true);
+    assert_eq!(ceo["unread"], 2);
+    assert_eq!(cto["unread"], 1);
+
+    // Each inbox reads back only its own mail — the shared-fixture bug. The
+    // route serves store (append) order; the console sorts newest-first.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ceo_subjects: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(ceo_subjects, vec!["board deck", "investor intro"]);
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/cto/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["subject"], "on-call rotation");
+    assert_eq!(items[0]["fromEmail"], "cto-sender@x.test");
+    assert_eq!(items[0]["inbox"], "cto");
+}
+
+/// An inbox nobody has mail in — or that does not exist at all — reads as an
+/// empty list rather than a 404. An enabled-but-empty inbox is a legitimate
+/// state, and the console must render it as such rather than as an error.
+#[tokio::test]
+async fn inbox_messages_soft_fail_on_unknown_key() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    append_mail(&runtime, "ceo", "m0", "mail 0", 1).await;
+
+    let (status, body) = send(
+        &state,
+        "GET",
+        "/api/v1/company/inboxes/nobody/messages",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty());
+
+    // …and the inbox that *does* hold mail is unaffected by that read.
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+}
+
+/// An inbox switched on but never written to is still listed, so the console can
+/// show it the moment the Team toggle flips — and `GET …/team` reports the same
+/// enabled state, so the toggle isn't a client-side guess.
+#[tokio::test]
+async fn team_read_reports_inbox_enabled_and_empty_inbox_is_listed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Before the toggle: no inbox on the roster, and nothing listed.
+    let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ceo = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "ceo")
+        .unwrap()
+        .clone();
+    assert_eq!(ceo["inboxEnabled"], false);
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert!(body.as_array().unwrap().is_empty());
+
+    // Toggle it on: listed with zero mail, and the roster agrees.
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/team/ceo/inbox",
+        Some(json!({"enabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["key"], "ceo");
+    assert_eq!(rows[0]["enabled"], true);
+    assert_eq!(rows[0]["unread"], 0);
+    // The manifest role is the display name until a domain gives it an address.
+    assert_eq!(rows[0]["name"], "Chief");
+
+    let (_, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+    let ceo = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "ceo")
+        .unwrap()
+        .clone();
+    assert_eq!(ceo["inboxEnabled"], true);
+
+    // Toggling back off keeps the inbox listed but disabled — the console
+    // filters on `enabled`, so it drops out of the selector without losing mail.
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/team/ceo/inbox",
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(body.as_array().unwrap()[0]["enabled"], false);
+}
+
+/// Mail that arrives through the ingest webhook is exactly what the console's
+/// read surface returns — the end-to-end path issue #173's repro step 4 walked.
+#[tokio::test]
+async fn ingested_mail_shows_up_on_the_console_read_surface() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // Straight into the store, as `file_and_notify` does for a verified payload
+    // (the HMAC path itself is covered in `ops::test`).
+    append_mail(&runtime, "ceo", "ingested-1", "hello from outside", 42).await;
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], "ingested-1");
+    assert_eq!(items[0]["subject"], "hello from outside");
+    assert_eq!(items[0]["read"], false);
+    assert_eq!(items[0]["outbound"], false);
+
+    // Reading it drops the unread count the selector badges.
+    let (_, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/inboxes/ceo/read",
+        Some(json!({"ids": ["ingested-1"]})),
+    )
+    .await;
+    assert_eq!(body["unread"], 0);
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(body.as_array().unwrap()[0]["unread"], 0);
+}
+
+#[tokio::test]
+async fn inbox_list_and_messages_project_store() {
+    use crate::ports::inbox::EmailRecord;
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    // One inbound (unread) + one outbound reply in inbox "ceo".
+    runtime
+        .inbox()
+        .append(
+            runtime.id(),
+            &EmailRecord {
+                id: "in1".into(),
+                inbox: "ceo".into(),
+                from_name: "Priya".into(),
+                from_email: "p@x.test".into(),
+                subject: "hi".into(),
+                body: "hello world".into(),
+                at_millis: 1,
+                read: false,
+                outbound: false,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .inbox()
+        .append(
+            runtime.id(),
+            &EmailRecord {
+                id: "out1".into(),
+                inbox: "ceo".into(),
+                from_name: String::new(),
+                from_email: "ceo@acme.test".into(),
+                subject: "re: hi".into(),
+                body: "reply".into(),
+                at_millis: 2,
+                read: false,
+                outbound: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    // GET /inboxes surfaces the message-bearing inbox; outbound doesn't count toward unread.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ceo = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "ceo")
+        .expect("ceo inbox listed");
+    assert_eq!(ceo["unread"], 1);
+
+    // GET messages returns both, camelCase, oldest first.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let msgs = body.as_array().unwrap();
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0]["id"], "in1");
+    assert_eq!(msgs[0]["fromEmail"], "p@x.test");
+    assert_eq!(msgs[1]["outbound"], true);
 }
 
 #[tokio::test]
 async fn chat_accepts_desk_id_and_replies() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, body) = send(
@@ -935,8 +1714,6 @@ async fn chat_accepts_desk_id_and_replies() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["responses"].is_array());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
@@ -946,7 +1723,8 @@ async fn credential_route_rejects_foreign_tenant() {
     };
     use std::collections::HashSet;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // Platform mode: `acme` is owned by `tenant:acme`.
     let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
     let state = AppState::new(AppConfig::default())
@@ -992,13 +1770,12 @@ async fn credential_route_rejects_foreign_tenant() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn unknown_company_scope_is_404() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let (status, _) = send(
         &state,
@@ -1008,7 +1785,6 @@ async fn unknown_company_scope_is_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,6 +1816,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1057,7 +1834,8 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
 
 #[tokio::test]
 async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Cold: no servers.
@@ -1140,13 +1918,12 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
     assert_eq!(list.as_array().unwrap().len(), 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_manifest(&home, mcp_manifest()).await;
 
     // The manifest server shows up as `manifest`.
@@ -1170,8 +1947,6 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so live discovery
@@ -1179,7 +1954,8 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
 #[cfg(not(feature = "openhuman"))]
 #[tokio::test]
 async fn mcp_discovery_is_not_wired_without_the_feature() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_manifest(&home, mcp_manifest()).await;
     let (status, body) = send(
         &state,
@@ -1190,14 +1966,14 @@ async fn mcp_discovery_is_not_wired_without_the_feature() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_wired");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// A `user:pass@host` endpoint smuggles a credential into the URL — rejected as
 /// a 400 (the error-hardening cell's validate-on-add).
 #[tokio::test]
 async fn mcp_userinfo_endpoint_is_rejected() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let (status, _) = send(
         &state,
@@ -1207,7 +1983,6 @@ async fn mcp_userinfo_endpoint_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// A query-parameter credential (BrowserBase style) round-trips write-only:
@@ -1215,7 +1990,8 @@ async fn mcp_userinfo_endpoint_is_rejected() {
 /// non-secret id left in the endpoint URL raises the non-blocking advisory.
 #[tokio::test]
 async fn mcp_query_param_auth_round_trips_write_only_with_advisory() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, added) = send(
@@ -1260,7 +2036,6 @@ async fn mcp_query_param_auth_round_trips_write_only_with_advisory() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,6 +2063,7 @@ async fn state_with_source_dir(
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1323,9 +2099,13 @@ fn workflow_body(id: &str) -> Value {
     })
 }
 
+/// Issue #168: the create path persists the graph **on the record**, never in
+/// the company source tree (which is a read-only mount in hosted mode), and
+/// both read routes serve it from there.
 #[tokio::test]
-async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
-    let home = home();
+async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1342,22 +2122,23 @@ async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
     assert_eq!(created["nodes"].as_array().unwrap().len(), 3);
     assert_eq!(created["edges"].as_array().unwrap().len(), 2);
 
-    // The graph landed on disk as TOML under the seed dir.
+    // Nothing was written into the company source tree — the read-only mount in
+    // hosted mode, and the whole reason #168 failed with EROFS.
     let path = seed_dir.join("workflows").join("greet.toml");
-    assert!(path.is_file(), "workflow file was written to {path:?}");
-    let on_disk = std::fs::read_to_string(&path).unwrap();
-    assert!(on_disk.contains("id = \"greet\""));
-    assert!(on_disk.contains("agent = \"ceo\""));
+    assert!(!path.exists(), "the source tree must not be written to");
 
-    // The operator's live manifest record gained the id in `[workflows].enabled`
-    // — the version-controlled seed dir's own `company.toml` was never touched
+    // The body and the enabled id both landed on the operator's live record —
+    // the version-controlled seed dir's own `company.toml` was never touched
     // (there isn't one here; only the store's copy is checked).
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
     assert_eq!(record.manifest.workflows.enabled, vec!["greet".to_string()]);
+    assert_eq!(record.overlay_workflows.len(), 1);
+    assert_eq!(record.overlay_workflows[0].id, "greet");
+    assert!(record.overlay_workflows[0].toml.contains("agent = \"ceo\""));
 
-    // `GET …/workflows` (which scans the seed dir) now lists it.
+    // `GET …/workflows` (seed ∪ overlay) now lists it.
     let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
     assert_eq!(status, StatusCode::OK);
     let rows = list.as_array().unwrap();
@@ -1368,13 +2149,12 @@ async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
     let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(graph["name"], "greet");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workflow_create_duplicate_id_is_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1397,13 +2177,12 @@ async fn workflow_create_duplicate_id_is_conflict() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "conflict");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1468,35 +2247,39 @@ async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
                 .unwrap_or(true)
         }
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
-async fn workflow_create_without_source_dir_is_bad_request() {
-    let home = home();
+async fn workflow_create_without_source_dir_succeeds() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // `state_with_company` boots with no `seed_dir`, so the company has no
-    // writable source directory — the platform-provisioned-mode case.
+    // source directory at all — the platform-provisioned-mode case. Issue #168:
+    // creation used to be refused here with a 400; the body now lands on the
+    // record, so it succeeds and reads back.
     let state = state_with_company(&home).await;
 
-    let (status, body) = send(
+    let (status, created) = send(
         &state,
         "POST",
         "/api/v1/company/workflows",
         Some(workflow_body("greet")),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "invalid_request");
+    assert_eq!(status, StatusCode::OK, "body: {created}");
+    assert_eq!(created["id"], "greet");
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+    let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 3);
 }
 
 /// Without the `openhuman` feature the on-demand Test route is "not wired".
 #[cfg(not(feature = "openhuman"))]
 #[tokio::test]
 async fn mcp_test_route_is_not_wired_without_the_feature() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     send(
         &state,
@@ -1514,7 +2297,6 @@ async fn mcp_test_route_is_not_wired_without_the_feature() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_wired");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Under the `openhuman` feature, adding a server probes it — and a probe that
@@ -1523,7 +2305,8 @@ async fn mcp_test_route_is_not_wired_without_the_feature() {
 #[cfg(feature = "openhuman")]
 #[tokio::test]
 async fn mcp_add_probes_without_rollback_and_persists_health() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // A syntactically valid but unreachable endpoint (nothing listening).
@@ -1564,8 +2347,6 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
         health["status"].is_string(),
         "test returns health: {health}"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // -- Telegram channel (issue #31) -------------------------------------------
@@ -1573,8 +2354,20 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
 use crate::company::telegram::RecordingTelegramApi;
 
 /// A running "acme" company whose host has a recording Telegram transport
-/// injected, so the inbound webhook can actually deliver a reply offline.
+/// injected, so the inbound webhook can actually deliver a reply offline. The
+/// host is loopback-only (no `public_url`) — the local/self-host shape of issue
+/// #203.
 async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) -> AppState {
+    state_with_telegram_at(home, api, None).await
+}
+
+/// As [`state_with_telegram`], but with `public_url` set — the hosted shape,
+/// where Telegram can actually deliver to the `/hooks/...` route.
+async fn state_with_telegram_at(
+    home: &std::path::Path,
+    api: RecordingTelegramApi,
+    public_url: Option<&str>,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -1588,6 +2381,7 @@ async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1599,7 +2393,11 @@ async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) 
         .unwrap();
     let connections =
         crate::server::ops::ConnectionsRuntime::new().with_telegram(std::sync::Arc::new(api));
-    let state = AppState::new(AppConfig::default()).with_connections(connections);
+    let state = AppState::new(AppConfig {
+        public_url: public_url.map(str::to_string),
+        ..AppConfig::default()
+    })
+    .with_connections(connections);
     state.registry().insert(id, std::sync::Arc::new(runtime));
     crate::server::test_support::seed_fixed_admin(&state, "acme").await;
     state
@@ -1649,20 +2447,18 @@ fn telegram_update(chat_id: i64, text: &str) -> Value {
 
 #[tokio::test]
 async fn telegram_config_is_write_only_and_status_reads_back() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
-    // Nothing configured yet.
+    // Nothing configured yet. This host binds loopback with no `public_url`, so
+    // it never offers a webhook URL (issue #203) — Telegram could not deliver
+    // to one, and inbound rides `getUpdates` polling instead.
     let (status, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cfg["configured"], false);
     assert_eq!(cfg["tokenSet"], false);
-    assert!(
-        cfg["webhookUrl"]
-            .as_str()
-            .unwrap()
-            .ends_with("/hooks/acme/telegram")
-    );
+    assert!(cfg["webhookUrl"].is_null(), "unreachable host: {cfg}");
 
     // Store both credentials (write-only).
     let (status, cfg) = send(
@@ -1704,13 +2500,12 @@ async fn telegram_config_is_write_only_and_status_reads_back() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cfg["configured"], false);
     assert_eq!(cfg["tokenSet"], false);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_webhook_rejects_an_unverified_post() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     send(
         &state,
@@ -1727,13 +2522,12 @@ async fn telegram_webhook_rejects_an_unverified_post() {
     // Wrong secret.
     let (status, _, _) = telegram_hook(&state, Some("nope"), telegram_update(1, "hi")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     let state = state_with_telegram(&home, api.clone()).await;
     send(
@@ -1761,13 +2555,52 @@ async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
         !raw.contains(BOT_TOKEN),
         "token leaked into webhook response"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_set_webhook_registers_the_public_url() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let api = RecordingTelegramApi::new();
+    // The hosted shape: a real public https URL Telegram can deliver to.
+    let state = state_with_telegram_at(&home, api.clone(), Some("https://acme.example")).await;
+    send(
+        &state,
+        "PUT",
+        "/api/v1/company/channels/telegram",
+        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
+    )
+    .await;
+
+    // The status advertises the webhook only on such a host.
+    let (_, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
+    assert_eq!(
+        cfg["webhookUrl"],
+        "https://acme.example/hooks/acme/telegram"
+    );
+
+    let (status, res) = send(
+        &state,
+        "POST",
+        "/api/v1/company/channels/telegram/webhook",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["ok"], true);
+    let webhooks = api.webhooks();
+    assert_eq!(webhooks.len(), 1);
+    assert_eq!(webhooks[0], "https://acme.example/hooks/acme/telegram");
+}
+
+/// Issue #203: on a host with no public https URL, registering a webhook is
+/// refused outright. Accepting it would be actively harmful — Telegram could
+/// never deliver to the URL *and* a registration blocks `getUpdates`, so it
+/// would take down the one inbound path that does work.
+#[tokio::test]
+async fn telegram_set_webhook_is_refused_on_a_host_telegram_cannot_reach() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     let state = state_with_telegram(&home, api.clone()).await;
     send(
@@ -1785,18 +2618,45 @@ async fn telegram_set_webhook_registers_the_public_url() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["ok"], true);
-    let webhooks = api.webhooks();
-    assert_eq!(webhooks.len(), 1);
-    assert!(webhooks[0].ends_with("/hooks/acme/telegram"));
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        res.to_string().contains("OPENCOMPANY_PUBLIC_URL"),
+        "the refusal must say how to fix it: {res}"
+    );
+    assert!(
+        api.webhooks().is_empty(),
+        "no loopback URL was ever handed to Telegram"
+    );
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// The channel is usable with a bot token alone: no webhook secret, no public
+/// URL, no `setWebhook` — the polling listener covers inbound.
+#[tokio::test]
+async fn telegram_is_configured_by_a_bot_token_alone() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let api = RecordingTelegramApi::new();
+    let state = state_with_telegram(&home, api).await;
+
+    let (status, cfg) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/channels/telegram",
+        Some(json!({ "botToken": BOT_TOKEN })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cfg["configured"], true, "a token is the whole setup: {cfg}");
+    assert_eq!(cfg["secretSet"], false);
+    assert!(cfg["webhookUrl"].is_null());
+    // The host has a transport wired, so it long-polls for inbound.
+    assert_eq!(cfg["polling"], true);
 }
 
 #[tokio::test]
 async fn telegram_token_never_leaks_even_when_delivery_fails() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // A transport that fails with an error embedding the bot token.
     let api = RecordingTelegramApi::failing_with_token_echo();
     let state = state_with_telegram(&home, api).await;
@@ -1818,6 +2678,527 @@ async fn telegram_token_never_leaks_even_when_delivery_fails() {
         !raw.contains(BOT_TOKEN),
         "token leaked on a failed delivery"
     );
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// #187: the Artifacts tab's full loop — an agent draft, a human edit appended
+/// as a new version, and the diff between them.
+///
+/// The point of the port is that the operator's edit does **not** overwrite the
+/// agent's text, so this asserts v1 survives verbatim after the edit. A store
+/// that mutated in place would still serve a plausible-looking artifact while
+/// having destroyed the one datum the epic wants.
+#[tokio::test]
+async fn artifact_versions_capture_the_human_edit_and_diff() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // The agent's draft.
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({
+            "taskId": "t-1",
+            "title": "Launch post",
+            "kind": "markdown",
+            "body": "alpha\nbeta\ngamma",
+            "authorId": "ceo"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["versions"].as_array().unwrap().len(), 1);
+    // No human has touched it, so no diff is offered.
+    assert!(created.get("humanEditDiff").is_none());
+
+    // The operator edits one line before approving.
+    let (status, edited) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/artifacts/{id}/versions"),
+        Some(json!({ "body": "alpha\nBETA\ngamma" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let versions = edited["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    // v1 is untouched — the whole reason versions are append-only.
+    assert_eq!(versions[0]["body"], "alpha\nbeta\ngamma");
+    assert_eq!(versions[0]["author"], "agent");
+    assert_eq!(versions[1]["author"], "operator");
+    assert_eq!(versions[1]["note"], "operator edit before approval");
+
+    // The derived diff rides along, so the tab needs one call.
+    let diff = &edited["humanEditDiff"];
+    assert_eq!(diff["fromVersion"], 1);
+    assert_eq!(diff["toVersion"], 2);
+    assert_eq!(diff["added"], 1);
+    assert_eq!(diff["removed"], 1);
+
+    // …and is also addressable on its own.
+    let (status, standalone) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(standalone["toVersion"], 2);
+
+    // Listing by task returns it; an unrelated task sees nothing.
+    let (status, listed) = send(&state, "GET", "/api/v1/company/tasks/t-1/artifacts", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let (_, empty) = send(
+        &state,
+        "GET",
+        "/api/v1/company/tasks/t-other/artifacts",
+        None,
+    )
+    .await;
+    assert_eq!(empty.as_array().unwrap().len(), 0);
+}
+
+/// #185: `GET …/tasks/{id}` assembles the header, the per-task timeline, and
+/// the lineage in one read.
+///
+/// The timeline half is the point: the journal is company-scoped, so this
+/// asserts that a reply tagged with *this* task is admitted while an untagged
+/// chat reply and a reply tagged to a *different* task are both excluded. Those
+/// three cases are exactly what the `task_id` threading exists to separate.
+#[tokio::test]
+async fn task_detail_assembles_timeline_and_lineage() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    let card = |id: &str, title: &str, parent: Option<&str>| TaskRecord {
+        id: id.into(),
+        title: title.into(),
+        note: None,
+        column: "in_review".into(),
+        priority: "medium".into(),
+        assignee: "ceo".into(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: parent.map(str::to_string),
+    };
+    for t in [
+        card("t-parent", "Parent", None),
+        card("t-1", "Ship it", Some("t-parent")),
+        card("t-child", "Subtask", Some("t-1")),
+        card("t-other", "Unrelated", None),
+    ] {
+        runtime.tasks().upsert(&company, &t).await.unwrap();
+    }
+
+    for event in [
+        CompanyEvent::TaskDispatched {
+            task_id: "t-1".into(),
+        },
+        // Tagged to this task — admitted.
+        CompanyEvent::AgentReply {
+            chat_id: "t-1".into(),
+            agent_id: "ceo".into(),
+            text: "on it".into(),
+            steps: Vec::new(),
+            task_id: Some("t-1".into()),
+        },
+        // An ordinary chat reply — excluded.
+        CompanyEvent::AgentReply {
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "unrelated chatter".into(),
+            steps: Vec::new(),
+            task_id: None,
+        },
+        // Tagged to a different task — excluded.
+        CompanyEvent::AgentReply {
+            chat_id: "t-other".into(),
+            agent_id: "ceo".into(),
+            text: "someone else's work".into(),
+            steps: Vec::new(),
+            task_id: Some("t-other".into()),
+        },
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "ceo".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+        },
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(body["task"]["id"], "t-1");
+    assert_eq!(body["task"]["parentTaskId"], "t-parent");
+
+    let kinds: Vec<&str> = body["timeline"]
+        .as_array()
+        .expect("timeline array")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["dispatched", "reply", "completed"]);
+
+    let raw = serde_json::to_string(&body["timeline"]).unwrap();
+    assert!(
+        !raw.contains("unrelated chatter") && !raw.contains("someone else's work"),
+        "another task's / an untagged chat reply leaked onto this timeline: {raw}"
+    );
+
+    assert_eq!(body["lineage"]["parent"]["id"], "t-parent");
+    let children = body["lineage"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["id"], "t-child");
+
+    // An unknown id 404s, matching PATCH/DELETE.
+    let (status, _) = send(&state, "GET", "/api/v1/company/tasks/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #187: the diff route's argument contract, and the 404s.
+#[tokio::test]
+async fn artifact_diff_rejects_a_half_specified_range() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({ "taskId": "t-1", "title": "Draft", "body": "one" })),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Neither bound, and no operator edit yet → nothing to diff, stated plainly
+    // rather than silently returning an empty diff.
+    let (status, _) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Half a range is a 400, not a guess about the other end.
+    let (status, _) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff?from=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A version that does not exist names itself.
+    let (status, _) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff?from=1&to=9"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Unknown artifact ids 404 on every handler that takes one.
+    let (status, _) = send(&state, "GET", "/api/v1/company/artifacts/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts/nope/versions",
+        Some(json!({ "body": "x" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/artifacts/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #185 gave `GET …/tasks/{task_id}` a handler, which now overlaps the static
+/// `GET …/tasks/inflight` the operator strip reads.
+///
+/// Before #185 the dynamic segment carried no GET, so nothing could shadow the
+/// strip. Now something can: if the routes were ever reordered (or the static
+/// one dropped), `inflight` would be parsed as a *card id*, `task_detail` would
+/// find no such card, and the strip would 404 — with no test failing anywhere
+/// else, because no card can be named `inflight` for the collision to show up
+/// in ordinary use.
+#[tokio::test]
+async fn inflight_read_is_not_shadowed_by_task_detail() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // The strip's read still resolves to the inflight handler: an array, not
+    // the object `task_detail` would return, and not a 404.
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/inflight", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.is_array(),
+        "GET /tasks/inflight must hit list_inflight, not task_detail: {body}"
+    );
+}
+
+/// #185 review follow-up: pin the two timeline branches the first test skipped —
+/// `tool_failed`, and the window-correlated `approval` arm.
+///
+/// The approval arm is the only branch in `task_timeline` whose correlation is
+/// heuristic (parked effects carry no task id, so it is scoped by the run
+/// window). That makes it the one most likely to regress into leaking another
+/// run's resolution, so it is asserted from both sides: a resolution *before*
+/// the dispatch anchor must be excluded, one *inside* the window admitted.
+#[tokio::test]
+async fn task_timeline_scopes_approvals_to_the_run_window() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "t-1".into(),
+                title: "Ship it".into(),
+                note: None,
+                column: "in_review".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let approval = |id: &str| CompanyEvent::ApprovalResolved {
+        approval_id: ApprovalId::new(id),
+        verdict: Verdict::Approve,
+        by: Actor {
+            kind: ActorKind::User,
+            id: "u-1".into(),
+        },
+    };
+
+    for event in [
+        // Before the dispatch anchor — belongs to some other run, must not leak.
+        approval("before"),
+        CompanyEvent::TaskDispatched {
+            task_id: "t-1".into(),
+        },
+        // Inside the window — admitted.
+        approval("during"),
+        CompanyEvent::McpCallFailed {
+            task_id: Some("t-1".into()),
+            server: "gh".into(),
+            tool: "issues".into(),
+            status: "credential_required".into(),
+            message: "needs auth".into(),
+        },
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "ceo".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+        },
+        // After the window closed — must not leak either.
+        approval("after"),
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let kinds: Vec<&str> = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["dispatched", "approval", "tool_failed", "completed"],
+        "exactly one approval — the one inside the run window"
+    );
+
+    // The failure carries its scrubbed message; the operator's identity on the
+    // approval is dropped, matching the SSE projection's deny-by-default stance.
+    let raw = serde_json::to_string(&body["timeline"]).unwrap();
+    assert!(raw.contains("needs auth"));
+    assert!(!raw.contains("u-1"), "operator identity leaked: {raw}");
+}
+
+/// #185 review follow-up: the lineage forest is enforced at the write boundary.
+///
+/// Without this a card could be its own parent (appearing as both parent and
+/// child of itself in `task_detail`), point at a card that does not exist, or
+/// close a `t1 → t2 → t1` loop — all persisted silently.
+#[tokio::test]
+async fn parent_task_id_rejects_self_unknown_and_cycles() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let create = |title: &str| {
+        let title = title.to_string();
+        async move { json!({ "title": title }) }
+    };
+    let (_, a) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(create("A").await),
+    )
+    .await;
+    let (_, b) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(create("B").await),
+    )
+    .await;
+    let (a_id, b_id) = (
+        a["id"].as_str().unwrap().to_string(),
+        b["id"].as_str().unwrap().to_string(),
+    );
+
+    // Unknown parent on create.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "C", "parentTaskId": "nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Self-parenting on patch.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{a_id}"),
+        Some(json!({ "parentTaskId": a_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A legitimate edge: B's parent is A.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{b_id}"),
+        Some(json!({ "parentTaskId": a_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // …which makes A → B a cycle.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{a_id}"),
+        Some(json!({ "parentTaskId": b_id })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "A → B → A must be rejected"
+    );
+}
+
+/// #185 review follow-up: validation is only as good as its atomicity.
+///
+/// Each half of `A → B` / `B → A` is individually legal against a board that
+/// has neither edge yet. Read → validate → write therefore has to be one
+/// critical section: without it both requests can validate against a snapshot
+/// taken before the other wrote, and the pair persists the very cycle
+/// `validate_parent` exists to reject.
+///
+/// With the writes serialized this is deterministic rather than probabilistic —
+/// whichever request takes the lock second sees the first one's edge and is
+/// rejected — so the assertion is *exactly* one success, not "usually one".
+#[tokio::test]
+async fn concurrent_reparents_cannot_race_a_cycle_onto_the_board() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = std::sync::Arc::new(state_with_company(&home).await);
+
+    let mut ids = Vec::new();
+    for title in ["A", "B"] {
+        let (_, card) = send(
+            &state,
+            "POST",
+            "/api/v1/company/tasks",
+            Some(json!({ "title": title })),
+        )
+        .await;
+        ids.push(card["id"].as_str().unwrap().to_string());
+    }
+    let (a_id, b_id) = (ids[0].clone(), ids[1].clone());
+
+    // Fire both halves of the would-be cycle at once.
+    let reparent = |child: String, parent: String| {
+        let state = state.clone();
+        tokio::spawn(async move {
+            send(
+                &state,
+                "PATCH",
+                &format!("/api/v1/company/tasks/{child}"),
+                Some(json!({ "parentTaskId": parent })),
+            )
+            .await
+            .0
+        })
+    };
+    let first = reparent(b_id.clone(), a_id.clone());
+    let second = reparent(a_id.clone(), b_id.clone());
+    let (first, second) = (first.await.unwrap(), second.await.unwrap());
+
+    let outcomes = [first, second];
+    assert_eq!(
+        outcomes.iter().filter(|s| **s == StatusCode::OK).count(),
+        1,
+        "exactly one re-parent may win: {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|s| **s == StatusCode::BAD_REQUEST)
+            .count(),
+        1,
+        "the loser must be rejected as a cycle, not silently applied: {outcomes:?}"
+    );
+
+    // And the board itself is a forest: the two cards cannot both have parents.
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let parented = board
+        .as_array()
+        .expect("board is a list")
+        .iter()
+        .filter(|c| c["parentTaskId"].is_string())
+        .count();
+    assert_eq!(parented, 1, "a cycle reached the board: {board}");
 }

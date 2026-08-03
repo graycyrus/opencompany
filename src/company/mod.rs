@@ -8,6 +8,10 @@
 pub mod composio;
 #[cfg(test)]
 mod content_test;
+// How this instance obtains its TinyHumans credential (projected, rotating
+// platform token vs a static key). Always compiled: the answer decides whether a
+// company can think at all, in every build.
+pub mod credentials;
 pub mod dns;
 pub mod inference;
 mod manifest;
@@ -26,25 +30,27 @@ pub mod steer;
 pub mod task_intent;
 pub mod telegram;
 mod types;
-#[cfg(feature = "openhuman")]
 mod workflow_create;
 mod workflow_file;
 pub mod workspace_seed;
 
 use std::path::Path;
 
+pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
 pub use manifest::{LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
-pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md};
+pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use types::{
     Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, ComposioTools,
-    Connection, DEFAULT_ALWAYS_APPROVE, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS,
-    Inference, KNOWN_CHANNELS, McpServer, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan,
-    Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit,
-    grants_media_explicit,
+    Connection, DEFAULT_ALWAYS_APPROVE, DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES,
+    INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference, KNOWN_CHANNELS, McpServer, PLAN_NAMES,
+    PLAN_PERIODS, POLICY_MODES, Place, Plan, Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools,
+    grants_composio_explicit, grants_media_explicit, grants_search_explicit,
+    grants_workspace_write_explicit,
 };
 pub use workflow_file::{
-    WORKFLOW_NODE_KINDS, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef, WorkflowNodeKind,
-    WorkflowRetryDef, list_source_workflows, load_company_workflows, parse_workflow,
+    WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
+    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, list_source_workflows,
+    list_workflows_union, load_company_workflows, load_workflow_union, parse_workflow,
 };
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
 // from its request body, renders it to TOML, and re-parses it through
@@ -52,8 +58,12 @@ pub use workflow_file::{
 pub(crate) use workflow_file::{RawEdge, RawNode, RawWorkflow, render_workflow};
 // Crate-internal only: the shared validated-persist core (issue #112) both the
 // REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.
-#[cfg(feature = "openhuman")]
-pub(crate) use workflow_create::create_company_workflow;
+// Ungated: the REST route is in the default build, so gating this behind
+// `openhuman` is what let the two surfaces drift apart (issue #168).
+pub(crate) use workflow_create::{
+    create_company_workflow, delete_company_workflow, seed_file_exists, update_company_workflow,
+    workflow_version,
+};
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
 use crate::{Result, VERSION};

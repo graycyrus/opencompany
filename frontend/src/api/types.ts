@@ -65,6 +65,16 @@ export interface OutboundMessage {
   steps?: TurnStep[];
   /** Channel-specific reply addressing (Telegram). Absent on operator messages. */
   replyTo?: ReplyTo;
+  /**
+   * The board card this turn opened, when it opened one (issue #246). Drives
+   * the reply bubble's "card opened" chip. Absent when the turn opened nothing
+   * — which is every reply the host sent before this field existed.
+   *
+   * Only the *first* card of a turn that opened several: the journal field this
+   * is persisted into is a single id, so the claim is incomplete but never
+   * wrong. The bubble's `steps` timeline still shows every spawn.
+   */
+  taskId?: string;
 }
 
 /** Channel-specific reply addressing. Mirrors `ReplyTo` in `src/ports/types.rs`. */
@@ -141,6 +151,13 @@ export interface ChatHistoryMessageDto {
    * empty (operator messages, tool-less replies).
    */
   steps?: TurnStep[];
+  /**
+   * The board card this reply is about (issue #246) — the card the turn opened,
+   * or the dispatched card it ran for (#185). Projected from the same shared
+   * `MessageView` field the GraphQL `Chat.history` resolver reads, so the chip
+   * renders identically whichever surface hydrated the transcript.
+   */
+  taskId?: string;
 }
 
 /** Response of `/chat` and approval-resolution routes. */
@@ -234,6 +251,48 @@ export interface TeamMemberDto {
   name?: string;
   role: string;
   description?: string;
+  /**
+   * Whether this teammate has an enabled inbox, as the host's `InboxStore` sees
+   * it. Absent on hosts predating the field; the console reads that as `false`.
+   */
+  inboxEnabled?: boolean;
+}
+
+/**
+ * One teammate inbox's non-secret status, from `GET .../inboxes`. Both inbound
+ * paths (the ingest webhook and the IMAP poller) file into the same store this
+ * projects, so received mail shows up here.
+ */
+export interface InboxDto {
+  /** The inbox key (a teammate's local part / slug). */
+  key: string;
+  /** The teammate's display name. */
+  name: string;
+  /** The full address (`{key}@{domain}` when a domain is configured). */
+  address: string;
+  /** Whether the inbox is enabled on the Team page. */
+  enabled: boolean;
+  /** The number of unread received (inbound) messages. */
+  unread: number;
+}
+
+/** One email in an inbox, from `GET .../inboxes/{key}/messages`. */
+export interface InboxMessageDto {
+  id: string;
+  /** The inbox this belongs to (the teammate local part). */
+  inbox: string;
+  /** The sender's display name (may be empty). */
+  fromName: string;
+  /** The sender's email address. */
+  fromEmail: string;
+  subject: string;
+  /** Plain-text body. */
+  body: string;
+  /** When it arrived / was sent, epoch millis. */
+  atMillis: number;
+  read: boolean;
+  /** True for a sent message, false for a received one. */
+  outbound: boolean;
 }
 
 /**
@@ -330,6 +389,23 @@ export interface CapabilityTierDto {
 }
 
 /**
+ * The plan-level total token ceiling (issue #188). Unlike a per-namespace tier
+ * — a *soft* gate that only trims exec tools — crossing this is a *hard* stop:
+ * the harness refuses to dispatch further turns this period. Present only when
+ * the manifest set `[plan].total_tokens`.
+ */
+export interface CapabilityTotalDto {
+  /** Total tokens allowed this period before dispatch is refused. */
+  budgetTokens: number;
+  /** Tokens spent this period. */
+  spentTokens: number;
+  /** `budget - spent`, floored at zero. */
+  remainingTokens: number;
+  /** Whether spend has reached the ceiling — dispatch is paused until reset. */
+  exhausted: boolean;
+}
+
+/**
  * The company's capability-budget status. When no `[plan]` is configured only
  * `configured: false` is present; the other fields accompany a configured plan.
  */
@@ -345,6 +421,12 @@ export interface CapabilityStatusDto {
   spentTokens?: number;
   /** One row per configured tier, namespace-sorted. */
   tiers?: CapabilityTierDto[];
+  /**
+   * The plan-level total token ceiling (issue #188), when configured. Crossing
+   * it is a hard stop — the harness refuses to dispatch further turns this
+   * period, unlike the soft per-namespace `tiers`.
+   */
+  total?: CapabilityTotalDto;
   /**
    * Media generation (issue #109): whether the company **explicitly** grants the
    * real-money `media` namespace (a `*` wildcard does not count). Present
@@ -365,6 +447,22 @@ export interface CapabilityStatusDto {
   composioInBuild?: boolean;
   /** Whether a per-tenant Composio token is stored — never the token itself. */
   composioTokenConfigured?: boolean;
+  /**
+   * Metered web search (issue #238): whether the company **explicitly** grants
+   * the `search` namespace (a `*` wildcard does not count). Every call is a
+   * priced request on the managed platform, so it is opt-in by name.
+   */
+  searchGranted?: boolean;
+  /**
+   * Whether the harness carrying `web_search` is compiled into this build.
+   * There is no `search` Cargo feature — the tool rides the harness feature so
+   * CI actually compiles and tests it.
+   */
+  searchInBuild?: boolean;
+  /** Whether a managed search credential is configured on this build (env-only). */
+  searchCredentialConfigured?: boolean;
+  /** The company's daily `web_search` call ceiling. */
+  searchDailyCallCap?: number;
 }
 
 /** One day's token totals in the usage series (`GET .../usage`). */
@@ -395,6 +493,13 @@ export interface UsageTotalsDto {
   costUsd: number;
   oauthCalls: number;
   connections: number;
+  /**
+   * Metered web searches in the window (issue #238). Their USD cost is already
+   * inside `costUsd`; this is the call count. Deliberately separate from
+   * `oauthCalls` / `connections`, which count connected third-party accounts —
+   * a search is a platform call, not an account the company connected.
+   */
+  searchCalls: number;
 }
 
 /**

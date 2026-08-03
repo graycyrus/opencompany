@@ -17,13 +17,46 @@ to a `Brain` and services the brain's callbacks through a `CycleHost`.
 pub trait Brain: Send + Sync {
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost)
         -> Result<CycleResult>;
+
+    /// How this brain does cognition and where its usage is metered.
+    /// Defaults to an injected brain: per-cycle metering, unknown provider.
+    fn cognition(&self) -> Cognition { Cognition::default() }
 }
 
+/// Metering + diagnosis descriptor for a cognition path (issue #174).
+pub struct Cognition {
+    /// `harness` | `hosted` | `sidecar` | `echo` | `custom`.
+    pub path: &'static str,
+    /// Provider slug the path's cycle usage is metered under.
+    pub provider: &'static str,
+    pub metering: UsageMetering,
+}
+
+pub enum UsageMetering {
+    /// The path meters each agent turn itself (the openhuman harness) and MUST
+    /// report a zero `CycleResult::token_usage`, or its spend is double-counted.
+    PerTurn,
+    /// `CycleRunner` meters whatever the cycle reports (hosted Medulla reads it
+    /// off the `orch:usage` frame).
+    PerCycle,
+    /// No model runs on this path (the echo brain) — a zero Usage reading is the
+    /// truth, not a missing hook.
+    None,
+}
+```
+
+`CycleRunner` **enforces** both non-`PerCycle` arms: a path that declares
+`PerTurn` or `None` and then reports non-zero cycle usage is warned about and
+dropped, never metered. Only `PerCycle` reaches the meter.
+
+```rust
 /// Callbacks the brain makes into the host mid-cycle.
 pub trait CycleHost: Send + Sync {
     async fn call_tool(&self, call: ToolCall) -> Result<ToolResult>;
     async fn context_op(&self, op: ContextOp) -> Result<ContextOpResult>;
     async fn emit_effect(&self, effect: Effect) -> Result<EffectDisposition>;
+    /// Parks an already-decided effect for approval, without re-evaluating it.
+    async fn park_effect(&self, effect: Effect) -> Result<ApprovalId>;
 }
 
 pub enum EffectDisposition {
@@ -33,9 +66,20 @@ pub enum EffectDisposition {
 }
 ```
 
+`emit_effect` submits an effect for a **decision** — the gate evaluates it and
+executes, parks, or denies it. `park_effect` is for a brain that hosts its own
+policy layer and has **already** decided: the harness brain's openhuman
+`ApprovalPolicy` blocks a gated tool call inside the agent turn, and the
+projected call is parked as-is so the operator can see and resolve it. Passing
+it back through `emit_effect` would re-decide it against the coarser
+`ApprovalGate` taxonomy and quietly drop it (issue #172).
+
 `CycleRequest` carries `{cycle_id, company_id, events, compressed_history,
 roster, context_index}`; `CycleResult` carries channel responses, new
-compressed traces, ledger deltas, and token usage. Implementations:
+compressed traces, ledger deltas, and `token_usage` — tokens **and** cost, which
+`CycleRunner` meters onto the `UsageMeter` + ledger for every path that is not
+`PerTurn`-metered (issue #174), so hosted/sidecar cognition is accounted for and
+not only the openhuman harness. Implementations:
 `HostedMedullaBrain` (default — see
 [integrations/medulla.md](../integrations/medulla.md)), `StubBrain`
 (single TinyAgents call, offline tests), `SidecarBrain` (feature `sidecar`),
@@ -48,6 +92,35 @@ construction, ≥1 response per cycle) are inherited, not re-verified.
 ## CompanyStore
 
 Durable company records: charter, roster, ledger, approval queue.
+
+The record also carries the **operator overlays** — teammates, desk members,
+desk order, operator-created desks, and (issue #168) `overlay_workflows`: the
+workflow graph bodies authored at runtime through the console's create dialog or
+the orchestrator's `create_workflow` tool. These are persisted here rather than
+written into `companies/<name>/workflows/<id>.toml` because the company source
+tree is the version-controlled seed and, in hosted mode, a read-only crate mount
+(writing there failed every hosted tenant with `EROFS`). Every reader unions the
+two sources — `load_workflow_union` / `list_workflows_union` in
+`src/company/workflow_file.rs` — with the committed seed file winning on an id
+collision, matching the manifest-first convention the desk resolvers use. The
+workflow scheduler (issue #169) reads through the same union, which is what
+makes a schedule on a console-created workflow survive a restart.
+
+**A boot rebuild is not a plain re-seed** (issue #208). `RuntimeBuilder::build`
+persists the freshly-parsed seed manifest with exactly one field merged:
+`[workflows].enabled` becomes the seed's ids plus every surviving
+`overlay_workflows` id not already among them. `create_workflow` writes the graph
+body and the enabled id in one save, so overlay presence *is* the enablement
+invariant — deriving from the bodies carries a runtime enablement forward and
+re-heals records an earlier rebuild wiped, with no migration. Ids dropped from
+the seed, and enabled ids with no surviving body, do not survive.
+
+Every other manifest field is **seed-authoritative**; for `[tools]` and
+`[policy]` that is a security property, not a convention — a record-wins merge
+would let a runtime grant or a relaxed approval mode outlive the operator
+revoking it in version control. Runtime additions that must persist get their own
+overlay field instead (`overlay_agents`, `overlay_desks`, the `SecretStore` for
+console MCP credentials).
 
 ```rust
 // src/ports/store.rs
@@ -80,7 +153,40 @@ pub trait EventLog: Send + Sync {
 graph was authored + enabled via the console `POST …/workflows` route or the
 orchestrator's `create_workflow` tool; journaled best-effort after persist),
 `TaskSteered` (an operator paused, cancelled, or redirected an in-flight task
-or delegation).
+or delegation), `DeskTaskCompleted` (a dispatched board task finished its run —
+the terminal anchor a per-task timeline ends on; "completed" means the run
+stopped, not that it succeeded, and `column` carries where the card landed).
+
+### Per-task event correlation (issue #185)
+
+The journal is company-scoped, so the events a dispatch *produces* cannot be
+filtered back to their task by shape alone. `AgentReply` and `McpCallFailed`
+therefore carry an optional `task_id`, stamped by the harness when the
+producing turn ran inside a `TaskDispatched` cycle and absent for an ordinary
+chat turn. Together with the `TaskDispatched` / `DeskTaskCompleted` anchors,
+that is what `GET …/tasks/{task_id}` filters on to assemble a task's timeline.
+
+Both fields are additive — `#[serde(default, skip_serializing_if = …)]` — so
+every already-persisted event loads unchanged and an untagged event serializes
+byte-for-byte as it did before the field existed. No stored log needs
+migrating, and the cross-backend export/import round-trip is unaffected.
+
+`TaskRecord` gains `parent_task_id` on the same contract, recording the
+task-to-task edge that `origin_chat_id` (a *conversation*, shared by every
+sibling spawned in that thread, and absent entirely on a board-native card)
+cannot express. It is the parent half of the Task Detail screen's lineage.
+
+`OutboundMessage` gains `task_id` on the same contract (issue #246): the card a
+chat turn **opened**, so the console can say a card exists instead of leaving an
+operator to notice it on the board. It is journaled onto that turn's
+`AgentReply.task_id`, which widens that field's meaning from "the dispatch that
+produced this reply" to "the card this reply is about" — a card-creating reply
+now also appears on that card's timeline, which is the lineage an operator
+wants and costs no schema change. A turn that opens several cards reports the
+**first**: the journal field is a single optional id, and widening it would
+break the byte-identical round-trip, so the claim is incomplete but never wrong.
+Both `chat/history` surfaces (REST and GraphQL) project it from the shared
+`MessageView`, so the chip survives a transcript reload on either.
 
 ## MemoryStore
 
@@ -254,7 +360,75 @@ pub trait TaskStore: Send + Sync {
 ```
 
 `TaskRecord` carries `{id, title, note, column, priority, assignee,
-updated_at}`. `column` ∈ `backlog|in_progress|in_review|done`.
+updated_at}`.
+
+`column` ∈ `backlog|todo|in_progress|paused|in_review|done` — the `BOARD_COLUMNS`
+constant in `src/ports/tasks.rs`, which is the one authority the REST write
+boundary, the dispatch edge and the harness lifecycle seam all read, and which
+the console mirrors in the same order. (`paused` arrived with steering, issue
+#111; this line used to omit it.) Entering `in_progress` is what dispatches the
+card; nothing dispatches out of `done`.
+
+`backlog` and `todo` are both "not started", and the split is deliberate:
+`backlog` is the unqueued pool — and where the lifecycle returns work that needs
+another pass (a failed dispatch, an orchestrator `revise` verdict) — while
+`todo` is what has been queued up next. `todo` is the board's one manual-entry
+column: the console's `+` button lives there alone and `POST …/tasks` defaults
+to it (issue #206), so an operator cannot create a card straight into
+`in_progress` or a terminal column. The transcript's "Add to board" action
+(issue #246) relies on exactly that default: it omits `column` so the *server*
+decides where a chat-created card lands, which is what keeps the human drag into
+`in_progress` the only thing that spends an agent turn.
+
+`assignee` names a **roster teammate id, a desk, or nobody** (`""`), resolved by
+`crate::runtime::assignee` against the full roster — manifest agents, operator
+overlay teammates, and desks (by id or case-insensitive name). The write plane
+rejects anything else with a `400` and stores the canonical key rather than what
+was typed; dispatch refuses a card whose assignee no longer resolves, returning
+it to `backlog` with the reason on the note, and writes the agent that actually
+worked the card back onto `assignee` so the board names the doer (issue #205).
+That write-back covers an unassigned card and a card assigned to a teammate; a
+card assigned to a **desk** keeps the desk id. A desk assignment records who the
+card belongs to, and dispatch only chooses which member runs the current turn, so
+writing the lead back would erase the desk from the board the first time the card
+ran — the member that did the work is named on the note instead.
+
+### ArtifactStore
+
+Versioned task outputs and the human-edit diff (`src/ports/artifacts.rs`,
+issue #187) — what the Task Detail **Artifacts** tab renders.
+
+```rust
+pub trait ArtifactStore: Send + Sync {
+    async fn list(&self, company: &CompanyId, task_id: Option<&str>)
+        -> Result<Vec<ArtifactRecord>>;
+    async fn get(&self, company: &CompanyId, id: &str) -> Result<Option<ArtifactRecord>>;
+    async fn upsert(&self, company: &CompanyId, artifact: &ArtifactRecord) -> Result<()>;
+    async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
+}
+```
+
+`ArtifactRecord` carries `{id, task_id, title, kind, versions, created_at,
+updated_at}`; `ArtifactKind` ∈ `text|markdown|image|file`. Each
+`ArtifactVersion` carries `{version, body, author, author_id, created_at,
+step_seq?, note?}`; `ArtifactAuthor` ∈ `agent|operator`.
+
+**Versions are append-only.** An operator's pre-approval edit is recorded as a
+*new version by a different author*, never as a mutation of the agent's — which
+is what makes `human_edit_diff()` ("the agent wrote X, the operator shipped Y")
+answerable at any later point, and why no route rewrites a stored version.
+Editing in place would destroy the single highest-signal quality datum the
+product can produce: sustained high `churn` on an agent's artifacts means its
+instructions need work.
+
+Independent of the per-task timeline (#185). A version may cross-reference the
+step that produced it via the optional `step_seq`, but this port never reads the
+event journal, so an artifact stands on its own.
+
+Backends must uphold `store::conformance::assert_artifact_store`, which asserts
+the full ordered version history survives a round-trip — a backend that stored
+only the latest body would otherwise pass a naive check while silently
+destroying the diff.
 
 ### WorkspaceStore
 
@@ -310,7 +484,19 @@ pub trait UsageMeter: Send + Sync {
 ```
 
 `UsageSample` records one metered event (`SampleKind::Inference` tokens or
-`SampleKind::OauthCall`). **Retention:** backends evict samples older than
+`SampleKind::OauthCall`). **Writers** — three, and they do **not** share failure
+semantics:
+
+| Writer | Called | On write failure |
+| --- | --- | --- |
+| `metering::inference::record_inference_usage` (always compiled) | per cycle by `CycleRunner`, for every cognition path that is not `PerTurn`-metered | logs and swallows — returns `()`, so the cycle still succeeds |
+| `metering::oauth::record_oauth_call` | per connected-tool call | logs and swallows — returns `()` |
+| `harness::cost::record_turn_cost` | per turn by the openhuman harness's cost hook | **propagates** — returns `Result<()>` and `HarnessPool::run_inner` applies `?`, so a ledger or meter failure fails the turn |
+
+The per-cycle and OAuth paths hold "accounting never fails the work it accounts
+for"; the per-turn harness path deliberately does not, because it writes the
+`inference.spend` ledger entry in the same call and a silently dropped ledger
+write is a money bug. **Retention:** backends evict samples older than
 **90 days** (`RETENTION_DAYS`, the console's maximum `D90` window) on write,
 anchored to the newest observed sample for deterministic eviction. Samples are
 non-secret accounting rows; money still resolves from the ledger and `[budget]`.

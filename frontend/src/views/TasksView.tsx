@@ -1,14 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, Plus, Trash2 } from "lucide-react";
+import { Loader2, Play, Plus } from "lucide-react";
 
-import {
-  createTask,
-  deleteTask,
-  listTasks,
-  patchTask,
-  type PatchTask,
-  type Task,
-} from "@/api/tasks";
+import { createTask, listTasks, patchTask, type Task } from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -33,8 +26,27 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+import { ADD_TASK_COLUMN, PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
+import { AssigneeSelect } from "./AssigneeSelect";
+import { TaskDetailView } from "./TaskDetailView";
+
+/**
+ * Reads the `#/tasks/<id>` sub-hash, or null on the bare board. The app shell's
+ * `useHashView` only inspects the first path segment (`tasks`), so this second
+ * segment is ours to own — no app-shell change needed to route the detail.
+ */
+function readTaskDetailId(): string | null {
+  try {
+    const parts = window.location.hash.replace(/^#\/?/, "").split(/[/?]/);
+    return parts[0] === "tasks" && parts[1] ? decodeURIComponent(parts[1]) : null;
+  } catch {
+    // Malformed percent-encoding (e.g. `#/tasks/%`) throws URIError — fall back
+    // to the bare board instead of blowing up the render. Covers both the
+    // useState initializer and the hashchange handler, since both call here.
+    return null;
+  }
+}
 
 const PRIORITIES = ["low", "medium", "high"] as const;
 
@@ -55,16 +67,25 @@ function priorityStyle(priority: string): string {
 export function TasksView({
   client,
   company,
+  onOpenThread,
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Opens the chat thread a card came from (issue #246). Absent when the board
+   * is rendered somewhere with no conversation pane to jump to, in which case
+   * the detail screen states the origin without offering the jump.
+   */
+  onOpenThread?: (threadId: string) => void;
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Task | null>(null);
+  // The open card's id, mirrored in `#/tasks/<id>` so the detail survives a
+  // refresh and honors back/forward.
+  const [detailId, setDetailId] = useState<string | null>(readTaskDetailId);
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
   const mounted = useRef(true);
   // A real HTML5 drag fires a trailing click; suppress it so a drag never also
@@ -94,6 +115,22 @@ export function TasksView({
       clearInterval(timer);
     };
   }, [refresh]);
+
+  // Follow browser back/forward and manual edits of the `#/tasks/<id>` sub-hash.
+  useEffect(() => {
+    const onHash = () => setDetailId(readTaskDetailId());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const openDetail = useCallback((id: string) => {
+    window.location.hash = `/tasks/${encodeURIComponent(id)}`;
+    setDetailId(id);
+  }, []);
+  const closeDetail = useCallback(() => {
+    window.location.hash = "/tasks";
+    setDetailId(null);
+  }, []);
 
   async function moveTo(column: string) {
     const id = dragId;
@@ -140,11 +177,28 @@ export function TasksView({
       dragged.current = false;
       return;
     }
-    setSelected(task);
+    openDetail(task.id);
+  }
+
+  // The detail screen replaces the board in place; the board keeps polling
+  // underneath so its state is reconciled by the time we return.
+  if (detailId) {
+    return (
+      <TaskDetailView
+        client={client}
+        company={company}
+        taskId={detailId}
+        onBack={closeDetail}
+        onNavigate={openDetail}
+        onOpenThread={onOpenThread}
+        onSaved={(saved) => setTasks((ts) => ts.map((t) => (t.id === saved.id ? saved : t)))}
+        onDeleted={(id) => setTasks((ts) => ts.filter((t) => t.id !== id))}
+      />
+    );
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold">Board</h2>
@@ -153,7 +207,7 @@ export function TasksView({
             size="sm"
             variant="outline"
             className="ml-1 h-7"
-            onClick={() => setCreatingIn(TASK_COLUMNS[0].id)}
+            onClick={() => setCreatingIn(ADD_TASK_COLUMN)}
           >
             <Plus className="size-4" />
             Add task
@@ -172,7 +226,7 @@ export function TasksView({
         </div>
       )}
 
-      <div className="flex flex-1 gap-4 overflow-x-auto py-4 pl-4">
+      <div className="flex min-h-0 flex-1 gap-4 overflow-x-auto py-4 pl-4">
         {TASK_COLUMNS.map((col) => {
           const items = tasks.filter((t) => t.column === col.id);
           return (
@@ -185,15 +239,18 @@ export function TasksView({
               onDragLeave={() => setOverCol((c) => (c === col.id ? null : c))}
               onDrop={() => void moveTo(col.id)}
               className={cn(
-                "flex w-72 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
+                "flex min-h-0 w-72 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
                 overCol === col.id && "border-primary/40 bg-accent/40",
               )}
             >
+              {/* New work enters the board in one place only (issue #206), and
+                  that entry point now lives in the board header rather than on
+                  this column. */}
               <div className="flex items-center gap-2 px-3 py-2.5">
                 <span className="text-sm font-medium">{col.label}</span>
                 <span className="text-xs text-muted-foreground">{items.length}</span>
               </div>
-              <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
+              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
                 {loading && items.length === 0 ? (
                   <Skeleton className="h-20 rounded-lg" />
                 ) : (
@@ -231,21 +288,6 @@ export function TasksView({
             so this spacer keeps ~16px of breathing room past the last column. */}
         <div aria-hidden className="w-4 shrink-0" />
       </div>
-
-      <TaskDetailDialog
-        task={selected}
-        onClose={() => setSelected(null)}
-        onSaved={(saved) => {
-          setTasks((ts) => ts.map((t) => (t.id === saved.id ? saved : t)));
-          setSelected(null);
-        }}
-        onDeleted={(id) => {
-          setTasks((ts) => ts.filter((t) => t.id !== id));
-          setSelected(null);
-        }}
-        client={client}
-        company={company}
-      />
 
       <CreateTaskDialog
         column={creatingIn}
@@ -337,166 +379,6 @@ function TaskItem({
   );
 }
 
-function TaskDetailDialog({
-  task,
-  onClose,
-  onSaved,
-  onDeleted,
-  client,
-  company,
-}: {
-  task: Task | null;
-  onClose: () => void;
-  onSaved: (t: Task) => void;
-  onDeleted: (id: string) => void;
-  client: OpenCompanyClient;
-  company: string | null;
-}) {
-  const [draft, setDraft] = useState<PatchTask>({});
-  const [busy, setBusy] = useState(false);
-
-  // Reset the edit draft each time a different card is opened.
-  useEffect(() => {
-    if (task) {
-      setDraft({
-        title: task.title,
-        note: task.note ?? "",
-        column: task.column,
-        priority: task.priority,
-        assignee: task.assignee,
-      });
-    }
-  }, [task]);
-
-  if (!task) return null;
-
-  async function save() {
-    if (!task) return;
-    setBusy(true);
-    try {
-      const saved = await patchTask(client, company, task.id, draft);
-      onSaved(saved);
-      toast.success("Saved.");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not save");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function remove() {
-    if (!task) return;
-    setBusy(true);
-    try {
-      await deleteTask(client, company, task.id);
-      onDeleted(task.id);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not delete");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog open={!!task} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Task detail</DialogTitle>
-          <DialogDescription>
-            Edit the card, or drop it into “In progress” on the board to dispatch it.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="task-title">Title</Label>
-            <Input
-              id="task-title"
-              value={draft.title ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
-            />
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label htmlFor="task-note">Note / result</Label>
-            <Textarea
-              id="task-note"
-              rows={8}
-              className="font-mono text-xs"
-              value={draft.note ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="grid gap-1.5">
-              <Label>Column</Label>
-              <Select
-                value={draft.column}
-                onValueChange={(v) => setDraft((d) => ({ ...d, column: v ?? undefined }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {TASK_COLUMNS.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-1.5">
-              <Label>Priority</Label>
-              <Select
-                value={draft.priority}
-                onValueChange={(v) => setDraft((d) => ({ ...d, priority: v ?? undefined }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PRIORITIES.map((p) => (
-                    <SelectItem key={p} value={p} className="capitalize">
-                      {p}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="task-assignee">Assignee</Label>
-              <Input
-                id="task-assignee"
-                value={draft.assignee ?? ""}
-                placeholder="agent id"
-                onChange={(e) => setDraft((d) => ({ ...d, assignee: e.target.value }))}
-              />
-            </div>
-          </div>
-        </div>
-
-        <DialogFooter className="justify-between sm:justify-between">
-          <Button variant="ghost" size="sm" onClick={() => void remove()} disabled={busy}>
-            <Trash2 className="mr-1.5 size-4" />
-            Delete
-          </Button>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={onClose} disabled={busy}>
-              Cancel
-            </Button>
-            <Button onClick={() => void save()} disabled={busy}>
-              {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-              Save
-            </Button>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 function CreateTaskDialog({
   column,
   onClose,
@@ -514,9 +396,6 @@ function CreateTaskDialog({
   const [note, setNote] = useState("");
   const [priority, setPriority] = useState("medium");
   const [assignee, setAssignee] = useState("");
-  // The board opens this from one button, so the column is picked here rather
-  // than by which `+` was clicked. `column` is only the starting value.
-  const [col, setCol] = useState(TASK_COLUMNS[0].id);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -525,7 +404,6 @@ function CreateTaskDialog({
       setNote("");
       setPriority("medium");
       setAssignee("");
-      setCol(column);
     }
   }, [column]);
 
@@ -538,7 +416,7 @@ function CreateTaskDialog({
       const created = await createTask(client, company, {
         title: title.trim(),
         note: note.trim() || undefined,
-        column: col,
+        column: column ?? undefined,
         priority,
         assignee: assignee.trim() || undefined,
       });
@@ -551,13 +429,15 @@ function CreateTaskDialog({
     }
   }
 
+  const columnLabel = TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
+
   return (
     <Dialog open={!!column} onOpenChange={(open) => !open && onClose()}>
       {/* `sm:` — DialogContent's own `sm:max-w-sm` beats an unprefixed width. */}
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>New task</DialogTitle>
-          <DialogDescription>Added to the column you pick below.</DialogDescription>
+          <DialogDescription>Added to “{columnLabel}”.</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3">
@@ -583,25 +463,7 @@ function CreateTaskDialog({
               placeholder="Any detail the assignee should act on."
             />
           </div>
-          <div className="grid grid-cols-3 gap-3">
-            <div className="grid gap-1.5">
-              <Label>Column</Label>
-              <Select value={col} onValueChange={(v) => setCol(v ?? TASK_COLUMNS[0].id)}>
-                <SelectTrigger>
-                  {/* Show the column's label, not its raw id. */}
-                  <SelectValue>
-                    {(v) => TASK_COLUMNS.find((c) => c.id === v)?.label ?? String(v ?? "")}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {TASK_COLUMNS.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+          <div className="grid grid-cols-2 gap-3">
             <div className="grid gap-1.5">
               <Label>Priority</Label>
               <Select value={priority} onValueChange={(v) => setPriority(v ?? "medium")}>
@@ -617,13 +479,18 @@ function CreateTaskDialog({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-1.5">
+            {/* `min-w-0` so a long teammate id cannot widen this grid track
+                and squeeze the Priority select beside it. */}
+            <div className="grid min-w-0 gap-1.5">
               <Label htmlFor="new-assignee">Assignee</Label>
-              <Input
+              {/* Issue #263: the roster is a closed set the host enforces, so it
+                  is picked, not typed. Blank is its own labelled row. */}
+              <AssigneeSelect
                 id="new-assignee"
+                client={client}
+                company={company}
                 value={assignee}
-                placeholder="agent id"
-                onChange={(e) => setAssignee(e.target.value)}
+                onChange={setAssignee}
               />
             </div>
           </div>
