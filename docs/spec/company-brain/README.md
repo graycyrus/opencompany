@@ -7,7 +7,8 @@ that state through the `Brain` port. Cognition itself is
 it.
 
 Supporting docs: [charter.md](charter.md), [approvals.md](approvals.md),
-[memory.md](memory.md).
+[memory.md](memory.md),
+[task-approval-correlation.md](task-approval-correlation.md) (design note, #333).
 
 ## Definition
 

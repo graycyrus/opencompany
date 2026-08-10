@@ -99,10 +99,13 @@ export function App() {
           redemption.current ??= verifyCode(client, company, magicLink.code);
           await redemption.current;
         } catch {
-          // A dead link is not fatal — fall through to sign-in and let them
-          // ask for another. The reason stays vague on purpose.
-          set({ kind: "login", company });
-          return;
+          // A dead link is not fatal, and it is not evidence of being signed
+          // out: a link is single-use and short-lived, so re-opening one you
+          // already redeemed is the ordinary case. Returning to sign-in here
+          // hid a perfectly live session behind a stale URL. Fall through
+          // instead — an existing session carries on into the console, and
+          // with none the first 401 lands on sign-in anyway. The reason stays
+          // vague on purpose.
         }
       }
 

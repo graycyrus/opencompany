@@ -1,13 +1,21 @@
-//! Workspace writes: create a node, overwrite a file, rename/move a node, and
-//! delete (folders recursive) — under both scope forms.
+//! The workspace REST surface: read the tree, read one node, create a node,
+//! overwrite a file, rename/move a node, and delete (folders recursive) — under
+//! both scope forms.
 //!
 //! Bodies mirror the console's `FsNode` (`frontend/src/lib/workspace.ts`).
-//! Writes land in the [`WorkspaceStore`](crate::ports::WorkspaceStore); node
-//! ids are stable ULIDs so a rename/move never breaks a reference.
+//! Reads and writes both go through the
+//! [`WorkspaceStore`](crate::ports::WorkspaceStore); node ids are stable ULIDs
+//! so a rename/move never breaks a reference.
+//!
+//! The reads exist so the console's Workspace tab renders the *company's*
+//! workspace — the one agents write through the code/shell capability — rather
+//! than a per-browser scratchpad (issue #177). A parallel read lives on the
+//! GraphQL surface (`Company.workspaceTree`); this is the REST twin the console
+//! client speaks.
 
 use axum::extract::Path;
 use axum::http::StatusCode;
-use axum::routing::{patch, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -19,12 +27,16 @@ use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
 /// Builds the workspace route fragment.
+///
+/// Each path is registered as a single `MethodRouter` — axum rejects two
+/// registrations of the same path, so the read verbs chain onto the write ones
+/// rather than merging a second router for the same suffix.
 pub fn router() -> Router<AppState> {
-    scoped("/workspace", post(create_node))
+    scoped("/workspace", get(list_tree).post(create_node))
         .merge(scoped("/workspace/file/{node_id}", put(write_file)))
         .merge(scoped(
             "/workspace/{node_id}",
-            patch(rename_move).delete(delete_node),
+            get(read_node).patch(rename_move).delete(delete_node),
         ))
 }
 
@@ -109,6 +121,55 @@ struct WriteAck {
 #[derive(Debug, Deserialize)]
 struct NodePath {
     node_id: String,
+}
+
+/// `GET …/workspace` — every node in the company's tree, file bodies inlined.
+///
+/// Bodies are inlined deliberately. The console renders `[[wiki link]]`
+/// backlinks, and "which notes link here" is a whole-tree question: a
+/// bodyless listing would force the client to fetch every file anyway, so
+/// inlining costs the same reads and one round trip instead of N.
+///
+/// The tree is unordered — callers build the hierarchy from `parentId`, which
+/// is absent on a node at the workspace root.
+async fn list_tree(company: ScopedCompany) -> Result<Json<Vec<FsNode>>, ApiError> {
+    let workspace = company.runtime.workspace();
+    let nodes = workspace.tree(company.id()).await?;
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let content = match node.kind {
+            NodeKind::File => workspace
+                .read(company.id(), &node.id)
+                .await?
+                .map(|(_, body)| body),
+            NodeKind::Folder => None,
+        };
+        out.push(FsNode::from_node(node, content));
+    }
+    Ok(Json(out))
+}
+
+/// `GET …/workspace/{node_id}` — one node, with its body when it is a file.
+/// 404s when the id names nothing in this company's workspace.
+async fn read_node(
+    company: ScopedCompany,
+    Path(NodePath { node_id }): Path<NodePath>,
+) -> Result<Json<FsNode>, ApiError> {
+    let (node, body) = company
+        .runtime
+        .workspace()
+        .read(company.id(), &node_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::NotFound(format!(
+                "workspace node {node_id}"
+            )))
+        })?;
+    let content = match node.kind {
+        NodeKind::File => Some(body),
+        NodeKind::Folder => None,
+    };
+    Ok(Json(FsNode::from_node(node, content)))
 }
 
 async fn create_node(

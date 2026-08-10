@@ -9,13 +9,32 @@
 //! `oauth/{provider}` — token material never appears in any response.
 //!
 //! The authorize URL carries a signed `state` nonce binding the flow to one
-//! company + provider + expiry, verified on callback so a tampered `state` is
-//! rejected with `401`.
+//! company + provider + expiry + **the console URL to come back to**, verified
+//! on callback so a tampered `state` is rejected.
+//!
+//! ## Why the return URL rides in the state (issue #300)
+//!
+//! Connecting is a top-level browser navigation: the console hands the tab to
+//! the provider and gets it back only via the callback's `Location`. But the
+//! console keeps its entire identity **in the URL** — `?api=`, `?company=` and
+//! `?token=` (`frontend/src/config.ts`) plus the active view in the `#/…`
+//! fragment (`frontend/src/hooks/use-hash-view.ts`). Nothing else holds it.
+//!
+//! So a callback that *fabricates* a return URL — as this once did, hardcoding
+//! `{console}/connections?connected=…` — drops the company, the host, and the
+//! step the operator was on, stranding a mid-onboarding connect on the wrong
+//! company (or a bare 404, since `/connections` is a path the hash-routed
+//! console has no concept of). Round-tripping the originating URL through the
+//! signed state is what makes the operator land back exactly where they left.
+//!
+//! The return URL is honoured **only** when it arrives inside a signature that
+//! verifies, and is origin-checked before it is ever signed
+//! ([`sanitize_return_to`]), so this is not an open redirect.
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::{StatusCode, Uri};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -126,22 +145,39 @@ fn state_secret() -> String {
 // Signed state nonce
 // ---------------------------------------------------------------------------
 
-/// Encodes `company:provider:exp:sig` into an opaque `state` value.
-fn encode_state(company: &str, provider: &str, exp: u64) -> String {
-    let payload = format!("{company}:{provider}:{exp}");
+/// Encodes `company:provider:exp:return_to:sig` into an opaque `state` value.
+///
+/// `return_to` is percent-encoded (so it can never contribute a `:` and split
+/// the payload) and empty when the flow carries none.
+fn encode_state(company: &str, provider: &str, exp: u64, return_to: Option<&str>) -> String {
+    let encoded_return = return_to.map(urlencode).unwrap_or_default();
+    let payload = format!("{company}:{provider}:{exp}:{encoded_return}");
     let sig = DefaultHashSigner.sign(&state_secret(), payload.as_bytes());
     format!("{payload}:{sig}")
 }
 
-/// Verifies and decodes a `state` value into `(company, provider)`, or `None`
-/// when the signature is wrong or the nonce has expired.
-fn decode_state(state: &str) -> Option<(String, String)> {
-    let parts: Vec<&str> = state.splitn(4, ':').collect();
-    if parts.len() != 4 {
+/// The trusted contents of a verified `state` nonce.
+struct OauthState {
+    company: String,
+    provider: String,
+    /// The console URL to bounce the browser back to. `None` for a flow started
+    /// by a console that sent none.
+    return_to: Option<String>,
+}
+
+/// Verifies and decodes a `state` value, or `None` when the signature is wrong
+/// or the nonce has expired.
+///
+/// Every field it yields — including [`OauthState::return_to`], which becomes a
+/// `Location` header — is covered by the signature, so a caller may trust it.
+fn decode_state(state: &str) -> Option<OauthState> {
+    let parts: Vec<&str> = state.splitn(5, ':').collect();
+    if parts.len() != 5 {
         return None;
     }
-    let (company, provider, exp, sig) = (parts[0], parts[1], parts[2], parts[3]);
-    let payload = format!("{company}:{provider}:{exp}");
+    let (company, provider, exp, encoded_return, sig) =
+        (parts[0], parts[1], parts[2], parts[3], parts[4]);
+    let payload = format!("{company}:{provider}:{exp}:{encoded_return}");
     let expected = DefaultHashSigner.sign(&state_secret(), payload.as_bytes());
     if sig != expected {
         return None;
@@ -150,7 +186,163 @@ fn decode_state(state: &str) -> Option<(String, String)> {
     if now_millis() > exp {
         return None;
     }
-    Some((company.to_string(), provider.to_string()))
+    Some(OauthState {
+        company: company.to_string(),
+        provider: provider.to_string(),
+        return_to: (!encoded_return.is_empty()).then(|| percent_decode(encoded_return)),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Console return URL
+// ---------------------------------------------------------------------------
+
+/// Upper bound on an accepted `returnTo`. Long enough for a console URL with
+/// `?api=&company=&token=` plus a `#/…` view; short enough that nothing
+/// pathological ends up signed into a nonce and echoed as a `Location`.
+const MAX_RETURN_TO_LEN: usize = 2048;
+
+/// The `scheme://host[:port]` of an absolute `http(s)` URL, lowercased.
+///
+/// Comparison is textual, so an explicitly-defaulted port (`http://h:80`) does
+/// not match its implicit form — deployments write one or the other
+/// consistently. Userinfo is rejected outright: `https://console@evil.test`
+/// reads as the console origin to a human and as `evil.test` to a browser.
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    Some(format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        authority.to_ascii_lowercase()
+    ))
+}
+
+/// The origins this host will bounce a browser back to, in preference order.
+///
+/// `Origin` is included because it is the only one that needs no configuration:
+/// the console's start call is a same-origin `POST`, so the browser sets it to
+/// the console's own origin and a cross-origin page cannot forge it. That is
+/// what makes both the dev split (Vite on `:5173`, host on `:8080`) and the
+/// nginx deployment work with nothing set.
+fn allowed_return_origins(state: &AppState, request_origin: Option<&str>) -> Vec<String> {
+    let candidates = [
+        std::env::var("OPENCOMPANY_CONSOLE_URL").ok(),
+        std::env::var("OPENCOMPANY_OAUTH_REDIRECT_BASE").ok(),
+        Some(state.config().host_base_url()),
+        request_origin.map(str::to_string),
+    ];
+    let mut origins: Vec<String> = Vec::new();
+    for origin in candidates.into_iter().flatten().filter_map(|c| origin_of(&c)) {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
+}
+
+/// Accepts an operator-supplied `returnTo` only when it is an absolute `http(s)`
+/// URL on an allowed console origin. `None` means "fall back to the default",
+/// never "trust it anyway" — this is the sole gate against turning the callback
+/// into an open redirect.
+fn sanitize_return_to(
+    state: &AppState,
+    request_origin: Option<&str>,
+    candidate: &str,
+) -> Option<String> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.len() > MAX_RETURN_TO_LEN {
+        return None;
+    }
+    // Whitespace or a control character could split the `Location` header.
+    // Reject rather than strip: a URL needing repair is not one we trust.
+    if candidate
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
+    let origin = origin_of(candidate)?;
+    allowed_return_origins(state, request_origin)
+        .contains(&origin)
+        .then(|| candidate.to_string())
+}
+
+/// Where to bounce when the flow carries no signed return URL — an older
+/// console, or a callback whose `state` did not verify.
+///
+/// The console routes on the fragment, so the view goes in the hash and the
+/// outcome in the query, which is the shape `AppShell` reads
+/// (`frontend/src/components/app-shell.tsx`). Note this cannot restore the
+/// console's `?company=`/`?api=`: only a signed `returnTo` can.
+fn default_console_return(state: &AppState) -> String {
+    let console = std::env::var("OPENCOMPANY_CONSOLE_URL")
+        .unwrap_or_else(|_| state.config().host_base_url());
+    format!("{}/#/connections", console.trim_end_matches('/'))
+}
+
+/// Splices `key=value` into `url`'s query string, preserving its fragment.
+///
+/// Any stale outcome param is dropped first so a retried connect doesn't
+/// accumulate them — including `code`, which the console reads as a single-use
+/// magic-link login credential (`frontend/src/App.tsx`) and must never inherit
+/// from an OAuth bounce.
+fn with_query_param(url: &str, key: &str, value: &str) -> String {
+    let (head, fragment) = match url.split_once('#') {
+        Some((head, fragment)) => (head, Some(fragment)),
+        None => (url, None),
+    };
+    let (path, query) = match head.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (head, ""),
+    };
+    let mut params: Vec<String> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let name = pair.split_once('=').map(|(n, _)| n).unwrap_or(pair);
+            !matches!(name, "connected" | "connect_error" | "code")
+        })
+        .map(str::to_string)
+        .collect();
+    params.push(format!("{}={}", urlencode(key), urlencode(value)));
+    let query = params.join("&");
+    match fragment {
+        Some(fragment) => format!("{path}?{query}#{fragment}"),
+        None => format!("{path}?{query}"),
+    }
+}
+
+/// Send the operator's browser back to the console carrying one outcome param.
+/// Everything else about the URL — the console's `?api=`/`?company=` config and
+/// its `#/…` view — survives exactly as the flow started with.
+fn bounce(return_to: &str, key: &str, value: &str) -> Response {
+    Redirect::to(&with_query_param(return_to, key, value)).into_response()
+}
+
+/// Reduces a provider-supplied OAuth `error` to a short, inert slug.
+///
+/// The value crosses from a third party into a `Location` header and then into
+/// console UI, so only `[a-z0-9_-]` survives and the rest is replaced wholesale.
+fn error_slug(raw: &str) -> String {
+    let slug: String = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(64)
+        .collect();
+    if slug.is_empty() {
+        "oauth_error".to_string()
+    } else {
+        slug
+    }
 }
 
 // ---------------------------------------------------------------------------
