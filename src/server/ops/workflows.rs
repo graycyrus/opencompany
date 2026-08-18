@@ -2519,6 +2519,25 @@ async fn list_runs(
 /// finishes and still journals, and its real finish lands after this synthetic
 /// one — so the fold, which settles an entry from the last finish it sees, ends
 /// up with the truth. The reading is wrong in between, not the record.
+///
+/// # Yes, a read writes
+///
+/// Two consequences, both accepted deliberately:
+///
+/// * **Two concurrent readers can append the same finish twice.** Both would see
+///   the run open, absent, and unsettled in the tail, and both would write. The
+///   rows are byte-identical, and every consumer of the journal is indifferent
+///   to the repeat — the fold settles one entry from the last finish it sees,
+///   `sweep_interrupted_runs` removes an already-removed key, and
+///   `delivered_by_unsettled_runs` reads the same error either way. Serialising
+///   the write to avoid a duplicate that changes no answer would cost a lock on
+///   the read path for nothing.
+/// * **It settles every open row, not just the page.** `limit` cuts the response
+///   *after* this runs, on purpose: a dead run that happens to fall off the
+///   requested page is still dead, and skipping it would leave it hanging for
+///   exactly as long as it stays off the page. The work is bounded in practice
+///   — the boot sweep clears the backlog at start, and each run is settled once,
+///   after which its finish is durable and it is no longer a candidate.
 async fn settle_dead_runs(
     company: &ScopedCompany,
     runs: &mut [WorkflowRunOutcome],

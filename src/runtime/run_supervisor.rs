@@ -43,14 +43,14 @@
 //!   the journal implies the run *was* registered — there is no window in which
 //!   a run is visibly started but not yet addressable.
 //! * the guard is dropped **after** the outcome is journaled — by the watchdog
-//!   in [`WorkflowSpawn::spawn_admitted`](super::WorkflowSpawn), which holds it
+//!   in [`WorkflowSpawn::spawn_admitted`](crate::runtime::WorkflowSpawn), which holds it
 //!   across the normal and the abnormal path alike. So a run that has left this
 //!   map has already written its finish, if it was ever going to write one.
 //!
 //! That second property is also what closed this module's other long-standing
 //! gap: a **panicking** run task used to unwind past its own journal write, so
 //! its guard dropped and nothing recorded the run at all. The watchdog now
-//! journals [`RUN_TASK_LOST`](super::RUN_TASK_LOST) for it.
+//! journals [`RUN_TASK_LOST`](crate::runtime::RUN_TASK_LOST) for it.
 //!
 //! ## One known gap, inherited rather than introduced
 //!
