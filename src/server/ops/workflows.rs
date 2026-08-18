@@ -2496,12 +2496,18 @@ async fn list_runs(
 /// that is walking its graph perfectly well. Three windows could produce it, and
 /// each is closed:
 ///
-/// * **Between spawn and registration.** There is none, in that order.
-///   [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) registers the
-///   run *before* `WorkflowSpawn` spawns its task, and the task journals the
-///   `WorkflowRunStarted` later still. So a start visible in the journal implies
-///   the run was already registered — a just-started run is addressable before
-///   it is ever visible here, never the other way round.
+/// * **Between starting and registration.** There is none, in that order, and
+///   all four entry points order it the same way:
+///   [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) runs first
+///   and the runner journals the `WorkflowRunStarted` afterwards. `WorkflowSpawn`
+///   calls `begin` before it spawns the run's task (the console's run route and
+///   the approved-gate resume); the cron scheduler calls `begin` on its tick
+///   thread, earlier still, so it can hold the guard across its minute-claim;
+///   and the orchestrator's `run_workflow` tool, which deliberately runs inline
+///   rather than on a task, calls `begin` immediately above its `runner.run`.
+///   So a start visible in the journal implies the run was already registered —
+///   a just-started run is addressable before it is ever visible here, never the
+///   other way round.
 /// * **Between the journal read and the liveness check.** A run that settled in
 ///   that gap has left the supervisor *and* has a finish this snapshot is too
 ///   old to have seen — it would look exactly like a dead one. So the journal is

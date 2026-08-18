@@ -38,14 +38,19 @@
 //! and [`RunGuard`] are what make that inference sound, and both have to survive
 //! any future change here:
 //!
-//! * `begin` registers **before** the run's task is spawned, and therefore
-//!   before the runner journals the run's `WorkflowRunStarted`. So a start in
-//!   the journal implies the run *was* registered — there is no window in which
-//!   a run is visibly started but not yet addressable.
+//! * `begin` runs **before** the runner journals the run's
+//!   `WorkflowRunStarted`, at every entry point — before the `tokio::spawn` in
+//!   [`WorkflowSpawn`](super::WorkflowSpawn), before the cron scheduler's
+//!   minute-claim, and immediately above the orchestrator tool's inline
+//!   `runner.run`. So a start in the journal implies the run *was* registered:
+//!   there is no window in which a run is visibly started but not yet
+//!   addressable.
 //! * the guard is dropped **after** the outcome is journaled — by the watchdog
-//!   in [`WorkflowSpawn::spawn_admitted`](crate::runtime::WorkflowSpawn), which holds it
-//!   across the normal and the abnormal path alike. So a run that has left this
-//!   map has already written its finish, if it was ever going to write one.
+//!   in [`WorkflowSpawn::spawn_admitted`](crate::runtime::WorkflowSpawn), which
+//!   holds it across the normal and the abnormal path alike, and by the
+//!   orchestrator tool holding `_run_guard` across both of its
+//!   `record_run_finished` arms. So a run that has left this map has already
+//!   written its finish, if it was ever going to write one.
 //!
 //! That second property is also what closed this module's other long-standing
 //! gap: a **panicking** run task used to unwind past its own journal write, so
