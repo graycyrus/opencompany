@@ -307,9 +307,29 @@ impl WorkflowSpawn {
                         std::panic::resume_unwind(join.into_panic());
                     }
                     // Cancelled rather than panicked. Nothing in this crate
-                    // aborts a run task — only the watchdog holds the handle —
-                    // so this is the runtime shutting the task down. Reported
-                    // as the same "outcome unknown" the run route's own
+                    // aborts a run task — the watchdog is the only holder of the
+                    // handle, and an operator's Stop goes through
+                    // [`RunSupervisor::cancel`](super::RunSupervisor::cancel),
+                    // which fires the run's own signal and lets it wind down and
+                    // journal normally. So this is the runtime shutting the task
+                    // down.
+                    //
+                    // Logged HERE, at `error`, because the arm it now lands in
+                    // downstream is quieter than the one it used to. Before the
+                    // watchdog a cancelled task surfaced to the run route as
+                    // `Err(JoinError)`, which logs; it now surfaces as
+                    // `Ok(Err(..))`, which the route turns straight into a
+                    // response without a line. Same severity as the arm it
+                    // replaced, so moving the log rather than dropping it keeps
+                    // "a run task vanished" as loud as it was.
+                    tracing::error!(
+                        company = %company,
+                        workflow = %workflow_id,
+                        run_id = %watched_run_id,
+                        scheduled,
+                        "workflow run task was cancelled before it finished; its outcome is unknown"
+                    );
+                    // Reported as the same "outcome unknown" the run route's own
                     // `JoinError` arm reports, so the two agree.
                     Err(OpenCompanyError::BackgroundTask(format!(
                         "the workflow run task for {watched_run_id} was cancelled before it finished"

@@ -2612,8 +2612,8 @@ async fn settle_dead_runs(
     dead.retain(|(_, run_id)| !settled_since.contains(run_id));
 
     let events = company.runtime.events();
-    for (index, run_id) in dead {
-        let entry = &mut runs[index];
+    for (index, run_id) in &dead {
+        let entry = &mut runs[*index];
         tracing::info!(
             company = %company.id(),
             workflow = %entry.workflow_id,
@@ -2626,17 +2626,74 @@ async fn settle_dead_runs(
             company.id(),
             &entry.workflow_id,
             entry.scheduled,
-            &run_id,
+            run_id,
             Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART),
         )
         .await;
         // Applied to the row being served as well, not just to the journal: this
         // response is the one that has to stop the console's spinner. Only the
-        // two fields the synthetic finish actually carries — it delivered
-        // nothing, blocked on nobody, and was not cancelled, all of which the
-        // row already says.
+        // fields the synthetic finish actually carries — it delivered nothing,
+        // blocked on nobody, and was not cancelled, all of which the row already
+        // says. `seq` and `at_millis` come from the appended rows below.
         entry.running = false;
         entry.error = Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+    }
+
+    // # Serve the row the NEXT read will fold, identically
+    //
+    // The fold keys a settled entry on its **finish**: it overwrites `seq` and
+    // `at_millis` from the finish row (see the settle arm above). So a response
+    // that flipped `running` but left the start's `seq` in place would be
+    // followed, one 2s poll later, by the same run carrying a different `seq`
+    // and a different time — and the console keys its history rows on exactly
+    // that field (`RunHistoryPanel`: `key={run.seq}`, and `selectedRunSeq` /
+    // `fixingRunSeq` compare against it). The row would remount and any
+    // selection on it would be dropped, in the one window where an operator is
+    // most likely to be looking at it: while the run they were watching gets
+    // repaired.
+    //
+    // So the appended rows are read back and their real `seq` / `at_millis`
+    // stamped on. Reading is what makes them the *durable* values rather than a
+    // second guess at them — `record_run_finished` is the one place that writes
+    // this event and it returns nothing, and teaching it to return a sequence is
+    // issue #1008's file, not this one.
+    match events
+        .read_from(
+            company.id(),
+            EventSeq::new(read_through.saturating_add(1)),
+            usize::MAX,
+        )
+        .await
+    {
+        Ok(appended) => {
+            let stamped: std::collections::HashMap<String, (u64, u64)> = appended
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    CompanyEvent::WorkflowRunFinished {
+                        run_id: Some(run_id),
+                        ..
+                    } => Some((run_id, (stored.seq.value(), stored.at_millis))),
+                    _ => None,
+                })
+                .collect();
+            for (index, run_id) in &dead {
+                if let Some((seq, at_millis)) = stamped.get(run_id) {
+                    let entry = &mut runs[*index];
+                    entry.seq = *seq;
+                    entry.at_millis = *at_millis;
+                }
+            }
+        }
+        Err(err) => {
+            // The settle itself stands — it is already durable. Only the row's
+            // identity is left at the start's, which the next read corrects.
+            tracing::warn!(
+                company = %company.id(),
+                %err,
+                "settled a dead workflow run but could not read back its finish row; \
+                 this response carries the start's seq and time"
+            );
+        }
     }
 }
 
@@ -4861,6 +4918,63 @@ mod tests {
             let body = json_body(response).await;
             assert_eq!(body.as_array().unwrap().len(), 1, "still one run: {body}");
             assert!(body[0].get("running").is_none(), "{body}");
+        }
+
+        /// **The settled row keeps one identity across reads.** The response
+        /// that performs the settle and every response after it carry the same
+        /// `seq` and `atMillis` — the appended finish's, not the start's.
+        ///
+        /// This is not cosmetic. `RunHistoryPanel` keys its rows on `run.seq`
+        /// (`key={run.seq}`) and compares it against `selectedRunSeq` and
+        /// `fixingRunSeq`, so a row whose `seq` changed between two polls would
+        /// remount and lose its selection — in the one window where that is most
+        /// likely to be noticed, since the 2s recovery poll is running precisely
+        /// because someone is watching this run.
+        #[tokio::test]
+        async fn a_settled_dead_run_keeps_its_seq_and_time_across_reads() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-dead", false).await;
+
+            let first = json_body(
+                router(state.clone())
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let second = json_body(
+                router(state)
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+
+            assert!(first[0].get("running").is_none(), "{first}");
+            assert_eq!(
+                first[0]["seq"], second[0]["seq"],
+                "the settling read and the one after it must agree on the row's \
+                 identity: {first} then {second}"
+            );
+            assert_eq!(
+                first[0]["atMillis"], second[0]["atMillis"],
+                "…and on when it settled: {first} then {second}"
+            );
+            // Specifically the FINISH's position, not the start's — which is
+            // what the next fold will use, and the only value the two reads can
+            // both hold.
+            assert_ne!(
+                first[0]["seq"], first[0]["startedAtMillis"],
+                "sanity: the start and the finish are different rows"
+            );
+            assert!(
+                first[0]["atMillis"].as_u64().unwrap()
+                    >= first[0]["startedAtMillis"].as_u64().unwrap(),
+                "the settle cannot predate the start: {first}"
+            );
         }
 
         /// **The false positive that would matter most, pinned.** A run the
