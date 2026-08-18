@@ -107,7 +107,42 @@ the nodes that did complete still group under it.
 
 This is what keeps the read side honest: `GET …/workflows/runs` folds a start
 without a finish as `running: true`, and that claim is only true because runs
-that will never finish are settled at the next boot.
+that will never finish are settled.
+
+### A boot sweep alone is not enough (#1009)
+
+The boot sweep repairs a host that *died*. It does nothing for a run that dies
+inside a host that stays up — a run task that panics unwinds past its own
+`record_run_finished`, and a finish append that fails is swallowed by design. In
+both cases the start stands alone in a journal nobody will sweep until the next
+restart, so the console shows a node pulsing, a header reading "running" and a
+Stop button, indefinitely. Two things close that:
+
+- **A watchdog on the run task.** `WorkflowSpawn::spawn_admitted` spawns the run
+  on an inner task and returns an outer task that awaits it. A `JoinError` —
+  panic or abort — means the run never ran its own journal write, so the
+  watchdog writes one carrying `RUN_TASK_LOST`. The `RunGuard` is held by the
+  watchdog rather than the run task, so the supervisor entry outlives *whichever*
+  path journaled. A panic is re-raised afterwards, so every caller's existing
+  `Err(JoinError)` arm behaves exactly as before.
+- **A liveness cross-check on the read.** `GET …/workflows/runs` checks each
+  still-running row against the company's `RunSupervisor::live()`. A run the
+  supervisor does not hold, whose finish is nowhere in the journal, is settled
+  there and then with the same synthetic "interrupted by a host restart" finish
+  the boot sweep writes — durably, so the next reader folds it without repeating
+  the work.
+
+The cross-check cannot mistake a live run for a dead one. `begin` registers a run
+*before* its task is spawned and therefore before the runner journals the start,
+so a start visible in the journal implies the run was already registered; and a
+run that settles between the journal read and the liveness check is caught by
+re-reading the journal tail before anything is written. A journal that cannot be
+re-read settles nothing — an unprovable claim is left alone.
+
+The one case it gets wrong is the pre-existing rebuild gap: a live runtime swap
+hands the successor a fresh supervisor, so a run started before the swap is
+settled early. Its real finish still lands, after the synthetic one, and the fold
+takes the last finish it sees — the reading is wrong in between, not the record.
 
 **It must not run on a rebuild.** The argument above holds at boot and is false
 once a company has been serving: a scheduler-spawned run survives a live runtime

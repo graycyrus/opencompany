@@ -71,6 +71,11 @@ with `{ "runId": "…", "detached": true }` before the engine walks a node; the
 run is then followed through the `workflow_run_started` / `workflow_node_finished`
 / `workflow_run_finished` frames it already keys by that `runId`, and read back
 from `GET …/workflows/runs`, whose fold reports `running: true` until it settles.
+That reading is cross-checked against the company's live run supervisor before it
+is served (issue #1009): a run the supervisor no longer holds and whose finish is
+nowhere in the journal is settled on the spot with the synthetic "interrupted by
+a host restart" outcome, so a run whose task died cannot spin forever. See
+`workflow-events.md`.
 
 **Clients must discriminate on the response shape, not on what they sent.** A
 host predating this ignores the unknown `detach` field and answers the full

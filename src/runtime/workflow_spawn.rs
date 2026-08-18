@@ -53,10 +53,26 @@ use tokio::task::JoinHandle;
 use crate::Result;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyRuntime;
+use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
 use crate::ports::{EventLog, WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::workflow_outcome::record_run_finished;
 use crate::runtime::{RunGuard, RunSupervisor};
+
+/// The error stamped on a run whose **task** ended without recording its own
+/// outcome (issue #1009).
+///
+/// Phrased as a host fact, like
+/// [`INTERRUPTED_BY_RESTART`](crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART),
+/// and deliberately distinct from it: "interrupted by a host restart" sends an
+/// operator to the deployment, and this one did not happen at a restart. The
+/// process is still up; one run's task unwound or was dropped, which is a
+/// different thing to go looking at.
+pub const RUN_TASK_LOST: &str = concat!(
+    "this run's task ended without finishing — it panicked, or it was aborted — ",
+    "so it never recorded its own outcome; the nodes recorded against it are the ",
+    "ones that completed before it stopped"
+);
 
 /// Everything starting a supervised workflow run needs, and nothing else.
 #[derive(Clone)]
@@ -98,9 +114,10 @@ impl WorkflowSpawn {
     /// mode, and the cron scheduler, which has to hold its overlap claim for
     /// the length of the run) or dropped (the console's detached mode, and the
     /// resume arm). Dropping it abandons the *waiting*, never the work: the
-    /// task holds its own guard, journals its own outcome, and deregisters
-    /// itself on every exit path including an unwind. Awaiting it therefore
-    /// resolves only once the outcome is already durable.
+    /// run holds its guard, journals its outcome, and deregisters itself on
+    /// every exit path including an unwind. Awaiting it therefore resolves only
+    /// once the outcome is already durable — including the abnormal exits the
+    /// watchdog in [`spawn_admitted`](Self::spawn_admitted) covers.
     ///
     /// `dry_run` (issue #542) makes this a **test run**: the flag is stamped
     /// onto the run's [`WorkflowRunContext`] (the supervisor still registers it,
@@ -160,6 +177,35 @@ impl WorkflowSpawn {
     /// `dry_run` (issue #542) is stamped on the admitted context here rather than
     /// at `begin`, so the supervisor is untouched — a dry run registers and
     /// cancels exactly like a real one.
+    ///
+    /// # The watchdog (issue #1009)
+    ///
+    /// Two tasks, not one. The inner task runs the graph and journals its own
+    /// outcome exactly as before; the returned handle belongs to an **outer
+    /// watchdog** that awaits it and covers the one exit the inner task cannot
+    /// cover for itself — the one where it never gets to run its own code.
+    ///
+    /// A panicking run task unwinds past its `record_run_finished`, so it
+    /// journals nothing; an aborted one is dropped at its next await point, so
+    /// it journals nothing either. Either way the run's
+    /// `WorkflowRunStarted` stands alone in the journal forever, which
+    /// `GET …/workflows/runs` folds as `running: true` until the *next process*
+    /// sweeps it — a hang that outlives the run by however long the host stays
+    /// up. `run_supervisor`'s module docs called this out as a known gap; the
+    /// watchdog is what closes it, by journaling [`RUN_TASK_LOST`] for a run
+    /// whose task did not come back.
+    ///
+    /// The [`RunGuard`] moves into the **watchdog**, not the run task. It has to:
+    /// the supervisor entry is what proves the run is still alive to the read
+    /// side's liveness cross-check, and dropping it while the finish is still
+    /// unwritten would open a window in which the run reads dead and its finish
+    /// has not landed — two writers racing to settle one run. Held out here, the
+    /// entry disappears only after *whichever* of the two paths journaled.
+    ///
+    /// A panic is **re-raised** rather than absorbed, so every existing
+    /// `Err(JoinError)` arm (the console's synchronous run route, the cron
+    /// scheduler) fires exactly as it did before — the watchdog adds a durable
+    /// record, it does not change what a caller sees.
     pub(crate) fn spawn_admitted(
         self,
         mut ctx: WorkflowRunContext,
@@ -171,12 +217,15 @@ impl WorkflowSpawn {
         let scheduled = ctx.scheduled;
         ctx.dry_run = dry_run;
         let run_id = ctx.run_id.clone();
-        let handle = tokio::spawn(async move {
-            // Held for the whole run INCLUDING the journal write below, so the
-            // window in which a cancel is accepted matches the window in which
-            // it can still do anything. Dropping on every exit path, unwind
-            // included, is why this is a guard rather than a call at the end.
-            let _guard = guard;
+        // The watchdog's own copies of what journaling a finish needs. Taken
+        // before `self` and `workflow` move into the run task below, and
+        // deliberately no more than these: the watchdog never runs a graph, so
+        // it has no use for the runner.
+        let events = self.events.clone();
+        let company = self.company.clone();
+        let workflow_id = workflow.id.clone();
+        let watched_run_id = run_id.clone();
+        let run = tokio::spawn(async move {
             let result = self.runner.run(&self.company, &workflow, input, &ctx).await;
             // Issue #542: a dry run journals NOTHING. The runner already skipped
             // the started + per-node rows; skipping the finish here keeps the
@@ -216,6 +265,57 @@ impl WorkflowSpawn {
                 }
             }
             result
+        });
+
+        // Issue #1009: the watchdog. It owns the run task's handle, so nothing
+        // else can be waiting on it, and it is the only thing that can tell the
+        // difference between "the run returned" and "the run's task went away".
+        let handle = tokio::spawn(async move {
+            // Held here rather than inside the run task, and across the journal
+            // write below: the supervisor entry is the read side's proof that
+            // this run is still alive, so it must not vanish while the run's
+            // finish is still unwritten. The window in which a cancel is
+            // accepted still matches the window in which it can do anything —
+            // it now simply extends past the abnormal exits too.
+            let _guard = guard;
+            match run.await {
+                // The run task ran its own code to completion, which means it
+                // already journaled its own outcome (or deliberately did not,
+                // for a dry run). Nothing owed.
+                Ok(result) => result,
+                Err(join) => {
+                    // Issue #542 again: a dry run journals NOTHING, and that
+                    // holds when it blows up too. There is no started row for a
+                    // finish to pair with.
+                    if !dry_run {
+                        record_run_finished(
+                            &events,
+                            &company,
+                            &workflow_id,
+                            scheduled,
+                            &watched_run_id,
+                            Err(RUN_TASK_LOST),
+                        )
+                        .await;
+                    }
+                    if join.is_panic() {
+                        // Re-raised, not absorbed: the callers that await this
+                        // handle already have an `Err(JoinError)` arm and it is
+                        // the right one — the run's outcome is unknown, not
+                        // failed. The only thing that changed is that the
+                        // journal now says so as well.
+                        std::panic::resume_unwind(join.into_panic());
+                    }
+                    // Cancelled rather than panicked. Nothing in this crate
+                    // aborts a run task — only the watchdog holds the handle —
+                    // so this is the runtime shutting the task down. Reported
+                    // as the same "outcome unknown" the run route's own
+                    // `JoinError` arm reports, so the two agree.
+                    Err(OpenCompanyError::BackgroundTask(format!(
+                        "the workflow run task for {watched_run_id} was cancelled before it finished"
+                    )))
+                }
+            }
         });
         (run_id, handle)
     }

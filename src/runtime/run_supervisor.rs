@@ -27,19 +27,39 @@
 //! help from an in-memory map (and could not get any — the map dies with the
 //! process). This module adds no sweep of its own.
 //!
-//! ## Two known gaps, both inherited rather than introduced
+//! ## The map is also the read side's liveness proof (issue #1009)
 //!
-//! * A **panicking** run task unwinds, so its guard drops and the entry goes —
-//!   but nothing journals a `WorkflowRunFinished`, so the run reads
-//!   `running: true` in `GET …/workflows/runs` until the next restart sweeps it.
-//!   That is the same exposure #371 accepted for a run whose journal append
-//!   failed, and the same remedy settles both.
-//! * A live runtime swap ([`rebuild_company`](super::rebuild_company)) gives the
-//!   successor runtime a fresh supervisor, so a run registered on the old one
-//!   can no longer be cancelled (it still finishes and still journals). This
-//!   matches how the steer registry behaves across a rebuild — see
-//!   [`RuntimeHandover`](super::RuntimeHandover) — and cancelling is a
-//!   best-effort operator convenience, not a correctness guarantee.
+//! [`live`](RunSupervisor::live) started life as a diagnostic. It is now load
+//! bearing. `GET …/workflows/runs` folds a start with no finish as
+//! `running: true`, and cross-checks that claim against this map: a run the map
+//! does not hold, whose finish is nowhere in the journal, is one that died
+//! without journaling, and the read settles it rather than serving a spinner
+//! that would otherwise last until the next restart. Two properties of `begin`
+//! and [`RunGuard`] are what make that inference sound, and both have to survive
+//! any future change here:
+//!
+//! * `begin` registers **before** the run's task is spawned, and therefore
+//!   before the runner journals the run's `WorkflowRunStarted`. So a start in
+//!   the journal implies the run *was* registered — there is no window in which
+//!   a run is visibly started but not yet addressable.
+//! * the guard is dropped **after** the outcome is journaled — by the watchdog
+//!   in [`WorkflowSpawn::spawn_admitted`](super::WorkflowSpawn), which holds it
+//!   across the normal and the abnormal path alike. So a run that has left this
+//!   map has already written its finish, if it was ever going to write one.
+//!
+//! That second property is also what closed this module's other long-standing
+//! gap: a **panicking** run task used to unwind past its own journal write, so
+//! its guard dropped and nothing recorded the run at all. The watchdog now
+//! journals [`RUN_TASK_LOST`](super::RUN_TASK_LOST) for it.
+//!
+//! ## One known gap, inherited rather than introduced
+//!
+//! A live runtime swap ([`rebuild_company`](super::rebuild_company)) gives the
+//! successor runtime a fresh supervisor, so a run registered on the old one can
+//! no longer be cancelled (it still finishes and still journals). This matches
+//! how the steer registry behaves across a rebuild — see
+//! [`RuntimeHandover`](super::RuntimeHandover) — and cancelling is a
+//! best-effort operator convenience, not a correctness guarantee.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -2156,10 +2156,13 @@ struct WorkflowRunOutcome {
     started_at_millis: Option<u64>,
     /// `true` for a run that has started and not yet settled.
     ///
-    /// Honest rather than optimistic, and only because of the boot sweep: a run
-    /// whose host died is settled with an "interrupted" outcome at the next
-    /// start, so nothing sits here spinning forever. Omitted when false, which
-    /// keeps every settled row's wire shape as short as it was.
+    /// Honest rather than optimistic, and issue #1009 is what keeps it that
+    /// way: the fold can only see that a finish is *missing*, so before this is
+    /// served it is cross-checked against the live supervisor and a run that is
+    /// no longer there is settled (see [`settle_dead_runs`]). The boot sweep
+    /// used to be the only thing that ever repaired one, which meant a
+    /// long-lived host never did. Omitted when false, which keeps every settled
+    /// row's wire shape as short as it was.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     running: bool,
     /// `true` for a run an operator stopped (issue #383).
@@ -2296,10 +2299,15 @@ async fn list_runs(
     // not "whichever of the last N happen to match".
     let wanted = query.workflow.as_deref();
     let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
+    // The high-water mark of this read, kept over EVERY row rather than only the
+    // matched ones — it is where `settle_dead_runs` resumes to close the race
+    // between this snapshot and the liveness check that follows it.
+    let mut read_through = 0u64;
 
     for stored in stored {
         let seq = stored.seq.value();
         let at_millis = stored.at_millis;
+        read_through = read_through.max(seq);
         match stored.event {
             CompanyEvent::WorkflowRunStarted {
                 workflow_id,
@@ -2443,12 +2451,168 @@ async fn list_runs(
         }
     }
 
+    // Issue #1009: `running: true` above is a claim about *now*, and the fold
+    // has no way to check it. Cross-check it against the live supervisor before
+    // serving it, and settle the rows that turn out to be dead.
+    settle_dead_runs(&company, &mut runs, read_through).await;
+
     // Newest first: a history panel leads with the run that just happened. The
     // `limit` now cuts *runs* rather than journal rows, which is the number the
     // caller was asking about all along.
     runs.reverse();
     runs.truncate(limit);
     Ok(Json(runs))
+}
+
+/// Settles the folded rows that claim to be running but whose run is gone
+/// (issue #1009).
+///
+/// # The hang this closes
+///
+/// A run journals a `WorkflowRunStarted` before the engine call and a
+/// `WorkflowRunFinished` after it, and [`list_runs`] folds a start with no
+/// finish as `running: true`. That reading is only honest while *something*
+/// guarantees the missing finish is still coming. Two things can take that
+/// guarantee away without anyone noticing: the finish's append can fail (it is
+/// best-effort by construction), and the run's task can die before it writes one
+/// at all. Either way the row stays `running: true` **forever** — nothing but
+/// the boot-time [`sweep_interrupted_runs`](crate::runtime::sweep_interrupted_runs)
+/// ever repairs it, so a long-lived host never recovers. The console reads that
+/// as a run still walking: a node pulses, the Stop button stays, and the
+/// recovery poll never stops.
+///
+/// So the read checks. The company's [`RunSupervisor`](crate::runtime::RunSupervisor)
+/// holds every run this process has admitted and not yet let go of; a run it
+/// does not hold, whose finish is nowhere in the journal, is one that will never
+/// write one. This appends the same synthetic
+/// [`INTERRUPTED_BY_RESTART`](crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART)
+/// finish the boot sweep would have appended eventually — durably, so the next
+/// reader folds it without repeating this work, and so the console's
+/// `settledRunIds` backstop finally sees the run settle.
+///
+/// # Why a live run cannot be mistaken for a dead one
+///
+/// The dangerous mistake is the opposite one: stamping "interrupted" on a run
+/// that is walking its graph perfectly well. Three windows could produce it, and
+/// each is closed:
+///
+/// * **Between spawn and registration.** There is none, in that order.
+///   [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) registers the
+///   run *before* `WorkflowSpawn` spawns its task, and the task journals the
+///   `WorkflowRunStarted` later still. So a start visible in the journal implies
+///   the run was already registered — a just-started run is addressable before
+///   it is ever visible here, never the other way round.
+/// * **Between the journal read and the liveness check.** A run that settled in
+///   that gap has left the supervisor *and* has a finish this snapshot is too
+///   old to have seen — it would look exactly like a dead one. So the journal is
+///   re-read from where the snapshot stopped, and a candidate whose finish turns
+///   up in that tail is dropped. The tail read costs a query only when there are
+///   candidates at all, which after the first settle is nothing.
+/// * **A journal that cannot be re-read.** Then nothing is settled. An
+///   unprovable claim is left alone rather than guessed at, and the row keeps
+///   reporting `running` until a later poll can prove otherwise.
+///
+/// One window is deliberately left open, because it is the pre-existing rebuild
+/// gap documented on [`RunSupervisor`](crate::runtime::run_supervisor): a live
+/// runtime swap hands the successor a *fresh* supervisor, so a run started
+/// before the swap is invisible to it and is settled early here. That run still
+/// finishes and still journals, and its real finish lands after this synthetic
+/// one — so the fold, which settles an entry from the last finish it sees, ends
+/// up with the truth. The reading is wrong in between, not the record.
+async fn settle_dead_runs(
+    company: &ScopedCompany,
+    runs: &mut [WorkflowRunOutcome],
+    read_through: u64,
+) {
+    // The rows the fold left open. A pre-#371 row carries no run id and so
+    // cannot be cross-checked against anything — it also folds `running: false`,
+    // so it is never in here.
+    let open: Vec<(usize, String)> = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| run.running)
+        .filter_map(|(index, run)| run.run_id.clone().map(|run_id| (index, run_id)))
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+
+    let live: HashSet<String> = company
+        .runtime
+        .run_supervisor()
+        .live()
+        .into_iter()
+        .map(|(run_id, _)| run_id)
+        .collect();
+    let mut dead: Vec<(usize, String)> = open
+        .into_iter()
+        .filter(|(_, run_id)| !live.contains(run_id))
+        .collect();
+    if dead.is_empty() {
+        return;
+    }
+
+    // The tail re-read described above: everything appended since the snapshot,
+    // which is normally nothing at all.
+    let tail = match company
+        .runtime
+        .events()
+        .read_from(
+            company.id(),
+            EventSeq::new(read_through.saturating_add(1)),
+            usize::MAX,
+        )
+        .await
+    {
+        Ok(tail) => tail,
+        Err(err) => {
+            tracing::warn!(
+                company = %company.id(),
+                %err,
+                "could not re-read the journal to confirm a workflow run is dead; leaving it as running"
+            );
+            return;
+        }
+    };
+    let settled_since: HashSet<String> = tail
+        .into_iter()
+        .filter_map(|stored| match stored.event {
+            CompanyEvent::WorkflowRunFinished {
+                run_id: Some(run_id),
+                ..
+            } => Some(run_id),
+            _ => None,
+        })
+        .collect();
+    dead.retain(|(_, run_id)| !settled_since.contains(run_id));
+
+    let events = company.runtime.events();
+    for (index, run_id) in dead {
+        let entry = &mut runs[index];
+        tracing::info!(
+            company = %company.id(),
+            workflow = %entry.workflow_id,
+            %run_id,
+            scheduled = entry.scheduled,
+            "settling a workflow run whose task went away without recording an outcome"
+        );
+        crate::runtime::record_run_finished(
+            events,
+            company.id(),
+            &entry.workflow_id,
+            entry.scheduled,
+            &run_id,
+            Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART),
+        )
+        .await;
+        // Applied to the row being served as well, not just to the journal: this
+        // response is the one that has to stop the console's spinner. Only the
+        // two fields the synthetic finish actually carries — it delivered
+        // nothing, blocked on nobody, and was not cancelled, all of which the
+        // row already says.
+        entry.running = false;
+        entry.error = Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+    }
 }
 
 /// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
@@ -4605,34 +4769,138 @@ mod tests {
             );
         }
 
-        /// A run whose host died leaves a start with no finish, and it folds as
-        /// `running: true` with the nodes it did complete. Honest only because
-        /// the boot sweep settles such runs — see `sweep_interrupted_runs`.
+        /// **Issue #1009, at the HTTP boundary.** A run whose start stands alone
+        /// in the journal and whose supervisor entry is gone is a run that died
+        /// without recording an outcome — and the read settles it rather than
+        /// reporting a spinner that would last until the next restart.
+        ///
+        /// Nothing registered `run-dead` with this company's supervisor, which
+        /// is exactly the state a panicking task or a failed finish-append
+        /// leaves behind. Before #1009 this folded `running: true` forever: only
+        /// the boot-time `sweep_interrupted_runs` ever repaired it, so a
+        /// long-lived host never recovered.
+        ///
+        /// The nodes it *did* complete are still there. Settling a run is not
+        /// forgetting it — the trail is the only thing that says how far it got.
         #[tokio::test]
-        async fn run_history_reports_an_unsettled_run_as_running() {
+        async fn run_history_settles_a_run_whose_supervisor_entry_is_gone() {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, id) = hosted_state(&home).await;
 
-            journal_start(&state, &id, "digest", "run-live", false).await;
+            journal_start(&state, &id, "digest", "run-dead", false).await;
             journal_node(
                 &state,
                 &id,
                 "digest",
-                "run-live",
+                "run-dead",
                 "ceo",
                 WorkflowNodeStatus::Ok,
             )
             .await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            // `running` is omitted when false, so its ABSENCE is the settled
+            // reading — the same wire shape every finished run has always had.
+            assert!(body[0].get("running").is_none(), "{body}");
+            assert_eq!(
+                body[0]["error"],
+                crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART,
+                "{body}"
+            );
+            assert_eq!(body[0]["nodes"].as_array().unwrap().len(), 1, "{body}");
+
+            // Durable, not just cosmetic: the synthetic finish is appended, so
+            // the *next* reader folds it without repeating the cross-check —
+            // and the console's `settledRunIds` backstop finally sees this run
+            // settle.
+            let runtime = state.registry().get(&id).expect("registered");
+            let finishes = runtime
+                .events()
+                .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter(|stored| matches!(stored.event, CompanyEvent::WorkflowRunFinished { .. }))
+                .count();
+            assert_eq!(finishes, 1, "the settle must be journaled exactly once");
 
             let response = router(state)
                 .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body[0]["running"], true, "{body}");
-            assert_eq!(body[0]["nodes"].as_array().unwrap().len(), 1);
+            assert_eq!(body.as_array().unwrap().len(), 1, "still one run: {body}");
+            assert!(body[0].get("running").is_none(), "{body}");
+        }
+
+        /// **The false positive that would matter most, pinned.** A run the
+        /// supervisor still holds is a run that is still going, and #1009's
+        /// cross-check must leave it alone — stamping "interrupted" on a healthy
+        /// run would tell an operator to re-run work that is still in flight,
+        /// which for a delivering workflow means mailing real people twice.
+        ///
+        /// The registration is real: `begin` is the same call every entry point
+        /// makes, and its guard is what the read consults. Dropping the guard —
+        /// which is what a run task's death does, and all it does — flips the
+        /// same journal from "running" to "interrupted" with nothing else
+        /// changed, so the two halves of the claim are asserted against one
+        /// fixture.
+        #[tokio::test]
+        async fn run_history_does_not_settle_a_run_the_supervisor_still_holds() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            let runtime = state.registry().get(&id).expect("registered");
+            let (ctx, guard) = runtime
+                .run_supervisor()
+                .begin("digest", false)
+                .expect("the first run is under any cap");
+            journal_start(&state, &id, "digest", &ctx.run_id, false).await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body[0]["running"], true,
+                "a registered run is alive and must read that way: {body}"
+            );
             assert!(body[0].get("error").is_none(), "{body}");
+
+            // …and nothing was written behind its back. A settle that journaled
+            // a finish for a live run would be discovered later, by the run's
+            // own finish landing second and contradicting it.
+            let finishes = runtime
+                .events()
+                .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter(|stored| matches!(stored.event, CompanyEvent::WorkflowRunFinished { .. }))
+                .count();
+            assert_eq!(finishes, 0, "a live run must not be settled");
+
+            // The only thing a dying run task changes.
+            drop(guard);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(body[0].get("running").is_none(), "{body}");
+            assert_eq!(
+                body[0]["error"],
+                crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART,
+                "{body}"
+            );
         }
 
         /// **The compatibility claim, pinned.** A journal written before #371
@@ -5736,8 +6004,14 @@ label = "ok"
                 .expect("tempdir")
         }
 
-        /// A hosted company with one overlay workflow and a runner that stalls.
-        async fn stalled_company(home: &std::path::Path) -> Stalled {
+        /// Saves the hosted company these tests drive, and hands back what
+        /// building a runtime over it needs.
+        ///
+        /// Split out of [`stalled_company`] (issue #1009), which now has a
+        /// sibling: a fixture whose runner **panics** rather than parks, driven
+        /// through the identical route, supervisor, spawn and journal. One copy
+        /// of the company, two runners.
+        async fn saved_company(home: &std::path::Path) -> (CompanyId, CompanyManifest) {
             let manifest: CompanyManifest =
                 toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
             let id = CompanyId::new("acme");
@@ -5763,28 +6037,52 @@ label = "ok"
                 })
                 .await
                 .unwrap();
+            (id, manifest)
+        }
 
-            let entered = Arc::new(tokio::sync::Notify::new());
-            let release = Arc::new(tokio::sync::Notify::new());
-            let completed = Arc::new(AtomicBool::new(false));
+        /// A hosted company serving the graph above, driven by `runner`.
+        ///
+        /// Everything above the runner is production code — the route, the
+        /// supervisor registration, `WorkflowSpawn`'s task and its watchdog, the
+        /// journal write — which is what lets these tests be about the entry
+        /// point rather than about the engine.
+        async fn company_with_runner(
+            home: &std::path::Path,
+            runner: Arc<dyn WorkflowRunner>,
+        ) -> (axum::Router, Arc<crate::company::runtime::CompanyRuntime>) {
+            let (id, manifest) = saved_company(home).await;
             let mut runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
                 .with_id(id.clone())
                 .build()
                 .await
                 .unwrap();
-            runtime.set_workflow_runner(Arc::new(StalledRunner {
-                entered: entered.clone(),
-                release: release.clone(),
-                completed: completed.clone(),
-            }));
+            runtime.set_workflow_runner(runner);
             let runtime = Arc::new(runtime);
 
             let state = AppState::new(AppConfig::default());
             state.registry().insert(id.clone(), runtime.clone());
             crate::server::test_support::seed_fixed_admin(&state, "acme").await;
 
+            (router(state), runtime)
+        }
+
+        /// A hosted company with one overlay workflow and a runner that stalls.
+        async fn stalled_company(home: &std::path::Path) -> Stalled {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let completed = Arc::new(AtomicBool::new(false));
+            let (app, runtime) = company_with_runner(
+                home,
+                Arc::new(StalledRunner {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    completed: completed.clone(),
+                }),
+            )
+            .await;
+
             Stalled {
-                app: router(state),
+                app,
                 runtime,
                 entered,
                 release,
@@ -5845,6 +6143,124 @@ label = "ok"
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             None
+        }
+
+        /// A runner that journals the run's start and then **panics**, which is
+        /// what an unhandled fault inside the engine looks like from out here.
+        ///
+        /// It writes the `WorkflowRunStarted` the real runner writes, because
+        /// that row is the whole problem: without it a lost run leaves nothing
+        /// behind, and with it the history folds `running: true` for a run that
+        /// will never finish.
+        ///
+        /// The log arrives through a [`OnceLock`](std::sync::OnceLock) because
+        /// of the order the fixture builds in — the runtime that owns the
+        /// journal is built first and the runner is set on it afterwards, so
+        /// there is no journal to hand the runner at construction time.
+        struct PanickingRunner {
+            events: std::sync::OnceLock<Arc<dyn crate::ports::EventLog>>,
+        }
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for PanickingRunner {
+            async fn run(
+                &self,
+                company: &CompanyId,
+                workflow: &crate::company::WorkflowFile,
+                _input: serde_json::Value,
+                ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                self.events
+                    .get()
+                    .expect("the journal is set before any run starts")
+                    .append(
+                        company,
+                        CompanyEvent::WorkflowRunStarted {
+                            workflow_id: workflow.id.clone(),
+                            run_id: ctx.run_id.clone(),
+                            scheduled: ctx.scheduled,
+                        },
+                    )
+                    .await
+                    .expect("append");
+                panic!("the run blew up mid-graph");
+            }
+        }
+
+        fn runs_request() -> Request<Body> {
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/company/workflows/runs")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        /// **Issue #1009's write half.** A run task that panics still ends with
+        /// a journaled finish, and the history reads settled rather than
+        /// running.
+        ///
+        /// Before the watchdog, a panicking task unwound straight past its own
+        /// `record_run_finished`: the guard dropped, the supervisor entry went,
+        /// and the `WorkflowRunStarted` stood alone in the journal for the life
+        /// of the process — `sweep_interrupted_runs` is boot-only, so nothing
+        /// short of a restart ever settled it. `run_supervisor`'s module docs
+        /// named this as a known gap; this is that gap, closed.
+        ///
+        /// Detached mode on purpose. The synchronous arm re-raises the panic
+        /// into the request, which is behaviour that must NOT change; what is
+        /// asserted here is what the run leaves behind when nobody is waiting on
+        /// it at all, which is the case that used to leave nothing.
+        #[tokio::test]
+        async fn a_panicking_run_task_still_journals_a_finish() {
+            let home_dir = home();
+            let runner = Arc::new(PanickingRunner {
+                events: std::sync::OnceLock::new(),
+            });
+            let (app, runtime) = company_with_runner(home_dir.path(), runner.clone()).await;
+            runner
+                .events
+                .set(runtime.events().clone())
+                .ok()
+                .expect("set once");
+
+            let response = app
+                .clone()
+                .oneshot(run_request(
+                    serde_json::json!({ "detach": true, "input": {} }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let accepted = json_body(response).await;
+            let run_id = accepted["runId"].as_str().expect("a run id").to_string();
+
+            let finished = await_finished(&runtime)
+                .await
+                .expect("the run task panicked and journaled nothing at all");
+            let CompanyEvent::WorkflowRunFinished {
+                run_id: settled,
+                error,
+                cancelled,
+                ..
+            } = finished
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                settled.as_deref(),
+                Some(run_id.as_str()),
+                "the finish must correlate with the run that died"
+            );
+            assert_eq!(error.as_deref(), Some(crate::runtime::RUN_TASK_LOST));
+            assert!(!cancelled, "a panic is not an operator pressing Stop");
+
+            // And the whole point of journaling it: the history stops claiming
+            // this run is walking.
+            let body = json_body(app.oneshot(runs_request()).await.unwrap()).await;
+            assert_eq!(body[0]["runId"], run_id, "{body}");
+            assert!(body[0].get("running").is_none(), "{body}");
+            assert_eq!(body[0]["error"], crate::runtime::RUN_TASK_LOST, "{body}");
         }
 
         /// **The keystone.** A client that walks away mid-run must not take the

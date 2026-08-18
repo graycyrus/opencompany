@@ -75,6 +75,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 import { cn } from "@/lib/utils";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
 // Issue #303: the canvas arithmetic, the run-state folds and the three drawers
 // moved out when this file passed 1800 lines and was about to grow an index and
@@ -1210,11 +1211,18 @@ export function WorkflowsView({
   // Same self-limiting shape as before: `settledRunIds` clears `liveRun.active`
   // on the first settled row, which unmounts this interval. With a working
   // stream the finish frame gets there first and this costs at most one fetch.
+  //
+  // Issue #1009: through `startVisiblePolling`, like every other poll in the
+  // console. "Self-limiting" was only ever true while a run really does settle,
+  // and this is the fastest poll here at 2s — so a run that hangs turns a
+  // background tab into a permanent 30-requests-a-minute conversation with the
+  // host about a company nobody is looking at. Stopping while hidden bounds the
+  // damage; the hidden → visible edge re-reads, so returning to the tab shows
+  // the current history rather than a stale snapshot plus a 2s wait.
   const watchingRun = Boolean(activeRunId) || Boolean(liveRun?.active);
   useEffect(() => {
     if (!watchingRun || !historySupported) return;
-    const timer = window.setInterval(() => setRunsTick((n) => n + 1), 2_000);
-    return () => window.clearInterval(timer);
+    return startVisiblePolling(() => setRunsTick((n) => n + 1), 2_000);
   }, [watchingRun, historySupported]);
 
   // Switching workflow (or company) clears the canvas: another graph's node ids
