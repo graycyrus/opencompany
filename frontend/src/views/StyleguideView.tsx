@@ -203,6 +203,10 @@ const BRAND_STEPS = [
 ] as const;
 
 const SURFACE_TOKENS = [
+  // Furthest back first, which is also the order the eye meets them: the
+  // ground is outside the app frame, the canvas is the working column, and
+  // a card is the closest thing to the operator (issue #1178).
+  { name: "app-ground", cls: "bg-app-ground" },
   { name: "background", cls: "bg-background" },
   { name: "card", cls: "bg-card" },
   { name: "popover", cls: "bg-popover" },

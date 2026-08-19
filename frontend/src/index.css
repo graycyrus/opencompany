@@ -776,11 +776,20 @@
 
 :root {
     --app-frame-inset: 0px;
+    --app-frame-radius: 0px;
+    --app-frame-border: 0px;
 }
 
+/* All three collapse together, and they have to: a frame that keeps its
+   radius at zero inset rounds its corners against the window edge and lets
+   the ground show through as two stray tinted notches, and a frame that keeps
+   its border draws a hairline down the outside of the screen. Below `lg`
+   there is no frame — not a flattened one. */
 @media (min-width: 64rem) {
     :root {
         --app-frame-inset: 0.75rem; /* 12px */
+        --app-frame-radius: calc(var(--radius) * 1.4); /* = radius-xl, 14px */
+        --app-frame-border: 1px;
     }
 }
 

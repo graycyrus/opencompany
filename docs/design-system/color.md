@@ -78,9 +78,32 @@ is the primitive and the theme picks a set.
 | `3` | `#E8E8F2` | `#131317` | Icon circles |
 | `4` | `#DADAE5` | `#161719` | Card stroke · dividers |
 | `active` | `#ECE9FC` | `#1E1E28` | The nav row you are standing on |
+| `ground` | `#EBE7F7` | `#15131B` | The surface the app frame sits on |
 
-Declared as `--surface-light-*` and `--surface-dark-*`. Every value is the
-brand guide's, unchanged.
+Declared as `--surface-light-*` and `--surface-dark-*`. Every value except
+`ground` is the brand guide's, unchanged.
+
+`ground` is the one rung that is not inside the app (issue #1178). The console
+is inset from the window, and this is what shows around it. Two things make it
+different from the six above:
+
+- **It is the most chromatic neutral in the system** (chroma 0.017–0.022
+  against 0.004–0.026 for the rest, at hue 296.5° rather than the ladder's
+  285–286°). It carries no text, no stroke and no control, so nothing on it can
+  be harmed by a tint — and a grey there reads as an empty margin rather than
+  as a ground the app is standing on. The ~10° warmer hue is what separates it
+  from "another panel". A genuinely warm ground would put a second hue family
+  into a palette that owns one, and would go muddy exactly where it meets the
+  cool greys — at the frame's edge, the one place this colour is ever seen
+  against another.
+- **The two themes take opposite sides of their canvas.** Light sits a step
+  *below* it (L 0.936 against 0.978), so the app stays the brightest thing on
+  screen. Dark sits a step *above* it (L 0.193 against 0.140), because there is
+  no rung left below near-black — darker is `#000`, and at that lightness the
+  chroma is invisible. It is also what makes the frame's shadow work: a shadow
+  needs something to fall on. The rule that surfaces climb toward the viewer
+  governs panels stacked *inside* the app; the window ground is not in that
+  stack.
 
 ### Ink levels
 
@@ -130,15 +153,40 @@ Layer 2. These are what components use.
 | `--secondary` | rung `3` | rung `active` | Secondary button fill |
 | `--surface-icon` | rung `3` | rung `3` | Ground behind an icon circle |
 | `--accent` | rung `active` | rung `active` | Hover/rest tint under rows |
-| `--sidebar` | rung `1` | rung `1` | Nav column |
+| `--sidebar` | rung `2` | rung `1` | Nav column |
 | `--sidebar-accent` | rung `active` | rung `active` | Active nav row background |
 | `--border` | rung `4` | rung `4` | The hairline |
 | `--input` | rung `4` | rung `active` | Field borders, stronger rules |
 | `--ring` | `brand-500` | `brand-400` | Focus |
+| `--app-ground` | rung `ground` | rung `ground` | Outside the app frame |
+| `--app-frame-edge` | rung `4` | rung `bg` | The frame's own hairline |
 
 Light surfaces climb *toward* the viewer with lightness (canvas `#F7F7FC` →
 card white), and dark does the same (`#08090B` → `#0C0D0F` → `#161719`). A card
 lifts off the page before any shadow is applied.
+
+**The ladder runs from the window inward, and it has to be monotonic.** With a
+ground outside the frame there are four surfaces between the window edge and a
+card, and if they do not step in one direction the frame reads as three
+unrelated greys rather than as an app sitting on a desk:
+
+```
+light   ground #EBE7F7 → sidebar #F1F1F8 → canvas #F7F7FC → card #FFFFFF
+dark    ground #15131B → sidebar #0C0D0F → canvas #08090B → card #0C0D0F
+```
+
+Dark already ran in that order. Light did not: `--sidebar` was rung 1, pure
+white, one step *above* the canvas it sits beside — while the stylesheet's own
+comment on the line claimed it was "slightly recessed from the canvas so the
+working area is the brightest thing on screen". Issue #1178 moved it to rung 2,
+which is what that sentence meant.
+
+`--app-frame-edge` is `--border` in light and the *canvas* value in dark, which
+looks inconsistent and is not. In dark the ground is lighter than the app, so
+rung 4 (`#161719`) sits between the two and reads as a third surface wedged into
+the seam. The canvas value disappears against the content it borders and stays a
+dark line against the ground and the sidebar — a raised edge on a dark screen is
+an absence of light, not a stroke.
 
 Dark borders were translucent white, so one value could read against the
 canvas, the card and the popover at once. The guide names the stroke outright —

@@ -7,8 +7,15 @@ import { expect, test } from "@playwright/test";
  * edge, and a `position: fixed` sidebar that had to be offset by 56px or it
  * slid underneath and clipped every nav label — "Company" read as "mpany".
  * Issue #1142 removed the rail and moved the choice into the sidebar's own
- * header, so the offset is gone and the assertion inverts: the sidebar now
- * starts at the left edge of the window, and nothing stands in front of it.
+ * header, so the offset went away and nothing stands in front of the sidebar.
+ *
+ * Issue #1178 then moved the line the sidebar starts on. The console is inset
+ * inside an app frame on a tinted ground, so "the left edge of the window" and
+ * "the left edge of the app" are no longer the same number, and pinning the
+ * sidebar to x=0 would now be pinning it OUTSIDE the frame — the exact bug
+ * this spec exists to catch, one frame further out. So the assertion is
+ * restated against the frame rather than the window: the sidebar starts where
+ * the app starts, and the app starts inset from the window.
  *
  * What carries over is why the spec exists at all. The broken state needed two
  * connections, and nothing else in the suite creates them — a design-system
@@ -31,7 +38,7 @@ test.beforeEach(async ({ page }) => {
 /** Must match `companies/e2e_harness/company.toml`'s `[users] admins`. */
 const ADMIN_EMAIL = "harness-e2e@tinyhumans.ai";
 
-test("the sidebar owns the left edge, and its header switches hosts", async ({
+test("the sidebar owns the frame's left edge, and its header switches hosts", async ({
   page,
   baseURL,
 }) => {
@@ -81,11 +88,32 @@ test("the sidebar owns the left edge, and its header switches hosts", async ({
   // Nothing stands to the left of the sidebar any more.
   await expect(page.getByTestId("connection-rail")).toHaveCount(0);
 
+  // The app frame, and the ground it sits on (issue #1178). The default
+  // Playwright viewport is 1280 wide, which is past the `lg` breakpoint the
+  // frame appears at, so the inset here is a real number rather than zero.
+  const ground = page.locator("[data-slot=sidebar-ground]");
+  const frame = page.locator("[data-slot=sidebar-wrapper]");
+  const groundBox = (await ground.boundingBox())!;
+  const frameBox = (await frame.boundingBox())!;
+  expect(
+    frameBox.x,
+    "the console is inset from the window, not flush against it",
+  ).toBeGreaterThan(groundBox.x);
+
   const sidebar = page.locator("[data-slot=sidebar-container]");
   await expect(sidebar).toBeVisible();
   const sidebarBox = await sidebar.boundingBox();
   expect(sidebarBox, "sidebar should have a box").not.toBeNull();
-  expect(sidebarBox!.x, "the sidebar starts at the left edge of the window").toBe(0);
+  // Inside the frame's 1px edge and nothing further: the sidebar is the first
+  // thing in the app, and the app's own border is all that precedes it.
+  expect(
+    sidebarBox!.x - frameBox.x,
+    "the sidebar starts at the left edge of the app, inside its border",
+  ).toBeLessThanOrEqual(1);
+  expect(
+    sidebarBox!.x,
+    "and the app's left edge is not the window's",
+  ).toBeGreaterThanOrEqual(frameBox.x);
 
   // And the labels are actually on screen rather than clipped — the symptom a
   // reader would report, asserted separately from the cause so a future change

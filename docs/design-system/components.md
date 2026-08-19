@@ -189,6 +189,48 @@ Never nest a modal inside a modal.
 
 ---
 
+## App frame
+
+Not a primitive but a shape the whole console takes, so it is stated once here
+rather than rediscovered per view (issue #1178). `SidebarProvider` renders two
+boxes:
+
+| Box | `data-slot` | What it is |
+| --- | --- | --- |
+| Ground | `sidebar-ground` | `100svh`, painted `bg-app-ground`. Holds nothing. |
+| Frame | `sidebar-wrapper` | The console: one edge, one radius, one shadow. |
+
+Three geometry tokens drive it, all declared at `:root` in `index.css` and all
+zero below `lg` (1024px):
+
+| Token | ≥ `lg` | ≥ `2xl` | Below `lg` |
+| --- | --- | --- | --- |
+| `--app-frame-inset` | 12px | 18px | 0 |
+| `--app-frame-radius` | 14px | 14px | 0 |
+| `--app-frame-border` | 1px | 1px | 0 |
+
+**Inset on three sides, flush to the bottom.** Vertical space is the scarcest
+thing in this app — chat's composer, the ledgers board and the workflows canvas
+all want every pixel of height — so only one inset comes out of `100svh`, and
+only the two top corners are rounded.
+
+**All three collapse together.** A radius kept at zero inset rounds the corners
+against the window edge and lets the ground show through as two stray tinted
+notches; a border kept there draws a hairline down the outside of the screen.
+Below `lg` there is no frame, not a flattened one.
+
+**Nothing inside may use a viewport unit for height.** The frame is one inset
+shorter than the window, and the shell clips rather than scrolls, so an `h-svh`
+box loses its bottom edge with no scrollbar to say so. Use `flex-1 min-h-0`.
+
+The desktop sidebar is `absolute` against the frame, not `fixed` against the
+window — that is what keeps it inside. Making the frame a containing block for
+`fixed` instead (a `transform`, or `contain: paint`) would have recaptured
+every other fixed descendant with it. `test/e2e/app-frame.spec.ts` pins the
+geometry.
+
+---
+
 ## Scrollbars
 
 Native scrollbars are themed once, globally, in `index.css` — nothing opts in

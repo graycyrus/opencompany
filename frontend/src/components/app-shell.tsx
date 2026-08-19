@@ -1300,7 +1300,7 @@ export function AppShell({
      * collapses to edge-to-edge, and for what the ground's tint is in each
      * theme.
      */
-    <SidebarProvider className="overflow-hidden rounded-t-[calc(var(--radius)*1.4)] border border-app-frame-edge border-b-0 shadow-frame">
+    <SidebarProvider className="overflow-hidden rounded-t-[var(--app-frame-radius)] border-app-frame-edge [border-width:var(--app-frame-border)] border-b-0 shadow-frame">
       {/* Mobile turns the sidebar into a sheet, so its own collapse control is
           not mounted while it is closed. Keep the way back fixed to the
           viewport and below the page controls rather than competing with a
