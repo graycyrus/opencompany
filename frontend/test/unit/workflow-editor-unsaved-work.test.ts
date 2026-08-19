@@ -2,7 +2,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { WorkflowGraph } from "@/api/workflows";
@@ -76,6 +76,11 @@ function stubClient(): OpenCompanyClient & { puts: unknown[] } {
  * the honest fix: the production call is correct in a browser, and guarding it
  * in `WorkflowCreateDialog` would only be guarding against jsdom.
  */
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "scrollIntoView",
+);
+
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
@@ -152,6 +157,21 @@ afterEach(() => {
   container.remove();
   vi.unstubAllGlobals();
   configFromDraft.mockClear();
+});
+
+// The shim stays up for the whole FILE, not per test: a failed save scrolls the
+// error banner from a `requestAnimationFrame`, and the callback can fire after
+// a test body has already returned. Removing the shim in `afterEach` strands
+// that callback with no `scrollIntoView` and Vitest reports an unhandled error.
+// `afterAll` keeps it present throughout the file and still restores the
+// prototype so it does not leak into a later jsdom test sharing this worker
+// (same discipline as `chat-scroll-anchor.test.ts`).
+afterAll(() => {
+  if (originalScrollIntoView) {
+    Object.defineProperty(Element.prototype, "scrollIntoView", originalScrollIntoView);
+  } else {
+    delete (Element.prototype as unknown as Record<string, unknown>).scrollIntoView;
+  }
 });
 
 describe("unsaved graph edits are not thrown away silently (#1006)", () => {
