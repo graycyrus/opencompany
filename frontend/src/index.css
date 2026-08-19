@@ -96,6 +96,41 @@
     --surface-dark-active: oklch(0.2396 0.019 284.87); /* #1E1E28 */
 
     /*
+     * Ground — the surface the app frame sits on (issue #1178).
+     *
+     * A seventh rung, and the only one that is not inside the app: the
+     * console is inset from the window edge, and this is what shows around
+     * it. It is deliberately the most chromatic neutral in the system,
+     * because it is the one surface that carries no text, no stroke and no
+     * control — nothing on it can be harmed by a tint, and a grey there
+     * reads as an empty margin rather than as a ground the app is standing
+     * on.
+     *
+     * Hue 296.5° in both themes: ~10° warmer than the 285–286° the neutral
+     * ladder runs at, which is what separates it from "another panel" and
+     * gets it as close to the reference's warm paper as a palette that owns
+     * one hue can honestly go. A genuinely warm ground (amber, 70–90°) would
+     * put a second hue family into the console and go muddy exactly where it
+     * meets the cool greys — at the frame's edge, which is the one place
+     * this colour is ever seen against another.
+     *
+     * The two themes take OPPOSITE sides of their canvas, and that is not an
+     * oversight:
+     *
+     *   light  L 0.936 — a step BELOW the canvas (0.978). The app is the
+     *          brightest thing on screen, as the surface ladder intends.
+     *   dark   L 0.193 — a step ABOVE the canvas (0.140). There is no rung
+     *          left below near-black: darker is #000, and at that lightness
+     *          chroma is invisible, so "the ground" would read as nothing at
+     *          all. Lighter is also what makes the drop shadow work — a
+     *          shadow needs something to fall on. The rule that surfaces
+     *          climb toward the viewer governs panels stacked INSIDE the
+     *          app; the window ground is not in that stack.
+     */
+    --surface-light-ground: oklch(0.9364 0.0221 296.5); /* #EBE7F7 */
+    --surface-dark-ground: oklch(0.193 0.017 296.5); /* #15131B */
+
+    /*
      * Ink — the five text levels, stated per theme.
      *
      * `primary` and the light `secondary` are the guide's values. The rest are
@@ -169,6 +204,13 @@
     --background: var(--surface-light-bg);
     --foreground: var(--ink-light-primary);
     --card: var(--surface-light-1);
+
+    /* The app frame (issue #1178). `--app-ground` is what shows around the
+       inset console; `--app-frame-edge` is the hairline that closes it.
+       In light the edge is the card stroke — the same rung every other
+       raised surface is outlined with. */
+    --app-ground: var(--surface-light-ground);
+    --app-frame-edge: var(--surface-light-4);
     --card-foreground: var(--ink-light-primary);
     --popover: var(--surface-light-1);
     --popover-foreground: var(--ink-light-primary);
@@ -294,9 +336,26 @@
     --chart-4: var(--amber-mark);
     --chart-5: var(--pink-mark);
 
-    /* Sidebar. Slightly recessed from the canvas so the working area is
-       the brightest thing on screen. */
-    --sidebar: var(--surface-light-1);
+    /* Sidebar — rung 2, not rung 1 (issue #1178).
+     *
+     * This line has always CLAIMED the sidebar is "slightly recessed from the
+     * canvas so the working area is the brightest thing on screen"; at rung 1
+     * (#FFFFFF) it was the brightest thing on screen instead, one step ABOVE
+     * the canvas it sits beside.
+     *
+     * Nothing depended on that until the app gained a ground to sit on. Now
+     * there is a ladder running from the window inward, and it has to be
+     * monotonic or the frame reads as three unrelated greys:
+     *
+     *   light   ground #EBE7F7 → sidebar #F1F1F8 → canvas #F7F7FC → card #FFF
+     *   dark    ground #15131B → sidebar #0C0D0F → canvas #08090B → card #0C0D0F
+     *
+     * Dark already ran in the right order — its sidebar is rung 1 and its
+     * canvas is `bg`, one step further from the ground. Light is the theme
+     * that was inverted, and this is the one value that fixes it. The working
+     * column becomes the brightest surface, which is what the sentence above
+     * meant all along. */
+    --sidebar: var(--surface-light-2);
     --sidebar-foreground: var(--ink-light-primary);
     --sidebar-primary: var(--brand-500);
     --sidebar-primary-foreground: var(--surface-light-1);
@@ -329,6 +388,14 @@
        surface. Not a substitute for the focus ring — an addition to it. */
     --shadow-brand: 0 2px 8px -2px color-mix(in oklab, var(--brand-500) 32%, transparent);
 
+    /* The app frame's lift (issue #1178). Its own step rather than `--shadow-md`
+       because this is the largest object on screen and the only one lit from
+       three sides: the frame is flush to the bottom of the window, so the
+       shadow must spread sideways and stay shallow downward, where there is
+       no gap left for it to fall into. */
+    --shadow-frame: 0 2px 6px -3px hsl(var(--shadow-color) / 0.1),
+        0 10px 32px -12px hsl(var(--shadow-color) / 0.22);
+
     /*
      * Third-party brand colours.
      *
@@ -357,6 +424,15 @@
     --background: var(--surface-dark-bg);
     --foreground: var(--ink-dark-primary);
     --card: var(--surface-dark-1);
+
+    /* The frame's edge is NOT `--border` here. The ground is lighter than the
+       app in dark, so rung 4 (#161719) sits between the two and reads as a
+       third surface wedged into the seam. The canvas value instead: it
+       disappears against the content it borders and stays a dark line against
+       the ground and the sidebar — which is how a raised edge reads on a dark
+       screen, as an absence of light rather than a stroke. */
+    --app-ground: var(--surface-dark-ground);
+    --app-frame-edge: var(--surface-dark-bg);
     --card-foreground: var(--ink-dark-primary);
     /* Rung 3, not rung 4. `--border` is rung 4, and a popover painted rung 4
        renders its own edge in its own fill — the dialog loses its outline
@@ -463,6 +539,14 @@
     --shadow-xl: 0 8px 16px -8px hsl(var(--shadow-color) / 0.55),
         0 24px 56px -12px hsl(var(--shadow-color) / 0.6), inset 0 1px 0 0 oklch(1 0 0 / 7%);
     --shadow-brand: 0 2px 12px -2px color-mix(in oklab, var(--brand-400) 40%, transparent);
+
+    /* Heavier than light mode's, and no inset highlight. The ground is
+       LIGHTER than the app here, so for once in dark mode there is something
+       for a shadow to fall on — it is the shadow, not a lit top edge, that
+       separates the frame from what surrounds it. Every other dark elevation
+       token has the opposite problem and adds the highlight instead. */
+    --shadow-frame: 0 2px 6px -3px hsl(var(--shadow-color) / 0.5),
+        0 12px 36px -12px hsl(var(--shadow-color) / 0.75);
 }
 
 /* ============================================================================
@@ -504,6 +588,11 @@
     --color-input: var(--input);
     --color-ring: var(--ring);
     --color-surface-icon: var(--surface-icon);
+
+    /* The app frame (issue #1178) — the ground it sits on and the hairline
+       that closes it. Two call sites, both in `app-shell.tsx`. */
+    --color-app-ground: var(--app-ground);
+    --color-app-frame-edge: var(--app-frame-edge);
 
     /* The five-level text hierarchy, as `text-ink-*`. Named `ink` rather than
        `text` because `--text-*` is Tailwind's font-size namespace in this same
@@ -579,6 +668,7 @@
     --shadow-lg: var(--shadow-lg);
     --shadow-xl: var(--shadow-xl);
     --shadow-brand: var(--shadow-brand);
+    --shadow-frame: var(--shadow-frame);
 
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
@@ -648,6 +738,59 @@
     --duration-fast: 120ms;
     --duration-base: 180ms;
     --duration-slow: 260ms;
+}
+
+/* ============================================================================
+ * The app frame (issue #1178).
+ *
+ * The console is inset from the window on three sides and flush to the bottom.
+ * Three sides, not four, and that is the load-bearing decision:
+ *
+ *   - Vertical space is the scarcest thing in this app. Chat's composer, the
+ *     ledgers board and the workflows canvas all want every pixel of height,
+ *     and a bottom gutter costs each of them twice — once for the gap and once
+ *     for the corner radius above it.
+ *   - A card that meets the bottom edge still reads as an object, because the
+ *     three edges that ARE inset are the three the eye tracks. Slack and the
+ *     macOS sidebar apps the reference is drawn from do the same thing.
+ *   - It keeps the arithmetic honest: only ONE inset comes out of `100svh`,
+ *     so a full-height scroller loses 12px, not 24px.
+ *
+ * Declared at `:root` rather than in `@theme` for the same reason the
+ * durations above are: `--app-frame-*` is not a namespace Tailwind emits, so
+ * a `@theme` entry would define nothing at runtime. Components read them
+ * through arbitrary values (`p-[var(--app-frame-inset)]`), which is a token
+ * reference, not an arbitrary value in the sense the design-token guard
+ * means.
+ *
+ * WHERE THE FRAME COLLAPSES: below `lg` (1024px) the inset is zero and the
+ * console runs edge to edge. Not `md` (768px), where the sidebar becomes an
+ * overlay sheet — by then the frame is a border around a single column and
+ * has been useless for a while. 1024 is where it starts to *cost*: with the
+ * sidebar expanded (13.5rem) a 12px inset leaves a 779px working column at
+ * 1024 and 523px at 768, and below `lg` the console has already begun
+ * stacking its secondary rails (chat's channel rail, settings' nav), so the
+ * content column is doing more work per pixel exactly as the frame starts
+ * taking them.
+ * ========================================================================== */
+
+:root {
+    --app-frame-inset: 0px;
+}
+
+@media (min-width: 64rem) {
+    :root {
+        --app-frame-inset: 0.75rem; /* 12px */
+    }
+}
+
+/* On a display wide enough that the frame is no longer competing with the
+   content for width, the gutter grows — this is the width at which the
+   surround stops being a detail and starts being the point. */
+@media (min-width: 96rem) {
+    :root {
+        --app-frame-inset: 1.125rem; /* 18px */
+    }
 }
 
 /* ============================================================================

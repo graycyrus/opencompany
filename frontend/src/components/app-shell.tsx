@@ -1288,7 +1288,19 @@ export function AppShell({
   });
 
   return (
-    <SidebarProvider className="h-svh overflow-hidden">
+    /*
+     * The app frame (issue #1178). `SidebarProvider` renders two boxes: the
+     * tinted ground that fills the window, and the console inset inside it.
+     * These classes describe the console — the ground's geometry belongs to
+     * the frame itself and is stated in `ui/sidebar.tsx`.
+     *
+     * `rounded-t-*` and no bottom edge: the frame is inset on three sides and
+     * flush to the bottom of the window. See the note beside
+     * `--app-frame-inset` in `index.css` for why, for where the frame
+     * collapses to edge-to-edge, and for what the ground's tint is in each
+     * theme.
+     */
+    <SidebarProvider className="overflow-hidden rounded-t-[calc(var(--radius)*1.4)] border border-app-frame-edge border-b-0 shadow-frame">
       {/* Mobile turns the sidebar into a sheet, so its own collapse control is
           not mounted while it is closed. Keep the way back fixed to the
           viewport and below the page controls rather than competing with a

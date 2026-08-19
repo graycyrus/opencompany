@@ -130,8 +130,30 @@ function SidebarProvider({
 
   return (
     <SidebarContext.Provider value={contextValue}>
+      {/*
+        Two boxes, not one (issue #1178).
+
+        THE GROUND fills the window and carries the colour. It holds nothing:
+        no text, no control, no stroke — it exists so the console has a surface
+        to sit on and so status colour has somewhere to live that is not the
+        content. `p-… pb-0` insets the console on three sides and leaves it
+        flush to the bottom; `--app-frame-inset` is 0 below `lg`, which is how
+        the frame collapses to edge-to-edge on a narrow viewport without a
+        second set of classes here. `h-svh` with `box-sizing: border-box`
+        keeps the pair exactly one viewport tall at every inset, so nothing
+        below can grow a document scrollbar.
+
+        THE FRAME is the console: one object, one edge, one radius, holding
+        the sidebar and the working column together instead of letting each
+        meet the window on its own. `relative`, because the desktop sidebar
+        positions against it — see the note on `sidebar-container` below.
+
+        `className` lands on the frame, because the frame is the box that
+        looks like something. `style` and the rest of the props stay on the
+        ground so `--sidebar-width` reaches both.
+      */}
       <div
-        data-slot="sidebar-wrapper"
+        data-slot="sidebar-ground"
         style={
           {
             "--sidebar-width": SIDEBAR_WIDTH,
@@ -139,13 +161,18 @@ function SidebarProvider({
             ...style,
           } as React.CSSProperties
         }
-        className={cn(
-          "group/sidebar-wrapper flex h-svh min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
-          className
-        )}
+        className="h-svh bg-app-ground p-[var(--app-frame-inset)] pb-0"
         {...props}
       >
-        {children}
+        <div
+          data-slot="sidebar-wrapper"
+          className={cn(
+            "group/sidebar-wrapper relative flex h-full w-full has-data-[variant=inset]:bg-sidebar",
+            className
+          )}
+        >
+          {children}
+        </div>
       </div>
     </SidebarContext.Provider>
   )
@@ -232,16 +259,20 @@ function Sidebar({
         data-slot="sidebar-container"
         data-side={side}
         className={cn(
-          // `left: 0`, and nothing stands to the left of it any more.
+          // `left: 0`, and nothing stands to the left of it any more. It used
+          // to be offset by `--oc-rail-inset` because the connection rail
+          // occupied the first 56px of the window and pinning this to 0 slid
+          // the whole sidebar underneath it — every icon and the first
+          // characters of every label clipped. Issue #1142 replaced that rail
+          // with a switcher in this sidebar's own header, so the offset has
+          // nothing left to clear.
           //
-          // This container is `fixed`, so it positions against the VIEWPORT
-          // rather than the column it is written inside. It used to be offset
-          // by `--oc-rail-inset` because the connection rail occupied the first
-          // 56px of the window and pinning this to 0 slid the whole sidebar
-          // underneath it — every icon and the first characters of every label
-          // clipped. Issue #1142 replaced that rail with a switcher in this
-          // sidebar's own header, so the offset has nothing left to clear.
-          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
+          // `absolute`, and `h-full` rather than `h-svh`: this box is measured
+          // against the `relative` frame wrapper above, NOT the window. It was
+          // `fixed`/`h-svh` until issue #1178 inset the console from the window
+          // edge, at which point "0" and "the left edge of the app" stopped
+          // being the same number and this column stood outside the frame.
+          "absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"

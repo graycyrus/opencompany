@@ -185,10 +185,14 @@ export function Overview({ client, company }: Props) {
   const memoryGraph = useMemo(() => buildMemoryGraph(sources.memories), [sources.memories]);
 
   return (
-    // The whole viewport: the shell hides its top bar for this view, so there
-    // is nothing above to subtract.
+    // The whole working column: the shell hides its top bar for this view, so
+    // there is nothing above to subtract. `flex-1` rather than `h-svh` — the
+    // app frame is inset from the top of the window (issue #1178), so a
+    // viewport-tall box overflows its slot by exactly the frame's inset and
+    // the shell's `overflow-hidden` clips the bottom of the graph off with no
+    // scrollbar to say so.
     <div
-      className="oc-kg relative h-svh min-h-0 w-full min-w-0 overflow-hidden"
+      className="oc-kg relative min-h-0 w-full min-w-0 flex-1 overflow-hidden"
       // The guided tour's Overview stop anchors here. It used to spotlight the
       // quick-action row this page had before it became the graph; the graph is
       // the page now, so the graph is what gets spotlighted.
