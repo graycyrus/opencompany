@@ -209,6 +209,11 @@ zero below `lg` (1024px):
 | `--app-frame-radius` | 14px | 14px | 0 |
 | `--app-frame-border` | 1px | 1px | 0 |
 
+The breakpoint is `lg` and not `md`: `md` is where the sidebar becomes an
+overlay sheet, so a frame surviving down to it would be a border around a single
+column. `lg` is where the inset starts to cost — 24px out of a 779px working
+column at 1024, 4.6% of a 523px one at 768.
+
 **Inset on three sides, flush to the bottom.** Vertical space is the scarcest
 thing in this app — chat's composer, the ledgers board and the workflows canvas
 all want every pixel of height — so only one inset comes out of `100svh`, and

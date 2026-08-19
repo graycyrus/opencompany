@@ -204,6 +204,9 @@
     --background: var(--surface-light-bg);
     --foreground: var(--ink-light-primary);
     --card: var(--surface-light-1);
+    --card-foreground: var(--ink-light-primary);
+    --popover: var(--surface-light-1);
+    --popover-foreground: var(--ink-light-primary);
 
     /* The app frame (issue #1178). `--app-ground` is what shows around the
        inset console; `--app-frame-edge` is the hairline that closes it.
@@ -211,9 +214,6 @@
        raised surface is outlined with. */
     --app-ground: var(--surface-light-ground);
     --app-frame-edge: var(--surface-light-4);
-    --card-foreground: var(--ink-light-primary);
-    --popover: var(--surface-light-1);
-    --popover-foreground: var(--ink-light-primary);
 
     /* Interaction. `primary` is the brand: the button you press, the link
        you follow, the series that leads a chart. */
@@ -424,6 +424,13 @@
     --background: var(--surface-dark-bg);
     --foreground: var(--ink-dark-primary);
     --card: var(--surface-dark-1);
+    --card-foreground: var(--ink-dark-primary);
+    /* Rung 3, not rung 4. `--border` is rung 4, and a popover painted rung 4
+       renders its own edge in its own fill — the dialog loses its outline
+       entirely. Rung 3 keeps the popover above the card (rung 1) and leaves
+       the stroke a step to read against. */
+    --popover: var(--surface-dark-3);
+    --popover-foreground: var(--ink-dark-primary);
 
     /* The frame's edge is NOT `--border` here. The ground is lighter than the
        app in dark, so rung 4 (#161719) sits between the two and reads as a
@@ -433,13 +440,6 @@
        screen, as an absence of light rather than a stroke. */
     --app-ground: var(--surface-dark-ground);
     --app-frame-edge: var(--surface-dark-bg);
-    --card-foreground: var(--ink-dark-primary);
-    /* Rung 3, not rung 4. `--border` is rung 4, and a popover painted rung 4
-       renders its own edge in its own fill — the dialog loses its outline
-       entirely. Rung 3 keeps the popover above the card (rung 1) and leaves
-       the stroke a step to read against. */
-    --popover: var(--surface-dark-3);
-    --popover-foreground: var(--ink-dark-primary);
 
     /* Brand-500 is too dense to read as ink on near-black; 400 is the
        working accent in dark mode. Filled brand buttons keep 500 with
@@ -764,14 +764,19 @@
  * means.
  *
  * WHERE THE FRAME COLLAPSES: below `lg` (1024px) the inset is zero and the
- * console runs edge to edge. Not `md` (768px), where the sidebar becomes an
- * overlay sheet — by then the frame is a border around a single column and
- * has been useless for a while. 1024 is where it starts to *cost*: with the
- * sidebar expanded (13.5rem) a 12px inset leaves a 779px working column at
- * 1024 and 523px at 768, and below `lg` the console has already begun
- * stacking its secondary rails (chat's channel rail, settings' nav), so the
- * content column is doing more work per pixel exactly as the frame starts
- * taking them.
+ * console runs edge to edge.
+ *
+ * `md` (768px) is the obvious candidate and it is the wrong one. That is where
+ * the sidebar becomes an overlay sheet, so a frame that survived down to it
+ * would be a border drawn around a single column — useless, and useless for
+ * the whole 768–1024 band on the way there.
+ *
+ * 1024 is where the inset starts to *cost* instead of give. With the sidebar
+ * expanded (13.5rem) the working column is 779px at 1024 and 523px at 768; the
+ * frame's 24px is 3% of the first and 4.6% of the second, taken from a column
+ * that by then is the only one left. Turning the frame off at `lg` means it is
+ * never on while the console is already short of width — which is the whole
+ * argument for having a breakpoint at all.
  * ========================================================================== */
 
 :root {
