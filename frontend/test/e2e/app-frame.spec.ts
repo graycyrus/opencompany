@@ -29,6 +29,12 @@ import { expect, test, type Page } from "@playwright/test";
  * rounds the corners against the window edge and lets the ground show through
  * as two stray tinted notches; a border kept there draws a hairline down the
  * outside of the screen.
+ *
+ * Both sidebar states matter now. Issue #1176 removed the auto-collapse, so
+ * the console stays in whatever state the operator left it — the frame has to
+ * hold with a 13.5rem column and with a 3rem icon rail, and the rail is the
+ * harder case because it is the narrow strip that has to keep reading as part
+ * of the app rather than as more of the ground.
  */
 
 /** Dismisses the first-run tour before it can cover the app. */
@@ -158,4 +164,39 @@ test("the frame appears exactly at lg, and every view fits inside it", async ({ 
     graph.x + graph.width,
     "and inside its right edge",
   ).toBeLessThanOrEqual(m.frame.x + m.frame.width + 1);
+});
+
+test("the frame holds with the sidebar collapsed to its icon rail", async ({ page }) => {
+  await skipTour(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/overview");
+  await expect(page.locator("[data-slot=sidebar-wrapper]")).toBeVisible();
+
+  const before = await measure(page);
+  await page.getByRole("button", { name: "Collapse", exact: true }).click();
+  // The width transition is 200ms; wait past it rather than racing the box.
+  await expect(page.locator("[data-slot=sidebar]")).toHaveAttribute(
+    "data-state",
+    "collapsed",
+  );
+  await page.waitForTimeout(400);
+
+  const after = await measure(page);
+  // The frame is the app's outline and belongs to the window, not to the
+  // sidebar. Collapsing a column inside it must not move it.
+  expect(after.frame, "collapsing the sidebar does not move the frame").toEqual(
+    before.frame,
+  );
+
+  // The icon rail is still the first thing inside the frame, and it is still
+  // inside — a rail that slipped to x=0 would be sitting on the ground.
+  const rail = (await page.locator("[data-slot=sidebar-container]").boundingBox())!;
+  expect(rail.x - after.frame.x, "the rail starts at the app's left edge").toBeLessThanOrEqual(
+    1,
+  );
+  expect(rail.width, "and it is the icon rail, not the full column").toBeLessThan(80);
+  expect(
+    rail.y + rail.height,
+    "the rail runs to the frame's flush bottom",
+  ).toBeGreaterThanOrEqual(after.frame.y + after.frame.height - 1);
 });
