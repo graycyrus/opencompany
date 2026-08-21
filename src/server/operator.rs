@@ -1323,6 +1323,19 @@ struct ChatResponse {
     /// here. A caller that finds it missing has the reply in hand anyway.
     #[serde(skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
+    /// The same discriminator [`ResolveReceiptDto::outcome`] carries, for the
+    /// non-detached resolve the Approvals page makes (issue #1449).
+    ///
+    /// The page never sees a `ResolveReceiptDto` — that shape is the *detached*
+    /// answer, which only the inline chat card asks for — so without this the
+    /// one surface the bug was reproduced on had no way to learn its click had
+    /// been refused, whatever the receipt said.
+    ///
+    /// Only ever set by a resolve, and omitted by every host predating it, which
+    /// a console reads as "this host cannot tell me" and words its confirmation
+    /// exactly as it did before rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
 }
 
 /// The `detach: true` response (issue #983): the turn's id and the durable id of
@@ -1973,6 +1986,8 @@ async fn chat_and_emit(
         // A chat turn is nobody's sign-off, so this stays absent here.
         still_awaiting: None,
         turn_id,
+        // …and it resolves nothing, so there is no resolve outcome to report.
+        outcome: None,
     })))
 }
 
@@ -2892,6 +2907,21 @@ struct ResolveReceiptDto {
     /// the action" for all four. This is what lets it say the true thing
     /// instead. `0` means this decision released the turn.
     still_awaiting: usize,
+    /// **Which** of the end states this resolve actually reached (issue #1449):
+    /// `"settled"`, `"already_resolved"`, or `"expired"`.
+    ///
+    /// `already_resolved` above is kept and still means what it always did —
+    /// there was nothing left to resolve — so a console predating this field
+    /// behaves byte for byte as it did. What it could never express is
+    /// `expired`: the approval **was** still parked, and the host default-denied
+    /// it because its deadline had passed. Before this the receipt had no shape
+    /// for that at all, so the console rendered the one thing it could — the
+    /// success line — over a decision the host had refused.
+    ///
+    /// A string rather than a second boolean because the states are mutually
+    /// exclusive: two booleans can spell combinations that cannot happen, and
+    /// every reader would have to know which ones are real.
+    outcome: &'static str,
 }
 
 async fn run_resolve(
@@ -2932,6 +2962,10 @@ async fn run_resolve(
     // what decrements the turn's counter — has not run yet, so this still counts
     // the approval just decided and `decisions_still_awaited` subtracts it.
     let still_awaiting = runtime.decisions_still_awaited(&id);
+    // Issue #1449: which end state this actually reached, read off the receipt
+    // rather than assumed from the fact that no error was returned. A resolve
+    // can succeed as a request and still not be the operator's decision.
+    let outcome = receipt.outcome();
 
     if body.detach {
         // Nothing here waits on the turn. The webhook fan-out still owes the
@@ -2954,6 +2988,7 @@ async fn run_resolve(
             recorded: true,
             already_resolved: receipt.already_resolved(),
             still_awaiting,
+            outcome,
         })
         .into_response());
     }
@@ -2964,6 +2999,7 @@ async fn run_resolve(
         message_id: None,
         responses: report.responses,
         still_awaiting: Some(still_awaiting),
+        outcome: Some(outcome),
         // A resolve runs a follow-up cycle, not an operator turn, so it opens no
         // turn row of its own.
         turn_id: None,
