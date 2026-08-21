@@ -279,6 +279,7 @@ companies/              19 business definitions (a company.toml + docs each)
 frontend/               Company-agnostic operator console (Vite + React)
 docs/spec/              Architecture reference
 docs/modules/           Per-package design docs
+docs/research/          Dated competitive/strategy archive (as of 2026-07)
 vendor/openhuman/       OpenHuman git submodule
 vendor/openhuman/vendor/tinyagents/
                         TinyAgents inherited from OpenHuman
