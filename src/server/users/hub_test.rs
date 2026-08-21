@@ -75,7 +75,6 @@ async fn state_with_public_url(
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
-            setup: None,
         })
         .await
         .unwrap();

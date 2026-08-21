@@ -4,7 +4,7 @@ import { ChevronRight, CircleDot, Hash, Lock, SquarePen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Avatar } from "./Avatar";
-import { dmFace, type Channel, type ChannelSection } from "./model";
+import type { Channel, ChannelSection } from "./model";
 
 /**
  * What an unread badge actually claims (issue #364).
@@ -178,9 +178,8 @@ function ChannelRow({
 
 function ChannelIcon({ channel }: { channel: Channel }) {
   if (channel.kind === "dm") {
-    const face = dmFace(channel);
-    return face ? (
-      <Avatar {...face} className="size-5 text-3xs" />
+    return channel.member ? (
+      <Avatar name={channel.name} tone={channel.tone} className="size-5 text-3xs" />
     ) : (
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );

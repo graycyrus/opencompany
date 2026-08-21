@@ -50,7 +50,6 @@ DELETE …/team/{agentId}                      remove an overlay teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
-POST   …/setup/roster                       propose a starting team from three answers (company-setup.md)
 GET    …/policy                              the autonomy tier + always-ask list
 PUT    …/policy                              set the tier and/or the always-ask list
 DELETE …/policy                              reset the policy to the manifest's
@@ -311,8 +310,9 @@ nothing does not.
 ### Credential-bearing surfaces (feature-gated)
 
 These write secrets to the `SecretStore` and expose only non-secret status.
-The native OAuth compatibility routes below deliberately **do not** write a
-credential: the old credential was unreachable by agents.
+The networked half of each (DNS lookup, SMTP send, OAuth token exchange) is
+dependency-inverted behind a trait; when the relevant seam is absent the write
+route `404`s with `{"code":"not_wired"}`.
 
 ```text
 GET    …/credential                         whether the company has its own key + which tier it presents
@@ -321,9 +321,9 @@ PUT    …/domain                             set the custom domain
 POST   …/domain/verify                       server-side DNS check
 PUT    …/smtp                               store SMTP credentials (secret store)
 POST   …/smtp/test                           send a test email
-POST   …/connections/{provider}/start        retired native OAuth bridge → 410 JSON until 2026-09-30  [feature: oauth]
-POST   …/connections/{provider}/disconnect   drop a legacy stored OAuth token  [feature: oauth]
-GET    /api/v1/oauth/callback                retired browser landing page → 410 HTML until 2026-09-30  [feature: oauth]
+POST   …/connections/{provider}/start        begin OAuth (returns authorize URL)   [feature: oauth]
+POST   …/connections/{provider}/disconnect   drop stored OAuth tokens               [feature: oauth]
+GET    /api/v1/oauth/callback                OAuth redirect target (unscoped; state carries the company)  [feature: oauth]
 ```
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
@@ -331,18 +331,33 @@ surface wired to it (**Composio today**) — see
 [`credentials.md`](credentials.md) for the resolution order, the rotation
 guarantee, and which surfaces are deliberately outside it.
 
-### Retired native OAuth callback
+### The OAuth callback always redirects
 
-`/api/v1/oauth/callback` stays reachable for a browser that began consent
-immediately before a deploy. It returns a non-caching `410 Gone` HTML page that
-says the authorization was not saved, why native OAuth cannot make agents able
-to use the provider, and to use Composio instead. It ignores the provider's
-`code` and `state` rather than exchanging or storing them.
+`/api/v1/oauth/callback` is reached by a **browser navigation**, so anything it
+returns as a body becomes the page the operator is left on. It therefore never
+answers with JSON. Every outcome redirects to the console's Connections view:
 
-`POST …/connections/{provider}/start` is likewise a `410 Gone` JSON response
-with stable code `native_oauth_retired`, an explanatory message, and
-`removalAfter: "2026-09-30"`. Both temporary endpoints send `Deprecation:
-true` and a `Sunset: Wed, 30 Sep 2026 00:00:00 GMT` header. #1023 removes the
-bridge after the cache compatibility window established by #979; it keeps
-Disconnect and the read projection so tenants can release credentials written
-before #828.
+- success → `…/connections?connected=<provider>`
+- failure → `…/connections?connect_error=<code>[&provider=<provider>]`
+
+`<code>` is one of a closed set — `denied`, `invalid_request`, `invalid_state`,
+`unknown_company`, `provider_disabled`, `exchange_failed`, `store_failed` — that
+the console maps to operator-facing copy. The provider's own error text is
+logged host-side but never forwarded: it is attacker-influenced and must not
+ride in a URL that lands in browser history and access logs. `provider` is
+appended only when a signature-verified `state` supplies it, so the arms that
+fire before verification omit it.
+
+### Provider catalog vs. configured providers
+
+The console's Connections view offers 11 provider tiles; `well_known()` in
+`server::ops::connections` carries built-in authorize/token URLs for three
+families only (`slack`, `google`/`gmail`, `github`). Every other tile needs
+`OPENCOMPANY_OAUTH_<P>_AUTHORIZE_URL` / `_TOKEN_URL` alongside its `_ID` /
+`_SECRET`, or it is simply not enabled on that host.
+
+This gap is **known and safe**: an unconfigured tile fails at `start` with a
+`400 provider '<p>' is not enabled on this host`, the console shows a toast, and
+the browser never navigates — so there is no broken redirect to come back from.
+Closing the gap (shipping more well-known URLs, or hiding unconfigured tiles) is
+separate work.

@@ -1,7 +1,5 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 
-import { workflowDetailName } from "./workflows";
-
 /**
  * Issue #541: the five withheld node kinds (`tool_call`, `http_request`,
  * `switch`, `output_parser`, `sub_workflow`) grew config forms in the workflow
@@ -34,19 +32,16 @@ async function dismissTour(page: Page) {
   await expect(skip).toBeHidden();
 }
 
+/** Selects the workflow named `name` in the picker and waits for it to settle. */
+async function selectWorkflow(page: Page, name: string) {
+  await page.getByRole("combobox").first().click();
+  await page.getByRole("option", { name, exact: true }).click();
+  await expect(page.getByRole("combobox").first()).toContainText(name);
+}
+
 /** Best-effort teardown so a failed spec does not poison the next run. */
-/**
- * Best-effort teardown so a failed spec does not poison the next run.
- * `expectedVersion` is required (issue #1013), so this reads the workflow's
- * current token first.
- */
 async function removeWorkflow(request: APIRequestContext, id: string) {
-  const version = await request
-    .get(`${COMPANY_SCOPE}/workflows/${id}`)
-    .then(async (res) => (res.ok() ? ((await res.json()).version as string | null) : null))
-    .catch(() => null);
-  const query = version ? `?expectedVersion=${encodeURIComponent(version)}` : "";
-  await request.delete(`${COMPANY_SCOPE}/workflows/${id}${query}`).catch(() => undefined);
+  await request.delete(`${COMPANY_SCOPE}/workflows/${id}`).catch(() => undefined);
 }
 
 const SUBMIT = "workflow-dialog-submit";
@@ -116,14 +111,9 @@ test("authoring a tool_call node's config through the form round-trips to the ho
 
     // Reopen from the saved graph (a fresh load, not local state) and click the
     // node: the inspector's Config block shows the slug the host round-tripped.
-    //
-    // Issue #1110: creating landed on the new workflow's own URL, so the reload
-    // comes back on its detail view with no picking to do — which is also this
-    // spec's incidental proof that a `#/workflows/<id>` survives a reload.
-    await expect(page).toHaveURL(new RegExp(`#/workflows/${id}$`));
     await page.reload();
     await dismissTour(page);
-    await expect(workflowDetailName(page)).toHaveText(name, { timeout: 30_000 });
+    await selectWorkflow(page, name);
 
     const node = page.locator('.react-flow__node[data-id="act"]');
     await expect(node).toBeVisible({ timeout: 15_000 });

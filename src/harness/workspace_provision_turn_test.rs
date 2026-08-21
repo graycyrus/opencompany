@@ -241,7 +241,6 @@ fn record(overlays: Vec<OverlayAgent>) -> CompanyRecord {
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
-        setup: None,
     }
 }
 
@@ -328,7 +327,6 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
-        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -345,6 +343,9 @@ fn dispatch(task_id: &str) -> CycleRequest {
             run_id: None,
         }],
         event_seqs: Vec::new(),
+        compressed_history: Vec::new(),
+        roster: Vec::new(),
+        context_index: Vec::new(),
     }
 }
 

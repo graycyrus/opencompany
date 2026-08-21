@@ -69,34 +69,21 @@ describe("hasConfigForm", () => {
   });
 });
 
-/**
- * `configFromDraft` answers a Result rather than throwing (issue #1006), so
- * these cases — every one of which is about the config it emits — unwrap it
- * here. The failure path is pinned separately below.
- */
-function serialized(
-  ...args: Parameters<typeof configFromDraft>
-): Record<string, unknown> | undefined {
-  const out = configFromDraft(...args);
-  if (!out.ok) throw new Error(`expected a serialized config, got: ${out.error}`);
-  return out.config;
-}
-
 describe("configFromDraft — valid drafts emit exactly the engine keys", () => {
   it("tool_call: slug + parsed args, empties omitted", () => {
     expect(
-      serialized("tool_call", { slug: "web_search", args: '{ "query": "hi" }' }),
+      configFromDraft("tool_call", { slug: "web_search", args: '{ "query": "hi" }' }),
     ).toEqual({ slug: "web_search", args: { query: "hi" } });
 
     // No args → the key is omitted entirely, not sent as "".
-    expect(serialized("tool_call", { slug: "web_search", args: "" })).toEqual({
+    expect(configFromDraft("tool_call", { slug: "web_search", args: "" })).toEqual({
       slug: "web_search",
     });
   });
 
   it("http_request: method + url + parsed headers/body", () => {
     expect(
-      serialized("http_request", {
+      configFromDraft("http_request", {
         method: "POST",
         url: "https://api.example.com",
         headers: '{ "Authorization": "Bearer x" }',
@@ -111,22 +98,22 @@ describe("configFromDraft — valid drafts emit exactly the engine keys", () => 
 
     // A JSON string body is a valid body — it stays a string.
     expect(
-      serialized("http_request", { method: "GET", url: "u", body: '"raw text"' }),
+      configFromDraft("http_request", { method: "GET", url: "u", body: '"raw text"' }),
     ).toEqual({ method: "GET", url: "u", body: "raw text" });
   });
 
   it("switch: field or expression, whichever is filled", () => {
-    expect(serialized("switch", { field: "status", expression: "" })).toEqual({
+    expect(configFromDraft("switch", { field: "status", expression: "" })).toEqual({
       field: "status",
     });
-    expect(serialized("switch", { field: "", expression: "=item.score > 0.5" })).toEqual({
+    expect(configFromDraft("switch", { field: "", expression: "=item.score > 0.5" })).toEqual({
       expression: "=item.score > 0.5",
     });
   });
 
   it("output_parser: parsed schema + boolean auto_fix, default omitted", () => {
     expect(
-      serialized("output_parser", {
+      configFromDraft("output_parser", {
         schema: '{ "type": "object" }',
         auto_fix: "false",
       }),
@@ -134,31 +121,31 @@ describe("configFromDraft — valid drafts emit exactly the engine keys", () => 
 
     // Unset auto_fix (the "" default) is omitted so the engine's own default
     // (true) applies; an empty schema is omitted (identity parse).
-    expect(serialized("output_parser", { schema: "", auto_fix: "" })).toBeUndefined();
-    expect(serialized("output_parser", { schema: "", auto_fix: "true" })).toEqual({
+    expect(configFromDraft("output_parser", { schema: "", auto_fix: "" })).toBeUndefined();
+    expect(configFromDraft("output_parser", { schema: "", auto_fix: "true" })).toEqual({
       auto_fix: true,
     });
   });
 
   it("sub_workflow: workflow_id", () => {
-    expect(serialized("sub_workflow", { workflow_id: "child-1" })).toEqual({
+    expect(configFromDraft("sub_workflow", { workflow_id: "child-1" })).toEqual({
       workflow_id: "child-1",
     });
   });
 
   it("transform: set map, empty draft omits config entirely (#661 L3)", () => {
-    expect(serialized("transform", { set: '{ "greeting": "=item.name" }' })).toEqual({
+    expect(configFromDraft("transform", { set: '{ "greeting": "=item.name" }' })).toEqual({
       set: { greeting: "=item.name" },
     });
     // An empty set is a passthrough → the whole config is omitted, never `{}`.
-    expect(serialized("transform", { set: "" })).toBeUndefined();
+    expect(configFromDraft("transform", { set: "" })).toBeUndefined();
     // An explicit empty object is authored through verbatim (still a passthrough).
-    expect(serialized("transform", { set: "{}" })).toEqual({ set: {} });
+    expect(configFromDraft("transform", { set: "{}" })).toEqual({ set: {} });
   });
 
   it("tool_call: connection_ref rides alongside slug/args, omitted when blank (#661 M6)", () => {
     expect(
-      serialized("tool_call", {
+      configFromDraft("tool_call", {
         slug: "slack.post",
         args: '{ "text": "hi" }',
         connection_ref: "composio:slack:acct_1",
@@ -167,13 +154,13 @@ describe("configFromDraft — valid drafts emit exactly the engine keys", () => 
 
     // Whitespace-only connection_ref is trimmed to empty and omitted.
     expect(
-      serialized("tool_call", { slug: "slack.post", args: "", connection_ref: "  " }),
+      configFromDraft("tool_call", { slug: "slack.post", args: "", connection_ref: "  " }),
     ).toEqual({ slug: "slack.post" });
   });
 
   it("http_request: connection_ref rides alongside method/url, omitted when blank (#661 M6)", () => {
     expect(
-      serialized("http_request", {
+      configFromDraft("http_request", {
         method: "POST",
         url: "https://api.test/x",
         connection_ref: "http:acct_2",
@@ -181,14 +168,14 @@ describe("configFromDraft — valid drafts emit exactly the engine keys", () => 
     ).toEqual({ method: "POST", url: "https://api.test/x", connection_ref: "http:acct_2" });
 
     expect(
-      serialized("http_request", { method: "GET", url: "u", connection_ref: "" }),
+      configFromDraft("http_request", { method: "GET", url: "u", connection_ref: "" }),
     ).toEqual({ method: "GET", url: "u" });
   });
 
   it("an all-empty draft serializes to undefined (config omitted from the body)", () => {
-    expect(serialized("switch", { field: "", expression: "" })).toBeUndefined();
-    expect(serialized("http_request", { method: "", url: "" })).toBeUndefined();
-    expect(serialized("transform", { set: "" })).toBeUndefined();
+    expect(configFromDraft("switch", { field: "", expression: "" })).toBeUndefined();
+    expect(configFromDraft("http_request", { method: "", url: "" })).toBeUndefined();
+    expect(configFromDraft("transform", { set: "" })).toBeUndefined();
   });
 });
 
@@ -225,7 +212,7 @@ describe("hydrate → serialize round-trips", () => {
   for (const { kind, config } of cases) {
     it(`${kind} survives a hydrate/serialize cycle`, () => {
       const { draft, extra } = configDraftFrom(kind, config);
-      expect(serialized(kind, draft, extra)).toEqual(config);
+      expect(configFromDraft(kind, draft, extra)).toEqual(config);
     });
   }
 });
@@ -239,14 +226,14 @@ describe("connection_ref is authorable, not an extra-bag rider (#661 M6)", () =>
     expect(extra).toEqual({});
     expect(draft.slug).toBe("gmail.send");
     // …and serializes back as a top-level config key.
-    expect(serialized("tool_call", draft, extra)).toEqual(config);
+    expect(configFromDraft("tool_call", draft, extra)).toEqual(config);
   });
 
   it("blanking connection_ref on an edit deletes the key", () => {
     const config = { slug: "gmail.send", connection_ref: "acct_42" };
     const { draft, extra } = configDraftFrom("tool_call", config);
     draft.connection_ref = "";
-    expect(serialized("tool_call", draft, extra)).toEqual({ slug: "gmail.send" });
+    expect(configFromDraft("tool_call", draft, extra)).toEqual({ slug: "gmail.send" });
   });
 
   it("hydrates an http_request connection_ref into the draft, leaving extra empty", () => {
@@ -254,7 +241,7 @@ describe("connection_ref is authorable, not an extra-bag rider (#661 M6)", () =>
     const { draft, extra } = configDraftFrom("http_request", config);
     expect(draft.connection_ref).toBe("http:acct_2");
     expect(extra).toEqual({});
-    expect(serialized("http_request", draft, extra)).toEqual(config);
+    expect(configFromDraft("http_request", draft, extra)).toEqual(config);
   });
 });
 
@@ -265,7 +252,7 @@ describe("unknown-key preservation — the data-loss guard", () => {
     const { draft, extra } = configDraftFrom("transform", config);
     expect(draft.set).toBe(JSON.stringify({ g: "=item.name" }, null, 2));
     expect(extra).toEqual({ mystery: "keep-me" });
-    expect(serialized("transform", draft, extra)).toEqual(config);
+    expect(configFromDraft("transform", draft, extra)).toEqual(config);
   });
 
   it("keeps a sub_workflow's execution/concurrency/inputs", () => {
@@ -281,7 +268,7 @@ describe("unknown-key preservation — the data-loss guard", () => {
       concurrency: 3,
       inputs: { repo: "=inputs.repo" },
     });
-    expect(serialized("sub_workflow", draft, extra)).toEqual(config);
+    expect(configFromDraft("sub_workflow", draft, extra)).toEqual(config);
   });
 });
 
@@ -300,7 +287,7 @@ describe("output never contains a host-reserved key", () => {
     for (const key of RESERVED_CONFIG_KEYS) {
       expect(extra, key).not.toHaveProperty(key);
     }
-    const out = serialized("tool_call", draft, extra) ?? {};
+    const out = configFromDraft("tool_call", draft, extra) ?? {};
     for (const key of RESERVED_CONFIG_KEYS) {
       expect(out, key).not.toHaveProperty(key);
     }
@@ -308,33 +295,11 @@ describe("output never contains a host-reserved key", () => {
   });
 
   it("never re-emits a reserved key even if forced through the extra bag", () => {
-    const out = serialized("http_request", { method: "GET", url: "u" }, {
+    const out = configFromDraft("http_request", { method: "GET", url: "u" }, {
       on_error: "route",
       requires_approval: true,
     });
     expect(out).toEqual({ method: "GET", url: "u" });
-  });
-});
-
-describe("configFromDraft answers a Result, never a throw (#1006)", () => {
-  it("reports malformed JSON instead of throwing out of the caller's `try`", () => {
-    // Only reachable when `configDraftProblem` and this disagree — but the
-    // caller assembles the graph inside the submit path, and an exception from
-    // here skipped the `finally` that clears `submitting`, locking the dialog
-    // shut over the operator's unsaved work.
-    const out = configFromDraft("tool_call", { slug: "web_search", args: "{ oops" });
-    expect(out).toEqual({ ok: false, error: "Arguments must be valid JSON." });
-  });
-
-  it("wraps a valid serialization, empty configs included", () => {
-    expect(configFromDraft("switch", { field: "status", expression: "" })).toEqual({
-      ok: true,
-      config: { field: "status" },
-    });
-    expect(configFromDraft("switch", { field: "", expression: "" })).toEqual({
-      ok: true,
-      config: undefined,
-    });
   });
 });
 

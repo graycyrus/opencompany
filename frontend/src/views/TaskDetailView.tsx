@@ -1,7 +1,7 @@
 // The Task Detail screen (v1, #184): the epic's capstone read surface. One
 // `GET …/tasks/{id}` (#185/#190) drives a header, the lineage rail, the event
 // timeline, and a controls bar; a 4s visibility-gated poll keeps it live while
-// the card is open. The Artifacts tab is
+// the card is open. Cost/₹ is intentionally absent everywhere. The Artifacts tab is
 // its own self-fetching surface (#306, over #187's routes); Discussion stays an
 // honest stub pending its own backend. Export (#352) is a host-rendered
 // document the controls bar downloads — the console lays out none of it.
@@ -111,7 +111,6 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { formatUsdCost } from "@/lib/cost";
 import { approvalAction, effectDone } from "@/lib/language";
 
 import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
@@ -273,7 +272,6 @@ export function TaskDetailView({
   client,
   company,
   taskId,
-  attemptEventTick,
   focus,
   parked = EMPTY_PARKED,
   onBack,
@@ -285,11 +283,6 @@ export function TaskDetailView({
   client: OpenCompanyClient;
   company: string | null;
   taskId: string;
-  /**
-   * Bumped on every `run_status_changed` (issue #1015) — the push half of this
-   * screen's liveness, beside the poll below rather than instead of it.
-   */
-  attemptEventTick?: number;
   /**
    * The company's parked approvals, for naming what this card is waiting on
    * (issue #883). Optional and defaulting to empty, which renders the pre-#883
@@ -386,36 +379,6 @@ export function TaskDetailView({
       dispose();
     };
   }, [load]);
-
-  // Issue #1015: the push half. Re-read the detail the moment the host says an
-  // attempt moved, rather than up to `POLL_MS` later — and at all, which the
-  // poll above deliberately does not do while the tab is hidden.
-  //
-  // Its own effect rather than a dependency of the one above, for the reason the
-  // board screen gave for the same split (issue #464): folding the tick in there
-  // would tear down and restart the fallback timer on every frame, so a busy
-  // company would keep resetting the interval and the fallback would effectively
-  // stop existing on exactly the companies that need it most.
-  //
-  // The poll STAYS. A frame can be missed — the stream can drop, and the store
-  // swallows an append that fails rather than failing the transition it
-  // describes (`runtime::run_events`) — so the timer is the floor under a
-  // liveness this does not otherwise guarantee.
-  const seenAttemptTick = useRef(attemptEventTick);
-  useEffect(() => {
-    if (attemptEventTick === undefined || attemptEventTick === seenAttemptTick.current) return;
-    // Gated like the poll it complements (issue #581), or the visibility gate
-    // buys nothing on a busy company. Deliberately NOT consumed on the way out:
-    // marking it seen here would drop it, since this effect does not re-run on a
-    // visibility change.
-    if (document.visibilityState === "hidden") return;
-    seenAttemptTick.current = attemptEventTick;
-    let cancelled = false;
-    void load(() => !cancelled);
-    return () => {
-      cancelled = true;
-    };
-  }, [attemptEventTick, load]);
 
   const worked = useMemo(
     () =>
@@ -622,28 +585,7 @@ export function TaskDetailView({
 
               {detail.task.plan && (
                 <TabsContent value="plan" className="mt-4">
-                  <TaskPlanBrief
-                    plan={detail.task.plan}
-                    // Issue #1106: answering the brief's ownership question is
-                    // the same write the reassign row makes, through the same
-                    // route — so the host validates the pick against the roster
-                    // once, for both, and a candidate the planner named cannot
-                    // reach the card by a path that skips that check.
-                    onPick={async (id) => {
-                      try {
-                        const saved = await patchTask(client, company, detail.task.id, {
-                          assignee: id,
-                        });
-                        onSaved(saved);
-                        await load();
-                        toast.success(`Assigned to ${id}.`);
-                      } catch (e) {
-                        toast.error(
-                          e instanceof Error ? e.message : "could not assign the task",
-                        );
-                      }
-                    }}
-                  />
+                  <TaskPlanBrief plan={detail.task.plan} />
                 </TabsContent>
               )}
 
@@ -736,12 +678,6 @@ function DetailHeader({
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
-        {formatUsdCost(task.cost, "total") && (
-          <span className="font-medium tabular-nums text-foreground">
-            {formatUsdCost(task.cost, "total")}
-            {task.cost?.amountUsd !== undefined && " total"}
-          </span>
-        )}
         <span className="inline-flex items-center gap-1.5">
           <span className="font-medium text-foreground">Status</span>
           <Badge variant="secondary" className="font-normal">
@@ -1067,14 +1003,12 @@ function ControlBar({
 
       {reassigning && (
         <div className="mt-2 flex items-center gap-2">
-          {/* Issue #263: the same roster picker the edit dialog uses, and since
-              #1106 the same one the create dialog offers up front. This is the
-              row that can reach the *whole* roster after the fact — the create
-              dialog pre-empts, and the plan brief's candidate list narrows to
-              what the planner named, so a card that needs anyone else is
-              reassigned here. Unassigned is a row rather than an empty field, so
-              handing the card back to the orchestrator is something you can see
-              and choose. */}
+          {/* Issue #263: the same roster picker the edit dialog uses. Since
+              #301 this is the *only* place a card gets an assignee — the create
+              box asks for a prompt and nothing else, so the host's default
+              (unassigned → orchestrator) stands until somebody picks here.
+              Unassigned is a row here rather than an empty field, so handing the
+              card back to the orchestrator is something you can see and choose. */}
           <AssigneeSelect
             client={client}
             company={company}
@@ -1165,11 +1099,6 @@ function LineageRail({
             <span className="min-w-0 flex-1 truncate">
               {lineage.parent.title}
             </span>
-            {formatUsdCost(lineage.parent.cost, "total") && (
-              <span className="shrink-0 tabular-nums text-muted-foreground">
-                {formatUsdCost(lineage.parent.cost, "total")}
-              </span>
-            )}
             <Badge variant="secondary" className="shrink-0 font-normal">
               {columnLabel(columns, lineage.parent.column)}
             </Badge>
@@ -1186,11 +1115,6 @@ function LineageRail({
           >
             <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{child.title}</span>
-            {formatUsdCost(child.cost, "total") && (
-              <span className="shrink-0 tabular-nums text-muted-foreground">
-                {formatUsdCost(child.cost, "total")}
-              </span>
-            )}
             <Badge variant="secondary" className="shrink-0 font-normal">
               {columnLabel(columns, child.column)}
             </Badge>
@@ -1252,7 +1176,7 @@ function groupTimeline(
       last.entries.push(e);
     } else {
       groups.push({
-        key: e.costKey ?? String(e.seq),
+        key: String(e.seq),
         kind: e.kind,
         status: e.status,
         label: e.label,
@@ -1523,11 +1447,6 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
           <Badge variant="outline" className="shrink-0 font-normal">
             ×{group.count}
           </Badge>
-        )}
-        {formatUsdCost(first.cost, "line") && (
-          <span className="shrink-0 font-medium tabular-nums text-foreground">
-            {formatUsdCost(first.cost, "line")}
-          </span>
         )}
         {/* A run step's own duration (#242); journal entries carry none. A
             gated call never ran, so its 0ms is the absence of a measurement

@@ -16,13 +16,13 @@ import {
   type ReadMarker,
   type ReadStateResponse,
   type ApiErrorBody,
-  type WorkflowProblem,
   type AppSpec,
   type ApprovalSummary,
   type CapabilityStatusDto,
   type ChatHistoryMessageDto,
   type ChatResponse,
   type CompanyStatus,
+  type ConnectionStart,
   type ConnectionState,
   type CreateDeskInput,
   type DeskDto,
@@ -34,7 +34,6 @@ import {
   type GrantScope,
   type InboxDto,
   type InboxMessageDto,
-  type PageManifestDto,
   type ResolveReceipt,
   type SetBudgetInput,
   type StandingGrant,
@@ -832,59 +831,19 @@ export class OpenCompanyClient {
   }
 
   /**
-   * The company's agent-authored dashboard pages (Pages tab). Each manifest
-   * names a slug served at `pageUrl(slug, company)` — the iframe host
-   * document that mounts the page's compiled bundle. Hosts without the
-   * surface 404; callers treat that as "no pages".
-   */
-  listPages(company?: string | null): Promise<PageManifestDto[]> {
-    return this.request<PageManifestDto[]>("GET", `${this.scope(company)}/pages`);
-  }
-
-  /**
-   * The URL to load as an iframe `src` for one page — a fixed HTML shell the
-   * host serves (not agent content) that sets up an import map for `react`,
-   * `react-dom/client`, and `@opencompany/site`, then mounts the page's own
-   * `bundle.mjs`. Absolute, since the iframe's `src` is resolved against its
-   * own (opaque, sandboxed) document rather than the console's.
-   *
-   * The iframe is a normal navigation and so can only carry the credentials a
-   * browser attaches to a same-origin request — the operator's HttpOnly
-   * session cookie. It cannot send this client's `authorization` /
-   * `x-opencompany-session` headers, so the shell and its bundle load only
-   * when the console is same-origin with the host (the console's supported
-   * deployment); a cross-origin console therefore cannot host pages.
-   */
-  pageUrl(slug: string, company?: string | null): string {
-    return `${this.baseUrl}${this.scope(company)}/pages/${encodeURIComponent(slug)}`;
-  }
-
-  /**
-   * Runs one GraphQL operation — query or mutation — against the host's
-   * `/graphql` endpoint, with this client's own credentials. This is the
-   * console's one real GraphQL entry point; `PagesView`'s postMessage bridge
-   * (`docs/spec/runtime/pages.md` §6) forwards a sandboxed page's requests
-   * through this exact method rather than opening a second client, so a page
-   * and the console proper can never disagree about how a request is
-   * authenticated or parsed.
-   *
-   * Deliberately untyped in `variables`/return shape: the caller (a page
-   * author, indirectly) supplies an arbitrary document, so there is no fixed
-   * response type to declare here the way every other method has one.
-   */
-  graphqlRequest(
-    query: string,
-    variables?: Record<string, unknown>,
-  ): Promise<{ data?: unknown; errors?: unknown }> {
-    return this.request("POST", "/graphql", { query, variables });
-  }
-
-  /**
    * Third-party connections for a company (forward-looking surface). Hosts
    * that don't expose it yet return 404 — callers treat that as "unavailable".
    */
   listConnections(company?: string | null): Promise<ConnectionState[]> {
     return this.request<ConnectionState[]>("GET", `${this.scope(company)}/connections`);
+  }
+
+  /** Begin an OAuth connect flow; returns the provider authorize URL to open. */
+  startConnection(provider: string, company?: string | null): Promise<ConnectionStart> {
+    return this.request<ConnectionStart>(
+      "POST",
+      `${this.scope(company)}/connections/${encodeURIComponent(provider)}/start`,
+    );
   }
 
   /** Revoke a connected provider. */
@@ -968,40 +927,9 @@ function parseJson(text: string): unknown {
 function errorEnvelope(text: string): ApiErrorBody | undefined {
   const parsed = parseJson(text);
   if (typeof parsed !== "object" || parsed === null) return undefined;
-  const { error, code, problems } = parsed as Record<string, unknown>;
+  const { error, code } = parsed as Record<string, unknown>;
   if (typeof error !== "string" || typeof code !== "string") return undefined;
-  const breakdown = workflowProblems(problems);
-  return breakdown ? { error, code, problems: breakdown } : { error, code };
-}
-
-/**
- * The `problems` array off an envelope, or `undefined` when there is not one.
- *
- * Held to the same strictness as the envelope itself, for the same reason: this
- * is rendered to operators, so an entry is kept only when it carries a real
- * `message`. Entries are filtered rather than the whole array rejected — a host
- * that grows a new problem shape should cost the operator that one line, not
- * the entire breakdown — and an array that filters down to nothing returns
- * `undefined` so a caller cannot mistake "every entry was junk" for "the host
- * refused with an empty list".
- *
- * `node_id` and `field` are dropped unless they are strings, keeping a
- * malformed locator from reaching the UI as `[object Object]`.
- */
-function workflowProblems(value: unknown): WorkflowProblem[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const kept: WorkflowProblem[] = [];
-  for (const entry of value) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const { node_id, field, message } = entry as Record<string, unknown>;
-    if (typeof message !== "string" || !message.trim()) continue;
-    kept.push({
-      ...(typeof node_id === "string" ? { node_id } : {}),
-      ...(typeof field === "string" ? { field } : {}),
-      message,
-    });
-  }
-  return kept.length ? kept : undefined;
+  return { error, code };
 }
 
 /**
@@ -1044,11 +972,6 @@ function httpError(res: TransportResponse, text: string): ApiError {
     envelope?.error ?? statusMessage(res),
     envelope !== undefined,
   );
-  // Issue #836: the host has sent this breakdown since #1016 and the console
-  // dropped it here, so a refused graph read as one flat sentence with no node
-  // named. Carried, not rendered here — what a surface does with it is the
-  // surface's call.
-  if (envelope?.problems) err.problems = envelope.problems;
   // Not discarded, just not rendered. A proxy error page is the only clue to
   // which hop gave up, which is worth keeping for a bug report even though it
   // is worthless as prose.

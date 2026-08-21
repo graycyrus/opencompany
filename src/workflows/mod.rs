@@ -19,11 +19,6 @@
 /// downstream agent node's turn (an `agent -> agent` pipeline passes data).
 #[cfg(test)]
 mod agent_upstream_input_test;
-/// Issue #899 (Stage 1): end-to-end proof that approving a call gated inside an
-/// agent node's own tool loop AUTO-CONTINUES the blocked run — one continuation,
-/// after the last decision, and none for a wholly refused block.
-#[cfg(test)]
-mod blocked_node_continuation_test;
 /// Issues #881 / #880: end-to-end proof that a node whose deliverable was
 /// parked for approval reports `blocked`, stops its branch instead of handing
 /// its apology downstream, and that the run says what it parked.
@@ -56,10 +51,6 @@ mod parallel_gate_fanout_test;
 pub mod replay;
 pub mod runner;
 pub mod translate;
-/// Issue #1098: a scheduled workflow granted a standing permission stops
-/// re-asking on every run — two runs, because a single-run test cannot see it.
-#[cfg(test)]
-mod workflow_standing_grant_test;
 
 pub use caps::{HarnessAgentRunner, build_capabilities};
 pub use delivery::{DeliveryParking, WorkflowDeliveryDeps, deliver_outputs, deliver_outputs_dry};

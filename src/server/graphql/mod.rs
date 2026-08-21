@@ -15,7 +15,6 @@ pub mod finances;
 pub mod inbox;
 pub mod memory_facts;
 pub mod pagination;
-mod policy;
 pub mod skills;
 pub mod tasks;
 pub mod usage;

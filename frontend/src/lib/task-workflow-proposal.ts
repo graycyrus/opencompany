@@ -37,14 +37,7 @@ import {
 import type { WorkflowGraph } from "@/api/workflows";
 
 /** The graph a built proposal is diffed against: nothing, so all of it is new. */
-const EMPTY_GRAPH: WorkflowGraph = {
-  id: "",
-  name: "",
-  nodes: [],
-  edges: [],
-  // No saved body, so no token (issue #1013 makes `version` explicit).
-  version: null,
-};
+const EMPTY_GRAPH: WorkflowGraph = { id: "", name: "", nodes: [], edges: [] };
 
 /** Either the all-added diff, or the one sentence to show instead of Apply. */
 export type TaskProposalDiff = { diff: GraphDiff } | { reason: string };
@@ -86,9 +79,6 @@ export function taskProposalDiff(ops: unknown): TaskProposalDiff {
   const validated = validateProposal(candidate, EMPTY_GRAPH);
   if ("reason" in validated) return { reason: validated.reason };
 
-  const proposal = {
-    ...validated,
-    basedOnVersion: EMPTY_GRAPH.version ?? undefined,
-  };
+  const proposal = { ...validated, basedOnVersion: EMPTY_GRAPH.version };
   return { diff: diffGraphs(EMPTY_GRAPH, applyProposal(EMPTY_GRAPH, proposal)) };
 }

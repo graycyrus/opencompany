@@ -52,10 +52,6 @@ pub mod oauth;
 /// Issue #337: the planning pass's usage sample and its company-bucket
 /// attribution rule. See [`planning`].
 pub mod planning;
-/// First-run company setup's usage sample and its company-bucket attribution
-/// rule (a sibling of [`planning`], not of an agent turn — the pass runs before
-/// the roster it is building exists). See [`roster_build`].
-pub mod roster_build;
 pub mod search;
 pub mod triage;
 mod types;
@@ -116,7 +112,6 @@ mod tests {
                 global: false,
                 id: "strategy".into(),
                 role: "Strategy desk".into(),
-                name: None,
                 description: None,
                 tier: None,
                 tools: vec![],
@@ -134,7 +129,6 @@ mod tests {
                 global: false,
                 id: "creative".into(),
                 role: "Creative studio".into(),
-                name: None,
                 description: None,
                 tier: None,
                 tools: vec![],

@@ -135,7 +135,7 @@ use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
 use crate::policy::CallPath;
 use crate::ports::UsageMeter;
 use crate::ports::types::{CompanyId, Effect, EffectGroup};
-use crate::runtime::grants::{GrantSet, GrantSubject, GrantedCall};
+use crate::runtime::grants::{GrantSet, GrantedCall};
 
 /// The name openhuman knows this policy by, and the name it stamps into the
 /// refusal it hands the model when a call is gated
@@ -643,14 +643,6 @@ impl ApprovalRequestQueue {
     /// The runtime mints and sweeps grants and the policy redeems them, so both
     /// sides must share one set. The builder creates the [`GrantSet`] first
     /// (it is feature-independent, unlike this queue) and hands it in here.
-    ///
-    /// The workflow gate pass uses it for a second reason (issue #1098): it
-    /// needs the company's real grants but must **not** share `inner`, because
-    /// `ApprovalPolicy::check` pushes its projected effect there and the shared
-    /// queue is drained by `park_gated_calls` and the chat cycle — either of
-    /// which would park a second, tool-call-shaped card for a decision the gate
-    /// card already covers. A fresh `inner` with the real `grants` is exactly
-    /// what this gives, and is why the two halves are separately owned.
     pub fn with_grants(grants: GrantSet) -> Self {
         Self {
             inner: Arc::default(),
@@ -761,17 +753,6 @@ pub struct ApprovalPolicy {
     /// projected before: no agent, so no grant, so the runtime executes it
     /// natively. Only `build_roster` sets it.
     agent: Option<String>,
-    /// Which authored workflow this policy instance is gating (issue #1098),
-    /// read by the standing-permission arm and by nothing else.
-    ///
-    /// `None` everywhere except the workflow gate pass, so no other construction
-    /// site changes behaviour. Set alongside — never instead of — the absent
-    /// [`agent`](Self::agent): a gate still projects an effect with no teammate
-    /// on it, because there is none. This names the subject a *standing*
-    /// permission may be matched against, and nothing else; see
-    /// [`with_workflow`](Self::with_workflow) for why the single-use arm stays
-    /// shut.
-    workflow: Option<String>,
     /// Which of the two paths the calls this instance judges arrive on (issue
     /// #674), read by the per-call judgement arm and by nothing else.
     ///
@@ -818,7 +799,6 @@ impl ApprovalPolicy {
             budget_usd_daily,
             requests: ApprovalRequestQueue::default(),
             agent: None,
-            workflow: None,
             spend: None,
             no_meter_warned: AtomicBool::new(false),
             // The strict path by default — see `for_authored_workflow_nodes`.
@@ -847,29 +827,6 @@ impl ApprovalPolicy {
     /// effect knows whose tool call it came from (issue #243).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
-        self
-    }
-
-    /// Binds this policy to the authored workflow whose nodes it is gating, so a
-    /// standing permission the operator gave that workflow can be matched (issue
-    /// #1098).
-    ///
-    /// **This opens exactly one arm.** `standing_grant_allows` gains a subject
-    /// to match on; [`consume_grant`](Self::consume_grant) is untouched and
-    /// still short-circuits on the absent agent, so no single-use grant can ever
-    /// be minted or redeemed on this path. That asymmetry is the whole safety
-    /// argument and it is not an oversight: a `GrantedCall` is redeemed by
-    /// re-dispatching *the agent that asked*, and on a workflow path nobody
-    /// asked — such a grant could never be redeemed, would expire on its TTL,
-    /// and would tell the operator "the agent did not act" about a call no agent
-    /// made. See [`crate::workflows::gate`], which records that reasoning and
-    /// whose `agent: None` this deliberately does **not** undo.
-    ///
-    /// A standing permission has the opposite lifecycle and so is not covered by
-    /// that argument: nothing redeems it, it is matched at the gate before the
-    /// call and the call then proceeds in place.
-    pub fn with_workflow(mut self, workflow_id: impl Into<String>) -> Self {
-        self.workflow = Some(workflow_id.into());
         self
     }
 
@@ -966,13 +923,6 @@ impl ApprovalPolicy {
     /// and the developer have no way to tell a re-worded argument from a bug in
     /// the grant machinery.
     fn consume_grant(&self, tool: &str, args: &serde_json::Value) -> Option<GrantedCall> {
-        // Agent-only, permanently. Do NOT extend this to the workflow subject
-        // #1098 added to `standing_grant_allows` — the asymmetry is deliberate.
-        // A `GrantedCall` is redeemed by re-dispatching the agent that asked;
-        // on a workflow path nobody asked, so one minted here could never be
-        // redeemed, would expire on its TTL, and would tell the operator "the
-        // agent did not act" about a call no agent made. `crate::workflows::gate`
-        // records the full reasoning.
         let agent = self.agent.as_deref()?;
         let grants = self.requests.grants();
         if let Some(grant) = grants.consume(agent, tool, args) {
@@ -1026,20 +976,8 @@ impl ApprovalPolicy {
     ///   refuses it. A grant replayed from a line written before the field
     ///   existed is unscoped and behaves exactly as it did.
     fn standing_grant_allows(&self, tool: &str, args: &serde_json::Value) -> bool {
-        // Issue #1098: an agent when one is installed, else the authored
-        // workflow this instance is gating. Neither means no subject to match a
-        // permission against, which is every construction site that has set
-        // up neither and is why they are unaffected.
-        let subject = match (self.agent.as_deref(), self.workflow.as_deref()) {
-            (Some(agent), _) => GrantSubject::Agent(agent.to_string()),
-            (None, Some(workflow)) => GrantSubject::Workflow(workflow.to_string()),
-            (None, None) => return false,
-        };
-        // Built only where a log line actually needs it — this runs on every
-        // gated tool call, and the two refusal paths below are the cold ones.
-        let holder = || match &subject {
-            GrantSubject::Agent(agent) => format!("agent '{agent}'"),
-            GrantSubject::Workflow(workflow) => format!("workflow '{workflow}'"),
+        let Some(agent) = self.agent.as_deref() else {
+            return false;
         };
         if Self::is_priced_call(tool, args, Self::amount_usd(args)) {
             return false;
@@ -1049,9 +987,8 @@ impl ApprovalPolicy {
             .is_grantable()
         {
             log::debug!(
-                "[approval] tool '{tool}' holds a standing grant for {} but this \
-                 call is not grantable on its own arguments; parking it",
-                holder()
+                "[approval] tool '{tool}' holds a standing grant for agent '{agent}' but this \
+                 call is not grantable on its own arguments; parking it"
             );
             return false;
         }
@@ -1061,7 +998,7 @@ impl ApprovalPolicy {
         // a grant that never matches its own tool.
         let scope = crate::policy::consequence::standing_scope_of(tool, args);
         let Some(grant) = self.requests.grants().match_standing(
-            &subject,
+            agent,
             tool,
             scope.as_deref(),
             crate::ports::now_millis(),
@@ -1069,10 +1006,9 @@ impl ApprovalPolicy {
             return false;
         };
         log::debug!(
-            "[approval] tool '{tool}' allowed by standing grant {} for {} \
+            "[approval] tool '{tool}' allowed by standing grant {} for agent '{agent}' \
              (expires at {})",
             grant.id,
-            holder(),
             grant.expires_at_millis
         );
         true
@@ -1576,7 +1512,6 @@ mod tests {
             mode: mode.to_string(),
             always_approve: always.iter().map(|s| s.to_string()).collect(),
             auto_approve_under_usd: auto_under,
-            approval_ttl_hours: None,
         };
         ApprovalPolicy::new(&p, Some(25.0))
     }
@@ -1732,7 +1667,6 @@ mod tests {
             mode: "full".to_string(),
             always_approve: fence.iter().map(|s| s.to_string()).collect(),
             auto_approve_under_usd: None,
-            approval_ttl_hours: None,
         });
 
         let mut agreed = 0;
@@ -3552,7 +3486,6 @@ mod tests {
             mode: mode.to_string(),
             always_approve: Vec::new(),
             auto_approve_under_usd: auto_under,
-            approval_ttl_hours: None,
         };
         let queue = ApprovalRequestQueue::default();
         let grants = queue.grants();
@@ -3811,7 +3744,6 @@ mod tests {
             mode: "full".to_string(),
             always_approve: Vec::new(),
             auto_approve_under_usd: None,
-            approval_ttl_hours: None,
         };
         let uncapped = ApprovalPolicy::new(&p, None)
             .with_requests(ApprovalRequestQueue::default())
@@ -3847,7 +3779,6 @@ mod tests {
             mode: "full".to_string(),
             always_approve: Vec::new(),
             auto_approve_under_usd: None,
-            approval_ttl_hours: None,
         };
         let no_meter = ApprovalPolicy::new(&p, Some(5.0))
             .with_requests(ApprovalRequestQueue::default())
@@ -3924,7 +3855,6 @@ mod tests {
         crate::runtime::grants::StandingGrant {
             id: crate::runtime::grants::GrantId::new("g1"),
             agent: agent.to_string(),
-            workflow: None,
             tool: tool.to_string(),
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,

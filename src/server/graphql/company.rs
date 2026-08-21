@@ -16,7 +16,6 @@ use super::finances::FinancesGql;
 use super::inbox::InboxGql;
 use super::memory_facts::{MemoryFactGql, MemoryKindGql};
 use super::pagination::Page;
-use super::policy;
 use super::skills::SkillGql;
 use super::tasks::TaskGql;
 use super::usage::{UsageGql, UsageRangeGql};
@@ -204,19 +203,6 @@ impl CompanyGql {
         connections::resolve_smtp(&self.runtime).await
     }
 
-    /// The approval policy in force (issue #1070).
-    ///
-    /// Answers from the same derivation `GET {scope}/policy` uses, so the two
-    /// read surfaces cannot report different tiers for one company. Read-only:
-    /// the write plane stays REST-and-admin-only (issue #562).
-    ///
-    /// This sits beside [`Self::approvals`] on purpose. That field says what is
-    /// parked; this one says whether anything ever parks, and an empty queue
-    /// means opposite things under `supervised` and `full`.
-    async fn policy(&self) -> async_graphql::Result<policy::PolicyGql> {
-        policy::resolve_policy(&self.runtime).await
-    }
-
     /// The source-template provenance recorded at launch: the stable template
     /// id (directory slug) and, when known, its version. Null for a company
     /// provisioned from a raw manifest body rather than a template.
@@ -363,14 +349,6 @@ pub struct ApprovalGql {
     /// Epoch-millis the effect was parked. `Float` round-trips the full u64
     /// range that would overflow GraphQL's `Int`.
     pub at_millis: f64,
-    /// Epoch-millis this approval default-denies if nobody decides it
-    /// (issue #971). `Float` for the same reason as `atMillis`.
-    ///
-    /// Carried here rather than left to the REST summary alone so the two
-    /// projections of one approval cannot drift into disagreeing about when it
-    /// dies — which is the sort of divergence a reader discovers by acting on
-    /// the wrong one. Null against a host that does not report a deadline.
-    pub expires_at_millis: Option<f64>,
     /// Whether `amountUsd` was withheld from this reader by their role (#618).
     ///
     /// Carried for the same reason it is on the REST summary: a `null` amount
@@ -393,7 +371,6 @@ impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
             kind: summary.kind,
             amount_usd: summary.amount_usd,
             at_millis: summary.at_millis as f64,
-            expires_at_millis: summary.expires_at_millis.map(|ms| ms as f64),
             contents_hidden: summary.contents_hidden,
             workflow_run_id: summary.workflow_run_id,
         }

@@ -379,7 +379,6 @@ mod tests {
                 overlay_policy: None,
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
-                setup: None,
             })
             .await
             .expect("save company");

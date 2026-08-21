@@ -40,7 +40,7 @@ export const OPERATOR_ORIGIN: WorkspaceOrigin = { kind: "operator" };
 export function originLabel(origin: WorkspaceOrigin | undefined): string | null {
   switch (origin?.kind) {
     case "agent":
-      return `Teammate · ${origin.id}`;
+      return `Agent · ${origin.id}`;
     case "seed":
       return "Seeded";
     default:

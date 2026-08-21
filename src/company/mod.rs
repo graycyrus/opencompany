@@ -57,12 +57,6 @@ pub mod mcp_oauth;
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
 pub mod runtime;
-// First-run company setup (issue: docs/spec/runtime/company-setup.md): the
-// curated starting rosters and the rules a proposed roster obeys. Always
-// compiled and model-free on purpose — it is both the input to the optional
-// polish pass and the fallback when that pass cannot run, so a company with no
-// inference credential still gets a real team.
-pub mod setup;
 mod skill_file;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
@@ -137,11 +131,10 @@ pub use types::{
     grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
-    STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
-    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, destination_is_reachable,
-    list_source_workflows, list_workflows_union, list_workflows_with_globals,
-    load_company_workflows, load_workflow_union, load_workflow_with_globals, parse_workflow,
+    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, list_source_workflows,
+    list_workflows_union, list_workflows_with_globals, load_company_workflows, load_workflow_union,
+    load_workflow_with_globals, parse_workflow,
 };
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
 // from its request body, renders it to TOML, and re-parses it through
@@ -166,12 +159,11 @@ pub(crate) use workflow_create::{
     update_company_workflow, workflow_version,
 };
 // Issue #580: the builder pass's courtesy validation, gated with the harness
-// builder that is its only caller. Issue #753 adds the copilot's tool grounding
-// on the same footing, split by #874 into the effective set a proposal may name
-// and the granted-but-unwired remainder that is reported, not offered.
+// builder that is its only caller. Issue #753 adds `workflow_callable_tool_slugs`
+// on the same footing — the create-time copilot's tool grounding.
 #[cfg(feature = "openhuman")]
 pub(crate) use workflow_create::{
-    courtesy_validate_draft, workflow_effective_tool_slugs,
+    courtesy_validate_draft, workflow_callable_tool_slugs, workflow_effective_tool_slugs,
     workflow_granted_but_unwired_tool_slugs, workflow_graph_from_spec, workflow_spec_from_graph,
 };
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};

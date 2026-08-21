@@ -658,7 +658,6 @@ mod tests {
             global: false,
             id: "ceo".into(),
             role: "Chief".into(),
-            name: None,
             description: None,
             tier: None,
             tools: grants.iter().map(|g| g.to_string()).collect(),

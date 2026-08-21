@@ -33,11 +33,10 @@ import { Bot, Loader2, Send } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
-import { ApiError, type WorkflowProblem } from "@/api/types";
+import { ApiError } from "@/api/types";
 import {
   listWorkflowToolSlugs,
   updateWorkflow,
-  type UnwiredWorkflowTool,
   type WorkflowGraph,
   type WorkflowRunOutcome,
 } from "@/api/workflows";
@@ -82,8 +81,6 @@ interface Review {
   state: ProposalState;
   /** The host's refusal of an apply, when one came back. */
   error?: string;
-  /** The per-node breakdown behind {@link error}, when the host sent one (#836). */
-  errorProblems?: WorkflowProblem[];
 }
 
 export function CopilotPanel({
@@ -156,12 +153,6 @@ export function CopilotPanel({
   // `runs`: an empty list on a host that serves the route ("no tools granted")
   // must not read the same as a host that does not serve it ("cannot say").
   const [toolSlugsKnown, setToolSlugsKnown] = useState(false);
-  // Issue #874. Granted here but unwired on this deployment — named to the model
-  // as off-limits, so it can explain the gap rather than propose a node that
-  // fails at the first run.
-  const [unwiredTools, setUnwiredTools] = useState<
-    UnwiredWorkflowTool[] | undefined
-  >(undefined);
   // Issue #415. One entry per company message that carried a proposal block,
   // parsed EXACTLY ONCE, when the message first appears.
   //
@@ -258,13 +249,6 @@ export function CopilotPanel({
     setRoster(undefined);
     setToolSlugs(undefined);
     setToolSlugsKnown(false);
-    // Cleared with the rest of the grounding, and for the same reason. Left
-    // behind, the previous company's unwired list rides along with THIS
-    // company's "the granted tools could not be listed here" for the whole
-    // in-flight window — a prompt that names tools as off-limits in the same
-    // breath as admitting it cannot name the granted ones, built from another
-    // company's wiring.
-    setUnwiredTools(undefined);
     (async () => {
       try {
         const team = await client.listTeam(company);
@@ -278,11 +262,10 @@ export function CopilotPanel({
     })();
     (async () => {
       try {
-        const tools = await listWorkflowToolSlugs(client, company);
+        const slugs = await listWorkflowToolSlugs(client, company);
         if (live) {
-          setToolSlugs(tools.slugs);
+          setToolSlugs(slugs);
           setToolSlugsKnown(true);
-          setUnwiredTools(tools.unwired);
         }
       } catch (e) {
         // The route is absent (older host): "cannot say", not "no tools".
@@ -290,7 +273,6 @@ export function CopilotPanel({
         if (live) {
           setToolSlugs(undefined);
           setToolSlugsKnown(false);
-          setUnwiredTools(undefined);
         }
       }
     })();
@@ -344,12 +326,7 @@ export function CopilotPanel({
     async (messageId: string, proposal: WorkflowProposal) => {
       setReviews((prev) => ({
         ...prev,
-        [messageId]: {
-          ...prev[messageId],
-          state: "applying",
-          error: undefined,
-          errorProblems: undefined,
-        },
+        [messageId]: { ...prev[messageId], state: "applying", error: undefined },
       }));
       try {
         const saved = await updateWorkflow(
@@ -361,12 +338,7 @@ export function CopilotPanel({
         );
         setReviews((prev) => ({
           ...prev,
-          [messageId]: {
-            ...prev[messageId],
-            state: "applied",
-            error: undefined,
-            errorProblems: undefined,
-          },
+          [messageId]: { ...prev[messageId], state: "applied", error: undefined },
         }));
         onApplied(saved);
       } catch (e) {
@@ -378,17 +350,9 @@ export function CopilotPanel({
             : "The change could not be applied.";
         // Back to `pending`, not to a dead end: the diff stays on screen and the
         // operator can dismiss it or retry after reloading.
-        // Issue #836: the host names the node and field it refused on; before
-        // this the console kept only the flattened sentence.
-        const problems = e instanceof ApiError ? e.problems : undefined;
         setReviews((prev) => ({
           ...prev,
-          [messageId]: {
-            ...prev[messageId],
-            state: "pending",
-            error: message,
-            errorProblems: problems,
-          },
+          [messageId]: { ...prev[messageId], state: "pending", error: message },
         }));
         if (conflict && e instanceof ApiError) onConflict?.(e.message);
       }
@@ -400,12 +364,7 @@ export function CopilotPanel({
   const dismiss = useCallback((messageId: string) => {
     setReviews((prev) => ({
       ...prev,
-      [messageId]: {
-        ...prev[messageId],
-        state: "dismissed",
-        error: undefined,
-        errorProblems: undefined,
-      },
+      [messageId]: { ...prev[messageId], state: "dismissed", error: undefined },
     }));
   }, []);
 
@@ -467,15 +426,7 @@ export function CopilotPanel({
         client,
         company,
         workflowId,
-        {
-          graph,
-          runs,
-          runsKnown,
-          roster,
-          toolSlugs,
-          toolSlugsKnown,
-          unwiredTools,
-        },
+        { graph, runs, runsKnown, roster, toolSlugs, toolSlugsKnown },
         question,
       );
       if (!mine()) return;
@@ -528,7 +479,6 @@ export function CopilotPanel({
     sending,
     toolSlugs,
     toolSlugsKnown,
-    unwiredTools,
     workflowId,
   ]);
 
@@ -667,7 +617,6 @@ export function CopilotPanel({
                     state={reviews[m.id].state}
                     blocked={blockedReason(m.id, reviews[m.id])}
                     error={reviews[m.id].error}
-                    problems={reviews[m.id].errorProblems}
                     onApply={() => void apply(m.id, reviews[m.id].proposal!)}
                     onDismiss={() => dismiss(m.id)}
                   />

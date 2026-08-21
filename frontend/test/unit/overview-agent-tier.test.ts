@@ -47,7 +47,6 @@ function member(id: string, over: Partial<TeamMember> = {}): TeamMember {
     role: "Worker",
     description: "",
     tone: "a",
-    avatar: "a",
     inboxEnabled: false,
     effectiveTools: [],
     desks: [],

@@ -10,10 +10,6 @@ type AgentTokens {
 	Total tokens attributed to them.
 	"""
 	tokens: Float!
-	"""
-	Source-currency USD attributed to the teammate, when visible.
-	"""
-	costUsd: Float
 }
 
 """
@@ -38,16 +34,6 @@ type Approval {
 	range that would overflow GraphQL's `Int`.
 	"""
 	atMillis: Float!
-	"""
-	Epoch-millis this approval default-denies if nobody decides it
-	(issue #971). `Float` for the same reason as `atMillis`.
-	
-	Carried here rather than left to the REST summary alone so the two
-	projections of one approval cannot drift into disagreeing about when it
-	dies — which is the sort of divergence a reader discovers by acting on
-	the wrong one. Null against a host that does not report a deadline.
-	"""
-	expiresAtMillis: Float
 	"""
 	Whether `amountUsd` was withheld from this reader by their role (#618).
 	
@@ -207,18 +193,6 @@ type Company {
 	SMTP status — host/port/username only, never the password.
 	"""
 	smtp: SmtpStatus!
-	"""
-	The approval policy in force (issue #1070).
-	
-	Answers from the same derivation `GET {scope}/policy` uses, so the two
-	read surfaces cannot report different tiers for one company. Read-only:
-	the write plane stays REST-and-admin-only (issue #562).
-	
-	This sits beside [`Self::approvals`] on purpose. That field says what is
-	parked; this one says whether anything ever parks, and an empty queue
-	means opposite things under `supervised` and `full`.
-	"""
-	policy: Policy!
 	"""
 	The source-template provenance recorded at launch: the stable template
 	id (directory slug) and, when known, its version. Null for a company
@@ -662,72 +636,6 @@ type MessageStep {
 }
 
 """
-The company's approval policy, as `GET {scope}/policy` reports it.
-"""
-type Policy {
-	"""
-	The tier **actually in force** — the console override where one sets it,
-	the committed manifest otherwise.
-	"""
-	mode: String!
-	"""
-	The always-ask list actually in force. The operator's real lever: it
-	wins over every tier, `full` included.
-	"""
-	alwaysApprove: [String!]!
-	"""
-	The manifest's tier, so a client can see what a reset would restore.
-	"""
-	manifestMode: String!
-	"""
-	The manifest's always-ask list, for the same reason.
-	"""
-	manifestAlwaysApprove: [String!]!
-	"""
-	Whether an operator override is in force.
-	
-	Distinct from comparing `mode` with `manifestMode`: an override that
-	happens to match the manifest is still an override, and is still what a
-	reset would remove.
-	"""
-	overridden: Boolean!
-	"""
-	Who set the override, if one is set.
-	"""
-	setBy: String
-	"""
-	When it was set (epoch millis), if one is set.
-	"""
-	setAtMillis: Float
-	"""
-	The selectable tiers with their operator-facing consequences.
-	"""
-	tiers: [PolicyTier!]!
-	"""
-	When a change bites.
-	"""
-	takesEffect: String!
-}
-
-"""
-One selectable tier and what choosing it means.
-"""
-type PolicyTier {
-	"""
-	The `[policy].mode` word.
-	"""
-	value: String!
-	"""
-	The operator-facing label.
-	"""
-	label: String!
-	"""
-	What choosing it means, in consequences rather than tier vocabulary.
-	"""
-	description: String!
-}
-
-"""
 Call totals for one provider.
 """
 type ProviderCalls {
@@ -1013,10 +921,6 @@ type Usage {
 	Aggregate totals.
 	"""
 	totals: UsageTotals!
-	"""
-	Whether positive cost was withheld by the reader's role.
-	"""
-	costHidden: Boolean!
 }
 
 """
@@ -1074,7 +978,7 @@ type UsageTotals {
 	"""
 	Total inference cost, USD.
 	"""
-	costUsd: Float
+	costUsd: Float!
 	"""
 	Total OAuth calls.
 	"""

@@ -511,11 +511,10 @@ describe("proposalIsStale", () => {
    * A host predating the version token (#259) has no concurrency protection at
    * all, for the canvas editor as much as for a proposal. Refusing every
    * proposal there would invent a protection that does not exist rather than
-   * report one. A current host's `null` (issue #1013 — a non-editable graph's
-   * honest "no token") must be treated the same way.
+   * report one.
    */
   it("does not invent staleness on a host that has no versions", () => {
-    const versionless = { ...graph(), version: null };
+    const versionless = { ...graph(), version: undefined };
     expect(proposalIsStale({ ...proposal, basedOnVersion: undefined }, versionless)).toBe(false);
   });
 });

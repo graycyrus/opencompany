@@ -232,16 +232,20 @@ function Sidebar({
         data-slot="sidebar-container"
         data-side={side}
         className={cn(
-          // `left: 0`, and nothing stands to the left of it any more.
+          // `left` is `--oc-rail-inset`, not 0.
           //
           // This container is `fixed`, so it positions against the VIEWPORT
-          // rather than the column it is written inside. It used to be offset
-          // by `--oc-rail-inset` because the connection rail occupied the first
-          // 56px of the window and pinning this to 0 slid the whole sidebar
-          // underneath it — every icon and the first characters of every label
-          // clipped. Issue #1142 replaced that rail with a switcher in this
-          // sidebar's own header, so the offset has nothing left to clear.
-          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
+          // rather than the column it is written inside. When anything stands
+          // to its left — the connection rail, which appears as soon as there
+          // are two hosts — pinning it to 0 slides the whole sidebar
+          // underneath: every icon and the first characters of every label
+          // disappear behind the rail. The rail already carries `z-50` from an
+          // earlier pass at this, which fixed the clicks landing on the wrong
+          // element and left the sidebar visually cut in half.
+          //
+          // The shell sets the variable; it defaults to 0 so a console with no
+          // rail is unchanged. See `CONNECTION_RAIL_WIDTH`.
+          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-[var(--oc-rail-inset,0px)] data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--oc-rail-inset,0px)-var(--sidebar-width))] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
@@ -612,59 +616,6 @@ function SidebarMenuBadge({
   )
 }
 
-/**
- * The attention mark that survives collapse (issue #1018).
- *
- * # Why this exists beside `SidebarMenuBadge` rather than replacing it
- *
- * [`SidebarMenuBadge`] carries `group-data-[collapsible=icon]:hidden`, and that
- * is correct: a two-digit count does not fit a 32px rail, which is why upstream
- * hides it. The defect was that the count was the sidebar's **only** attention
- * signal, so hiding it hid the fact that anything was waiting at all — a
- * collapsed rail showing nothing is indistinguishable from all-clear.
- *
- * This is the exact mirror of that rule: `hidden` until the rail collapses, then
- * shown. So precisely one of the two renders at any width — a count while there
- * is room to read one, a mark when there is not. Both are driven from the same
- * value, so the collapsed and expanded states can never disagree.
- *
- * # Why a dot and not the number
- *
- * The same reason the select popup fades its clipped row rather than adding a
- * count beside its trigger (issue #975): a signal that has to be *read* does not
- * survive being shrunk. A mark does. What it deliberately does not do is claim
- * how many — the number stays the badge's job, and the accessible name below is
- * where the count goes for anyone who cannot see the mark.
- *
- * `--status-blocked` is the console's existing "waiting on a person" amber, the
- * same one the workflow run panel uses for a parked gate, so this introduces no
- * new colour vocabulary.
- */
-function SidebarMenuDot({
-  className,
-  label,
-  ...props
-}: React.ComponentProps<"span"> & { label: string }) {
-  return (
-    <span
-      data-slot="sidebar-menu-dot"
-      data-sidebar="menu-dot"
-      // `role="img"` + `aria-label` because a bare coloured span is invisible to
-      // a screen reader, and colour alone is not a signal everyone receives. The
-      // label names WHAT is waiting and HOW MANY, so the information the badge
-      // carried visually is not lost with it.
-      role="img"
-      aria-label={label}
-      title={label}
-      className={cn(
-        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full bg-[var(--status-blocked)] ring-2 ring-sidebar select-none group-data-[collapsible=icon]:block",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
 function SidebarMenuSkeleton({
   className,
   showIcon = false,
@@ -778,7 +729,6 @@ export {
   SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
-  SidebarMenuDot,
   SidebarMenuItem,
   SidebarMenuSkeleton,
   SidebarMenuSub,

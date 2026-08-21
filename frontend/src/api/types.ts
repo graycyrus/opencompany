@@ -298,39 +298,7 @@ export interface ApprovalSummary {
   /** The parked effect's dotted kind, e.g. "payment.send". */
   kind: string;
   amount_usd: number | null;
-  /**
-   * Epoch-millis the effect was parked — stamped in the same turn that composed
-   * its arguments, so it dates the **payload**, not the queue (#1024).
-   */
   at_millis: number;
-  /**
-   * Epoch-millis this approval default-denies if nobody decides it (#971) —
-   * `at_millis` plus the company's approval deadline
-   * (`[policy].approval_ttl_hours`, 24 hours by default).
-   *
-   * **Never recompute it.** The host projects it from the gate that actually
-   * enforces the deadline; a console that added its own 24 hours to
-   * `at_millis` would show a deadline nothing enforces, and an operator would
-   * act on "in 3h" and be refused.
-   *
-   * Optional because a host may predate the field. Absent means "this host
-   * does not report deadlines" — render the card exactly as before rather
-   * than guessing one.
-   */
-  expires_at_millis?: number | null;
-  /**
-   * The host's consequence group for the parked effect (#1024).
-   *
-   * Derived server-side from the tool **and its arguments**, so a
-   * `composio_execute` carrying `GMAIL_SEND_EMAIL` arrives as `"send"` rather
-   * than as the catch-all its tool name alone implies. It cannot be computed
-   * here: for a harness tool call `kind` is the tool name, so a console keying
-   * on `kind` would miss exactly the outbound sends this marks.
-   *
-   * Optional, and that is how an old host degrades: no field, no age label,
-   * exactly the pre-#1024 card.
-   */
-  group?: "spend" | "send" | "sign" | "publish" | "hire" | "identity" | "other";
   /**
    * Which board task this approval was parked for (#333). Mirrors `TaskLink` in
    * `src/runtime/journal.rs`.
@@ -408,29 +376,6 @@ export interface ApprovalSummary {
    * alone, exactly as every approval did before this shipped.
    */
   thread?: string | null;
-  /**
-   * Which **workflow run** parked this approval (#880) — the run's correlation
-   * id, the same value `WorkflowRunResult.runId` carries back to the console
-   * that pressed Run.
-   *
-   * The join, and the only one there is: it is what lets a second surface — the
-   * run drawer (#1002) — show the cards *this* run is held on without the host
-   * growing a run-scoped approvals route. Compare it for equality and nothing
-   * else; like every other id here it never reaches the screen.
-   *
-   * **Absent is not "unknown", it is "no workflow run behind this card"** — a
-   * chat turn, a scheduler tick, a task attempt. The host stamps it only for an
-   * *unlinked* park that carries a run id, precisely because `Effect::run_id`
-   * also carries task-attempt ids that must never be read as a workflow run
-   * (`workflow_run_of` in `src/company/runtime.rs`). Absent on a host predating
-   * the field too, and both must read the same way: such a card belongs to the
-   * Approvals page alone, exactly as every approval did before this shipped.
-   *
-   * Snake-case because the REST projection is
-   * (`ApprovalSummary::workflow_run_id` in `src/runtime/types.rs`); the GraphQL
-   * schema camel-cases the same field, and this console reads REST.
-   */
-  workflow_run_id?: string | null;
   /**
    * Which turn's gated calls this one belongs to (#842) — an opaque key shared
    * by every approval a single agent turn parked.
@@ -583,16 +528,6 @@ export interface FeedbackSummary {
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
-/** The bound memory engine, as `/spec` reports it. No endpoint, no credential. */
-export interface MemorySpec {
-  /** `store` | `embedded` | `remote` | `null`. */
-  backend: string;
-  /** The bound engine's own name, absent when the base store serves memory. */
-  driver_id?: string;
-  /** Capability families negotiated at bind time; empty = not negotiated. */
-  capabilities: string[];
-}
-
 export interface AppSpec {
   name: string;
   version: string;
@@ -603,13 +538,6 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
-  /**
-   * The bound memory engine: mode, driver id, and the capability families it
-   * negotiated at bind time. Optional — a host predating the field omits it.
-   * The console shows this so an operator can see what a hosted engine does
-   * NOT support before a cycle discovers it.
-   */
-  memory?: MemorySpec;
   /**
    * Whether the first-run setup flow has been completed on this instance.
    *
@@ -831,23 +759,6 @@ export interface SetBudgetInput {
  * paths (the ingest webhook and the IMAP poller) file into the same store this
  * projects, so received mail shows up here.
  */
-/**
- * One agent-authored dashboard page's manifest, from `GET {scope}/pages`.
- * Mirrors the `page.toml` a page's `Pages/<slug>/` bundle carries
- * (`docs/spec/runtime/pages.md`) — the page's own compiled bundle is served
- * separately, at `GET {scope}/pages/{slug}` (the iframe host document) and
- * `GET {scope}/pages/{slug}/bundle.mjs` (the compiled JS).
- */
-export interface PageManifestDto {
-  slug: string;
-  title: string;
-  /** Optional in the DTO: `page.toml`'s `description` is omitted when absent. */
-  description?: string;
-  /** Optional in the DTO: `page.toml`'s `icon` is omitted when absent. */
-  icon?: string;
-  navVisible: boolean;
-}
-
 export interface InboxDto {
   /** The inbox key (a teammate's local part / slug). */
   key: string;
@@ -893,11 +804,13 @@ export interface InboxMessageDto {
  *   by the Composio plane, which brokers through it. The native OAuth catalog
  *   does **not** route through the company key today, so this value does not
  *   appear on a native-only provider — see `api/credential.ts`.
- * - `static` — a legacy native OAuth token this company already stored. It is
- *   visible and revocable, but no agent can use it.
- * - `none` — neither. A registered native provider application also lands
- *   here: its start route is a dated 410 retirement bridge (issue #838), not a
- *   connection route.
+ * - `static` — a token this company already stored, or this host's own
+ *   registered provider application (the self-hosted hatch). The handshake
+ *   works; the console stopped offering it in issue #822, because what it
+ *   stores is read by no agent tool (#396). So this tier now says what the host
+ *   *could* do, and `connectRoute` (`lib/connections.ts`) routes such a
+ *   provider through Composio or reports it unavailable.
+ * - `none` — neither, so no Connect can succeed on this host.
  */
 export type ConnectionCredentialSource = "attested" | "company" | "static" | "none";
 
@@ -934,6 +847,12 @@ export interface ConnectionState {
    * distinction rather than a confident disconnected state.
    */
   unverified?: boolean;
+}
+
+/** Response of `POST .../connections/{provider}/start`: where to send the user. */
+export interface ConnectionStart {
+  /** The provider's OAuth authorize URL to redirect the operator to. */
+  url: string;
 }
 
 /** The coarse health tier of an MCP server, from a probe. */
@@ -1176,8 +1095,6 @@ export interface UsagePointDto {
 export interface AgentTokensDto {
   name: string;
   tokens: number;
-  /** Source-currency USD, absent when role-redacted. */
-  costUsd?: number;
 }
 
 /** OAuth-connected calls counted for one provider over the window. */
@@ -1191,7 +1108,7 @@ export interface UsageTotalsDto {
   inputTokens: number;
   outputTokens: number;
   tokens: number;
-  costUsd?: number;
+  costUsd: number;
   oauthCalls: number;
   connections: number;
   /**
@@ -1218,8 +1135,6 @@ export interface UsageDto {
   /** OAuth calls per provider, highest first (empty until Phase 2 emit). */
   byProvider: ProviderCallsDto[];
   totals: UsageTotalsDto;
-  /** Positive cost exists but is hidden from this role. */
-  costHidden?: boolean;
 }
 
 /** Spend rolled up by prosumer category (`GET .../finances`). */
@@ -1258,64 +1173,10 @@ export interface FinancesDto {
   transactions: TransactionDto[];
 }
 
-/**
- * One structured problem with a workflow graph the host refused (issue #1016).
- *
- * Field names are the **wire** names, not the console's usual camelCase. The
- * host serialises `WorkflowProblem` with serde's defaults (`src/error.rs`), so
- * the key really is `node_id`; renaming it here to match house style would
- * compile, type-check, and silently read `undefined` at runtime for every
- * problem — the failure this shape exists to prevent.
- *
- * Both locators are optional because a problem need not have one: a graph-level
- * refusal (an inescapable cycle) names several nodes at once and owns neither.
- * `message` is the only field always present, and it is prosumer language ready
- * to render.
- */
-export interface WorkflowProblem {
-  /** The node at fault, or the dangling endpoint for an edge problem. */
-  node_id?: string;
-  /** The config path at fault (`config.url`, `workflow_id`, `from`). */
-  field?: string;
-  /** The human-readable problem. */
-  message: string;
-}
-
-/**
- * Error envelope shape: `{ error, code }`, plus `problems` on a refusal that
- * has them.
- *
- * `problems` is additive and scoped to `workflow_invalid` on the host side, so
- * it is absent from every other error and must stay optional here.
- */
+/** Error envelope shape: `{ error, code }`. */
 export interface ApiErrorBody {
   error: string;
   code: string;
-  problems?: WorkflowProblem[];
-}
-
-/**
- * The "where" of a {@link WorkflowProblem}, or `undefined` when it names no
- * location at all.
- *
- * A function rather than a conditional inside the card's JSX, because the three
- * shapes are the whole of this feature's correctness and the console has no
- * component-test harness to catch a mistake in markup. Extracted after review
- * caught the field-only case being dropped: the first version keyed the whole
- * locator on `node_id`, so a problem carrying `field` and no node rendered its
- * message with no indication of where it came from — and nothing could have
- * failed, because there was nothing to call.
- *
- * All three shapes are real. The host builds a node+field problem through
- * `WorkflowProblem::node_field`, which stores `node_id` only when it is
- * non-blank — so a blank node id with a real field emits exactly the field-only
- * shape — and a graph-level refusal (an inescapable cycle) carries neither.
- */
-export function workflowProblemLocator(problem: WorkflowProblem): string | undefined {
-  const parts = [problem.node_id, problem.field].filter(
-    (part): part is string => typeof part === "string" && part.trim() !== "",
-  );
-  return parts.length ? parts.join(" · ") : undefined;
 }
 
 export class ApiError extends Error {
@@ -1332,23 +1193,6 @@ export class ApiError extends Error {
    * that may sit in state for the life of the view.
    */
   detail?: string;
-
-  /**
-   * The per-node, per-field breakdown behind `message`, when the host sent one
-   * (issue #836).
-   *
-   * The host already computes this and puts it on the wire; before this field
-   * existed the console parsed the envelope's `error` and `code` and dropped
-   * `problems` on the floor, so an operator was told *that* a graph was refused
-   * and never *which node*. `message` remains the flattened sentence and stays
-   * the fallback — a renderer may show this list instead, never in addition to
-   * nothing.
-   *
-   * Absent for every error that is not a workflow refusal, and absent (rather
-   * than empty) when the host sent no array, so `problems?.length` distinguishes
-   * "no breakdown offered" from "a breakdown with nothing in it".
-   */
-  problems?: WorkflowProblem[];
 
   constructor(
     public status: number,

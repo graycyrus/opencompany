@@ -1,14 +1,12 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Issue #300 — a legacy OAuth connection query from inside the onboarding tour.
+ * Issue #300 — an OAuth connection started from inside the onboarding tour.
  *
  * The redirect back from the provider is a **full-page navigation**, so neither
  * half of this can be proven by a unit test: the tour's step state lives in
  * react-joyride's memory and dies with the document, and the failure arms of the
- * host callback used to render a JSON body *as the page*. #838's callback now
- * has a terminal explanatory page; these cover the console's compatibility
- * handling for an older callback URL.
+ * host callback used to render a JSON body *as the page*.
  *
  * These specs drive a running host (see `playwright.config.ts` — the harness
  * brings it up, there is no `webServer`). CI does not run Playwright.
@@ -25,15 +23,7 @@ type Page = import("@playwright/test").Page;
  */
 async function dismissWelcome(page: Page): Promise<void> {
   const skip = page.getByRole("button", { name: "Skip for now" });
-  // Waits rather than sampling. The welcome is held until first-run setup has
-  // read the roster and decided it has nothing to do
-  // (`docs/spec/runtime/company-setup.md`), so it now appears one request later
-  // than it used to — an instantaneous `isVisible()` loses that race and leaves
-  // the dialog blocking every role-based assertion below. Absence is still
-  // tolerated: a company that has already seen the tour never offers it.
-  await skip.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
   if (await skip.isVisible().catch(() => false)) await skip.click();
-  await expect(skip).toBeHidden();
 }
 
 /** The tour's per-company localStorage key, discovered from the running app. */
@@ -45,9 +35,9 @@ async function tourKey(page: Page): Promise<string> {
   return key!;
 }
 
-test("a legacy cancelled-handshake query lands in the console, not on a dead page", async ({ page }) => {
-  // This is the query the former callback used after an operator cancelled at
-  // the provider consent screen. Before the original fix it answered with
+test("a cancelled handshake lands back in the console, not on a dead page", async ({ page }) => {
+  // Exactly what the host now redirects to when the operator cancels at the
+  // provider's consent screen. Before the fix this route answered with
   // `{"error":"provider returned: access_denied"}` as the document body.
   await page.goto("/connections?connect_error=denied&provider=slack");
 

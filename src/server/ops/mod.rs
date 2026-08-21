@@ -38,7 +38,6 @@ pub mod mail;
 pub mod mailer;
 pub mod mcp;
 pub mod memory;
-pub mod pages;
 pub mod policy;
 pub mod read_state;
 /// Issue #245 (operator half): bind a real repository to a company, list what
@@ -47,13 +46,8 @@ pub mod read_state;
 pub mod repos;
 pub mod runs;
 pub mod scope;
-/// First-run company setup: propose a starting roster from three answers
-/// (`docs/spec/runtime/company-setup.md`). Proposes only — the console creates
-/// each teammate through [`team`], so setup has no second write path.
-pub mod setup;
 pub mod skills;
 pub mod smtp;
-mod task_cost;
 pub mod task_export;
 pub mod tasks;
 pub mod team;
@@ -193,14 +187,12 @@ pub fn router() -> Router<AppState> {
         .merge(artifacts::router())
         .merge(memory::router())
         .merge(workspace::router())
-        .merge(pages::router())
         .merge(skills::router())
         .merge(mcp::router())
         .merge(read_state::router())
         .merge(repos::router())
         .merge(inference::router())
         .merge(team::router())
-        .merge(setup::router())
         .merge(policy::router())
         .merge(workflows::router())
         .merge(mail::router());

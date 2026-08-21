@@ -1,7 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
-import { workflowDetailName } from "./workflows";
 
 /**
  * Issue #863: the canvas paints per-node state WHILE a run walks the graph.
@@ -95,20 +94,6 @@ test.describe("workflow canvas during a live run", () => {
     expect(res.ok(), `create ${id}: ${res.status()} ${await res.text()}`).toBeTruthy();
   }
 
-  /**
-   * Best-effort teardown so a failed spec does not poison the next run.
-   * `expectedVersion` is required (issue #1013), so this reads the workflow's
-   * current token first rather than sending a bare DELETE.
-   */
-  async function removeWorkflow(request: APIRequestContext, id: string) {
-    const version = await request
-      .get(`${COMPANY_SCOPE}/workflows/${id}`)
-      .then(async (res) => (res.ok() ? ((await res.json()).version as string | null) : null))
-      .catch(() => null);
-    const query = version ? `?expectedVersion=${encodeURIComponent(version)}` : "";
-    await request.delete(`${COMPANY_SCOPE}/workflows/${id}${query}`).catch(() => undefined);
-  }
-
   /** The per-node run marks the canvas is painting right now. */
   async function painted(page: Page): Promise<Record<string, string>> {
     return page.evaluate(() =>
@@ -148,10 +133,7 @@ test.describe("workflow canvas during a live run", () => {
     try {
       await page.goto(`/#/workflows/${id}`);
       await dismissTour(page);
-      // Issue #1110: a `#/workflows/<id>` link opens that workflow's detail
-      // view directly, so this reads the heading the detail view names itself
-      // with rather than the picker it used to be asserted through.
-      await expect(workflowDetailName(page)).toHaveText(`Live canvas ${id}`, {
+      await expect(page.getByRole("combobox").first()).toContainText(`Live canvas ${id}`, {
         timeout: 30_000,
       });
 
@@ -177,7 +159,7 @@ test.describe("workflow canvas during a live run", () => {
       expect(settled["Step 0"], JSON.stringify(settled)).toBe("ok");
       await run;
     } finally {
-      await removeWorkflow(request, id);
+      await request.delete(`${COMPANY_SCOPE}/workflows/${id}`).catch(() => undefined);
     }
   });
 
@@ -222,7 +204,7 @@ test.describe("workflow canvas during a live run", () => {
       expect(settled["Done"], JSON.stringify(settled)).toBe("ok");
       await run;
     } finally {
-      await removeWorkflow(request, id);
+      await request.delete(`${COMPANY_SCOPE}/workflows/${id}`).catch(() => undefined);
     }
   });
 });

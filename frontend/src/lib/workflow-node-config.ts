@@ -301,47 +301,24 @@ export function configDraftFrom(
 }
 
 /**
- * What {@link configFromDraft} answers: the node's `config` — `undefined` when
- * it would be empty, so the field is omitted from the body — or the reason it
- * could not be built.
+ * Serialize a draft back into a node's `config`, or `undefined` when it would
+ * be empty (so the field is omitted from the body).
  *
- * A value rather than a throw, because of issue #1006. The one caller assembles
- * every node inside its submit path; an exception escaping from there ran past
- * the `finally` that clears `submitting`, which gates both Cancel and the
- * dialog's own close handler. The operator was then locked in the dialog with
- * their unsaved graph, and the only way out — reloading the page — was the one
- * that lost it. A result the caller has to unwrap cannot skip a `finally`.
- */
-export type ConfigFromDraft =
-  | { ok: true; config: Record<string, unknown> | undefined }
-  | { ok: false; error: string };
-
-/**
- * Serialize a draft back into a node's `config`.
- *
- * Empty fields are dropped; `json` fields are parsed; the preserved `extra` bag
- * is re-merged verbatim.
- *
- * A malformed `json` field should never reach here — {@link configDraftProblem}
- * rejects it at submit — so `{ ok: false }` means the two disagreed, which is a
- * programmer error rather than user input. It is still reported as a value:
- * see {@link ConfigFromDraft} for why that distinction is load-bearing.
+ * Empty fields are dropped; `json` fields are parsed (the caller has validated
+ * them via {@link configDraftProblem}, so a parse here would be a programmer
+ * error, not user input); the preserved `extra` bag is re-merged verbatim.
  */
 export function configFromDraft(
   kind: string,
   draft: Record<string, string>,
   extra?: Record<string, unknown>,
-): ConfigFromDraft {
+): Record<string, unknown> | undefined {
   const config: Record<string, unknown> = {};
   for (const spec of configFieldSpecs(kind)) {
     const raw = (draft[spec.key] ?? "").trim();
     if (raw === "") continue;
     if (spec.control === "json") {
-      try {
-        config[spec.key] = JSON.parse(raw);
-      } catch {
-        return { ok: false, error: `${spec.label} must be valid JSON.` };
-      }
+      config[spec.key] = JSON.parse(raw);
     } else if (spec.boolean) {
       config[spec.key] = raw === "true";
     } else {
@@ -353,7 +330,7 @@ export function configFromDraft(
       if (!RESERVED_CONFIG_KEYS.includes(key)) config[key] = value;
     }
   }
-  return { ok: true, config: Object.keys(config).length > 0 ? config : undefined };
+  return Object.keys(config).length > 0 ? config : undefined;
 }
 
 /**
@@ -510,7 +487,7 @@ export function nodeKindConfigProblem(node: {
       // take the whole validation down instead of refusing the one node).
       return typeof node.agent === "string" && node.agent.trim()
         ? null
-        : "An agent step names no teammate — set its `agent` field to a roster teammate (not inside `config`).";
+        : "An agent step names no teammate — set its `agent` field to a roster member (not inside `config`).";
     case "tool_call":
       return nonEmpty("slug")
         ? null

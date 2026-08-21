@@ -1,8 +1,7 @@
 // The task edit form, extracted from the board (#184) so both the Kanban board
 // and the Task Detail screen open the same dialog without a circular import.
 // This is an *edit* form — title / note / column / priority / assignee plus a
-// delete — unchanged from its original home on the board screen (retired in
-// issue #1140; the board is the `tasks` ledger's columns now).
+// delete — unchanged from its original home in `TasksView`.
 
 import { useEffect, useState } from "react";
 import { Loader2, Trash2 } from "lucide-react";

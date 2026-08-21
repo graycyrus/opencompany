@@ -788,7 +788,6 @@ members = ["writer", "ceo"]
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
-            setup: None,
         };
         record.overlay_agents.push(OverlayAgent {
             id: "scoped".to_string(),
@@ -838,7 +837,6 @@ members = ["writer", "ceo"]
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
-                setup: None,
             })
             .await
             .unwrap();

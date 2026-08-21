@@ -263,7 +263,6 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
-                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
@@ -292,7 +291,6 @@ pub(super) fn record() -> CompanyRecord {
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
-        setup: None,
     }
 }
 

@@ -19,11 +19,9 @@ import {
   useRef,
   useState,
   type DragEvent,
-  type ReactNode,
 } from "react";
 import {
   ChevronDown,
-  ChevronRight,
   ChevronUp,
   Crown,
   Plus,
@@ -32,7 +30,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { toast } from "sonner";
 
 import { listPeople } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
@@ -46,14 +43,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  addMemberFailure,
-  addOutcome,
-  NO_TEAM_WRITE_PLANE,
-  reportAddMember,
-  type AddMemberOutcome,
-  type MissedStep,
-} from "@/lib/member-feedback";
 import {
   addableTo,
   buildOrgTree,
@@ -74,30 +63,6 @@ import {
 
 const SEAT_MIME = "application/x-opencompany-seat";
 
-/**
- * Where a teammate named on this chart opens: `#/team/<agentId>`, the sub-page
- * `TeamView` already routes to `AgentDetailView` (issue #1102).
- *
- * A **link**, not a click handler on a `div`. The console routes on the hash,
- * so an `<a href>` is the real address: middle-click and cmd-click open a
- * second console, the browser shows the target on hover, and the keyboard
- * reaches it without this file re-implementing Enter/Space and a focus ring.
- *
- * The id is the one the desk itself names — `OrgSeat.id` is `DeskDto.members[i]`
- * and `TeamMember.id` is the roster id, and `buildOrgTree` resolves the seat by
- * matching those two. That is exactly the id `AgentDetailView` asks the host
- * for, so no translation is needed here — and none should be invented.
- *
- * `null` for an id that is blank or missing, which is the whole point of
- * routing through this function: a teammate with no usable id must render as
- * plain text rather than as a link to `#/team/undefined`, which is a page that
- * cannot exist and would report the teammate as deleted.
- */
-function teamHref(agentId: string | null | undefined): string | null {
-  const id = agentId?.trim();
-  return id ? `#/team/${encodeURIComponent(id)}` : null;
-}
-
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -115,19 +80,11 @@ interface Props {
    * operator just followed.
    */
   focusDeskId?: string | null;
-  /**
-   * Return to the roster at `#/company` (issue #1193).
-   *
-   * The chart is a destination under the Company page rather than a mode of it,
-   * so it owes the operator a way back — the same debt any sub-page has.
-   * Optional, so the chart still stands alone.
-   */
-  onBack?: () => void;
 }
 
 type Load = "loading" | "ready" | "error";
 
-export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
+export function OrgChartView({ client, company, focusDeskId }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [tree, setTree] = useState<OrgTree | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -144,16 +101,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
   const [focusMark, setFocusMark] = useState<string | null>(null);
   const chartRef = useRef<HTMLDivElement | null>(null);
 
-  /**
-   * Re-read the whole chart. Answers whether it landed.
-   *
-   * A read superseded by a newer one counts as landed: another `boot` owns the
-   * screen and will settle it, so reporting a reload failure for it would warn
-   * about a chart nobody is looking at. Only the catch is a real miss, and
-   * `addMember` is the only caller that asks — everything else fires and
-   * forgets, which is why this reports rather than rejects.
-   */
-  const boot = useCallback(async (): Promise<boolean> => {
+  const boot = useCallback(async () => {
     const mine = ++gen.current;
     try {
       // Desks are the only required half — they are the chart. The roster and
@@ -175,11 +123,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
           .catch(() => [] as OrgPerson[]),
         client.status(company).catch(() => null),
       ]);
-      if (mine !== gen.current) return true;
-      // Cleared here rather than at the top of the write that triggered this
-      // read: since #1099 the banner belongs to the load alone, so a chart that
-      // loads is the only thing that can retire the message saying it did not.
-      setError(null);
+      if (mine !== gen.current) return;
       setTree(
         buildOrgTree(
           status?.name || company || "This company",
@@ -189,16 +133,14 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
         ),
       );
       setLoad("ready");
-      return true;
     } catch (e) {
-      if (mine !== gen.current) return true;
+      if (mine !== gen.current) return;
       // A failed `/desks` is a real error, not an empty company. Inventing an
       // empty chart here would tell the operator their desks are gone.
       setError(
         e instanceof Error ? e.message : "Could not load the org chart.",
       );
       setLoad("error");
-      return false;
     }
   }, [client, company]);
 
@@ -290,16 +232,12 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
    */
   async function mutate(key: string, run: () => Promise<unknown>) {
     setBusy(key);
+    setError(null);
     try {
       await run();
       await boot();
     } catch (e) {
-      // Toasted, not banked in the banner above the chart (issue #1099). The
-      // banner is the page's own state — it belongs to a chart that could not
-      // be *loaded*, and it sits with the Retry button that clears it. A write
-      // the operator just attempted is an action, and every other action in
-      // this console answers in a toast.
-      toast.error(
+      setError(
         e instanceof Error ? e.message : "Something went wrong. Try again.",
       );
     } finally {
@@ -316,19 +254,13 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
   async function addMember(fields: NewMemberFields) {
     const deskId = addMemberDeskId;
     setBusy("add-member");
+    setError(null);
     // Whether the host has the teammate, which decides whether the chart needs
     // re-reading on the way out. A desk add that fails after the teammate is
     // created leaves the two disagreeing: the roster has someone the chart has
     // never heard of, so the message telling the operator to place them by hand
     // would point at a dropdown that does not list them yet.
     let createdOnHost = false;
-    // What to say once the chart has been re-read — decided here, raised after
-    // `boot()`, so a refetch that contradicts the write contradicts the message
-    // too rather than arriving a beat behind it.
-    let outcome: AddMemberOutcome;
-    // Every step of the ask that did not land, in the order the operator met
-    // them. Empty is the only thing that earns "Added <name>.".
-    const missed: MissedStep[] = [];
     try {
       let created: TeamMemberDto;
       try {
@@ -343,11 +275,8 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
         createdOnHost = true;
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
-          // No local-only fallback here, unlike the roster and the chat empty
-          // state: a console-only teammate has no host id to place on a desk
-          // and would vanish on the next chart read.
           throw new Error(
-            `${NO_TEAM_WRITE_PLANE} They can't be created from the Company page.`,
+            "This host does not support creating teammates from the Company page.",
           );
         }
         throw e;
@@ -356,78 +285,37 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
         try {
           await client.addDeskMember(deskId, created.id, company);
         } catch (e) {
-          // Created but unplaced — a real half-landing, and the operator has
-          // to know which half, because the fix is on the chart in front of
-          // them rather than in the dialog they just closed.
-          missed.push({
-            what: `they couldn't be added to that desk: ${e instanceof Error ? e.message : "unknown error"}`,
-            fix: "They're on the roster — drag them onto the desk from the chart.",
-          });
+          throw new Error(
+            `Teammate ${fields.name} was created, but could not be added to the selected desk: ${e instanceof Error ? e.message : "unknown error"}`,
+          );
         }
       }
-      if (!(await boot())) {
-        // The chart is on its error state behind this toast. Congratulating the
-        // operator over a banner saying the chart could not be loaded is the
-        // contradiction #1099 set out to remove, not one to add.
-        missed.push({
-          what: "the chart couldn't be read back",
-          fix: "Retry to see where they landed.",
-        });
-      }
-      outcome = addOutcome(fields.name, missed);
+      await boot();
       setAddMemberOpen(false);
     } catch (e) {
       setAddMemberOpen(false);
-      outcome = addMemberFailure(e, "Could not create teammate.");
+      setError(e instanceof Error ? e.message : "Could not create teammate.");
       if (createdOnHost) {
         await boot();
       }
     } finally {
       setBusy(null);
     }
-    reportAddMember(outcome);
   }
 
   return (
     <div ref={chartRef} className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6">
-        {/* A sub-page of Company, so it says where it is and offers the way
-            back (issue #1193). It used to be the other half of a toggle, which
-            said "another view of the same thing" about the one surface that can
-            create a desk. */}
-        {onBack && (
-          <nav aria-label="Breadcrumb">
-            <ol className="flex flex-wrap items-center gap-1 text-sm">
-              <li>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="-ml-2 h-7 px-2 text-muted-foreground"
-                  onClick={onBack}
-                  data-testid="desks-breadcrumb-company"
-                >
-                  Company
-                </Button>
-              </li>
-              <li aria-hidden className="text-muted-foreground">
-                <ChevronRight className="size-3.5" />
-              </li>
-              <li aria-current="page" className="min-w-0 truncate font-medium">
-                Desks
-              </li>
-            </ol>
-          </nav>
-        )}
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
             <p className="text-sm text-muted-foreground">
               How your company is organised: the desks it works from and who
               staffs each one. Add a desk, move someone between desks, or change
               who leads.
             </p>
           </div>
-          <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <div className="flex shrink-0 flex-wrap justify-end gap-2">
             <Button
               size="sm"
               variant="outline"
@@ -829,40 +717,6 @@ function Seat({
     if (sourceDeskId === deskId && Number.isInteger(fromIndex)) onDrop(index);
   }
 
-  // Where this seat opens, or `null` when it opens nowhere. A seat the roster
-  // cannot resolve is deliberately *not* a link: `#/team/<id>` for an id the
-  // host has never heard of lands on the detail view's "no such teammate"
-  // state, so offering the link would send the operator to a dead end to
-  // discover what the badge beside the name already says.
-  const href = seat.known ? teamHref(seat.id) : null;
-
-  const label = (
-    <>
-      {seat.lead && (
-        <Crown
-          role="img"
-          aria-label="Desk lead"
-          className="size-3.5 shrink-0 text-muted-foreground"
-        />
-      )}
-      <span className={cn("truncate", !seat.known && "text-muted-foreground")}>
-        {seat.name}
-      </span>
-      {seat.role && (
-        <span className="truncate text-xs text-muted-foreground">
-          {seat.role}
-        </span>
-      )}
-      {/* A seat naming somebody the roster no longer has. Shown, not hidden:
-          it is a fact about the structure only the operator can fix. */}
-      {!seat.known && (
-        <Badge variant="outline" className="shrink-0 text-3xs">
-          Not on the roster
-        </Badge>
-      )}
-    </>
-  );
-
   return (
     <div
       role="treeitem"
@@ -878,27 +732,32 @@ function Seat({
         busy && "opacity-50",
       )}
     >
-      {href ? (
-        <a
-          href={href}
-          title={`Open ${seat.name}`}
-          // The name is the target, not the whole row: the row is the drag
-          // handle for re-ordering, and a full-row link would make every
-          // attempt to drag a seat read as a click on it.
-          //
-          // `draggable={false}` so a drag that starts on the name is not the
-          // browser's own drag-a-link gesture — it falls through to the row,
-          // which is the draggable ancestor, and re-ordering keeps working
-          // from anywhere on the seat.
-          draggable={false}
-          className="-mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+      <span className="flex min-w-0 items-center gap-1.5">
+        {seat.lead && (
+          <Crown
+            role="img"
+            aria-label="Desk lead"
+            className="size-3.5 shrink-0 text-muted-foreground"
+          />
+        )}
+        <span
+          className={cn("truncate", !seat.known && "text-muted-foreground")}
         >
-          {label}
-          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-        </a>
-      ) : (
-        <span className="flex min-w-0 items-center gap-1.5">{label}</span>
-      )}
+          {seat.name}
+        </span>
+        {seat.role && (
+          <span className="truncate text-xs text-muted-foreground">
+            {seat.role}
+          </span>
+        )}
+        {/* A seat naming somebody the roster no longer has. Shown, not hidden:
+            it is a fact about the structure only the operator can fix. */}
+        {!seat.known && (
+          <Badge variant="outline" className="shrink-0 text-3xs">
+            Not on the roster
+          </Badge>
+        )}
+      </span>
       <span className="flex shrink-0 items-center gap-0.5">
         {/* Moving the second seat up is how the lead changes: `members[0]` IS
             the lead, so there is no separate set-lead call to make. */}
@@ -966,33 +825,14 @@ function Unplaced({ tree }: { tree: OrgTree }) {
             desk above.
           </p>
           <ul className="flex flex-wrap gap-1.5">
-            {tree.unassigned.map((member) => {
-              // These chips name roster teammates, so they open the same page
-              // a seat does (issue #1102) — they were the worse half of that
-              // bug, bordered pills that read as controls and did nothing.
-              const href = teamHref(member.id);
-              return (
-                <li key={member.id}>
-                  {href ? (
-                    <a
-                      href={href}
-                      title={`Open ${member.name}`}
-                      className="flex items-center gap-1 rounded-md border px-2 py-1 text-xs outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
-                    >
-                      {member.name}
-                      <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
-                    </a>
-                  ) : (
-                    // No usable id, so there is nothing to open. Rendered flat
-                    // rather than as a pill: the border is what made the inert
-                    // version of this chip a lie.
-                    <InertChip title="This teammate has no id, so their page can't be opened.">
-                      {member.name}
-                    </InertChip>
-                  )}
-                </li>
-              );
-            })}
+            {tree.unassigned.map((member) => (
+              <li
+                key={member.id}
+                className="rounded-md border px-2 py-1 text-xs"
+              >
+                {member.name}
+              </li>
+            ))}
           </ul>
         </section>
       )}
@@ -1000,51 +840,24 @@ function Unplaced({ tree }: { tree: OrgTree }) {
         <section className="space-y-2">
           <h3 className="text-sm font-medium">People</h3>
           <p className="text-xs text-muted-foreground">
-            The humans who can sign in. Desks staff teammates, so the company
+            The humans who can sign in. Desks staff agents, so the company
             declares no desk for a person, and this chart does not guess one.
           </p>
           <ul className="flex flex-wrap gap-1.5">
-            {/* Deliberately inert, and styled to say so (issue #1102). A person
-                is a console user, not an agent: `#/team/<id>` resolves against
-                the roster, so pointing a person's id at it would 404 every
-                time. There is no person detail page to link to instead, so the
-                pill treatment is dropped rather than left promising one. */}
             {tree.people.map((person) => (
-              <li key={person.id}>
-                <InertChip title="People sign in to the console. Desks staff agents, so a person has no teammate page.">
-                  {person.name}
-                  <span className="ml-1.5">{person.role}</span>
-                </InertChip>
+              <li
+                key={person.id}
+                className="rounded-md border px-2 py-1 text-xs"
+              >
+                {person.name}
+                <span className="ml-1.5 text-muted-foreground">
+                  {person.role}
+                </span>
               </li>
             ))}
           </ul>
         </section>
       )}
     </div>
-  );
-}
-
-/**
- * A name that is only a name.
- *
- * Filled and borderless, with the muted foreground a caption uses: the outlined
- * pill it replaces was indistinguishable from an outline button, which is why
- * #1102 reports these as clicked and inert. Nothing here reacts to a pointer —
- * no hover, no cursor change, no focus ring — because nothing here happens.
- */
-function InertChip({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <span
-      title={title}
-      className="inline-block rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground"
-    >
-      {children}
-    </span>
   );
 }

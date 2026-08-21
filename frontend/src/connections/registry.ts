@@ -204,7 +204,7 @@ export function addConnection(input: AddConnection): ConnectionId {
   const id = remembered?.id ?? mintId();
   const connection: Connection = {
     id,
-    label: input.label ?? rememberedLabel(remembered) ?? hostLabel(baseUrl),
+    label: input.label ?? remembered?.label ?? hostLabel(baseUrl),
     baseUrl,
     defaultCompany,
     credential: input.credential ?? { kind: "cookie" },
@@ -312,31 +312,13 @@ function sameCredential(a: Credential, b: Credential): boolean {
   return true;
 }
 
-/**
- * The same-origin console this page load *is*.
- *
- * Passed by `App` when the bootstrap host is the origin serving the bundle,
- * which is every ordinary web deployment. Absent in the desktop, where a
- * same-origin profile is unreachable and dropped outright by
- * {@link keepIfReachable}, and in a console pointed elsewhere with `?api=`,
- * which makes no claim about what lives at its own origin.
- */
-export interface SameOriginConsole {
-  /** What `?company=` names on this load; `null` for the alias form. */
-  defaultCompany: string | null;
-}
-
-export function restoreConnections(
-  transport?: Transport,
-  sameOrigin?: SameOriginConsole,
-): ConnectionId[] {
+export function restoreConnections(transport?: Transport): ConnectionId[] {
   return readProfiles()
     .filter(keepIfReachable)
-    .filter((profile) => isThisConsole(profile, sameOrigin))
     .map((profile) =>
       addConnection({
         baseUrl: profile.baseUrl,
-        label: rememberedLabel(profile),
+        label: profile.label,
         defaultCompany: profile.defaultCompany,
         credential: profile.credential,
         identity: profile.instanceId ? { instanceId: profile.instanceId } : undefined,
@@ -365,50 +347,11 @@ function keepIfReachable(profile: ConnectionProfile): boolean {
   return false;
 }
 
-/**
- * Whether a same-origin profile is *this* page load's console, or a past one.
- *
- * The second half of issue #1167, and the reason the duplicate row existed at
- * all. Profiles are keyed on `(baseUrl, defaultCompany)` — deliberately, so
- * `?company=a` and `?company=b` keep their view state apart (`findProfile`) —
- * but the empty base url is one host, whichever company a link named. So every
- * distinct `?company=` ever opened against this origin left a durable profile
- * behind, and this function is what used to bring all of them back: one row per
- * company ever visited, all at the same address, all with the same name, and
- * nothing that ever expired them.
- *
- * They are not extra hosts. A connection already carries every company its host
- * serves, and `switchCompany` moves between them *inside* one console
- * (`ConnectionConsole.tsx`) — so a second row for the same origin offers an
- * operator a choice that changes nothing but which of two identical rows is
- * ticked.
- *
- * Skipped rather than forgotten, which is the distinction `retireConnection`
- * exists for: the profile stays, so opening `?company=b` again lands on the
- * same connection id and the same scoped state (`scopedKey`) rather than a
- * freshly minted one.
- */
-function isThisConsole(
-  profile: ConnectionProfile,
-  sameOrigin: SameOriginConsole | undefined,
-): boolean {
-  if (sameOrigin === undefined) return true;
-  if (profile.baseUrl !== "") return true;
-  return profile.defaultCompany === sameOrigin.defaultCompany;
-}
-
-/** Where a host running inside this application is, and who it is. */
+/** Where the host running inside this application is, and who it is. */
 export interface EmbeddedHostInfo {
   baseUrl: string;
   /** Absent only on a shell predating `instance_id` on `oc_embedded`. */
   instanceId?: string;
-  /**
-   * What to call it, when the core has a name from the operator.
-   *
-   * Absent for the host at the data root, which keeps {@link EMBEDDED_LABEL} —
-   * and absent from a shell predating the roster, which has only that one.
-   */
-  label?: string;
   /** Injected in tests. */
   transport?: Transport;
 }
@@ -433,116 +376,33 @@ export interface EmbeddedHostInfo {
  * of them keyed by connection id (see `scopedKey`).
  */
 export function adoptEmbeddedHost(host: EmbeddedHostInfo): ConnectionId {
-  return adoptLocalHosts([host])[0];
-}
-
-/**
- * Registers every host running inside this application, and drops the rest.
- *
- * The generalisation of {@link adoptEmbeddedHost} to a machine running more
- * than one instance, and the reason the pruning could not stay where it was:
- * the single-host version treated *any other* embedded profile as last
- * launch's dead row and removed it. With a roster, another embedded profile is
- * ordinarily the operator's second company — so the set has to be pruned
- * against the set, not against one member of it.
- *
- * Kept as one call rather than a loop of {@link adoptEmbeddedHost} for exactly
- * that reason: the prune needs to see every live instance before it removes
- * anything, and N calls each see one.
- *
- * A **stopped** instance is not passed as a host — it has no address, so a
- * connection for it could only sit in the rail failing its probe. But its id
- * must still be passed in `knownInstanceIds`, and the difference is the whole
- * of the second bug this signature exists to prevent.
- *
- * `removeConnection` forgets the *persisted profile*, and a connection id is
- * what every browser-local key is scoped by (see `scopedKey`). So pruning a
- * stopped instance as though it were a ghost means its tour state, last-read
- * channel and mail draft are orphaned the moment it is stopped, and it comes
- * back from a restart wearing a freshly minted id — #615 again, reached by
- * pressing Stop instead of by relaunching.
- *
- * A stopped instance therefore has its live entry retired and its profile
- * kept: no row in the rail, no lost namespace. Only a profile matching *no*
- * instance the core knows about is a genuine ghost, and only that is forgotten.
- */
-export function adoptLocalHosts(
-  hosts: EmbeddedHostInfo[],
-  /**
-   * Every instance the core holds, running or not.
-   *
-   * Defaulted to the running set so a caller that passes one argument keeps
-   * the old meaning — but `App` always passes the whole roster, because the
-   * running set alone cannot tell "stopped" from "gone".
-   */
-  knownInstanceIds: readonly string[] = hosts
-    .map((host) => host.instanceId)
-    .filter((id): id is string => id !== undefined),
-): ConnectionId[] {
-  const known = embeddedProfiles();
-  const rostered = new Set(knownInstanceIds);
-  // Matched first, all of them, before anything is removed. `thisHost` falls
-  // back to an id-less profile — the one an older version wrote — and two
-  // hosts must not both adopt it, or two connections share one namespace.
-  const claimed = new Set<ConnectionId>();
-  const mine = hosts.map((host) => {
-    const match = thisHost(
-      known.filter((profile) => !claimed.has(profile.id)),
-      host.instanceId,
-    );
-    if (match) claimed.add(match.id);
-    return match;
-  });
-
-  for (const profile of known) {
-    if (claimed.has(profile.id)) continue;
-    if (profile.instanceId !== undefined && rostered.has(profile.instanceId)) {
-      // A stopped instance. Its entry goes — nothing is listening, and a row
-      // that cannot answer is the dead row this whole function exists to
-      // prevent — but its profile stays, so starting it again lands on the
-      // same connection id and the same scoped state.
-      retireConnection(profile.id);
-      continue;
-    }
-    // A genuine ghost: a previous launch's address, or a data root this
-    // application no longer serves. Nothing is listening there and nothing
-    // ever will be again, so it is dropped rather than left failing its probe
-    // in the rail forever.
-    removeConnection(profile.id);
-  }
-
-  return hosts.map((host, index) => adoptOne(host, mine[index]));
-}
-
-function adoptOne(
-  host: EmbeddedHostInfo,
-  mine: ConnectionProfile | undefined,
-): ConnectionId {
   const baseUrl = host.baseUrl.replace(/\/$/, "");
   const identity = host.instanceId ? { instanceId: host.instanceId } : undefined;
+  const known = embeddedProfiles();
+  const mine = thisHost(known, host.instanceId);
+
+  // Whatever else claims to be the host inside this application is a previous
+  // launch's address, or a data root this application no longer serves. Either
+  // way nothing is listening there and nothing ever will be again, so these are
+  // dropped rather than left to fail their probe in the rail forever.
+  for (const stale of known) {
+    if (stale.id !== mine?.id) removeConnection(stale.id);
+  }
 
   if (mine) {
     const registered = entries.find((e) => e.connection.id === mine.id);
     if (registered) {
       // `restoreConnections` already put it back at last launch's address.
-      return reseatEmbedded(registered.connection, baseUrl, identity, host.label);
+      return reseatEmbedded(registered.connection, baseUrl, identity);
     }
     // Not registered this session. Write the new address down first, so the
     // `addConnection` below finds this profile by it and reuses the id.
-    saveProfile({
-      ...mine,
-      baseUrl,
-      label: host.label ?? mine.label,
-      instanceId: host.instanceId ?? mine.instanceId,
-    });
+    saveProfile({ ...mine, baseUrl, instanceId: host.instanceId ?? mine.instanceId });
   }
 
   return addConnection({
     baseUrl,
-    // The core's name wins over the remembered one: renaming an instance
-    // happens there, and a stale label in `localStorage` would quietly outrank
-    // it forever.
-    label: host.label ?? mine?.label ?? EMBEDDED_LABEL,
+    label: mine?.label ?? EMBEDDED_LABEL,
     identity,
     origin: "embedded",
     transport: host.transport,
@@ -576,13 +436,8 @@ function reseatEmbedded(
   connection: Connection,
   baseUrl: string,
   identity: InstanceIdentity | undefined,
-  label?: string,
 ): ConnectionId {
-  if (
-    connection.baseUrl === baseUrl &&
-    connection.origin === "embedded" &&
-    (label === undefined || connection.label === label)
-  ) {
+  if (connection.baseUrl === baseUrl && connection.origin === "embedded") {
     // The same host at the same address: a second call in one session, which
     // StrictMode guarantees. Re-seating would throw away a probe in flight.
     return connection.id;
@@ -590,7 +445,6 @@ function reseatEmbedded(
   reseat(connection.id, {
     ...connection,
     baseUrl,
-    label: label ?? connection.label,
     origin: "embedded",
     identity: identity ?? connection.identity,
     // Whatever the last probe concluded, it concluded about the old address.
@@ -661,23 +515,6 @@ export function adoptSession(id: ConnectionId, session: string): void {
 export function removeConnection(id: ConnectionId): void {
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
-  if (isDesktopRuntime()) forgetConnection(id);
-  emit();
-}
-
-/**
- * Drops a connection from this session **without forgetting who it was.**
- *
- * The difference from {@link removeConnection} is one line — `forgetProfile` —
- * and it is the difference between "this host is gone" and "this host is not
- * running right now". A stopped local instance is the second: there is nothing
- * to talk to, so it must not hold a row, but it still owns a connection id
- * that every `scopedKey` under it is named after.
- */
-function retireConnection(id: ConnectionId): void {
-  const present = entries.some((e) => e.connection.id === id);
-  if (!present) return;
-  entries = entries.filter((e) => e.connection.id !== id);
   if (isDesktopRuntime()) forgetConnection(id);
   emit();
 }
@@ -823,58 +660,12 @@ function labelOf(id: ConnectionId): string {
   return getConnection(id)?.label ?? id;
 }
 
-/**
- * The name every same-origin connection used to carry, and no longer earns.
- *
- * Kept as a constant because two things still need to recognise it: the
- * fallback below, for a runtime with no address to read, and
- * {@link rememberedLabel}, which has to spot it in a profile written before
- * issue #1167 and re-derive rather than restore it.
- */
-export const SAME_ORIGIN_LABEL = "This host";
-
-/**
- * A readable name for a host before it has told us its own.
- *
- * A same-origin host has no url of its own to read, and naming it by a constant
- * is the whole of issue #1167: *every* such connection came out with the same
- * name, so a console holding two offered an operator two identical rows in the
- * host switcher with nothing but the hue of a status dot between them — the
- * failure `adoptLocalHosts` above was written to end, resurfacing somewhere a
- * position and a hover title no longer make up for it.
- *
- * The origin serving this page is what the connection actually addresses, so it
- * is both distinguishing and honest. "This host" is only ever true of one row,
- * and survives here solely for a runtime with no location to read — Node, under
- * the unit tests — where a label is still required and there is nothing better.
- */
+/** A readable name for a host before it has told us its own. */
 export function hostLabel(baseUrl: string): string {
-  if (!baseUrl) return sameOriginLabel();
+  if (!baseUrl) return "This host";
   try {
     return new URL(baseUrl).host;
   } catch {
     return baseUrl;
   }
-}
-
-function sameOriginLabel(): string {
-  const host = typeof window === "undefined" ? "" : (window.location?.host ?? "");
-  return host || SAME_ORIGIN_LABEL;
-}
-
-/**
- * The remembered name for a host, or `undefined` when it is not worth keeping.
- *
- * Installs are durable, so dropping the constant from {@link hostLabel} does
- * nothing on its own: every console that has already run wrote "This host" into
- * `oc.connections.v1`, and a remembered label outranks a derived one — so the
- * indistinguishable name would outlive the fix on exactly the machines that
- * reported it. A profile still carrying it is therefore treated as carrying
- * none. Only the same-origin row is treated this way; a host someone typed is
- * named by its address and could never have been given this label.
- */
-function rememberedLabel(profile: ConnectionProfile | undefined): string | undefined {
-  if (!profile) return undefined;
-  if (profile.baseUrl === "" && profile.label === SAME_ORIGIN_LABEL) return undefined;
-  return profile.label;
 }

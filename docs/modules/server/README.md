@@ -53,7 +53,7 @@ why this is not a read/write split: [authority.md](authority.md).
 | `inbox` | `POST …/inboxes/ingest` (HMAC-signed inbound email) |
 | `domain` | `PUT …/domain`, `POST …/domain/verify` |
 | `smtp` | `PUT …/smtp`, `POST …/smtp/test` |
-| `connections` (feature `oauth`) | `POST …/connections/{provider}/start` → dated `410` retirement bridge, `POST …/connections/{provider}/disconnect`, `GET /api/v1/oauth/callback` → dated `410` browser landing page (#838; removal #1023) |
+| `connections` (feature `oauth`) | `POST …/connections/{provider}/start\|disconnect`, `GET /api/v1/oauth/callback` |
 | `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/runs`, `POST …/workflows/cron/preview`, `GET …/workflows/{wid}`, `PUT …/workflows/{wid}`, `DELETE …/workflows/{wid}`, `POST …/workflows/{wid}/run`, `POST …/workflows/runs/{runId}/cancel` |
 
 ### Exporting a task's record (issue #352)
@@ -275,11 +275,6 @@ poll, which is what makes another operator's post appear without a reload.
 The cron preview (`#262`), the `PUT`/`DELETE` authoring round trip (`#259`)
 and run-time report delivery (`#228`) are documented together in
 [workflow-routes.md](workflow-routes.md).
-
-What a run **adds up to** — the `verdict` both run DTOs carry, why an
-undelivered report is its own reading rather than a failure, and why it is
-derived on the read rather than journaled (issue #981) — has its own focused
-page: [run-verdict.md](run-verdict.md).
 
 ### Pausing a workflow, and the disarm rule (issue #276)
 

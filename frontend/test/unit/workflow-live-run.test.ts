@@ -43,7 +43,6 @@ type Subs = import("@/hooks/use-events").Subscribers;
 const GRAPH: WorkflowGraph = {
   id: "greet",
   name: "Greet",
-  version: null,
   nodes: [
     { id: "start", kind: "trigger", name: "Start" },
     { id: "ceo", kind: "agent", name: "CEO", agent: "ceo" },

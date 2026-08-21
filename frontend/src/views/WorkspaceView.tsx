@@ -120,8 +120,6 @@ interface Props {
    * exactly its old refresh-and-refocus behaviour.
    */
   event?: WorkspaceEvent | null;
-  /** Bumped when incremental event delivery cannot be trusted (#1011). */
-  refreshTick?: number;
   /**
    * A node to open on arrival (issue #552), from the `#/workspace/<nodeId>`
    * hash segment the Artifacts tab's "Open in workspace" link sets.
@@ -335,7 +333,7 @@ function message(e: unknown, fallback: string): string {
  * (#326), and there is no live push, so a write that lands while the tab is open
  * appears on refresh/refocus rather than instantly (#327).
  */
-export function WorkspaceView({ client, company, event, refreshTick = 0, initialNodeId }: Props) {
+export function WorkspaceView({ client, company, event, initialNodeId }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [nodes, setNodes] = useState<FsNode[]>([]);
@@ -721,15 +719,6 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     // Read does not replay the last frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [event?.tick]);
-
-  // A stream gap (or a stream that never reached OPEN) names no single node.
-  // Re-read the canonical tree without disturbing the open editor; the normal
-  // event path above remains responsible for payload-specific handling.
-  useEffect(() => {
-    if (refreshTick === 0) return;
-    void loadTree({ silent: true });
-    if (searchQuery) void runSearch(searchQuery);
-  }, [refreshTick, loadTree, runSearch, searchQuery]);
 
   /**
    * The open note stopped existing while the pane held it.
@@ -1672,7 +1661,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
             <Badge
               variant="outline"
               className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
-              title={`Created by teammate ${node.createdBy.id}`}
+              title={`Created by agent ${node.createdBy.id}`}
               data-testid="workspace-tree-agent-badge"
             >
               {node.createdBy.id}

@@ -50,12 +50,6 @@ pub mod acp_run_turn;
 pub mod audit;
 pub mod brain;
 pub mod build;
-/// Issue #989 (Part 2a of #926): end-to-end proof that a **chat** turn which
-/// pauses at its tool-iteration cap runs the same #244 unpublished-work scan
-/// and nudge the task-dispatch path (`run_task`) already gets — and that a
-/// capped turn which wrote nothing is not nudged on top of it. Test-only.
-#[cfg(test)]
-mod cap_publish_test;
 /// Issue #926: end-to-end proof that a turn which exhausts its tool-iteration
 /// budget pauses **visibly** — the flag is read, the operator gets a second
 /// bubble saying so, and the notice never reaches memory. Test-only.
@@ -92,13 +86,6 @@ pub mod embeddings;
 /// build — the console's Hosting settings write them whether or not this
 /// harness exists to use them.
 pub mod hosting;
-/// End-to-end proof of issue #988: a turn really does get
-/// [`MAX_TOOL_ITERATIONS`](build::MAX_TOOL_ITERATIONS) tool rounds instead of the
-/// vendored ten, and a budget-armed turn's in-turn
-/// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts it when it
-/// outruns its money — distinguishably from an iteration-cap pause. Test-only.
-#[cfg(test)]
-mod iteration_cap_turn_test;
 pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
@@ -106,12 +93,6 @@ pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod orchestrator;
-/// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
-/// `pages_write` / `pages_delete` over `Pages/<slug>/` in the same
-/// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
-/// `Page.tsx` to `Page.compiled.mjs` via `swc_core`. See
-/// `docs/spec/runtime/pages.md`.
-pub mod pages_tools;
 /// Chargebee billing tools (issue #788), wired per company from its own
 /// SecretStore. Always compiled so the credential resolution and the fail-closed
 /// decision are testable at default features; only the tools are gated.
@@ -142,9 +123,6 @@ mod publish_turn_test;
 /// (a full object copy, then every reference back to the mirror severed), plus
 /// the per-turn ledger that deletes it again. See [`repo`].
 pub mod repo;
-/// First-run company setup's pass: one tool-less model call that designs a
-/// company's starting team from three answers. See [`roster_build`].
-pub mod roster_build;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
@@ -155,9 +133,6 @@ pub mod search;
 #[cfg(test)]
 mod search_turn_test;
 pub mod skills;
-pub mod spend;
-#[cfg(test)]
-mod spend_halt_turn_test;
 pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
@@ -591,80 +566,6 @@ pub struct HarnessDeps {
     pub checkouts: repo::CheckoutLedger,
 }
 
-/// A minimal [`HarnessDeps`] for tests that only care about **workflow-tool
-/// wiring**: which namespaces a `tool_call` can reach, and why the others cannot.
-///
-/// Only the inputs [`workflow_tool_wiring`](crate::workflows::caps) actually
-/// reads are parameters — the meter and plan (which resolve the capability
-/// filter per company and spend) and the static filter itself. `search` is
-/// pinned to `None`, because a deployment with no managed search backend is the
-/// shape issue #874 is about. Everything else is the cheapest inert default, so
-/// a test asserting on wiring does not have to name thirty fields that cannot
-/// affect the answer.
-///
-/// Shared rather than copied: the same fixture backs the runtime-level wiring
-/// tests and the `tool-slugs` route test, so both ask about one deployment shape.
-#[cfg(test)]
-pub(crate) fn workflow_wiring_deps(
-    runtime: &crate::CompanyRuntime,
-    meter: Option<Arc<dyn UsageMeter>>,
-    capabilities: toolbelt::CapabilityFilter,
-    plan: Option<capability_budget::CapabilityPlan>,
-) -> HarnessDeps {
-    HarnessDeps {
-        ledgers: None,
-        ledger_registry: Default::default(),
-        provider: Arc::new(provider::MockProvider::default()),
-        provider_slug: "mock".to_string(),
-        context: runtime.context.clone(),
-        store: runtime.store.clone(),
-        meter,
-        workspace_root: std::env::temp_dir(),
-        workspace_git_enabled: false,
-        audit_root: std::env::temp_dir(),
-        model_override: None,
-        tasks: None,
-        artifacts: None,
-        skills: None,
-        skills_source_dir: None,
-        skills_registry: Arc::from([]),
-        mcp_servers: Vec::new(),
-        default_mcp_servers: Vec::new(),
-        facts: None,
-        events: None,
-        delegations: orchestrator::DelegationQueue::default(),
-        workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
-        mcp_failures: mcp_probe::McpFailureQueue::default(),
-        pending_publishes: publish::PendingPublishQueue::default(),
-        workflow_refs: workflow_refs::WorkflowRefQueue::default(),
-        run_outputs: orchestrator::RunOutputCache::default(),
-        run_output_store: None,
-        workflow_revisions: None,
-        approval_requests: policy::ApprovalRequestQueue::default(),
-        secrets: None,
-        web_allowed_domains: Vec::new(),
-        capabilities,
-        workflow_source_dir: None,
-        plan,
-        media: None,
-        composio: None,
-        #[cfg(feature = "chargebee")]
-        chargebee: None,
-        #[cfg(feature = "paypal")]
-        paypal: None,
-        hosting: None,
-        // The staging shape in issue #874: `searchCredentialConfigured: false`.
-        search: None,
-        steer: crate::company::steer::InflightRegistry::default(),
-        run_supervisor: crate::runtime::RunSupervisor::default(),
-        delivery: None,
-        workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: repo::CheckoutLedger::default(),
-    }
-}
-
 /// One live openhuman agent, keyed by its manifest id.
 pub struct CompanyAgent {
     /// The manifest agent id.
@@ -757,57 +658,6 @@ pub struct TurnOutcome {
     /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
     /// would tell the operator to reply "continue" to a turn that never ran.
     pub hit_iteration_cap: bool,
-    /// The in-turn **spend halt**, when one stopped this turn (issue #1032).
-    ///
-    /// `Some` exactly when the teammate declared a `budget_usd_daily`, the
-    /// [`SpendStopHook`](crate::harness::spend::SpendStopHook) armed for it
-    /// fired, and the turn therefore stopped short of the answer it was working
-    /// towards. `None` on every other path, including every turn by a teammate
-    /// who declared no budget — no hook is installed for them, so there is
-    /// nothing that could have halted them.
-    ///
-    /// A **separate** field from [`hit_iteration_cap`](Self::hit_iteration_cap)
-    /// rather than another reading of it, because the two are different
-    /// outcomes needing different operator actions: a step pause is resumable
-    /// with "continue", a spend halt means the work costs more than its budget
-    /// allows and asking again just spends more. #988 pinned that they are
-    /// distinguishable — a budget halt reads `last_turn_hit_cap() == false`,
-    /// because the run paused *below* `max_tool_iterations` — which is why this
-    /// could not be folded into the existing flag.
-    ///
-    /// Carries the figures rather than a bare `bool` so the notice can say what
-    /// was spent against which cap, and names the teammate so a chain of turns
-    /// cannot report a number the operator has no way to attribute.
-    pub halted_for_spend: Option<SpendHalt>,
-}
-
-/// What one in-turn spend halt cost, and whose cap it was measured against
-/// (issue #1032).
-///
-/// The figures are the ones this crate already owns: the cap is
-/// [`CompanyAgent::turn_spend_cap_usd`], and the spend is the sum of the
-/// [`TurnUsage::cost_usd`](crate::harness::cost::TurnUsage::cost_usd) totals the
-/// turn already reports. Deliberately **not** parsed out of the vendored hook's
-/// `reason` string, which is a developer-facing trace line whose shape is
-/// upstream's to change.
-///
-/// `agent` is carried because one operator bubble can cover a responder turn, a
-/// desk turn and a relay turn, each with its own cap. The iteration-cap notice
-/// declines to name a number for exactly that reason; naming the teammate is
-/// what makes a number attributable, and is why this one can be quoted where
-/// that one could not.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SpendHalt {
-    /// The teammate whose cap was reached.
-    pub agent: String,
-    /// What that teammate's turn had spent when the brake fired, in USD.
-    ///
-    /// Can exceed [`cap_usd`](Self::cap_usd): the brake fires *between* tool
-    /// iterations, so the call that crossed the line has already been paid for.
-    pub spent_usd: f64,
-    /// The cap it was measured against, in USD — the teammate's declared
-    /// `budget_usd_daily`.
-    pub cap_usd: f64,
 }
 
 impl CompanyAgent {
@@ -917,47 +767,14 @@ impl CompanyAgent {
         let mut agent = self.agent.lock().await;
         agent.set_on_progress(Some(tx));
 
-        // Two hooks, both fired by openhuman between tool-loop iterations:
-        //
-        // * the **steer** hook, only when an operator control is provided (#111);
-        // * the **budget** hook, only when this teammate declares a
-        //   `budget_usd_daily` cap (#988) — the in-turn spend brake. A teammate
-        //   with no declared budget gets no hook, which matches the vendored
-        //   runtime's own posture: openhuman constructs `BudgetStopHook` nowhere
-        //   and explicitly "never hard-stops a user-present turn that isn't
-        //   actively burning a live budget". A turn that never outruns a real
-        //   budget has nothing to protect it from, and a blanket magic number no
-        //   operator can see or change would be worse than none.
-        //
-        // A budget halt and an iteration-cap pause are **different outcomes**, not
-        // two spellings of one: openhuman reports the cap through
-        // `Agent::last_turn_hit_cap`, which stays `false` for a hook-driven stop
-        // (the run paused below `max_tool_iterations`, so its cap predicate does
-        // not hold). Part 1 of #926 makes the cap pause operator-visible; it must
-        // not inherit budget halts.
-        let mut hooks: Vec<Arc<dyn oh::agent::stop_hooks::StopHook>> = Vec::new();
-        if let Some(control) = steer {
-            hooks.push(Arc::new(crate::harness::steer::SteerStopHook::new(
+        // Install the steer hook only when a control is provided; an empty hook
+        // list is exactly the pre-#111 behaviour.
+        let hooks: Vec<Arc<dyn oh::agent::stop_hooks::StopHook>> = match steer {
+            Some(control) => vec![Arc::new(crate::harness::steer::SteerStopHook::new(
                 control.clone(),
-            )));
-        }
-        // Issue #1032: the budget hook is *wrapped* rather than pushed bare, so
-        // the halt survives the boundary. Upstream's `StopDecision::Stop` is
-        // consumed inside openhuman's tool loop, which returns the run's text as
-        // an ordinary `Ok(reply)`; `with_stop_hooks` hands back only the
-        // future's value; and `last_turn_hit_cap()` is `false` here by design.
-        // Without the wrapper there is nothing left to read, and a turn stopped
-        // for spend is indistinguishable from one that finished.
-        //
-        // The predicate itself stays upstream's — the wrapper only observes it.
-        let mut spend_brake: Option<(f64, Arc<std::sync::atomic::AtomicBool>)> = None;
-        if let Some(cap) = self.turn_spend_cap_usd() {
-            let hook = crate::harness::spend::SpendStopHook::new(cap);
-            // Taken before the hook is boxed into the task-local list; once it
-            // is an `Arc<dyn StopHook>` the concrete type is unreachable.
-            spend_brake = Some((cap, hook.halted()));
-            hooks.push(Arc::new(hook));
-        }
+            ))],
+            None => Vec::new(),
+        };
 
         // `Box::pin` at the task-local scope boundary (the nested-scope
         // stack-overflow trap). The turn body owns the retry classification and
@@ -976,41 +793,7 @@ impl CompanyAgent {
                             // Retry-guard edge: skip the one-shot retry when an
                             // operator steer already pends, so a cancel/pause
                             // before any text can't restart the work.
-                            //
-                            // Issue #1032 adds the second guard, on the same
-                            // reasoning: the work was stopped on purpose, and an
-                            // empty reply is not licence to restart it. The
-                            // retry is a fresh `agent.turn`, so openhuman builds
-                            // it a fresh `TurnCost` — the brake's accumulator
-                            // starts back at zero, and a teammate that had just
-                            // exhausted its cap could spend up to a whole cap
-                            // again before the hook fired a second time. The
-                            // brake is armed per turn, so nothing else here
-                            // would stop it.
-                            //
-                            // **Defence in depth, not a fix to an observed bug,
-                            // and the difference is recorded so nobody re-derives
-                            // it.** The `Empty` arm appears to be unreachable
-                            // after a halt: a halt implies at least one completed
-                            // tool iteration, and openhuman answers the post-halt
-                            // wrap-up with its own synthesised "here's what I did
-                            // this turn" summary — which it substitutes even when
-                            // the wrap-up call returns blank text OR no choices
-                            // at all. Both were scripted against the real turn
-                            // loop and neither reached this arm, so there is no
-                            // test here that would fail without this guard, and
-                            // one was deliberately not left behind pretending
-                            // otherwise. What the guard buys is that the
-                            // invariant stops depending on that substitution
-                            // staying true across a vendored bump.
-                            //
-                            // `halted_for_spend` below still reports the halt
-                            // either way, so the operator gets the notice that
-                            // explains a stub reply rather than silence.
-                            let spend_halted = spend_brake.as_ref().is_some_and(|(_, halted)| {
-                                halted.load(std::sync::atomic::Ordering::SeqCst)
-                            });
-                            if steer.map(|c| c.requested()).unwrap_or(false) || spend_halted {
+                            if steer.map(|c| c.requested()).unwrap_or(false) {
                                 Ok(crate::harness::mcp_probe::scrub(GRACEFUL_EMPTY_REPLY, &[]))
                             } else {
                                 let second = agent.turn(message).await;
@@ -1064,32 +847,6 @@ impl CompanyAgent {
                 "[turn] paused at the tool-iteration cap; the reply is a resumable checkpoint, not a finished answer"
             );
         }
-        // Issue #1032: read the spend brake the same way. Not under the agent
-        // lock — the flag lives on the hook, not on the vendored session, and
-        // the hook has already finished running by the time `with_stop_hooks`
-        // returns.
-        //
-        // The spend is summed over every attempt's usage rather than read from
-        // the hook, so the figure covers the retry path's second attempt too:
-        // both were paid for, and reporting only one would understate what the
-        // turn actually cost.
-        let halted_for_spend = spend_brake.and_then(|(cap_usd, halted)| {
-            halted
-                .load(std::sync::atomic::Ordering::SeqCst)
-                .then(|| SpendHalt {
-                    agent: self.agent_id.clone(),
-                    spent_usd: usages.iter().map(|usage| usage.cost_usd).sum(),
-                    cap_usd,
-                })
-        });
-        if let Some(halt) = &halted_for_spend {
-            tracing::info!(
-                agent = %self.agent_id,
-                spent_usd = halt.spent_usd,
-                cap_usd = halt.cap_usd,
-                "[turn] halted at the in-turn spend cap; the reply stops short of the work it was doing"
-            );
-        }
         let steps = steps::fold_steps(events);
 
         let reply = reply?;
@@ -1098,39 +855,9 @@ impl CompanyAgent {
                 reply,
                 steps,
                 hit_iteration_cap,
-                halted_for_spend,
             },
             usages,
         ))
-    }
-
-    /// This turn's in-turn spend ceiling, in USD — the value that
-    /// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts the turn
-    /// at, armed only when the teammate declares a `budget_usd_daily` cap
-    /// (issue #988). `None` means no hook is installed.
-    ///
-    /// This mirrors the vendored runtime's own posture. OpenCompany's plan-level
-    /// token ceiling and a teammate's `budget_usd_daily` are **pre-dispatch** —
-    /// they decide whether to start a turn and cannot see inside one — and
-    /// openhuman itself constructs `BudgetStopHook` nowhere, applying only an
-    /// opt-in token-based goal hook. So this crate, like upstream, arms the
-    /// in-turn brake only for a teammate who has opted into a budget: a declared
-    /// `budget_usd_daily` cap also bounds any single turn of that teammate's, so
-    /// the worst-case overshoot is "one daily cap" rather than "one turn, of
-    /// unknown size". A teammate with no declared budget gets no hook — the
-    /// runtime never hard-stops a turn that isn't actively burning a live budget
-    /// — and there is no blanket magic number no operator can see or change.
-    ///
-    /// A non-finite or non-positive manifest value is ignored (no hook armed)
-    /// rather than forwarded: the vendored hook fails closed on a malformed cap
-    /// and would halt every turn at iteration one. Such a teammate is already
-    /// refused before dispatch (`spent >= cap` holds at zero spend), so this only
-    /// guards the path where no meter was available to make that call.
-    fn turn_spend_cap_usd(&self) -> Option<f64> {
-        match self.budget_usd_daily {
-            Some(daily) if daily.is_finite() && daily > 0.0 => Some(daily),
-            _ => None,
-        }
     }
 
     /// Classify one `agent.turn` result for the retry wrapper.
@@ -2271,11 +1998,6 @@ impl HarnessPool {
                                 // No model call ran, so no cap was reached
                                 // (issue #926). A refusal is not a pause.
                                 hit_iteration_cap: false,
-                                // And no in-turn hook fired, because no turn
-                                // ran (issue #1032). The reply already IS the
-                                // budget notice; labelling this as a halt too
-                                // would tell the operator the same thing twice.
-                                halted_for_spend: None,
                             });
                         }
                     }
@@ -2522,11 +2244,6 @@ impl HarnessPool {
                                     // No model call ran, so no cap was reached
                                     // (issue #926). A refusal is not a pause.
                                     hit_iteration_cap: false,
-                                    // Same teammate cap, refused BEFORE the
-                                    // turn (issue #1032). The in-turn brake
-                                    // never armed, and the reply above already
-                                    // names the cap it refused against.
-                                    halted_for_spend: None,
                                 });
                             }
                         }
@@ -3198,19 +2915,16 @@ pub(crate) fn build_roster(
 /// model), and no manifest budget cap — an overlay teammate has no manifest row
 /// at all, so its cap (if any) comes from the record's budget overrides via
 /// [`CompanyRecord::effective_budget`], resolved by the caller. The overlay's
-/// `name` is carried across (issue #1105): it is what
-/// [`crate::metering::roster_display_names`] labels this teammate with
-/// everywhere in the console, so
-/// [`persona_prompt`](crate::company::prompt::persona_prompt) needs it to frame the
-/// agent as the person the operator is addressing. Dropping it here — as this
-/// did until #1105 — left the model knowing only its role, so it denied being
-/// the name on its own DM header.
+/// `name` is a display
+/// label only — already surfaced through
+/// [`crate::metering::roster_display_names`] — so the persona is framed from
+/// `role`/`description` alone, exactly like a manifest teammate
+/// ([`build::persona_prompt`]).
 fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     ManifestAgent {
         global: false,
         id: overlay.id.clone(),
         role: overlay.role.clone(),
-        name: Some(overlay.name.clone()),
         description: overlay.description.clone(),
         tier: None,
         // Issue #661 / L5: carry the overlay's own per-teammate grant. An empty
@@ -3372,30 +3086,6 @@ mod tests {
             agent_effective_grants(&allow, &manifest.tools),
             allow,
             "an empty grant falls back to the full company allow-list"
-        );
-    }
-
-    /// Issue #1105: the overlay's display name is the only place the operator's
-    /// chosen name exists, and the console shows it on the DM header, subtitle
-    /// and composer. Dropping it here left the persona framed from the role
-    /// alone, so the teammate denied being the person on its own header.
-    #[test]
-    fn overlay_agent_to_manifest_carries_the_display_name() {
-        let overlay = OverlayAgent {
-            id: "alex".into(),
-            name: "Alex".into(),
-            role: "Content Writer".into(),
-            description: None,
-            tools: Vec::new(),
-        };
-
-        let manifest = overlay_agent_to_manifest(&overlay);
-        assert_eq!(manifest.name.as_deref(), Some("Alex"));
-        // And it reaches the one place it has to: the persona the model reads.
-        let persona = crate::company::prompt::persona_prompt("Acme", &manifest);
-        assert!(
-            persona.contains("You are Alex, the Content Writer at Acme"),
-            "{persona}"
         );
     }
 
@@ -3630,7 +3320,6 @@ description = "Builds the product."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
-            setup: None,
         }
     }
 
@@ -5561,7 +5250,6 @@ description = "Sets direction."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
-            setup: None,
         }
     }
 
@@ -6587,7 +6275,6 @@ budget_usd_daily = 0.0
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
-            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -6707,7 +6394,6 @@ budget_usd_daily = 0.0
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
-            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),

@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
-import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
+import { approvalSummary, grantHeadline, timeAgo, toolAction } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
@@ -193,9 +193,9 @@ export function ApprovalsView({
       // for a one-off and for a week-long permission, and the operator has to be
       // able to tell those apart from the confirmation they just got.
       //
-      // …and only say "the teammate" when there IS one (#395). A card with no
+      // …and only say "the agent" when there IS one (#395). A card with no
       // `agent` is one the runtime performs itself — a paused workflow gate, a
-      // cold-recipient report — and naming a teammate there is the same shape of
+      // cold-recipient report — and naming an agent there is the same shape of
       // small lie the wording above exists to remove. The work is still in
       // flight either way, so both halves say so; only the actor changes.
       // Issue #561: what happens next is the host's answer, not this view's
@@ -231,7 +231,7 @@ export function ApprovalsView({
       if (mayHaveLanded(err, Date.now() - startedAt)) {
         const line =
           verdict === "approve"
-            ? "Approved — the host didn't answer in time, but your decision was recorded. The teammate may still be working; no need to approve again."
+            ? "Approved — the host didn't answer in time, but your decision was recorded. The agent may still be working; no need to approve again."
             : "Declined — the host didn't answer in time, but your decision was recorded. No need to decline again.";
         onResolved(line);
         // Neither a success nor an error: the verdict is durable, the
@@ -293,15 +293,6 @@ export function ApprovalsView({
                   : `${visible.length} things need your approval`}
               </h2>
             </div>
-            {/* #971: nothing may vanish unannounced. Requests now age out on
-                their own, so the queue says so once, up front — mirroring the
-                standing-permissions section's "Each one expires on its own"
-                below. Each card carries its own deadline; this is the sentence
-                that stops that deadline being a surprise. */}
-            <p className="mb-3 text-xs text-muted-foreground">
-              Each one has a deadline. Anything still undecided by then is
-              declined on its own, and the work behind it moves on.
-            </p>
             <div className="flex flex-col gap-3">
               {visible.map((a) => (
                 <ApprovalCard
@@ -514,6 +505,15 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
   return granterNames.get(g.granted_by.id) ?? "someone with admin access";
 }
 
+/** "in 42m" / "in 6h" / "in 3d" — how long a permission has left. */
+function untilLabel(atMillis: number, now: number): string {
+  const mins = Math.max(0, Math.round((atMillis - now) / 60_000));
+  if (mins < 60) return `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
+
 /**
  * One parked approval, told in full (#372).
  *
@@ -561,7 +561,7 @@ function ApprovalCard({
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
   return (
-    <Card data-approval-id={a.id}>
+    <Card>
       <CardContent className="flex flex-col gap-3 py-4">
         <ApprovalHeadline
           approval={a}
@@ -627,7 +627,7 @@ function ApprovalCard({
           status={
             deciding
               ? deciding === "approve"
-                ? "Waiting for the teammate…"
+                ? "Waiting for the agent…"
                 : "Recording…"
               : batchTotal > 1
                 ? // Deliberately a count and not a link: the row is decided

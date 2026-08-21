@@ -109,7 +109,6 @@ pub fn router(state: AppState) -> Router {
 fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router {
     let router = Router::new()
         .route("/healthz", get(healthz))
-        .route("/healthz/busy", get(busy))
         .route("/spec", get(spec))
         .route("/tiny", get(tiny))
         .merge(crate::server::operator::router())
@@ -244,19 +243,13 @@ impl Serving {
         self.listener.local_addr()
     }
 
-    /// Serves until a termination signal arrives (see [`serve_on`]) or the task
-    /// is dropped.
+    /// Serves until the process ends or the task is dropped.
     pub async fn run(self) -> Result<()> {
         serve_on(self.listener, self.state).await
     }
 }
 
-/// Serves on a listener the caller already bound, until a termination signal.
-///
-/// Returns `Ok(())` on a graceful shutdown, so the CLI's `serve` exits `0` on a
-/// rollout rather than reporting a failure it did not have. What "graceful"
-/// means here — and what it deliberately does not wait for — is spelled out on
-/// [`serve_on_until`].
+/// Serves on a listener the caller already bound.
 ///
 /// The one production serving path — `bind`/`serve` and the desktop app's own
 /// [`start_local`](crate::desktop::start_local) both end up here, so there is
@@ -275,162 +268,16 @@ impl Serving {
 /// loopback, so the peer this process observes reads as loopback regardless of
 /// where its own caller actually was).
 pub async fn serve_on(listener: TcpListener, state: AppState) -> Result<()> {
-    serve_on_until(listener, state, crate::server::shutdown::signal()).await
-}
-
-/// [`serve_on`] with the termination signal supplied by the caller.
-///
-/// Exists for tests: a test cannot raise a real `SIGTERM` at its own process
-/// without every *other* test in the binary receiving it too, and the thing
-/// worth proving here is what happens *after* the signal, not that tokio
-/// delivers one.
-///
-/// ## The shutdown sequence
-///
-/// On the signal, in order:
-///
-/// 1. Every registered company stops accepting new cycles and the ones in
-///    flight are waited on, bounded by
-///    [`shutdown::grace_from_env`](crate::server::shutdown::grace_from_env).
-///    The server is deliberately **still serving** through this: the console's
-///    event stream is how an operator watches the turn land, and cutting it at
-///    the signal would hide the very work the drain exists to preserve. New
-///    cycles are refused with `503 Quiescing` in the meantime, which is what
-///    "stop accepting new work" means for a host whose work does not arrive on
-///    the connection it will be done on.
-/// 2. The listener stops accepting and open connections are given
-///    [`CONNECTION_GRACE`](crate::server::shutdown::CONNECTION_GRACE) to finish
-///    writing.
-/// 3. The process returns regardless. This is the ceiling that matters: the
-///    console's event stream never ends on its own, so waiting for connections
-///    to close on their own terms would hold the pod open until the kubelet's
-///    `SIGKILL` — trading a clean exit for the exact abrupt one this is here to
-///    remove.
-///
-/// Step 2's clock starts when the drain *returns*, not at the signal, so an idle
-/// host with an open event stream exits in about `CONNECTION_GRACE` rather than
-/// sitting out the whole bound. Total time from signal to exit is therefore at
-/// most `grace + CONNECTION_GRACE` — the number the pod's
-/// `terminationGracePeriodSeconds` has to stay above.
-///
-/// `/healthz` is untouched. Nothing in this path runs before the signal, and the
-/// signal only arrives at the end of a pod's life — the manager's
-/// wake-on-request proxy blocks on that endpoint during *boot*, which this
-/// cannot reach.
-pub async fn serve_on_until<S>(listener: TcpListener, state: AppState, signal: S) -> Result<()>
-where
-    S: std::future::Future<Output = ()> + Send + 'static,
-{
-    serve_on_until_with_grace(
-        listener,
-        state,
-        signal,
-        crate::server::shutdown::grace_from_env(),
-    )
-    .await
-}
-
-/// [`serve_on_until`] with the drain bound supplied by the caller.
-///
-/// Split out so a test can prove the ceiling without waiting the real
-/// twenty-five seconds for it — and without mutating process environment, which
-/// no test can do safely in a binary whose other tests share the process.
-pub(crate) async fn serve_on_until_with_grace<S>(
-    listener: TcpListener,
-    state: AppState,
-    signal: S,
-    grace: std::time::Duration,
-) -> Result<()>
-where
-    S: std::future::Future<Output = ()> + Send + 'static,
-{
-    use std::future::IntoFuture;
-
-    let drain_state = state.clone();
-    // Starts the ceiling's clock when the *drain* returns, not at the signal.
-    //
-    // Timing it from the signal instead would make the connection window
-    // whatever the drain left over — up to the whole of `grace` on an idle host
-    // — so a tenant with nothing in flight but an open event stream would sit
-    // there for the full bound before exiting. That is the rollout latency this
-    // whole change exists to reduce. Drained-then-two-seconds keeps the worst
-    // case identical (`grace` + `CONNECTION_GRACE`, since `drain` is itself
-    // bounded by `grace`) while letting the common case go quickly.
-    let (drained_tx, drained_rx) = tokio::sync::oneshot::channel::<()>();
-    let shutting_down = async move {
-        signal.await;
-        crate::server::shutdown::arm_force_exit_on_second_signal();
-        crate::server::shutdown::drain(&drain_state, grace).await;
-        let _ = drained_tx.send(());
-    };
-
-    // `into_future` because `WithGracefulShutdown` is `IntoFuture`, not
-    // `Future`, and the ceiling below has to race a *pinned* server future.
-    let serving = axum::serve(
+    axum::serve(
         listener,
         router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutting_down)
-    .into_future();
-    tokio::pin!(serving);
-    // `Err` means the sender was dropped, which can only happen once the serve
-    // future is gone — at which point the other arm has already won.
-    let ceiling = async {
-        if drained_rx.await.is_err() {
-            std::future::pending::<()>().await;
-        }
-        tokio::time::sleep(crate::server::shutdown::CONNECTION_GRACE).await;
-    };
-
-    tokio::select! {
-        served = &mut serving => served?,
-        () = ceiling => tracing::warn!(
-            "connections were still open {}s after the drain finished; exiting anyway",
-            crate::server::shutdown::CONNECTION_GRACE.as_secs()
-        ),
-    }
+    .await?;
     Ok(())
 }
 
 async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
-}
-
-/// Whether this workload is doing anything — the signal the manager consults
-/// before scaling the tenant to zero (opencompany-microservice#22).
-///
-/// The manager measures "idle" by inbound proxied traffic alone, so a company
-/// working through a long turn produces none of its own and looks exactly like
-/// one nobody has opened. Parking it there destroys the work in flight. This
-/// answers the question the manager cannot infer.
-///
-/// Deliberately a **sibling** of `/healthz` rather than a field on it. The
-/// wake-on-request proxy blocks on `/healthz` and gives up after its startup
-/// budget, so anything that makes that endpoint slower or heavier directly
-/// degrades every cold start — a hard constraint in the issue.
-///
-/// Asks each company runtime, which combines three sources — the per-company
-/// cycle lock, the workflow run supervisor, and the in-flight steer registry.
-/// No one of them sees all the work: the first version of this endpoint read
-/// only the last and therefore missed the top-level operator chat turn, which
-/// is the case #22 actually measured.
-///
-/// Holds no lock across an await and does no I/O. The cost is a non-blocking
-/// `try_lock`, a `RwLock` read to enumerate companies, and one `Mutex`
-/// acquisition each — the manager calls this once per idle tenant per scan
-/// against a short timeout, so anything that could block would stall the sweep.
-///
-/// Unauthenticated on purpose. It reveals one boolean about the workload the
-/// caller can already reach, and requiring a credential would mean the manager
-/// holding a per-tenant secret purely to ask whether to stop it.
-async fn busy(State(state): State<AppState>) -> Json<BusyResponse> {
-    let busy = state
-        .registry()
-        .list()
-        .into_iter()
-        .filter_map(|id| state.registry().get(&id))
-        .any(|runtime| runtime.is_busy());
-    Json(BusyResponse { busy })
 }
 
 async fn spec(State(state): State<AppState>) -> Json<crate::app::AppSpec> {
@@ -444,11 +291,6 @@ async fn tiny(State(state): State<AppState>) -> Json<Vec<crate::tiny::RuntimeMod
 #[derive(Clone, Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct BusyResponse {
-    busy: bool,
 }
 
 #[cfg(test)]
@@ -681,67 +523,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    /// An idle workload reports `busy: false`, so the manager parks it as it
-    /// always has.
-    ///
-    /// Note what this does *not* prove: with an empty registry the handler
-    /// iterates nothing and returns `false` without consulting any runtime, so
-    /// this cannot fail for an aggregation bug. The direction that matters —
-    /// that the endpoint can report `true` — is covered by
-    /// `is_busy_sees_a_cycle_holding_the_serial_lock` in `company::runtime`,
-    /// which exercises the real signal against a real runtime.
-    #[tokio::test]
-    async fn busy_is_false_when_nothing_is_running() {
-        let app = router(AppState::new(AppConfig::default()));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/healthz/busy")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["busy"], serde_json::Value::Bool(false), "{json}");
-    }
-
-    /// The wire shape the manager parses. It reads a top-level boolean `busy`
-    /// and treats anything else — a missing field, a rename, a string `"true"` —
-    /// as *not busy*, so a change here would silently stop protecting work in
-    /// flight rather than fail loudly.
-    #[tokio::test]
-    async fn busy_responds_with_the_shape_the_manager_parses() {
-        let app = router(AppState::new(AppConfig::default()));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/healthz/busy")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            json.get("busy")
-                .and_then(serde_json::Value::as_bool)
-                .is_some(),
-            "the manager reads a top-level boolean `busy`; got {json}"
-        );
-    }
-
     #[tokio::test]
     async fn healthz_returns_ok() {
         let app = router(AppState::new(AppConfig::default()));
@@ -901,6 +682,7 @@ mod tests {
             memory_driver: Some("supermemory".to_string()),
             memory_url: Some(ENDPOINT.to_string()),
             memory_api_key: Some(KEY.to_string()),
+            allow_unproven_remote: true,
             ..Default::default()
         })
         .expect("a fully configured remote engine binds")

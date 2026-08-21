@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactKind, ArtifactRecord, ArtifactStore};
 use crate::ports::context::ContextStore;
-use crate::ports::events::{EventLog, EventStreamItem};
+use crate::ports::events::EventLog;
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
@@ -42,7 +42,6 @@ use crate::ports::workflow_revisions::{
     MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
 };
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
-use futures::StreamExt;
 
 /// A minimal valid manifest used to seed [`CompanyRecord`]s in the suite.
 fn sample_manifest() -> crate::company::CompanyManifest {
@@ -172,17 +171,6 @@ fn record(id: &CompanyId) -> CompanyRecord {
         )]),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
-        setup: Some(sample_setup_answers()),
-    }
-}
-
-/// The answers a first-run setup stored. Non-empty in all three fields so a
-/// backend that persisted only some of them fails the round-trip below.
-fn sample_setup_answers() -> crate::company::setup::SetupAnswers {
-    crate::company::setup::SetupAnswers {
-        industry: "E-commerce — homeware".to_string(),
-        team_hint: "plus customer support".to_string(),
-        automate: "Meta ads, order dispatch".to_string(),
     }
 }
 
@@ -490,39 +478,6 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
     assert_eq!(tail[0].seq, EventSeq::new(3));
 }
 
-/// A live receiver that falls behind the 256-slot backend broadcast ring must
-/// report loss before delivering its retained tail. Silent `Lagged` handling
-/// leaves a console unable to distinguish a quiet company from a stale one.
-pub async fn assert_event_subscription_surfaces_gap(events: Arc<dyn EventLog>) {
-    let id = CompanyId::new("gap");
-    let mut stream = events.subscribe(&id);
-    for seq in 0..300 {
-        events
-            .append(
-                &id,
-                CompanyEvent::OperatorMessage {
-                    parent: None,
-                    text: format!("event {seq}"),
-                    by: None,
-                    chat: None,
-                    deliverable: None,
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    assert_eq!(
-        stream.next().await,
-        Some(EventStreamItem::Gap { missed: 44 }),
-        "a lagged receiver must announce exactly the entries its 256-slot buffer lost"
-    );
-    let Some(EventStreamItem::Event(first_retained)) = stream.next().await else {
-        panic!("the retained tail must continue after its gap signal");
-    };
-    assert_eq!(first_retained.seq, EventSeq::new(44));
-}
-
 /// `read_before` returns a bounded, newest-first page before an exclusive
 /// cursor. This is the primitive transcript pagination uses, so every durable
 /// EventLog backend must exercise its production query/stream implementation.
@@ -713,76 +668,6 @@ pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
     let unique = seqs.len();
     seqs.dedup();
     assert_eq!(unique, seqs.len(), "duplicate sequences after prune+append");
-
-    // 6. Issue #983: a turn's accept bracket is prunable, its failure bracket is
-    //    not, and pruning the accept must not break a live turn's read-back.
-    //
-    //    The pairing is the point. `TurnStarted` is one frame per operator
-    //    message on a busy desk and its meaning is spent once the turn settles;
-    //    `TurnFailed` is the only record that a question was accepted and never
-    //    answered, so losing it would silently un-report a lost turn. And the
-    //    two are joined by `turn_id`, not by sequence — which is what makes the
-    //    accept safe to discard: nothing points *at* it, so a turn still reads
-    //    back through its row and its failure line after its start is gone.
-    let bravo = CompanyId::new("bravo");
-    for n in 0..4u64 {
-        events
-            .append(
-                &bravo,
-                CompanyEvent::TurnStarted {
-                    turn_id: format!("turn-{n}"),
-                    chat_id: "general".to_string(),
-                    parent: None,
-                    by: None,
-                },
-            )
-            .await
-            .unwrap();
-    }
-    events
-        .append(
-            &bravo,
-            CompanyEvent::TurnFailed {
-                turn_id: "turn-0".to_string(),
-                error: "the host restarted".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let report = events
-        .prune(&bravo, &RetentionPolicy::with_max_entries_per_kind(1))
-        .await
-        .unwrap();
-    assert_eq!(
-        report.removed, 3,
-        "TurnStarted must be prunable, keeping only the newest"
-    );
-
-    let kept = events
-        .read_from(&bravo, EventSeq::new(0), usize::MAX)
-        .await
-        .unwrap();
-    let starts: Vec<&str> = kept
-        .iter()
-        .filter_map(|e| match &e.event {
-            CompanyEvent::TurnStarted { turn_id, .. } => Some(turn_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(starts, ["turn-3"], "the newest accept must survive");
-    let settles: Vec<&str> = kept
-        .iter()
-        .filter_map(|e| match &e.event {
-            CompanyEvent::TurnFailed { turn_id, .. } => Some(turn_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        settles,
-        ["turn-0"],
-        "a turn's failure is the record that it was never answered; it is permanent"
-    );
 }
 
 /// Everything written through the ports reads back through the ports,
@@ -851,14 +736,6 @@ pub async fn assert_export_totality(
         loaded.template_provenance,
         Some(sample_provenance()),
         "template provenance did not round-trip through the store"
-    );
-    // First-run setup's answers persist for every backend too. Phase 2 builds
-    // this company's workflows from them, so a backend that dropped them would
-    // make the operator describe their business a second time.
-    assert_eq!(
-        loaded.setup,
-        Some(sample_setup_answers()),
-        "setup answers did not round-trip through the store"
     );
     // Issue #168: the runtime-authored graph bodies round-trip too — an export
     // that dropped them would lose every console-created workflow.
@@ -1113,7 +990,6 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         parent_task_id: None,
         output: None,
         plan: None,
-        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -1211,20 +1087,6 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
             verification: "the notes are live".to_string(),
             scope: "the notes only".to_string(),
             proposed_assignee: Some("maya".to_string()),
-            // Issue #1106. Populated here even though a real plan never carries
-            // both this and `proposed_assignee` — this fixture's job is to make
-            // a silently-dropped field fail, and a field left empty would
-            // round-trip through a backend that drops it entirely.
-            assignee_candidates: vec![
-                crate::ports::tasks::AssigneeCandidate {
-                    id: "maya".to_string(),
-                    reason: "writes the release notes today".to_string(),
-                },
-                crate::ports::tasks::AssigneeCandidate {
-                    id: "devrel".to_string(),
-                    reason: "owns everything that ships to developers".to_string(),
-                },
-            ],
             planned_at_millis: 1_234,
         }),
         ..task("t-planned", "planning", 9)
@@ -2107,7 +1969,6 @@ pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutput
         at_millis: at,
         nodes: serde_json::json!({ "writer": { "items": [marker] } }),
         truncated: false,
-        partial: false,
     };
 
     // Roundtrip: a stored record reads back byte-identically.
@@ -3872,7 +3733,11 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
 
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
-    let spec = |id: &str, task: &str| NewRun::for_task(id, task, "ceo");
+    let spec = |id: &str, task: &str| NewRun {
+        id: id.to_string(),
+        task_id: task.to_string(),
+        agent_id: "ceo".to_string(),
+    };
 
     // -- create: a fresh run is Pending and nothing else ---------------------
 
@@ -3880,8 +3745,7 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
     assert_eq!(first.status, RunStatus::Pending);
     assert_eq!(first.attempt, 1, "the first attempt at a card is 1-based");
     assert_eq!(first.company, alpha);
-    assert_eq!(first.task_id.as_deref(), Some("card"));
-    assert_eq!(first.chat_id, None, "a dispatch names no conversation");
+    assert_eq!(first.task_id, "card");
     assert_eq!(first.agent_id, "ceo");
     assert_eq!(first.trigger_event_seq, None);
     assert_eq!(first.started_at_millis, None);
@@ -4242,117 +4106,6 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
         runs.list_stale_active(&alpha).await.unwrap().is_empty(),
         "parked is not active: a run waiting on a person is not stale"
     );
-
-    // -- a run at no card (issue #983) ---------------------------------------
-    //
-    // The chat-turn shape: an attempt at work that opened no board card. It has
-    // to round-trip, it has to be reachable, and — the part a backend gets wrong
-    // by accident — it must not answer a per-card filter, because `task_id`
-    // being absent is not the same as it matching.
-
-    let chat = runs
-        .create_run(&alpha, NewRun::for_chat("t1", "general", "ceo"))
-        .await
-        .unwrap();
-    assert_eq!(chat.task_id, None);
-    assert_eq!(chat.chat_id.as_deref(), Some("general"));
-    assert_eq!(
-        chat.attempt, 1,
-        "with no card there is nothing for a second attempt to be the second of"
-    );
-    assert_eq!(runs.get_run(&alpha, "t1").await.unwrap(), Some(chat));
-
-    let second_chat = runs
-        .create_run(&alpha, NewRun::for_chat("t2", "general", "ceo"))
-        .await
-        .unwrap();
-    assert_eq!(
-        second_chat.attempt, 1,
-        "card-less runs do not share one anonymous attempt counter"
-    );
-
-    for card in ["card", "other", "no-such-card"] {
-        let matched = runs
-            .list_runs(&alpha, &RunFilter::for_task(card))
-            .await
-            .unwrap();
-        assert!(
-            !matched.iter().any(|r| r.id == "t1" || r.id == "t2"),
-            "a card-less run answered the filter for card '{card}'"
-        );
-    }
-    let all = runs.list_runs(&alpha, &RunFilter::default()).await.unwrap();
-    assert!(
-        all.iter().any(|r| r.id == "t1"),
-        "an unfiltered list must still reach a card-less run"
-    );
-
-    // It moves through the state machine like any other row, so the orphan
-    // reaper and the terminality backstop need no card-less special case.
-    runs.begin_run(&alpha, "t1", EventSeq::new(31))
-        .await
-        .unwrap();
-    assert_eq!(
-        runs.list_stale_active(&alpha)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.id == "t1")
-            .count(),
-        1,
-        "a running card-less run is active"
-    );
-    let settled = runs
-        .finish_run(&alpha, "t1", RunOutcome::new(RunStatus::Succeeded))
-        .await
-        .unwrap();
-    assert_eq!(settled.status, RunStatus::Succeeded);
-    assert_eq!(settled.task_id, None, "the settle invented no card");
-}
-
-/// Asserts a [`RunRecord`](crate::ports::runs::RunRecord) written before
-/// `task_id` could be absent still loads (issue #983).
-///
-/// This is a pure serde property, so it is asserted once here rather than per
-/// backend: all three store the record as the same JSON blob, so a row written
-/// by a pre-#983 host is a `"taskId": "<string>"` whichever backend holds it.
-/// It is in the conformance module because that is where the round-trip
-/// contract lives, and because a backend that ever stops using the record's own
-/// serialization is exactly what this would catch.
-pub fn assert_legacy_run_row_loads() {
-    use crate::ports::runs::{RunRecord, RunStatus};
-
-    let legacy = serde_json::json!({
-        "id": "run-1",
-        "company": "acme",
-        "taskId": "card-7",
-        "agentId": "ceo",
-        "attempt": 2,
-        "status": "running",
-        "createdAtMillis": 1_700_000_000_000u64,
-    });
-    let loaded: RunRecord = serde_json::from_value(legacy).expect("a pre-#983 row still loads");
-    assert_eq!(loaded.task_id.as_deref(), Some("card-7"));
-    assert_eq!(loaded.chat_id, None, "an absent conversation reads as None");
-    assert_eq!(loaded.status, RunStatus::Running);
-
-    // And the new shape omits the key rather than writing `null`, so a dispatch
-    // row is byte-identical to the ones already on disk.
-    let card_less = RunRecord {
-        task_id: None,
-        chat_id: Some("general".to_string()),
-        ..loaded
-    };
-    let written = serde_json::to_value(&card_less).unwrap();
-    assert!(
-        written.get("taskId").is_none(),
-        "an absent card must be omitted, never null: {written}"
-    );
-    assert_eq!(
-        serde_json::from_value::<RunRecord>(written).unwrap(),
-        card_less,
-        "the card-less row round-trips"
-    );
 }
 
 /// Asserts the boot-reaper contract
@@ -4364,7 +4117,11 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
 
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
-    let spec = |id: &str, task: &str| NewRun::for_task(id, task, "ceo");
+    let spec = |id: &str, task: &str| NewRun {
+        id: id.to_string(),
+        task_id: task.to_string(),
+        agent_id: "ceo".to_string(),
+    };
 
     // One of each state the reaper has an opinion about.
     runs.create_run(&alpha, spec("pending", "a")).await.unwrap();
@@ -4414,7 +4171,7 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
     // Issue #337: the caller gets the records, not a count, because it has to
     // return each reaped run's *card* to To-do — and for that it needs the
     // `task_id`s. A count would leave the board claiming work nothing is doing.
-    let mut reaped_tasks: Vec<&str> = reaped.iter().filter_map(|r| r.task_id.as_deref()).collect();
+    let mut reaped_tasks: Vec<&str> = reaped.iter().map(|r| r.task_id.as_str()).collect();
     reaped_tasks.sort_unstable();
     assert_eq!(
         reaped_tasks,

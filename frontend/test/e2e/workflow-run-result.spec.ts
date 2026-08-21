@@ -1,7 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { openWorkflow } from "./workflows";
-
 import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
 
 /**
@@ -37,14 +35,16 @@ async function dismissTour(page: Page) {
   await expect(skip).toBeHidden();
 }
 
-/**
- * Opens a workflow by name, from the index (issue #1110).
- *
- * `#/workflows` is the list now — the picker this used to drive exists only
- * once a workflow is open, and Run has no subject until then.
- */
+/** The workflow picker's trigger. */
+function picker(page: Page) {
+  return page.getByRole("combobox").first();
+}
+
+/** Selects a workflow by name and waits for the selection to settle. */
 async function selectWorkflow(page: Page, name: string) {
-  await openWorkflow(page, name);
+  await picker(page).click();
+  await page.getByRole("option", { name, exact: true }).click();
+  await expect(picker(page)).toContainText(name);
 }
 
 test("running a workflow shows its per-node output in the result drawer", async ({
@@ -54,6 +54,7 @@ test("running a workflow shows its per-node output in the result drawer", async 
 
   await page.goto("/#/workflows");
   await dismissTour(page);
+  await expect(picker(page)).toBeEnabled({ timeout: 30_000 });
 
   // The source-defined fixture — its agent node ("Draft the note") is what the
   // drawer must render text for. Its ids and names are pinned by the harness.

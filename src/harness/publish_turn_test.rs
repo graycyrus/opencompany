@@ -370,7 +370,6 @@ fn brain_with(
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
-        setup: None,
     };
     (
         // Issue #339: the run store is wired here so a dispatch carrying a
@@ -388,9 +387,17 @@ fn brain_with(
 async fn mint_run(ops: &Arc<FsOps>, run_id: &str, task_id: &str) {
     use crate::ports::RunStore;
     use crate::ports::runs::NewRun;
-    RunStore::create_run(&**ops, &company(), NewRun::for_task(run_id, task_id, AGENT))
-        .await
-        .expect("mint the attempt row");
+    RunStore::create_run(
+        &**ops,
+        &company(),
+        NewRun {
+            id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            agent_id: AGENT.to_string(),
+        },
+    )
+    .await
+    .expect("mint the attempt row");
 }
 
 fn company() -> CompanyId {
@@ -411,7 +418,6 @@ fn card(id: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
-        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -438,6 +444,9 @@ fn dispatch_run(task_id: &str, run_id: Option<&str>) -> CycleRequest {
             run_id: run_id.map(str::to_string),
         }],
         event_seqs: Vec::new(),
+        compressed_history: Vec::new(),
+        roster: Vec::new(),
+        context_index: Vec::new(),
     }
 }
 
@@ -1187,6 +1196,9 @@ fn chat(text: &str) -> CycleRequest {
             deliverable: None,
         }],
         event_seqs: Vec::new(),
+        compressed_history: Vec::new(),
+        roster: Vec::new(),
+        context_index: Vec::new(),
     }
 }
 

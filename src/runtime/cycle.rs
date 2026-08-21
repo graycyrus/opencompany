@@ -44,10 +44,13 @@ use crate::runtime::delegation_tools::{
     DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, desk_lead,
     unknown_desk_message,
 };
-use crate::runtime::grants::{GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant};
+use crate::runtime::grants::{GrantId, GrantScope, GrantedCall, StandingGrant};
 use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
+
+/// How many recent traces to load into a cycle's compressed history.
+const HISTORY_LIMIT: usize = 32;
 
 /// The `Effect::kind` for an outbound email send. Shared between where the
 /// effect is built (`CycleHostImpl::send_email`, and the workflow delivery path
@@ -176,13 +179,6 @@ impl ResolveReceipt {
 /// Deliberately coarse and deliberately not the event's payload: this lands in a
 /// durable record, and a label is not the place for message text or tool
 /// arguments.
-fn cycle_trigger_of(events: &[(Option<EventSeq>, CompanyEvent)]) -> String {
-    match events.first() {
-        Some((_, first)) => cycle_trigger(std::slice::from_ref(first)),
-        None => "empty".to_string(),
-    }
-}
-
 fn cycle_trigger(events: &[CompanyEvent]) -> String {
     let Some(first) = events.first() else {
         return "empty".to_string();
@@ -233,63 +229,8 @@ impl<'a> CycleRunner<'a> {
     /// deliberate — a banked decision is *correctly* not running, and giving it
     /// a bracket would leave an open cycle that never closes and never should.
     pub async fn run(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
-        // Every input still needs appending — this is the wrapper every trigger
-        // but the chat route uses, and it is byte-unchanged from its pre-#983
-        // self.
-        self.run_bracketed(
-            events.into_iter().map(|event| (None, event)).collect(),
-            None,
-        )
-        .await
-    }
-
-    /// [`run`](Self::run), for inputs whose journal append has **already
-    /// happened** (issue #983).
-    ///
-    /// The chat route appends the operator's message the instant the request is
-    /// accepted, before it takes this lock, so `chat/history` is correct from
-    /// acceptance rather than from whenever the cycle wins the per-company
-    /// mutex — which, behind a busy company, is an unbounded time later. That
-    /// append must not then happen a second time in here, so the caller hands
-    /// over each event together with the [`EventSeq`] it was appended under and
-    /// this skips the write.
-    ///
-    /// **Everything downstream stays keyed on the supplied seqs.** The
-    /// `TaskDispatched` → `begin_run` handling, `CycleReport::input_seqs` (and
-    /// therefore the chat response's `messageId`), and the seq list the brain
-    /// sees are all built from them, so a pre-journaled cycle is
-    /// indistinguishable from an appending one everywhere except in who wrote
-    /// the line.
-    ///
-    /// `run_id` is a run row to move `Pending` → `Running` once the serial lock
-    /// is actually held. That placement is the point: a chat turn's row is
-    /// minted at accept time, so `Pending` means "queued behind other turns" and
-    /// `Running` means "owns the lock" — a distinction the caller cannot make
-    /// from outside, because the wait on the lock happens in here.
-    pub async fn run_journaled(
-        &self,
-        events: Vec<(EventSeq, CompanyEvent)>,
-        run_id: Option<String>,
-    ) -> Result<CycleReport> {
-        self.run_bracketed(
-            events
-                .into_iter()
-                .map(|(seq, event)| (Some(seq), event))
-                .collect(),
-            run_id,
-        )
-        .await
-    }
-
-    /// The shared body of both entry points: open the journal bracket, take the
-    /// serial lock, run, close the bracket.
-    async fn run_bracketed(
-        &self,
-        events: Vec<(Option<EventSeq>, CompanyEvent)>,
-        run_id: Option<String>,
-    ) -> Result<CycleReport> {
         let cycle_id = crate::ports::generate_id();
-        let trigger = cycle_trigger_of(&events);
+        let trigger = cycle_trigger(&events);
 
         // Best-effort, and it must stay that way: record-keeping does not get to
         // refuse a cycle. A failed open simply means this cycle is unbracketed,
@@ -309,7 +250,7 @@ impl<'a> CycleRunner<'a> {
         }
 
         let guard = self.rt.serial.lock().await;
-        let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
+        let outcome = self.run_locked(events, cycle_id.clone()).await;
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
         let error = outcome.as_ref().err().map(|err| err.to_string());
@@ -332,28 +273,19 @@ impl<'a> CycleRunner<'a> {
 
     async fn run_locked(
         &self,
-        inputs: Vec<(Option<EventSeq>, CompanyEvent)>,
+        mut events: Vec<CompanyEvent>,
         cycle_id: String,
-        run_id: Option<String>,
     ) -> Result<CycleReport> {
         let company = self.rt.id.clone();
 
         // 2. Persist input — durable before any thinking.
         let mut persisted_seq = None;
-        let mut event_seqs = Vec::with_capacity(inputs.len());
+        let mut event_seqs = Vec::with_capacity(events.len());
         // Issue #242: the attempt rows this cycle is about to run, moved
         // `Pending` → `Running` below and backstopped after the brain returns.
         let mut dispatched_runs: Vec<String> = Vec::new();
-        let mut events: Vec<CompanyEvent> = Vec::with_capacity(inputs.len());
-        for (journaled, event) in inputs {
-            // Issue #983: an input the caller already appended keeps the seq it
-            // was appended under. Everything below is keyed on `seq` and not on
-            // who wrote it, so the two entry points diverge here and nowhere
-            // else.
-            let seq = match journaled {
-                Some(seq) => seq,
-                None => self.rt.events.append(&company, event.clone()).await?,
-            };
+        for event in &events {
+            let seq = self.rt.events.append(&company, event.clone()).await?;
             event_seqs.push(seq);
             persisted_seq = Some(seq);
             // Start the run here, not inside the brain: the serial lock is held,
@@ -364,7 +296,7 @@ impl<'a> CycleRunner<'a> {
             if let CompanyEvent::TaskDispatched {
                 run_id: Some(run_id),
                 ..
-            } = &event
+            } = event
             {
                 match self.rt.runs().begin_run(&company, run_id, seq).await {
                     Ok(_) => dispatched_runs.push(run_id.clone()),
@@ -382,45 +314,25 @@ impl<'a> CycleRunner<'a> {
                     ),
                 }
             }
-            events.push(event);
         }
 
-        // Issue #983: the caller's own run row, moved `Pending` → `Running`
-        // here — inside the serial lock — because that is what makes the two
-        // statuses mean anything. A row started at accept time would read
-        // `Running` while it was in fact queued behind another turn, which is
-        // precisely the wait an operator staring at a slow company needs to see.
-        //
-        // Deliberately **not** added to `dispatched_runs`: the terminality
-        // backstop settles what it started as soon as this cycle ends, and the
-        // chat turn's settle belongs to the task that also journals its replies,
-        // which outlives this call. A cycle error still settles the row — the
-        // caller sees the `Err` and settles it `Failed` — and a panic is the
-        // boot reaper's job, exactly as it is for a dispatch.
-        //
-        // Best-effort and logged, on the same terms as the dispatch rows above:
-        // record-keeping does not get to fail the work it records.
-        if let Some(run_id) = run_id.as_deref()
-            && let Some(seq) = event_seqs.first().copied()
-            && let Err(err) = self.rt.runs().begin_run(&company, run_id, seq).await
-        {
-            tracing::warn!(
-                company = %company,
-                run = %run_id,
-                error = %err,
-                "[runs] could not start a turn row; the turn runs untracked"
-            );
-        }
-
-        // 3. Load — the company record, and nothing else.
-        //
-        // Issue #1175: this step used to also read 32 recent traces and the
-        // *entire* context index (`list(&company, "")` — no prefix, no limit, so
-        // a full scan that grows with every turn the company has ever run) into
-        // `CycleRequest`. No brain read either one. Both loads are gone; see the
-        // note on [`CycleRequest`] for why the fields went with them. Traces are
-        // still written below — only the read was dead.
+        // 3. Load — history, context index, roster.
+        let compressed_history = self
+            .rt
+            .memory
+            .recent_traces(&company, HISTORY_LIMIT)
+            .await?;
+        let context_index = self.rt.context.list(&company, "").await?;
         let record = self.rt.store.load(&company).await?;
+        let roster = match &record {
+            Some(record) => record
+                .manifest
+                .agents
+                .iter()
+                .map(|agent| agent.id.clone())
+                .collect(),
+            None => Vec::new(),
+        };
 
         // Issue #176 (handed-task awareness): when an operator message is
         // addressed to a desk/agent that already has open work handed to it,
@@ -453,6 +365,9 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
+            compressed_history,
+            roster,
+            context_index,
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
@@ -619,16 +534,10 @@ impl<'a> CycleRunner<'a> {
             // The reason goes onto the note so the board says why, and the move
             // is guarded: a card an operator has since dragged, or that a later
             // attempt parked, is left exactly where it is.
-            // Issue #983: a card-less run has no card to strand, so there is
-            // nothing here to make truthful. Settling the row above was the
-            // whole of this run's cleanup.
-            let Some(task_id) = run.task_id.as_deref() else {
-                continue;
-            };
             match crate::runtime::advance::advance_settled_card(
                 self.rt.tasks().as_ref(),
                 company,
-                task_id,
+                &run.task_id,
                 RunStatus::Failed,
                 &reason,
             )
@@ -637,7 +546,7 @@ impl<'a> CycleRunner<'a> {
                 Ok(Some(column)) => tracing::info!(
                     company = %company,
                     run = %id,
-                    task = %task_id,
+                    task = %run.task_id,
                     column,
                     "[runs] the terminality backstop returned a stranded card"
                 ),
@@ -648,7 +557,7 @@ impl<'a> CycleRunner<'a> {
                 Err(err) => tracing::warn!(
                     company = %company,
                     run = %id,
-                    task = %task_id,
+                    task = %run.task_id,
                     error = %err,
                     "[runs] the terminality backstop settled an attempt but could not move its card"
                 ),
@@ -948,13 +857,9 @@ approval.]"
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
-        // Issue #1098: a teammate, or the authored workflow a gate belongs to.
-        // Neither means the runtime itself is performing this, and there is
-        // genuinely nothing to hold a permission — the refusal below is the same
-        // one it always was, now stated about a subject rather than an agent.
-        if crate::runtime::grants::subject_of(&effect).is_none() {
+        if effect.agent.is_none() {
             return Err(OpenCompanyError::InvalidRequest(format!(
-                "'{}' is performed by the runtime itself, so there is nobody's tool use to \
+                "'{}' is performed by the runtime itself, so there is no teammate's tool use to \
                  grant; approve it once instead",
                 effect.kind
             )));
@@ -976,20 +881,6 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<()> {
-        // Issue #1098: a gate carries no teammate but can still hold a standing
-        // permission for its workflow, so that case is taken before the native
-        // fall-through below. Only for `GrantScope::Tool` — a `Once` approval of
-        // a gate is still performed natively, because the single-use grant this
-        // would otherwise mint has nobody to redeem it (see `crate::workflows::gate`).
-        if effect.agent.is_none()
-            && let GrantScope::Tool { expires_at_millis } = scope
-            && let Some(subject @ GrantSubject::Workflow(_)) =
-                crate::runtime::grants::subject_of(&effect)
-        {
-            return self
-                .mint_standing_grant(id, subject, effect, by, expires_at_millis)
-                .await;
-        }
         let Some(agent) = effect.agent.clone() else {
             let key = format!("approval:{id}");
             // The card that asked for this sign-off (issue #351). It is not
@@ -1007,14 +898,8 @@ approval.]"
         match scope {
             GrantScope::Once => self.mint_grant(id, agent, effect).await,
             GrantScope::Tool { expires_at_millis } => {
-                self.mint_standing_grant(
-                    id,
-                    GrantSubject::Agent(agent),
-                    effect,
-                    by,
-                    expires_at_millis,
-                )
-                .await
+                self.mint_standing_grant(id, agent, effect, by, expires_at_millis)
+                    .await
             }
         }
     }
@@ -1034,7 +919,7 @@ approval.]"
     async fn mint_standing_grant(
         &self,
         id: &ApprovalId,
-        subject: GrantSubject,
+        agent: String,
         effect: Effect,
         by: Actor,
         expires_at_millis: u64,
@@ -1044,33 +929,12 @@ approval.]"
             .journal
             .approval_conversation(id)
             .unwrap_or_default();
-        // Issue #1098: a gate's `kind` is the `workflow.approve` wrapper, so the
-        // tool and arguments the permission is *about* are the inner call issue
-        // #846 wrote onto the payload — the same call the card showed. Every
-        // other effect is its own call and answers `None` here.
-        let (tool, args) = crate::runtime::workflow_resume::gate_inner_call(&effect)
-            .map(|(tool, args)| (tool.to_string(), args.clone()))
-            .unwrap_or_else(|| (effect.kind.clone(), effect.payload.clone()));
-        // Issue #457: which slice of the tool the card was actually about, read
-        // off the **parked effect's own payload** — the arguments the operator
-        // was shown — rather than re-derived from anything live, so the grant
-        // records the sentence they consented to. `None` for every tool whose
-        // name is the whole of what it can do.
-        //
-        // Computed here rather than inline in the literal below, which would
-        // borrow `tool` after the field above has moved it.
-        let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
-        let (agent, workflow) = match subject {
-            GrantSubject::Agent(agent) => (agent, None),
-            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow)),
-        };
         let grant = StandingGrant {
             id: GrantId::generate(),
             agent,
-            workflow,
             // The tool, and nothing about the arguments. A standing grant has no
             // `args` field to copy them into — that is the type's whole point.
-            tool,
+            tool: effect.kind.clone(),
             granted_by: by,
             approval_id: id.clone(),
             at_millis: now_millis(),
@@ -1084,19 +948,19 @@ approval.]"
             // Issue #796: the task this call was parked from, carried so a
             // standing grant can reclaim the task's checkout across parks.
             origin_task: self.approval_work_key(id),
-            // Derived from the same `(tool, args)` the grant records, which for
-            // a gate is the inner call rather than the wrapper — read with the
-            // same function the live side uses, so the two cannot drift into a
-            // permission that never matches its own call.
-            scope,
+            // Issue #457: which slice of the tool the card was actually about.
+            // Read off the **parked effect's own payload** — the arguments the
+            // operator was shown — rather than re-derived from anything live, so
+            // the grant records the sentence they consented to. `None` for every
+            // tool whose name is the whole of what it can do.
+            scope: crate::policy::consequence::standing_scope_of(&effect.kind, &effect.payload),
         };
         self.rt.journal.record_standing_granted(&grant).await?;
         tracing::debug!(
             approval_id = %id,
             grant_id = %grant.id,
-            tool = %grant.tool,
+            tool = %effect.kind,
             agent = %grant.agent,
-            workflow = ?grant.workflow,
             expires_at_millis,
             "[approval] minted a standing grant; this tool will not ask again until it expires"
         );
@@ -1967,19 +1831,6 @@ fn cycle_task_id(
             // work merely by existing, and that work's own card writes would
             // announce again.
             | CompanyEvent::TaskCardChanged { .. }
-            // Issue #983: the accept/settle brackets of a chat turn. Records of
-            // something that already happened, exactly like the workflow-run
-            // brackets above — they name no card, and they are appended by the
-            // route that already started the turn they describe, so treating
-            // either as a stimulus would make a turn re-trigger itself.
-            | CompanyEvent::TurnStarted { .. }
-            | CompanyEvent::TurnFailed { .. }
-            // Issue #1015: an attempt row announcing its own move. The same
-            // argument as `TaskCardChanged` directly above, and it matters more
-            // here — the store appends it *after* the status write, and the
-            // write is made by this very cycle, so treating it as a stimulus
-            // would let a run re-trigger itself on every transition it makes.
-            | CompanyEvent::RunStatusChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -2152,19 +2003,6 @@ fn cycle_conversation(
             // work merely by existing, and that work's own card writes would
             // announce again.
             | CompanyEvent::TaskCardChanged { .. }
-            // Issue #983: the accept/settle brackets of a chat turn. Records of
-            // something that already happened, exactly like the workflow-run
-            // brackets above — they name no card, and they are appended by the
-            // route that already started the turn they describe, so treating
-            // either as a stimulus would make a turn re-trigger itself.
-            | CompanyEvent::TurnStarted { .. }
-            | CompanyEvent::TurnFailed { .. }
-            // Issue #1015: an attempt row announcing its own move. The same
-            // argument as `TaskCardChanged` directly above, and it matters more
-            // here — the store appends it *after* the status write, and the
-            // write is made by this very cycle, so treating it as a stimulus
-            // would let a run re-trigger itself on every transition it makes.
-            | CompanyEvent::RunStatusChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -2492,7 +2330,6 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
-            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2589,7 +2426,6 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
-            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2630,11 +2466,7 @@ fn first_line(text: &str, max: usize) -> String {
 /// assignee is the addressed desk's lead — so a hand-off recorded against a desk
 /// id surfaces when the operator addresses that desk by id or name, and a card
 /// assigned to a person surfaces when that person is addressed.
-///
-/// `pub(crate)` since issue #982 for a second caller — `chat_handler_card`'s
-/// adoption predicate, which has to ask the same question about the card the
-/// REST handler just wrote. One comparator, so the two cannot drift.
-pub(crate) fn assignment_matches(record: &CompanyRecord, target: &str, assignee: &str) -> bool {
+fn assignment_matches(record: &CompanyRecord, target: &str, assignee: &str) -> bool {
     if assignee.eq_ignore_ascii_case(target) {
         return true;
     }
@@ -2881,7 +2713,6 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
-            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2906,7 +2737,7 @@ mod test {
         assert!(!task_names_a_card(&[], "019ff728-abcd"));
     }
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
 
     use crate::company::CompanyManifest;
     use crate::company::runtime::CompanyMail;
@@ -2914,16 +2745,13 @@ mod test {
     use crate::ports::ChannelAdapter;
     use crate::ports::brain::Brain;
     use crate::ports::types::{
-        ActorKind, ChunkAddr, ChunkHit, ChunkMeta, CompressedTrace, ContextChunk, CycleResult,
-        EffectGroup, EventSeq, EvictionPolicy, ReplyTo, TaskResult, TokenUsage,
+        ActorKind, CompressedTrace, CycleResult, EffectGroup, EventSeq, ReplyTo, TokenUsage,
     };
-    use crate::ports::{ContextStore, MemoryStore};
     use crate::runtime::RuntimeBuilder;
     use crate::runtime::channel::OperatorChannel;
     use crate::server::ops::mailer::RecordingMailSender;
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
     use crate::store::paths::Bundle;
-    use crate::store::{FsContextStore, FsMemoryStore};
 
     fn tmp_home() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -3221,7 +3049,11 @@ mod test {
         rt.runs()
             .create_run(
                 rt.id(),
-                crate::ports::runs::NewRun::for_task(crate::ports::generate_id(), task, "ceo"),
+                crate::ports::runs::NewRun {
+                    id: crate::ports::generate_id(),
+                    task_id: task.to_string(),
+                    agent_id: "ceo".to_string(),
+                },
             )
             .await
             .expect("mint a run")
@@ -3306,7 +3138,6 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
-                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -3368,7 +3199,6 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
-                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -3493,142 +3323,6 @@ mod test {
         }])
         .await
         .expect("an unknown run id is a bookkeeping miss, not a cycle failure");
-    }
-
-    /// A [`MemoryStore`] that counts the calls a cycle makes, delegating the
-    /// work to a real fs store so the runtime behaves normally around it.
-    struct CountingMemory {
-        inner: FsMemoryStore,
-        reads: AtomicUsize,
-        writes: AtomicUsize,
-    }
-
-    impl CountingMemory {
-        fn new(inner: FsMemoryStore) -> Self {
-            Self {
-                inner,
-                reads: AtomicUsize::new(0),
-                writes: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl MemoryStore for CountingMemory {
-        async fn save_trace(&self, id: &CompanyId, trace: CompressedTrace) -> Result<()> {
-            self.writes.fetch_add(1, Ordering::SeqCst);
-            self.inner.save_trace(id, trace).await
-        }
-
-        async fn recent_traces(
-            &self,
-            id: &CompanyId,
-            limit: usize,
-        ) -> Result<Vec<CompressedTrace>> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.recent_traces(id, limit).await
-        }
-
-        async fn save_task_result(&self, id: &CompanyId, result: TaskResult) -> Result<()> {
-            self.inner.save_task_result(id, result).await
-        }
-
-        async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
-            self.inner.evict(id, policy).await
-        }
-    }
-
-    /// The [`ContextStore`] half of the same instrument.
-    struct CountingContext {
-        inner: FsContextStore,
-        lists: AtomicUsize,
-    }
-
-    impl CountingContext {
-        fn new(inner: FsContextStore) -> Self {
-            Self {
-                inner,
-                lists: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ContextStore for CountingContext {
-        async fn put(&self, id: &CompanyId, chunk: ContextChunk) -> Result<ChunkAddr> {
-            self.inner.put(id, chunk).await
-        }
-
-        async fn list(&self, id: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>> {
-            self.lists.fetch_add(1, Ordering::SeqCst);
-            self.inner.list(id, prefix).await
-        }
-
-        async fn peek(
-            &self,
-            id: &CompanyId,
-            addr: &ChunkAddr,
-            range: Option<std::ops::Range<usize>>,
-        ) -> Result<String> {
-            self.inner.peek(id, addr, range).await
-        }
-
-        async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
-            self.inner.search(id, query, limit).await
-        }
-    }
-
-    /// Issue #1175: a cycle used to load 32 recent traces *and the whole context
-    /// index* (`list(company, "")` — no prefix, no limit) into `CycleRequest`,
-    /// where no brain read either. Both reads are gone, and the context one was
-    /// the expensive half: it grew with every turn the company had ever run.
-    ///
-    /// The trace *write* deliberately stayed — traces travel with the export
-    /// bundle — so this asserts the save as well. Without that half, a later
-    /// "nothing reads traces, delete the write" would pass silently.
-    #[tokio::test]
-    async fn a_cycle_reads_neither_recent_traces_nor_the_context_index() {
-        let home_dir = tmp_home();
-        let home = home_dir.path().to_path_buf();
-        let memory = Arc::new(CountingMemory::new(FsMemoryStore::new(home.clone())));
-        let context = Arc::new(CountingContext::new(FsContextStore::new(home.clone())));
-        let rt = RuntimeBuilder::new(home, manifest("full"))
-            .with_memory(memory.clone())
-            .with_context(context.clone())
-            .build()
-            .await
-            .unwrap();
-
-        // Boot is not what this test is about; only what one cycle costs.
-        memory.reads.store(0, Ordering::SeqCst);
-        memory.writes.store(0, Ordering::SeqCst);
-        context.lists.store(0, Ordering::SeqCst);
-
-        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
-            parent: None,
-            text: "hi".into(),
-            by: None,
-            chat: None,
-            deliverable: None,
-        }])
-        .await
-        .unwrap();
-
-        assert_eq!(
-            memory.reads.load(Ordering::SeqCst),
-            0,
-            "a cycle must not read traces back: no brain consumes them"
-        );
-        assert_eq!(
-            context.lists.load(Ordering::SeqCst),
-            0,
-            "a cycle must not scan the context index: no brain consumes it"
-        );
-        assert_eq!(
-            memory.writes.load(Ordering::SeqCst),
-            1,
-            "the trace write is not dead code — it feeds the export bundle"
-        );
     }
 
     #[tokio::test]
@@ -3958,52 +3652,6 @@ mod test {
     }
 
     // --- What the card says (issue #372) ------------------------------------
-
-    /// **Issue #1024.** The parked effect's consequence group reaches the card.
-    ///
-    /// A `GMAIL_SEND_EMAIL` gate sat parked for days and mailed a five-day-old
-    /// digest the moment an operator cleared a backlog. The age was already on
-    /// the card — as a bare "5d ago" in the footer, where it reads as how long
-    /// the QUEUE has held the item rather than how old the PAYLOAD is. The
-    /// console can only tell those apart for an effect that leaves the company,
-    /// and it cannot work out which those are on its own: for a harness tool
-    /// call `kind` is the TOOL NAME (`composio_execute`), not `email.send`, so
-    /// a console keying on `kind` would miss exactly this send.
-    ///
-    /// So the host's own classification has to ride on the summary. This pins
-    /// that it is the PARKED EFFECT's group and not a constant: a summary that
-    /// hard-coded `Other` would render every outbound send as internal and put
-    /// the bug straight back.
-    #[tokio::test]
-    async fn a_parked_effect_carries_its_group_to_the_card() {
-        let home_dir = tmp_home();
-        let mut effect = harness_effect(
-            "devrel",
-            "composio_execute",
-            serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
-        );
-        // The group a real `composio_execute` of a send resolves to.
-        effect.group = EffectGroup::Send;
-        let (rt, _id) = park_one(home_dir.path().to_path_buf(), effect).await;
-
-        let pending = rt.pending_approvals();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(
-            pending[0].group,
-            EffectGroup::Send,
-            "the card must carry the parked effect's own group; anything constant \
-             renders an outbound send as internal"
-        );
-        // And the tool name is NOT the discriminator — the reason the group has
-        // to be sent at all.
-        assert_eq!(pending[0].kind, "composio_execute");
-
-        // It survives the wire: the console reads this field, so a summary that
-        // classified correctly and serialized nothing would be no fix.
-        let wire: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&pending[0]).unwrap()).unwrap();
-        assert_eq!(wire["group"], "send");
-    }
 
     /// A harness-projected park reaches the operator naming its asker and what
     /// it will actually do — the whole point of #372, where the card used to say
@@ -4747,8 +4395,7 @@ mod test {
             .filter(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND)
             .collect();
         assert_eq!(spend.len(), 1);
-        // Negative: an outflow, per the ledger convention (issue #1047).
-        assert_eq!(spend[0].amount_usd, -0.031);
+        assert_eq!(spend[0].amount_usd, 0.031);
     }
 
     /// Tokens without USD (the managed passthrough bills backend-side) still
@@ -6696,7 +6343,6 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
-                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -6771,7 +6417,6 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
-                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -7252,171 +6897,6 @@ mod test {
         assert!(
             !rt.pending_approvals()[0].broadly_grantable,
             "sending mail stays a per-call decision"
-        );
-    }
-
-    // ── Issue #983: the pre-journaled entry point ────────────────────────────
-
-    /// Every input of a cycle appears in the journal **exactly once**, whichever
-    /// entry point drove it.
-    ///
-    /// This is the pin the plumbing change is worth having. `run_cycle` is what
-    /// every other trigger in the tree uses — the scheduler, cron, webhooks, the
-    /// telegram poller, delegation, approval follow-ups — so the append it does
-    /// must stay exactly one per input; and `run_journaled_cycle`, which exists
-    /// so the chat route can append at accept time instead, must do none. Either
-    /// half getting it wrong is invisible at the call site and shows up as a
-    /// duplicated (or missing) message in somebody's transcript.
-    ///
-    /// It also pins `CycleReport::input_seqs`, and therefore the chat response's
-    /// `messageId`: the pre-journaled path reports back the seqs it was handed,
-    /// not seqs of its own.
-    #[tokio::test]
-    async fn each_input_is_journaled_exactly_once_by_either_entry_point() {
-        let home_dir = tmp_home();
-        let home = home_dir.path().to_path_buf();
-        let seen = Arc::new(StdMutex::new(Vec::new()));
-        let rt = RuntimeBuilder::new(home, manifest("full"))
-            .with_brain(Arc::new(CapturingBrain {
-                seen: Arc::clone(&seen),
-            }))
-            .build()
-            .await
-            .unwrap();
-
-        let ask = |text: &str| CompanyEvent::OperatorMessage {
-            text: text.to_string(),
-            by: None,
-            chat: None,
-            parent: None,
-            deliverable: None,
-        };
-        let messages = |stored: &[crate::ports::types::StoredEvent]| -> Vec<String> {
-            stored
-                .iter()
-                .filter_map(|s| match &s.event {
-                    CompanyEvent::OperatorMessage { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect()
-        };
-
-        // The appending wrapper: one line per input, and the report names them.
-        let appended = rt.run_cycle(vec![ask("first")]).await.unwrap();
-        let stored = rt
-            .events()
-            .read_from(rt.id(), EventSeq::new(0), 1_000)
-            .await
-            .unwrap();
-        assert_eq!(
-            messages(&stored),
-            ["first"],
-            "the appending entry point wrote its input exactly once"
-        );
-        assert_eq!(appended.input_seqs.len(), 1);
-        assert_eq!(
-            stored
-                .iter()
-                .find(|s| matches!(&s.event, CompanyEvent::OperatorMessage { text, .. } if text == "first"))
-                .map(|s| s.seq),
-            appended.input_seqs.first().copied(),
-            "the reported seq is the one the message was appended under"
-        );
-
-        // The pre-journaled entry point: the caller's append is the only one.
-        let pre = rt.events().append(rt.id(), ask("second")).await.unwrap();
-        let journaled = rt
-            .run_journaled_cycle(vec![(pre, ask("second"))], None)
-            .await
-            .unwrap();
-        let stored = rt
-            .events()
-            .read_from(rt.id(), EventSeq::new(0), 1_000)
-            .await
-            .unwrap();
-        assert_eq!(
-            messages(&stored),
-            ["first", "second"],
-            "the pre-journaled entry point appended its input a second time"
-        );
-        assert_eq!(
-            journaled.input_seqs,
-            vec![pre],
-            "the report carries the seq the caller supplied, not one of its own"
-        );
-
-        // And the brain saw both, so skipping the append did not skip the input.
-        assert_eq!(*seen.lock().expect("seen"), ["first", "second"]);
-    }
-
-    /// A pre-journaled cycle moves the caller's run row to `Running` **inside**
-    /// the serial lock, and leaves settling it to the caller.
-    ///
-    /// Both halves matter. Starting the row outside the lock would make
-    /// `Running` mean "accepted" rather than "owns the lock", which is exactly
-    /// the queued-behind-another-turn wait an operator needs to see. And letting
-    /// the cycle's terminality backstop settle it would close the row while the
-    /// task that journals the turn's replies is still running.
-    #[tokio::test]
-    async fn a_journaled_cycle_starts_the_callers_run_and_leaves_it_running() {
-        use crate::ports::runs::{NewRun, RunStatus};
-
-        let home_dir = tmp_home();
-        let home = home_dir.path().to_path_buf();
-        let rt = RuntimeBuilder::new(home, manifest("full"))
-            .build()
-            .await
-            .unwrap();
-        rt.runs()
-            .create_run(rt.id(), NewRun::for_chat("turn-1", "general", "ceo"))
-            .await
-            .unwrap();
-
-        let seq = rt
-            .events()
-            .append(
-                rt.id(),
-                CompanyEvent::OperatorMessage {
-                    text: "hello".into(),
-                    by: None,
-                    chat: None,
-                    parent: None,
-                    deliverable: None,
-                },
-            )
-            .await
-            .unwrap();
-        rt.run_journaled_cycle(
-            vec![(
-                seq,
-                CompanyEvent::OperatorMessage {
-                    text: "hello".into(),
-                    by: None,
-                    chat: None,
-                    parent: None,
-                    deliverable: None,
-                },
-            )],
-            Some("turn-1".to_string()),
-        )
-        .await
-        .unwrap();
-
-        let row = rt
-            .runs()
-            .get_run(rt.id(), "turn-1")
-            .await
-            .unwrap()
-            .expect("the row survives the cycle");
-        assert_eq!(
-            row.status,
-            RunStatus::Running,
-            "the cycle started the row and must not have settled it"
-        );
-        assert_eq!(
-            row.trigger_event_seq,
-            Some(seq),
-            "the row is stamped with the seq the caller supplied"
         );
     }
 }

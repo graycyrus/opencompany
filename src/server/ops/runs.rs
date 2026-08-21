@@ -139,18 +139,7 @@ pub(crate) struct RunSummary {
     /// Stable id for the attempt.
     id: String,
     /// The card this is an attempt at.
-    ///
-    /// **Omitted, never `null`**, when the attempt is at no card — an operator
-    /// chat turn (issue #983) — matching how every other absent field in this
-    /// module is written, so a reader's "is there a card?" test is a presence
-    /// check rather than a null check.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task_id: Option<String>,
-    /// The conversation this attempt belongs to, when one raised it
-    /// (issue #983). Omitted for a dispatch, which is reachable through its
-    /// card instead.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chat_id: Option<String>,
+    task_id: String,
     /// The desk/teammate it was dispatched to.
     agent_id: String,
     /// Which attempt at the card this is, 1-based.
@@ -207,7 +196,6 @@ impl From<RunRecord> for RunSummary {
         Self {
             id: run.id,
             task_id: run.task_id,
-            chat_id: run.chat_id,
             agent_id: run.agent_id,
             attempt: run.attempt,
             status: run.status,
@@ -489,7 +477,6 @@ mod tests {
                 disabled_workflows: Vec::new(),
                 overlay_workflows: Vec::new(),
                 template_provenance: None,
-                setup: None,
             })
             .await
             .unwrap();
@@ -535,9 +522,16 @@ mod tests {
         run_id: &str,
         task_id: &str,
     ) -> RunRecord {
-        runs.create_run(id, NewRun::for_task(run_id, task_id, "ceo"))
-            .await
-            .expect("mint")
+        runs.create_run(
+            id,
+            NewRun {
+                id: run_id.to_string(),
+                task_id: task_id.to_string(),
+                agent_id: "ceo".to_string(),
+            },
+        )
+        .await
+        .expect("mint")
     }
 
     fn step(seq: u32, kind: TurnStepKind, status: TurnStepStatus, label: &str) -> TurnStep {

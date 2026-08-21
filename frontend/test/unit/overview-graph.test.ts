@@ -28,7 +28,6 @@ function member(over: Partial<TeamMember> & Pick<TeamMember, "id" | "name">): Te
     role: "Engineer",
     description: "",
     tone: "sky",
-    avatar: "green",
     inboxEnabled: false,
     effectiveTools: [],
     desks: [],
@@ -41,7 +40,7 @@ function desk(id: string, name: string, members: string[] = []): DeskDto {
 }
 
 function flow(over: Partial<WorkflowGraph> & Pick<WorkflowGraph, "id" | "name">): WorkflowGraph {
-  return { version: null, nodes: [], edges: [], ...over };
+  return { nodes: [], edges: [], ...over };
 }
 
 function person(id: string, email: string, role: "admin" | "member"): HostPerson {

@@ -310,12 +310,7 @@ pub enum Delegation {
     /// [`desk_lead`](crate::runtime::delegation_tools::desk_lead) — which is the
     /// whole of what D1 was missing.
     DelegateToTeammate {
-        /// The teammate's **canonical** roster id, resolved and validated at
-        /// the tool boundary (#1162 — before it, this carried the key exactly
-        /// as the model typed it, and the drain had to resolve it a second
-        /// time). The one exception is the fail-open path, where the record
-        /// could not be read at all: nothing was refused there and nothing was
-        /// canonicalised, so the drain resolves it with the same resolver.
+        /// The teammate's roster id, already validated at the tool boundary.
         teammate: String,
         /// The instruction handed to that teammate.
         instruction: String,
@@ -1490,43 +1485,21 @@ impl Tool for QueryCompanyTool {
         // Team roster: manifest agents plus operator-added overlay teammates
         // (the ones `add_agent` persists), so a freshly added teammate is
         // visible on the next query instead of looking unpersisted.
-        //
-        // **Every row leads with the id**, because this column is the one the
-        // orchestrator's brief and `delegate_to_teammate`'s own description
-        // send the model to for a hand-off target. An overlay teammate used to
-        // be listed under `overlay.name` while a manifest agent was listed
-        // under `agent.id` — two namespaces rendered identically, and since
-        // `mint_agent_id` slugs the display name (`"Dana Designer"` →
-        // `dana_designer`) the name was a token the delegation tools could not
-        // ground. The model did exactly what it was told and was refused
-        // (issue #1162). The display name follows as a label, in the shape
-        // `workflow_build::roster_line` (#813) already uses for the roster it
-        // shows the same model, so the two surfaces cannot drift apart.
-        let mut roster: Vec<(String, Option<String>, String)> = Vec::new();
+        let mut roster: Vec<(String, String)> = Vec::new();
         if let Some(record) = &record {
             for agent in &record.manifest.agents {
-                // A manifest `[[agent]]` has no display name; its role is its
-                // label.
-                roster.push((agent.id.clone(), None, agent.role.clone()));
+                roster.push((agent.id.clone(), agent.role.clone()));
             }
             for overlay in &record.overlay_agents {
-                roster.push((
-                    overlay.id.clone(),
-                    Some(overlay.name.clone()).filter(|n| !n.trim().is_empty()),
-                    overlay.role.clone(),
-                ));
+                roster.push((overlay.name.clone(), overlay.role.clone()));
             }
         }
         md.push_str("\n## Team\n");
         if roster.is_empty() {
             md.push_str("_Roster unavailable._\n");
         } else {
-            for (id, name, role) in &roster {
-                md.push_str(&format!("- **{}** — {}", id, role.trim()));
-                if let Some(name) = name {
-                    md.push_str(&format!(" (known as {})", name.trim()));
-                }
-                md.push('\n');
+            for (id, role) in &roster {
+                md.push_str(&format!("- **{}** — {}\n", id, role.trim()));
             }
         }
 
@@ -1600,21 +1573,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn summarize_event(event: &CompanyEvent) -> String {
     match event {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
-        // Issue #983. Structural only, like every arm here: the turn id, which
-        // is a minted identifier, and nothing else. Neither the desk nor the
-        // failure reason is named — the desk is operator-authored free text on
-        // an overlay-created chat, and the reason is our own prose about the
-        // host, which is exactly what a non-sensitive one-liner should not
-        // carry.
-        CompanyEvent::TurnStarted { turn_id, .. } => format!("turn accepted: {turn_id}"),
-        CompanyEvent::TurnFailed { turn_id, .. } => format!("turn unanswered: {turn_id}"),
-        // Issue #1015. Structural only: the minted id and the status word, a
-        // fixed vocabulary. The failure reason is our own prose about the host
-        // and is tenant-scoped, so it stays off this surface exactly as
-        // `TurnFailed`'s does.
-        CompanyEvent::RunStatusChanged { run_id, to, .. } => {
-            format!("attempt {run_id}: {to}")
-        }
         CompanyEvent::AgentReply { agent_id, .. } => format!("reply from {agent_id}"),
         CompanyEvent::TaskDispatched { task_id, .. } => format!("task dispatched: {task_id}"),
         // Issue #464. Structural only, like every arm here: the id, the change
@@ -1962,26 +1920,10 @@ pub struct MemberScope {
 }
 
 /// What one read of the company record decided about a hand-off target: the
-/// refusal to return, if any, the canonical id it resolved to, and the depth
-/// bound in force.
+/// refusal to return, if any, and the depth bound in force.
 struct Grounding {
     /// The refusal to hand back to the model, or `None` when the target is good.
     refusal: Option<String>,
-    /// The **canonical roster id** the key resolved to, when it resolved to one
-    /// (issue #1162).
-    ///
-    /// What makes grounding at the tool boundary mean anything: the queued
-    /// delegation carries this rather than the string the model typed, so the
-    /// drain has nothing left to decide. Without it the tool could accept a
-    /// display name, answer "Handed to …", and then have the drain fail to
-    /// resolve the very key the tool just approved — a refusal traded for a
-    /// silent drop.
-    ///
-    /// `None` on the fail-open path (the record could not be read, so there was
-    /// nothing to resolve against) and for [`DelegateToDeskTool`], whose target
-    /// is a desk: `desk_lead` and `resolve_desk_id` already accept a desk by id
-    /// **or** name at both ends, so that path has no namespace to close.
-    target: Option<String>,
     /// `[tools].max_delegation_depth`, or its default. Read from the same record
     /// load as the refusal so a single store round-trip decides both.
     max_depth: usize,
@@ -2060,14 +2002,7 @@ impl DelegateToDeskTool {
                     )
                 })
         });
-        Grounding {
-            refusal,
-            // A desk key needs no canonicalising: `resolve_desk_id` and
-            // `desk_lead` both accept a desk by id or name, at the tool
-            // boundary and again at the drain.
-            target: None,
-            max_depth,
-        }
+        Grounding { refusal, max_depth }
     }
 
     /// What a hand-off grounds to when the record behind the grounding could
@@ -2094,7 +2029,6 @@ impl DelegateToDeskTool {
                  yourself.",
                 member = scope.member
             )),
-            target: None,
             max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
         }
     }
@@ -2105,10 +2039,6 @@ impl Grounding {
     fn open() -> Self {
         Self {
             refusal: None,
-            // Nothing was read, so there is nothing to canonicalise: the key
-            // goes to the queue as the model wrote it, and the drain does the
-            // resolve instead (#1162).
-            target: None,
             max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
         }
     }
@@ -2305,16 +2235,7 @@ impl DelegateToTeammateTool {
                 teammate,
             )
         });
-        // Resolved from the same record read that decided the refusal, so the
-        // id queued below is the id the refusal was (or was not) written about.
-        // Pure over `record`, so it agrees with `reject_teammate_target`'s own
-        // resolve by construction.
-        let target = record.resolve_teammate_key(teammate).agent();
-        Grounding {
-            refusal,
-            target,
-            max_depth,
-        }
+        Grounding { refusal, max_depth }
     }
 
     /// The member/orchestrator split for an unreadable record — see
@@ -2330,7 +2251,6 @@ impl DelegateToTeammateTool {
                  out yourself.",
                 member = scope.member
             )),
-            target: None,
             max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
         }
     }
@@ -2371,21 +2291,10 @@ impl Tool for DelegateToTeammateTool {
             return Ok(ToolResult::error(refusal));
         }
 
-        // Queue the **canonical id**, not the key as typed (issue #1162). The
-        // grounding above is the only place the roster is read before the turn
-        // ends, so whatever goes into the queue is what the drain must be able
-        // to deliver to. A display name accepted here and re-resolved there
-        // would turn a refusal the model can retry into a hand-off that is
-        // answered "Handed to …" and then quietly never runs.
-        //
-        // Falls back to the key on the fail-open path — the record could not be
-        // read, so nothing was resolved and nothing was refused either; the
-        // drain resolves it with the same resolver.
-        let target = grounding.target.unwrap_or_else(|| teammate.clone());
-        let effect = format!("nothing was handed to {target}");
+        let effect = format!("nothing was handed to {teammate}");
         match self.queue.push_within_cap(
             Delegation::DelegateToTeammate {
-                teammate: target.clone(),
+                teammate: teammate.clone(),
                 instruction,
             },
             MAX_DELEGATIONS_PER_TURN,
@@ -2401,15 +2310,9 @@ impl Tool for DelegateToTeammateTool {
                 )));
             }
         }
-        // Both strings when they differ: the model asked for a person by the
-        // name it read, and the id is the token it should write next time.
-        Ok(ToolResult::success(
-            if target.eq_ignore_ascii_case(&teammate) {
-                format!("Handed to {target}. They will answer this turn.")
-            } else {
-                format!("Handed to {teammate} (`{target}`). They will answer this turn.")
-            },
-        ))
+        Ok(ToolResult::success(format!(
+            "Handed to {teammate}. They will answer this turn."
+        )))
     }
 }
 
@@ -3753,21 +3656,13 @@ impl Tool for RunWorkflowTool {
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
                 if let Some(events) = self.events.as_ref() {
-                    let message = err.to_string();
                     crate::runtime::record_run_finished(
                         events,
                         &self.company,
                         &wid,
                         false,
                         &ctx.run_id,
-                        // Issue #1008: an agent-started run journals what it did
-                        // before it broke on exactly the same terms as a console
-                        // or scheduled one — the three entry points share this
-                        // helper so their history cannot drift.
-                        Err(crate::runtime::FailedRun {
-                            error: message.as_str(),
-                            partial: err.partial_run(),
-                        }),
+                        Err(err.to_string().as_str()),
                     )
                     .await;
                 }
@@ -3897,49 +3792,6 @@ fn summarize_run(
     }
     if blocked.is_empty() && paused.is_empty() {
         md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
-    }
-
-    // Issue #981: what happened to the reports. Nothing here read `deliveries`,
-    // so a run whose report was refused closed with the sentence above and
-    // nothing else — and "reached its terminal node(s)" is true of exactly that
-    // run, which is what made the silence so convincing. The model then reports
-    // a clean run to whoever asked for one, and nobody learns the report is
-    // gone until somebody notices it never arrived.
-    //
-    // **Reason, never `detail`.** `DeliveryReason` is the log-safe half of the
-    // pair (issue #248): a mail transport's refusal quotes the mailbox it
-    // refused, and `detail` is for the operator's own surfaces. This summary is
-    // a model's tool result and goes wherever that turn goes, so it takes the
-    // closed set — which says what class of thing failed and has no field that
-    // could carry an address.
-    let undelivered: Vec<&crate::ports::DeliveryReport> = run
-        .deliveries
-        .iter()
-        .filter(|d| {
-            !matches!(
-                d.status,
-                crate::ports::DeliveryStatus::Sent | crate::ports::DeliveryStatus::Pending
-            )
-        })
-        .collect();
-    if !undelivered.is_empty() {
-        md.push_str(&format!(
-            "\n**{} report(s) did NOT reach a destination.** The graph ran and its work stands — \
-             delivery happens after the engine returns, so no node failed and none of the \
-             per-node lines above is wrong. But the report did not go out, and it will not \
-             without a change:\n",
-            undelivered.len()
-        ));
-        for report in &undelivered {
-            md.push_str(&format!(
-                "- `{}` ({}): {}\n",
-                report.node, report.kind, report.reason
-            ));
-        }
-        md.push_str(
-            "There is no retry: fix the destination or the runtime wiring and run the workflow \
-             again.\n",
-        );
     }
 
     // Footer: the previews above are the *last* item of each node, clipped, so
@@ -4639,9 +4491,6 @@ impl Tool for CreateWorkflowTool {
                 let detail = match &err {
                     OpenCompanyError::InvalidRequest(message)
                     | OpenCompanyError::Conflict(message) => message.clone(),
-                    // A structured workflow rejection (issue #1016) carries the
-                    // joined problem text via `Display`, so the agent reads why.
-                    OpenCompanyError::WorkflowInvalid { .. } => err.to_string(),
                     _ => "the company couldn't save it right now; try again.".to_string(),
                 };
                 Ok(ToolResult::error(format!(
@@ -4746,7 +4595,6 @@ mod tests {
             global: false,
             id: id.to_string(),
             role: "Role".to_string(),
-            name: None,
             description: None,
             tier: tier.map(str::to_string),
             tools: Vec::new(),
@@ -6316,85 +6164,6 @@ members = ["legal_counsel"]
         assert!(refused.is_error, "{}", refused.output_for_llm(true));
     }
 
-    /// Issue #1162, the other half of the fix: a hand-off written with a
-    /// teammate's **display name** is accepted, and what reaches the queue is
-    /// the **canonical id**.
-    ///
-    /// Queueing the key as typed is what would make a name-accepting refusal
-    /// worse than the refusal it replaced — the tool would answer "Handed to
-    /// …" and the drain, which resolves independently, would find nothing to
-    /// deliver to. The reply names both strings so the model learns the id.
-    #[tokio::test]
-    async fn a_teammate_named_by_display_name_is_queued_under_its_id() {
-        let company = CompanyId::new("acme");
-        let queue = DelegationQueue::default();
-        let _claim = queue.claim();
-        let mut record = peers_record(&company);
-        record.overlay_agents.push(OverlayAgent {
-            id: "dana_designer".to_string(),
-            name: "Dana Designer".to_string(),
-            role: "Designer".to_string(),
-            description: None,
-            tools: Vec::new(),
-        });
-        let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
-        let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
-
-        let result = tool
-            .execute(json!({ "teammate": "Dana Designer", "instruction": "draw it" }))
-            .await
-            .expect("execute");
-        assert!(!result.is_error, "{}", result.output_for_llm(true));
-        let reply = result.output_for_llm(true);
-        assert!(
-            reply.contains("Dana Designer") && reply.contains("dana_designer"),
-            "the reply must name the person and teach the id: {reply}"
-        );
-        assert_eq!(
-            queue.drain(MAX_DELEGATIONS_PER_TURN),
-            vec![Delegation::DelegateToTeammate {
-                teammate: "dana_designer".to_string(),
-                instruction: "draw it".to_string(),
-            }],
-            "the queue must carry the canonical id, not the key as typed"
-        );
-    }
-
-    /// A display name two teammates answer to is refused rather than routed to
-    /// whichever was added first, and the refusal carries the ids to retry
-    /// with — the collision is the operator's to resolve, and the model cannot
-    /// do it without being told the alternatives (issue #1162).
-    #[tokio::test]
-    async fn a_display_name_two_teammates_share_is_refused_with_their_ids() {
-        let company = CompanyId::new("acme");
-        let queue = DelegationQueue::default();
-        let _claim = queue.claim();
-        let mut record = peers_record(&company);
-        for id in ["dana_designer", "dana_designer_2"] {
-            record.overlay_agents.push(OverlayAgent {
-                id: id.to_string(),
-                name: "Dana Designer".to_string(),
-                role: "Designer".to_string(),
-                description: None,
-                tools: Vec::new(),
-            });
-        }
-        let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
-        let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
-
-        let result = tool
-            .execute(json!({ "teammate": "Dana Designer", "instruction": "draw it" }))
-            .await
-            .expect("execute");
-        assert!(result.is_error, "{}", result.output_for_llm(true));
-        let refusal = result.output_for_llm(true);
-        assert!(
-            refusal.contains("dana_designer") && refusal.contains("dana_designer_2"),
-            "the refusal must name both ids: {refusal}"
-        );
-        assert_eq!(queue.queued(), 0);
-    }
-
     /// Both arguments are required, and neither may be blank — a hand-off with
     /// no instruction is a turn run on nothing.
     #[tokio::test]
@@ -6536,10 +6305,7 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(
-                &self,
-                _id: &CompanyId,
-            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
                 Box::pin(stream::empty())
             }
         }
@@ -6641,10 +6407,7 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(
-                &self,
-                _id: &CompanyId,
-            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
                 Box::pin(stream::empty())
             }
         }
@@ -6996,61 +6759,6 @@ name = "Morning"
         );
     }
 
-    /// Issue #1162: the Team column is the one the orchestrator is told to take
-    /// a hand-off target from, so every row must lead with a token the
-    /// delegation tools can ground. An overlay teammate was listed under its
-    /// **display name** while a manifest agent was listed under its **id** —
-    /// two namespaces rendered identically, and `mint_agent_id` guarantees the
-    /// name is not the id.
-    ///
-    /// The two halves are pinned together deliberately: the assertion is not
-    /// "the line contains `dana_designer`" but "the token the line prints
-    /// resolves", so a render that drifts from the resolver fails here rather
-    /// than in production.
-    #[tokio::test]
-    async fn query_company_lists_a_teammate_under_the_id_delegation_grounds() {
-        let mut record = seeded_record(&CompanyId::new("acme"));
-        let id = record.mint_agent_id("Dana Designer");
-        assert_eq!(id, "dana_designer", "the id and the name must differ");
-        record.overlay_agents.push(OverlayAgent {
-            id: id.clone(),
-            name: "Dana Designer".to_string(),
-            role: "Designer".to_string(),
-            description: None,
-            tools: Vec::new(),
-        });
-        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record.clone()));
-
-        let out = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, Some(store))
-            .execute(json!({}))
-            .await
-            .expect("execute")
-            .output_for_llm(true);
-
-        let line = out
-            .lines()
-            .find(|line| line.contains("Designer"))
-            .unwrap_or_else(|| panic!("no teammate line: {out}"));
-        assert!(
-            line.contains(&id),
-            "the row must lead with the groundable id: {line}"
-        );
-        assert!(
-            line.contains("known as Dana Designer"),
-            "the display name must survive as a label: {line}"
-        );
-        // The token the roster prints is the token delegation accepts.
-        let printed = line
-            .split("**")
-            .nth(1)
-            .unwrap_or_else(|| panic!("no bold token: {line}"));
-        assert_eq!(
-            record.resolve_teammate_key(printed),
-            crate::ports::types::TeammateResolution::Agent(id),
-            "the roster printed a token delegation cannot ground: {line}"
-        );
-    }
-
     /// Issue #272: `query_company` is the grounding surface the orchestrator is
     /// told to consult, but it listed the roster and not the **desks** — so an
     /// orchestrator about to delegate had no authoritative id to read and
@@ -7133,7 +6841,6 @@ name = "Morning"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
-            setup: None,
         }
     }
 
@@ -7918,7 +7625,6 @@ name = "Morning"
                 tools: vec!["publish_artifact".to_string()],
                 approval_ids: vec!["appr-1".to_string()],
                 unparkable: 0,
-                stranded: 0,
             }],
             approvals: vec![
                 crate::ports::WorkflowRunApprovalRow {
@@ -8110,7 +7816,6 @@ name = "Morning"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
-            setup: None,
         }
     }
 
@@ -9078,89 +8783,6 @@ name = "Morning"
         assert!(md.contains("run drawer"), "{md}");
         assert!(md.contains("999 bytes"), "{md}");
         assert!(!md.contains("Read any node's full output"), "{md}");
-    }
-
-    /// Issue #981 (part 2): the summary says a report did not go out.
-    ///
-    /// Before this, `summarize_run` never read `deliveries`, so a run whose
-    /// report was refused closed with "The run reached its terminal node(s)
-    /// without pausing for approval" and nothing else — a true sentence about a
-    /// run that had just dropped its only output, which the model then reported
-    /// upward as a clean run.
-    #[test]
-    fn the_summary_says_when_a_report_did_not_go_out() {
-        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
-        let dropped = WorkflowRun {
-            output: json!({ "nodes": { "worker": { "items": ["the report"] } } }),
-            pending_approvals: Vec::new(),
-            deliveries: vec![crate::ports::DeliveryReport {
-                node: "worker".into(),
-                kind: "channel".into(),
-                target: Some("operator".into()),
-                status: crate::ports::DeliveryStatus::Failed,
-                detail: "`operator` is not a workflow delivery channel — this runtime has:                          engineering"
-                    .into(),
-                reason: crate::ports::DeliveryReason::ChannelNotWired,
-            }],
-            cancelled: false,
-            nodes: Vec::new(),
-            notices: Vec::new(),
-            board: Vec::new(),
-            blocked_nodes: Vec::new(),
-            approvals: Vec::new(),
-        };
-        let md = summarize_run(&file, &dropped, "run-drop", RunOutputStored::Stored);
-        assert!(
-            md.contains("1 report(s) did NOT reach a destination"),
-            "{md}"
-        );
-        assert!(md.contains("`worker` (channel)"), "{md}");
-        // The reason, from the closed set — never `detail`, which quotes what a
-        // transport said and is for the operator's own surfaces (issue #248).
-        assert!(
-            md.contains(&crate::ports::DeliveryReason::ChannelNotWired.to_string()),
-            "{md}"
-        );
-        assert!(
-            !md.contains("this runtime has: engineering"),
-            "the operator-only `detail` must not ride the summary: {md}"
-        );
-        // And it does not claim the graph broke: the per-node line still reports
-        // what the node produced.
-        assert!(md.contains("1 item(s) — the report"), "{md}");
-
-        // A run that delivered fine says nothing about delivery at all, so an
-        // ordinary summary is unchanged.
-        let clean = WorkflowRun {
-            deliveries: vec![crate::ports::DeliveryReport {
-                node: "worker".into(),
-                kind: "owner".into(),
-                target: Some("ada@example.com".into()),
-                status: crate::ports::DeliveryStatus::Sent,
-                detail: "emailed the company's admin".into(),
-                reason: crate::ports::DeliveryReason::OwnerEmailed,
-            }],
-            ..dropped.clone()
-        };
-        let md = summarize_run(&file, &clean, "run-ok", RunOutputStored::Stored);
-        assert!(!md.contains("did NOT reach a destination"), "{md}");
-
-        // A report parked for an operator's approval is waiting on a person,
-        // not lost — counting it here would tell the model to go fix a queue
-        // that is working.
-        let parked = WorkflowRun {
-            deliveries: vec![crate::ports::DeliveryReport {
-                node: "worker".into(),
-                kind: "email".into(),
-                target: Some("new@example.com".into()),
-                status: crate::ports::DeliveryStatus::Pending,
-                detail: "waiting in Approvals".into(),
-                reason: crate::ports::DeliveryReason::ParkedForApproval,
-            }],
-            ..dropped.clone()
-        };
-        let md = summarize_run(&file, &parked, "run-parked", RunOutputStored::Stored);
-        assert!(!md.contains("did NOT reach a destination"), "{md}");
     }
 
     /// T3: a successful run populates the cache and the tool's JSON payload

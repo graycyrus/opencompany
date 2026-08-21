@@ -168,30 +168,7 @@ export interface TaskPlan {
    * had no assignee — a plan never reassigns work a person routed.
    */
   proposedAssignee?: string;
-  /**
-   * The teammates that plausibly fit, when more than one did (issue #1106).
-   *
-   * Non-empty means the pass **declined to choose** and the card is waiting on
-   * a person — it is never populated alongside `proposedAssignee`, which is set
-   * only when exactly one candidate resolved. Absent on every plan written
-   * before #1106, and on every unambiguous plan written since.
-   */
-  assigneeCandidates?: AssigneeCandidate[];
   plannedAtMillis: number;
-}
-
-/**
- * One teammate the planner thinks could take a card, and why (issue #1106).
- *
- * `id` is canonical — the host resolves it against the roster before storing
- * it, and drops anything the roster does not carry, so every candidate rendered
- * is one the assignee write boundary will accept.
- */
-export interface AssigneeCandidate {
-  /** A teammate id, or a desk id. Submitted verbatim, never resolved here. */
-  id: string;
-  /** One line on why this one fits. Model prose, shown to a person deciding. */
-  reason: string;
 }
 
 /** A board card as the host returns it. */
@@ -202,12 +179,6 @@ export interface AssigneeCandidate {
  * treat an absent value as `"once"`.
  */
 export type TaskDeliverable = "once" | "workflow";
-
-/** A positive source-currency USD amount or an explicit role-redacted state. */
-export interface TaskCost {
-  amountUsd?: number;
-  hidden?: boolean;
-}
 
 /**
  * A workflow the builder pass proposed for a `workflow`-deliverable card,
@@ -238,8 +209,6 @@ export interface Task {
   /** The desk/teammate label that owns it (a roster agent id routes a turn). */
   assignee: string;
   updatedAt: number;
-  /** Lifetime total, including descendants. Absent for a true zero. */
-  cost?: TaskCost;
   /**
    * The card this one was spawned from (#185), when it has a parent. Omitted on
    * a lineage root — every card the board creates today — so the board's wire
@@ -396,10 +365,6 @@ export interface TimelineEntry {
    * host-side and bounded (#411).
    */
   detail?: string;
-  /** Stable key for a durable cost row that is not a journal event. */
-  costKey?: string;
-  /** Cost incurred by this line. Absent for a true zero. */
-  cost?: TaskCost;
   /**
    * On a run step: **what came back** — a shape summary, an intrinsic tool's
    * own message, or a failure's plain-language cause (#411). Absent on
@@ -432,16 +397,7 @@ export interface TimelineEntry {
   waitedMillis?: number;
 }
 
-/**
- * What became of an approval (#333). `pending` is still waiting on a human.
- *
- * `expired` was declared here from the start and was **unreachable** until
- * #971: nothing swept approvals for a company without a manifest schedule, so
- * no approval ever aged out and no surface ever needed to render this. It is
- * reachable now. Render it through `approvalStatusLabel` in `lib/language` —
- * an operator must be able to tell the no they made from the one the deadline
- * made, and neither should ever appear as a raw identifier.
- */
+/** What became of an approval (#333). `pending` is still waiting on a human. */
 export type TaskApprovalStatus = "pending" | "approved" | "denied" | "expired";
 
 /**
@@ -541,8 +497,6 @@ export interface LineageRef {
   id: string;
   title: string;
   column: string;
-  /** This child's lifetime total, including its descendants. */
-  cost?: TaskCost;
 }
 
 /** The parent/children view of a task (#185). */

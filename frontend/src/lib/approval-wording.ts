@@ -1,12 +1,9 @@
 /**
  * What an approve actually promises (issue #561).
  *
- * Approving does not resume a suspended call in place — the host refuses a
- * gated call, mints a single-use grant and re-dispatches (issue #243): a chat
- * turn re-dispatches the agent, and since issue #899 (Stage 1) a blocked
- * workflow run re-dispatches the run itself, so approving now continues that run
- * automatically rather than leaving it for a manual re-run. Since issue #469 the
- * re-dispatch happens **once per turn, when the last decision that turn was
+ * Approving does not resume a suspended call — the host refuses a gated call,
+ * mints a single-use grant and re-dispatches the agent (issue #243). Since
+ * issue #469 it does that **once per turn, when the last decision that turn was
  * blocked on lands**. So on a turn that parked four calls, three of the
  * operator's four clicks release nothing at all, and the console said "the
  * agent is completing the action" for every one of them. Measured on staging:
@@ -25,7 +22,7 @@ export type StillAwaiting = number | undefined;
  *
  * Three states, and the middle one is the whole point:
  *
- * * `0` — this decision released the turn, so the teammate really is picking it up;
+ * * `0` — this decision released the turn, so the agent really is picking it up;
  * * `n > 0` — it did not, and the operator is told what is still owed rather
  *   than being left to watch for work that nothing has started;
  * * `undefined` — the host predates the field, so nothing is claimed about what
@@ -34,16 +31,16 @@ export type StillAwaiting = number | undefined;
 export function approvedLine(stillAwaiting: StillAwaiting, detail?: string): string {
   const suffix = detail ? `: ${detail}` : "";
   if (stillAwaiting === undefined) return `Approved — recorded${suffix}`;
-  if (stillAwaiting === 0) return `Approved — the teammate is picking it up now${suffix}`;
+  if (stillAwaiting === 0) return `Approved — the agent is picking it up now${suffix}`;
   return `Approved — waiting on ${stillAwaiting} more sign-off${
     stillAwaiting === 1 ? "" : "s"
-  } before the teammate continues${suffix}`;
+  } before the agent continues${suffix}`;
 }
 
 /**
  * The same answer for a card the runtime performs itself — a paused workflow
- * gate, a cold-recipient report (issue #395). There is no teammate to re-dispatch,
- * so "the teammate" must not appear; the work is still gated on the rest of the
+ * gate, a cold-recipient report (issue #395). There is no agent to re-dispatch,
+ * so "the agent" must not appear; the work is still gated on the rest of the
  * turn's decisions in exactly the same way.
  */
 export function approvedByRuntimeLine(stillAwaiting: StillAwaiting, detail?: string): string {

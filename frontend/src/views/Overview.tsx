@@ -7,7 +7,7 @@ import { listMemory, type MemoryEntry } from "@/api/memory";
 import { listTasks, type Task } from "@/api/tasks";
 import type { DeskDto } from "@/api/types";
 import { getWorkflow, listWorkflows, type WorkflowGraph } from "@/api/workflows";
-import { fromDto, type TeamMember } from "@/lib/team";
+import { fromDto, starterTeam, type TeamMember } from "@/lib/team";
 import { adapt, buildMemoryGraph } from "./overview/kg/adapter";
 import { buildKnowledgeGraph } from "./overview/kg/model";
 import { ownedBy } from "./overview/pulse";
@@ -47,10 +47,7 @@ interface Sources {
 
 const EMPTY: Sources = {
   tasks: [],
-  // Empty, not a fabricated roster. This is the pre-load state, and seeding it
-  // with twelve invented agents drew a full org graph for a company that has
-  // nobody in it (`docs/spec/runtime/company-setup.md`).
-  team: [],
+  team: starterTeam(),
   desks: [],
   people: [],
   memories: [],
@@ -130,8 +127,6 @@ export function Overview({ client, company }: Props) {
               description: summary.description,
               nodes: [],
               edges: [],
-              // No saved graph to fetch, so no token (issue #1013).
-              version: null,
             }),
           ),
         ),
@@ -140,10 +135,7 @@ export function Overview({ client, company }: Props) {
 
       setSources({
         tasks,
-        // The host's roster, or nobody. Never a fabricated stand-in: an operator
-        // reading this graph is reading who works here, and inventing twelve
-        // agents made an unstaffed company look busy.
-        team: roster?.length ? roster.map(fromDto) : [],
+        team: roster?.length ? roster.map(fromDto) : starterTeam(),
         desks,
         people,
         memories,

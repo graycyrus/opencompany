@@ -1,15 +1,13 @@
 import { useRef, useState } from "react";
 import {
-  ArrowUp,
   AtSign,
   Bold,
-  CaseSensitive,
   Code,
   Italic,
   Link2,
   List,
   Paperclip,
-  Smile,
+  SendHorizontal,
   Strikethrough,
 } from "lucide-react";
 
@@ -68,10 +66,6 @@ export function MessageComposer({
   // after every send so a workflow request never silently carries into the
   // ordinary message after it — each build is an explicit, per-line decision.
   const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
-  // The formatting row is opt-in, behind the `Aa` toggle in the icon row. It
-  // used to sit open above every composer, which spent the widest strip of the
-  // dock on four buttons most lines never use.
-  const [formatting, setFormatting] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
 
   function send() {
@@ -111,7 +105,7 @@ export function MessageComposer({
       data-tour={compact ? undefined : "chat-composer"}
     >
       <div className="rounded-xl border bg-card shadow-sm focus-within:ring-2 focus-within:ring-ring/40">
-        {!compact && formatting && (
+        {!compact && (
           <div className="flex items-center gap-0.5 border-b px-2 py-1">
             {WRAPS.map((w) => (
               <Button
@@ -198,16 +192,6 @@ export function MessageComposer({
             variant="ghost"
             size="icon"
             className="size-7 text-muted-foreground"
-            aria-label="Mention someone"
-            title="Mention someone"
-            onClick={() => wrap("@")}
-          >
-            <AtSign className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground"
             aria-label="Attach a file"
             title="Attach a file"
             disabled
@@ -218,36 +202,20 @@ export function MessageComposer({
             variant="ghost"
             size="icon"
             className="size-7 text-muted-foreground"
-            aria-label="Add an emoji"
-            title="Add an emoji"
-            disabled
+            aria-label="Mention someone"
+            title="Mention someone"
+            onClick={() => wrap("@")}
           >
-            <Smile className="size-4" />
+            <AtSign className="size-4" />
           </Button>
-          {!compact && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn(
-                "size-7 text-muted-foreground",
-                formatting && "bg-accent text-accent-foreground",
-              )}
-              aria-label="Formatting"
-              aria-pressed={formatting}
-              title="Formatting"
-              onClick={() => setFormatting((f) => !f)}
-            >
-              <CaseSensitive className="size-4" />
-            </Button>
-          )}
           <Button
             size="icon"
-            className="ml-auto size-9 rounded-full"
+            className="ml-auto size-7 rounded-lg"
             onClick={send}
             disabled={disabled || !draft.trim()}
             aria-label="Send"
           >
-            <ArrowUp className="size-4" />
+            <SendHorizontal className="size-4" />
           </Button>
         </div>
       </div>
