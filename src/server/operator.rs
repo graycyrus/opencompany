@@ -3106,6 +3106,19 @@ mod test {
         config: AppConfig,
         brain: Option<Arc<dyn crate::ports::brain::Brain>>,
     ) -> AppState {
+        build_state_with_brain_and_manifest(home, lifecycle, config, brain, manifest()).await
+    }
+
+    /// [`build_state_with_brain`], with the company manifest chosen by the
+    /// caller — the approval **deadline** lives in `[policy]`, so a test about
+    /// what a past-deadline card answers has to be able to set it (issue #1449).
+    async fn build_state_with_brain_and_manifest(
+        home: &std::path::Path,
+        lifecycle: &str,
+        config: AppConfig,
+        brain: Option<Arc<dyn crate::ports::brain::Brain>>,
+        manifest: CompanyManifest,
+    ) -> AppState {
         // Pre-seed a record so the builder preserves the requested lifecycle.
         let store = FsCompanyStore::new(home.to_path_buf());
         let id = CompanyId::new("acme");
@@ -3113,7 +3126,7 @@ mod test {
         store
             .save(&CompanyRecord {
                 id: id.clone(),
-                manifest: manifest(),
+                manifest: manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: lifecycle.to_string(),
                 overlay_agents: Vec::new(),
@@ -3131,7 +3144,7 @@ mod test {
             .await
             .unwrap();
 
-        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest()).with_id(id.clone());
+        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone());
         if let Some(brain) = brain {
             builder = builder.with_brain(brain);
         }
@@ -6902,7 +6915,7 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
 
         // The answer really did precede the work: the turn is only now under
@@ -7080,13 +7093,102 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0, "outcome": "already_resolved" })
         );
         assert_eq!(
             c.runtime.grants.live_count(),
             1,
             "re-approving minted no second grant"
         );
+    }
+
+    /// **Issue #1449 on the wire.** A card past its deadline answers `expired`,
+    /// on both response shapes, and journals no approval against the operator.
+    ///
+    /// The two shapes matter independently. The **detached** receipt is what the
+    /// inline chat card reads; the **synchronous** `ChatResponse` is what the
+    /// Approvals page reads — the surface the defect was reported on — and it
+    /// never sees a receipt at all, so a discriminator that only rode on the
+    /// receipt would have left the reproduced bug in place.
+    #[tokio::test]
+    async fn a_resolve_past_the_deadline_answers_expired_on_both_shapes() {
+        let home_dir = home();
+        // `approval_ttl_hours = 0`: anything parked is past its deadline the
+        // instant it lands, which is the state an operator meets when they get
+        // to a queue late.
+        let expiring: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\napproval_ttl_hours = 0\n",
+        )
+        .unwrap();
+        let state = build_state_with_brain_and_manifest(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(StalledContinuationBrain {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+                parked: gated_tool_call(),
+            })),
+            expiring,
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app.clone().oneshot(chat_request("do it")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval_id = runtime.pending_approvals()[0].id.clone();
+
+        // The detached shape.
+        let detached = app
+            .clone()
+            .oneshot(resolve_request(
+                &approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(detached.status(), StatusCode::OK);
+        let bytes = to_bytes(detached.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["outcome"], "expired",
+            "the host default-denied this; the receipt has to be able to say so, got {value}"
+        );
+        assert_eq!(
+            runtime.grants.live_count(),
+            0,
+            "and it minted nothing, as it always did"
+        );
+
+        // The synchronous shape, on a second card of the same company.
+        let response = app
+            .clone()
+            .oneshot(chat_request("do it again"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let second = runtime.pending_approvals()[0].id.clone();
+        let sync = app
+            .clone()
+            .oneshot(resolve_request(
+                &second,
+                serde_json::json!({"verdict":"approve"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sync.status(), StatusCode::OK);
+        let bytes = to_bytes(sync.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("responses").is_some_and(|r| r.is_array()),
+            "still a ChatResponse, got {value}"
+        );
+        assert_eq!(
+            value["outcome"], "expired",
+            "the Approvals page's own shape carries it too, got {value}"
+        );
+        assert_eq!(runtime.grants.live_count(), 0);
     }
 
     /// Both scope forms carry `detach` identically — the `/companies/{id}` route
@@ -7113,7 +7215,7 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
         assert!(await_continuation(&c.runtime).await);
         assert_eq!(c.runtime.grants.live_count(), 1);
