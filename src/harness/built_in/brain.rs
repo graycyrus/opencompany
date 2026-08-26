@@ -2376,6 +2376,21 @@ impl HarnessBrain {
         if let Some(lead) = self.desk_lead(chat) {
             return lead;
         }
+        // The built-in `#general` channel, once no desk has claimed the key
+        // above (issue #1743). It is the company-wide line and the orchestrator
+        // answers it, which is what this host has always done — but only
+        // because nothing else matched. A teammate whose id happens to be
+        // `main` or `General` used to match on the next line and answer every
+        // unaddressed message, while `GET chat/history?desk=main` returned the
+        // folded General conversation rather than that teammate's DM: the
+        // responder and the transcript disagreed about whose conversation it
+        // was. `mint_agent_id` reserves both spellings now, but a manifest can
+        // still declare one, and a manifest is not something to overrule — so
+        // the bare key belongs to the line and the teammate keeps its DM, which
+        // the `dm:<id>` arm below still routes.
+        if crate::server::chat_history::is_general_chat(Some(chat)) {
+            return self.responder.clone();
+        }
         if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
             return agent;
         }

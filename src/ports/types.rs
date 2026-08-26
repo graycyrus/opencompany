@@ -3905,6 +3905,20 @@ impl CompanyRecord {
     /// id, searching the manifest desks first and then the operator-created
     /// overlay desks. Lets the harness route to overlay desks by the same
     /// id-or-name key it already accepts for manifest desks.
+    ///
+    /// **An overlay desk never answers to a General spelling** (issue #1743).
+    /// `POST .../desks` accepted `general` and `main` — and the display name
+    /// `General` — until that issue, so an upgraded record can hold one, and it
+    /// would otherwise take over routing for the built-in `#general` channel:
+    /// `responder_for` would answer as its lead while the console showed the
+    /// company-wide line, and `@everyone` there would name only its members.
+    /// Keyed on the **key being asked for**, not on the desk, so such a desk
+    /// still routes normally under its own non-General id — this narrows one
+    /// question, it does not retire a desk.
+    ///
+    /// A desk the *manifest* declares is matched first and is unaffected: a
+    /// blueprint that authored the company's General desk keeps it, which is
+    /// the grandfathering this host has always honoured.
     pub fn resolve_desk_id(&self, key: &str) -> Option<String> {
         self.manifest
             .group_chats
@@ -3912,6 +3926,9 @@ impl CompanyRecord {
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
+                if crate::server::chat_history::is_general_chat(Some(key)) {
+                    return None;
+                }
                 self.overlay_desks
                     .iter()
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
