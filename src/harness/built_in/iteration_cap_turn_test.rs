@@ -296,6 +296,7 @@ async fn company_agent(
         &manifest_agent,
         policy,
         &deps,
+        &crate::analytics::null_tracker(),
         &["docs".to_string()],
         &[],
         &[],

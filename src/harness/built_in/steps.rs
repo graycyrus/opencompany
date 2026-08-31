@@ -208,17 +208,48 @@ pub fn tool_source(tool_name: &str) -> &'static str {
 /// on exactly the turns that delegate, which is the shape that makes a funnel
 /// lie rather than merely inflate.
 ///
+/// # A parked call is not a call
+///
+/// A call our supervised policy gated arrives here as `success = false`
+/// carrying the approval-required refusal — the same event
+/// [`complete`] reads as [`AwaitingApproval`](TurnStepStatus::AwaitingApproval)
+/// and explicitly refuses to count as an error. Reading `success` alone would
+/// therefore score **every approval-gated call as a tool failure**, and this
+/// event exists to answer "does tool traffic work", so the inflation would land
+/// hardest on exactly the companies that supervise the most.
+///
+/// It is not reported as a success either. The tool never ran: nothing left
+/// this process, there is no outcome to have, and a duration measured to a
+/// refusal is not how long the tool takes. The oversight loop is already the
+/// subject of its own two events —
+/// [`ApprovalParked`](crate::analytics::Event::ApprovalParked) and
+/// [`ApprovalDecided`](crate::analytics::Event::ApprovalDecided) — so the park
+/// is counted there, once, rather than half-counted in two vocabularies. If the
+/// operator approves it, the call runs and reports itself here like any other.
+///
+/// Recognised through [`is_awaiting_approval`], the same predicate `complete`
+/// uses, so the timeline an operator reads and the number a dashboard draws
+/// cannot disagree about what a parked call is.
+///
 /// [`Tracker::track`]: crate::analytics::Tracker::track
 pub fn track_tool_call(tracker: &dyn crate::analytics::Tracker, event: &AgentProgress) {
     let AgentProgress::ToolCallCompleted {
         tool_name,
         success,
+        output,
         elapsed_ms,
         ..
     } = event
     else {
         return;
     };
+    // Checked before anything is emitted, and only on the failing arm: a
+    // *successful* call whose output happens to quote the refusal is a real
+    // call that really ran, and `success` is the harness's own answer to
+    // whether it did.
+    if !success && is_awaiting_approval(output) {
+        return;
+    }
     tracker.track(crate::analytics::Event::ToolCalled {
         // The source, never the name. A tool name is where an MCP server's own
         // tool, a Composio action slug, or whatever a model invented would enter
@@ -3273,6 +3304,121 @@ mod tests {
             // rather than a tracker that never records anything.
             track_tool_call(&tracker, &finished("workspace_read", true, 1));
             assert_eq!(tracker.events().len(), 1);
+        }
+
+        /// [`finished`], carrying the output the tool actually returned.
+        fn finished_with(tool: &str, success: bool, output: &str) -> AgentProgress {
+            let AgentProgress::ToolCallCompleted {
+                call_id,
+                tool_name,
+                elapsed_ms,
+                ..
+            } = finished(tool, success, 9)
+            else {
+                unreachable!("`finished` builds a completion")
+            };
+            AgentProgress::ToolCallCompleted {
+                call_id,
+                tool_name,
+                success,
+                output_chars: output.chars().count(),
+                output: output.to_string(),
+                arguments: None,
+                elapsed_ms,
+                iteration: 1,
+                failure: None,
+            }
+        }
+
+        /// Raised in review of #1739: a call **our** approval policy parked is
+        /// not a tool failure, and must not be counted as one.
+        ///
+        /// It arrives as `success = false` carrying the refusal, which is the
+        /// same event the timeline reads as
+        /// [`TurnStepStatus::AwaitingApproval`] — so scoring it `failed` here
+        /// would put one call in two irreconcilable places at once, and inflate
+        /// the failure rate most for the companies that supervise the most.
+        ///
+        /// Not reported as a success either: the tool never ran. The park is
+        /// counted by `approval_parked`/`approval_decided` instead.
+        #[test]
+        fn an_approval_parked_call_is_not_reported_at_all() {
+            let tracker = RecordingTracker::new();
+            let parked = finished_with("send_email", false, &approval_refusal("send_email"));
+
+            // The coupling that makes this a real case rather than a guess: the
+            // timeline classifier reads this very event as parked, not failed.
+            let AgentProgress::ToolCallCompleted {
+                tool_name,
+                success,
+                output,
+                ..
+            } = &parked
+            else {
+                unreachable!("a completion")
+            };
+            assert_eq!(
+                complete(tool_name, *success, output, None, None).status,
+                TurnStepStatus::AwaitingApproval,
+                "the fixture must be the event the timeline calls parked"
+            );
+
+            track_tool_call(&tracker, &parked);
+            assert!(
+                tracker.events().is_empty(),
+                "a parked call is neither a success nor a failure: {:?}",
+                tracker.events()
+            );
+
+            // Self-check, and the regression: a call that genuinely failed —
+            // same `success = false`, an ordinary error body — is still
+            // reported, so the emptiness above is the park being recognised
+            // rather than every failure having been dropped.
+            track_tool_call(
+                &tracker,
+                &finished_with("send_email", false, "SMTP 550: mailbox unavailable"),
+            );
+            assert_eq!(
+                tracker.events(),
+                vec![Event::ToolCalled {
+                    source: "built-in",
+                    outcome: Outcome::Failed,
+                    duration_ms: 9,
+                }],
+                "a real failure must still be reported"
+            );
+        }
+
+        /// The predicate is `is_awaiting_approval`, not "the word approval
+        /// appeared". A different `ToolPolicy` on the same host, and a hard deny
+        /// from our own, are both real refusals — dropping them would hide
+        /// failures instead of the reverse.
+        #[test]
+        fn only_our_own_policys_park_escapes_the_failure_count() {
+            let tracker = RecordingTracker::new();
+            for output in [
+                "Blocked: Tool 'shell' requires approval under policy 'some-other-policy'.",
+                "Blocked: Tool 'shell' was denied by policy 'opencompany-approval'.",
+            ] {
+                track_tool_call(&tracker, &finished_with("shell", false, output));
+            }
+            assert_eq!(
+                tracker.events().len(),
+                2,
+                "neither of these is our park: {:?}",
+                tracker.events()
+            );
+            assert!(
+                tracker.events().iter().all(|event| matches!(
+                    event,
+                    Event::ToolCalled {
+                        outcome: Outcome::Failed,
+                        ..
+                    }
+                )),
+                "both must still read as failures: {:?}",
+                tracker.events()
+            );
         }
     }
 }

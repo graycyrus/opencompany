@@ -100,13 +100,25 @@ name belonging to the company stops:
   have on, and a rotted entry reports real built-in traffic as `other` — which
   reads as "an unknown tool ran". Sub-agent calls are deliberately not reported;
   they are work done *inside* the parent call that spawned them, and counting
-  both double-counts exactly the turns that delegate.
+  both double-counts exactly the turns that delegate. A call the **approval gate
+  parked** is not reported at all: it arrives as `success = false` carrying the
+  refusal, which is the same event the operator's timeline reads as
+  `AwaitingApproval`, so scoring it `failed` would inflate the failure rate
+  hardest for the companies that supervise the most. It is not a success either
+  — the tool never ran — and the park is already counted by
+  `approval_parked`/`approval_decided`.
 - **`status`** on `workflow_run_finished` reads `WorkflowRunVerdict`'s wire
   token rather than matching its variants, so a verdict this vocabulary has not
   heard of degrades to `other`. Five stay there on purpose — `running`,
   `stranded`, `undelivered`, `awaiting-approval`, `degraded` — each *nearly* one
   of the four words, and folding one onto its neighbour would make that
-  neighbour's count mean two things with no way to separate them afterwards.
+  neighbour's count mean two things with no way to separate them afterwards. A
+  run that fails while **warming the roster** — the first run after a boot or a
+  rebuild, against a provider that will not construct — reports `failed` with
+  zero nodes and zero duration, rather than returning to its caller with no
+  event at all; those are the cold-start and misconfiguration failures a failure
+  metric exists for, and a company whose workflows had never once warmed would
+  otherwise have shown a clean sheet.
 - **`shape`** on `ledger_appended` is the six ledgers every company has whichever
   vertical it started from, and never a cell. A ledger slug is author-defined at
   runtime, so `acme-holdings-merger` is a legal one that names the customer; a
@@ -130,7 +142,7 @@ Set once at boot, attached to every event:
 | `distinct_id` | the opaque identity — see below |
 | `deployment` | `desktop` \| `self-hosted` \| `hosted-tenant` |
 | `app_version` | the crate version |
-| `build_commit` | the revision this binary was stamped from (`crate::BUILD_COMMIT`), or `unknown` |
+| `build_commit` | the object id this binary was stamped from, optionally `-dirty`, or `unknown` |
 | `os`, `arch` | `std::env::consts` |
 | `cognition_path` | `harness` \| `hosted` \| `echo` \| `sidecar` \| `custom` |
 | `cognition_provider` | `openrouter` \| `subscription` \| `managed` \| `ollama` \| `byok` \| … |
@@ -146,8 +158,20 @@ the crate version: it moves on a release and not on a deploy, so every build
 between two releases is indistinguishable and "did this start after Tuesday's
 rollout?" — the question a regression always asks — has no answer. #1771 already
 stamps the revision into the binary and `/spec` reports it; it simply never
-reached the envelope until 2026-08-29. It is a fixed-shape hex string or the
-honest word `unknown`, so it carries no user content and needs no classifier.
+reached the envelope until 2026-08-29.
+
+It is the one envelope string that is **not** a literal compiled into this
+repository, so it is folded like every other. `build_stamp.rs` prefers
+`OPENCOMPANY_BUILD_COMMIT` over `git` on purpose — an escape hatch for a build
+environment nothing else covers — and it *sanitizes* rather than validates, so
+`release-2026-08-25`, or a branch name carrying a customer's name, would reach
+`crate::BUILD_COMMIT` intact and ride every event this instance ever sends.
+`types::commit_slug` therefore admits only an object id (7–40 hex digits, at
+most the `-dirty` suffix `build_stamp.rs` itself appends) and answers `unknown`
+for everything else. The stamp is left alone elsewhere: `/spec` and the
+operator-facing surfaces still report whatever was stamped, because the person
+reading them is the person who stamped it — this narrows only what leaves the
+process as telemetry.
 
 ## What is never collected
 
@@ -260,8 +284,8 @@ compiles the transport, and how to turn reporting off:
 | `approval_parked` | `runtime::cycle`'s park path | The single write into the operator's queue. A second emission site beside the journal write is a second thing a third park path can forget, and the count would then disagree with the queue it claims to describe. |
 | `approval_decided` | `runtime::cycle::track_decided` | Both settle paths, and **before** the `Expired` early return: an approval nobody answered in time is the failure mode the funnel is looking for, and emitting after that return would make `expired` the one verdict never reported. |
 | `tool_called` | `harness::built_in::steps::track_tool_call`, from the per-turn progress collector | The collector hands it **every** progress event, so it carries no decision of its own — which events count, and what each may say, is decided in one testable place. |
-| `workflow_run_finished` | `workflows::runner`, at the `WorkflowRunner` port boundary | The one place every run — console, scheduler, an orchestrator's `run_workflow` tool — passes exactly once. Timed from after the roster warms: charging a cold start to the first run makes it look pathological beside every later one. |
-| `ledger_appended` | `ledger::analytics::track_append`, from `company::ledgers` | After the append, so a refused write is not reported as one that happened, and before the fold, so a republish failure cannot lose the count. |
+| `workflow_run_finished` | `workflows::runner`, at the `WorkflowRunner` port boundary | The one place every run — console, scheduler, an orchestrator's `run_workflow` tool — passes exactly once. Timed from after the roster warms: charging a cold start to the first run makes it look pathological beside every later one. A warm that *fails* is still reported, at zero nodes and zero duration. |
+| `ledger_appended` | `ledger::analytics::track_append`, from `company::ledgers` | After the append, so a refused write is not reported as one that happened, and before the fold, so a republish failure cannot lose the count. The tracker reaches **both** ledger contexts — the routes', built from a whole `CompanyRuntime`, and the agent tools', built per turn in `harness::built_in::build::build_agent` — because agent-authored writes are the primary ledger path and reporting only the routes' would have read as "operators write ledgers, agents do not". |
 | `connection_changed` | `server::ops::connections::track_connection`, from the connections, MCP and Composio routes | After every removal or write half has landed, so a 409 or a 404 is never reported as a disconnect that happened. An MCP mutation whose probe comes back `Error` reports `failed` rather than the transition it attempted. |
 | `console_viewed` | `server::ops::console_view` — raised by the **console** | The host cannot see a hash change. See below. |
 | `instance_started` | `analytics::boot::install` | After companies register **and after the port is bound**: the company count and the cognition path are not known before the first, and a host that never took its address never started in any sense worth counting. |

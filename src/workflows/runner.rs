@@ -2329,7 +2329,35 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         // populated before a node addresses it. The run addresses the record's
         // own company; `_company` is the routed scope, which the runtime
         // resolves to this same record.
-        self.turn.ensure(&record).await?;
+        // Issue #1739, raised in review: a run that dies here is still a run
+        // that finished, and must say so.
+        //
+        // `ensure` builds or refreshes the harness roster on the first run
+        // after a boot or a rebuild, and it is fallible — a provider that will
+        // not construct, a manifest the roster cannot be built from. Returning
+        // straight to the caller left the console, the scheduler and the
+        // orchestrator each with an error and no `workflow_run_finished` event
+        // at all, which removed **exactly** the cold-start and misconfiguration
+        // failures from the failure metric. Those are the ones a dashboard is
+        // for; a company whose workflows have never once run would have shown a
+        // clean sheet.
+        if let Err(err) = self.turn.ensure(&record).await {
+            self.tracker
+                .track(crate::analytics::Event::WorkflowRunFinished {
+                    status: "failed",
+                    // The graph was never handed to the engine, so no node ran.
+                    // Zero here is the same honest answer the `Err` arm below
+                    // gives, and for the same reason.
+                    nodes: 0,
+                    // Warming is deliberately outside the reported runtime (see
+                    // below), and a run that never started has no runtime to
+                    // report. Charging the cost of a *failed* warm to the
+                    // duration distribution would make the one number this
+                    // event carries about speed mean two different things.
+                    duration_ms: 0,
+                });
+            return Err(err);
+        }
         // Issue #1739. Nothing in this tree measures how long a whole run takes
         // — the journal records that one started and that one finished, never
         // the span between — so this is new instrumentation rather than a read
@@ -4542,6 +4570,152 @@ to = "done"
             "{:?}",
             run.deliveries
         );
+    }
+
+    /// A lane whose roster will not warm: `ensure` fails and no turn is ever
+    /// reachable.
+    ///
+    /// The cold-start shape exactly — a provider that will not construct, a
+    /// manifest the roster cannot be built from — reduced to the one seam that
+    /// matters. Every `run*` method panics rather than returning, so a
+    /// regression that ran the graph anyway is a loud failure rather than a
+    /// quietly different assertion.
+    struct ColdRosterTurn;
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for ColdRosterTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            unreachable!("the roster never warmed; no turn may run")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            unreachable!("the roster never warmed; no turn may run")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            unreachable!("the roster never warmed; no turn may run")
+        }
+
+        async fn ensure(&self, _company: &CompanyRecord) -> Result<()> {
+            Err(OpenCompanyError::Harness(
+                "synthetic: the roster will not build".to_string(),
+            ))
+        }
+    }
+
+    /// Issue #1739, raised in review: a run that dies **warming the roster** is
+    /// still a finished run, and must report as one.
+    ///
+    /// This is the first run after a boot or a rebuild — the run that gets a
+    /// misconfigured provider or an unbuildable manifest. Before this, `ensure`
+    /// returned straight to the caller through `?`, ahead of both the timer and
+    /// the tracked outcome, so precisely the cold-start and configuration
+    /// failures never reached `workflow_run_finished`. A company whose
+    /// workflows had never once succeeded in warming would have shown a clean
+    /// sheet, which is the worst reading a failure metric can give.
+    #[tokio::test]
+    async fn a_run_that_fails_warming_the_roster_still_reports_a_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = record();
+        let tracker = Arc::new(crate::analytics::RecordingTracker::new());
+        let cold = HarnessWorkflowRunner::new(
+            Arc::new(ColdRosterTurn),
+            deps(dir.path()),
+            rec.clone(),
+            tracker.clone() as Arc<dyn crate::analytics::Tracker>,
+        );
+        let file = parse_workflow(GREET).expect("workflow parses");
+
+        let err = WorkflowRunner::run(
+            &cold,
+            &rec.id,
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect_err("a roster that will not build fails the run");
+        assert!(
+            err.to_string().contains("the roster will not build"),
+            "the caller must still get the real cause: {err}"
+        );
+
+        assert_eq!(
+            tracker.events(),
+            vec![crate::analytics::Event::WorkflowRunFinished {
+                status: "failed",
+                // Nothing was handed to the engine, so no node ran and there is
+                // no runtime to report.
+                nodes: 0,
+                duration_ms: 0,
+            }],
+            "a cold-start failure must reach the failure metric"
+        );
+
+        // The other arm, on a fresh tracker of the same kind: a run whose
+        // roster DOES warm reports something else, over nodes it actually ran.
+        // Without this the assertion above could be satisfied by a runner that
+        // reported `failed`, zero nodes, zero duration for everything.
+        //
+        // Not pinned to `completed`: this fixture's graph settles on a reading
+        // outside the four-word vocabulary (`other`), which
+        // `a_settled_run_reports_the_reading_its_fields_add_up_to` covers
+        // directly. What this arm is for is that the two are distinguishable.
+        let warm_tracker = Arc::new(crate::analytics::RecordingTracker::new());
+        let deps = deps(dir.path());
+        let warm = HarnessWorkflowRunner::new(
+            Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+                Arc::new(HarnessPool::new()),
+                Arc::new(deps.clone()),
+            )),
+            deps,
+            rec.clone(),
+            warm_tracker.clone() as Arc<dyn crate::analytics::Tracker>,
+        );
+        WorkflowRunner::run(
+            &warm,
+            &rec.id,
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
+        let [warmed] = warm_tracker.events()[..] else {
+            panic!("one finish: {:?}", warm_tracker.events())
+        };
+        let crate::analytics::Event::WorkflowRunFinished {
+            status,
+            nodes,
+            duration_ms,
+        } = warmed
+        else {
+            panic!("a workflow finish: {warmed:?}")
+        };
+        assert_ne!(status, "failed", "a run that warmed is not a warm failure");
+        assert!(nodes > 0, "a run that warmed ran nodes");
+        assert!(duration_ms > 0, "a run that warmed took time");
     }
 
     /// The port implementation ensures the roster itself, so a caller need not

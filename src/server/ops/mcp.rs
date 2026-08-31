@@ -1202,6 +1202,32 @@ mod tests {
             .expect("the index saves");
     }
 
+    /// What `mutation_response` reports for an asked-for transition in **this**
+    /// build.
+    ///
+    /// `probe_and_persist` is compiled only under `openhuman`; without the MCP
+    /// transport there is no probe, `observed_transition` sees `None`, and the
+    /// asked-for word survives. With it, the probe dials the fixture's endpoint
+    /// — an RFC 6761 `.invalid` name, which cannot answer — so the reading is
+    /// `McpStatus::Error` and the transition is downgraded to `failed`. That
+    /// downgrade is the point of the property, not an accident of the fixture.
+    ///
+    /// Stated here rather than worked around: the alternative is an endpoint
+    /// that really answers, which means a live MCP server inside a unit test.
+    /// The downgrade *decision* is pinned in every build by
+    /// [`a_probe_that_failed_downgrades_the_reported_transition`] and
+    /// [`a_server_awaiting_its_credential_is_not_a_failure`], both of which call
+    /// `observed_transition` directly; what the two mutation tests add on top is
+    /// that the emit is attached to the mutation at all — which a unit test of
+    /// the helper would pass with the call site deleted.
+    fn as_this_build_probes(asked: &'static str) -> &'static str {
+        if cfg!(feature = "openhuman") {
+            "failed"
+        } else {
+            asked
+        }
+    }
+
     /// **The wiring**: the add and update handlers both land here, and this is
     /// where the event is actually sent. Driven through `mutation_response`
     /// rather than by calling `track_connection` directly, because the thing
@@ -1235,7 +1261,7 @@ mod tests {
                 connection_events(&recorder),
                 vec![Event::ConnectionChanged {
                     provider: "mcp",
-                    transition: expected,
+                    transition: as_this_build_probes(expected),
                 }]
             );
         }
@@ -1318,7 +1344,7 @@ mod tests {
             events,
             vec![Event::ConnectionChanged {
                 provider: "mcp",
-                transition: "connected",
+                transition: as_this_build_probes("connected"),
             }]
         );
     }

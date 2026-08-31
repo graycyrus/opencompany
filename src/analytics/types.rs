@@ -261,6 +261,47 @@ impl FailureCode {
     }
 }
 
+/// The commit stamp a payload may carry: an object id, optionally `-dirty`, or
+/// `unknown` (issue #1739, raised in review).
+///
+/// [`crate::BUILD_COMMIT`] is *not* a closed value the way every other envelope
+/// string is. `build_stamp.rs` prefers `OPENCOMPANY_BUILD_COMMIT` over `git`
+/// precisely so a build environment nothing else covers can say what it is, and
+/// it sanitizes rather than validates — `[A-Za-z0-9._-]`, 64 characters. So
+/// `release-2026-08-25`, or a branch name naming a customer, reaches
+/// `crate::BUILD_COMMIT` intact and would then ride **every event this instance
+/// ever sends** as a super-property.
+///
+/// That is one free-form string in a module whose whole claim is that it has
+/// none, so it is folded here on the same terms as every other: a value that is
+/// not the shape it claims to be becomes `unknown`. Losing a builder's label
+/// costs a segmentation nobody has asked for; keeping it costs the claim.
+///
+/// The stamp itself is left alone. `/spec` and the operator-facing surfaces go
+/// on reporting whatever was stamped, because they are read by the person who
+/// stamped it — this narrows only what leaves the process as telemetry.
+///
+/// # The shape
+///
+/// Hex, 7 to 40 digits (`build_stamp` shortens a long id to 12; a shorter
+/// explicit one is still an id), with at most the `-dirty` suffix that same
+/// module appends. Anything else, including the empty string, is `unknown`.
+pub fn commit_slug(raw: &'static str) -> &'static str {
+    /// The stamp for a value that names no commit. Matches
+    /// `build_stamp.rs`'s own `UNKNOWN_COMMIT`, which is what a build with no
+    /// source to ask already reports.
+    const UNKNOWN: &str = "unknown";
+
+    let body = raw.strip_suffix("-dirty").unwrap_or(raw);
+    let looks_like_an_object_id =
+        (7..=40).contains(&body.len()) && body.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if looks_like_an_object_id {
+        raw
+    } else {
+        UNKNOWN
+    }
+}
+
 /// The provider vocabulary an event may name.
 ///
 /// [`UsageSample::provider`](crate::ports::usage::UsageSample::provider) is
@@ -495,7 +536,9 @@ pub struct Envelope {
     pub deployment: Deployment,
     /// The crate version.
     pub app_version: &'static str,
-    /// The commit this binary was built from ([`crate::BUILD_COMMIT`]).
+    /// The commit this binary was built from ([`crate::BUILD_COMMIT`]), folded
+    /// through [`commit_slug`] so it is an object id or `unknown` and never a
+    /// label somebody chose.
     pub build_commit: &'static str,
     /// The OS this build runs on.
     pub os: &'static str,
@@ -518,7 +561,7 @@ impl Envelope {
             id,
             deployment,
             app_version: env!("CARGO_PKG_VERSION"),
-            build_commit: crate::BUILD_COMMIT,
+            build_commit: commit_slug(crate::BUILD_COMMIT),
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             cognition_path: cognition.path,
@@ -565,8 +608,9 @@ impl Envelope {
             // regression asks. #1771 already stamps this into the binary and
             // `/spec` reports it; it simply never reached the envelope.
             //
-            // A fixed-shape hex string or `unknown`, so it carries no user
-            // content and needs no classifier.
+            // A fixed-shape hex string or `unknown` — enforced by
+            // `commit_slug` at construction rather than assumed, because the
+            // stamp has an escape hatch and an assumption is not a guarantee.
             ("build_commit", PropValue::Word(self.build_commit)),
             ("os", PropValue::Word(self.os)),
             ("arch", PropValue::Word(self.arch)),

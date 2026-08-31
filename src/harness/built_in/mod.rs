@@ -4913,6 +4913,7 @@ pub(crate) fn build_roster(
             manifest_agent,
             agent_policy,
             deps,
+            tracker,
             &grants,
             skill_deltas,
             routed_context
@@ -4998,6 +4999,7 @@ pub(crate) fn build_roster(
             &manifest_agent,
             agent_policy,
             deps,
+            tracker,
             &grants,
             skill_deltas,
             routed_context
@@ -11019,6 +11021,7 @@ budget_usd_daily = 0.0
             &manifest_agent,
             policy,
             &deps,
+            &crate::analytics::null_tracker(),
             &grants,
             &[],
             &[],
@@ -11142,6 +11145,7 @@ budget_usd_daily = 0.0
             &manifest_agent,
             ApprovalPolicy::new(&Policy::default(), None),
             &deps,
+            &crate::analytics::null_tracker(),
             &["*".to_string()],
             &[],
             &[],
