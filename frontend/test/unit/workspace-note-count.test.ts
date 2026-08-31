@@ -13,6 +13,8 @@
  * absurd. `isBinary` is already the console's single test for this everywhere
  * else in the pane, so the count asks the same question.
  */
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { OPERATOR_ORIGIN, type FsNode } from "@/api/workspace";
@@ -102,5 +104,30 @@ describe("the header count while the tree is unknown", () => {
     // a failed one leaves `error` set; neither un-knows the tree, so blanking
     // the badge in either case would be a flicker rather than honesty.
     expect(headerNoteCount(7, true)).toBe(7);
+  });
+});
+
+/**
+ * And the reset effect clears it, or the claim survives the company it was
+ * true of.
+ *
+ * `treeKnown` only ever goes false -> true, so without a reset a company
+ * switch left it true while `nodes` was cleared to `[]` — the header then
+ * reported an authoritative "0 notes" about a workspace nobody had read yet.
+ * That is the same false claim `headerNoteCount` exists to prevent, reachable
+ * on every switch rather than only at first mount.
+ */
+describe("the reset effect clears what it invalidates", () => {
+  it("resets treeKnown wherever it resets nodes", () => {
+    const view = readFileSync(
+      new URL("../../src/views/WorkspaceView.tsx", import.meta.url),
+      "utf8",
+    );
+    const reset = view.slice(view.indexOf("// Mount / company change"));
+    const body = reset.slice(0, reset.indexOf("}, ["));
+    expect(body).toContain("setNodes([])");
+    expect(body, "clearing the tree without un-knowing it is the bug").toContain(
+      "setTreeKnown(false)",
+    );
   });
 });

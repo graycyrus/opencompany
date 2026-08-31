@@ -709,6 +709,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     expandedSeeded.current = false;
     nodesRef.current = [];
     setNodes([]);
+    // With the nodes, or the header claims the *previous* company's answer
+    // about the new one: `noteCount` drops to 0 immediately while `treeKnown`
+    // still reads true, and `headerNoteCount` reports an authoritative "0
+    // notes" for a workspace nobody has read yet — the exact false claim it
+    // exists to prevent, on every company switch rather than only at mount.
+    setTreeKnown(false);
     setOpenId(null);
     setOpenFile(null);
     setDraft(null);
