@@ -254,3 +254,7 @@ impl WorkflowGateQueue {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "workflow_gates_test.rs"]
+mod test;
