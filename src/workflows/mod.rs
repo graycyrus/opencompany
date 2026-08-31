@@ -44,6 +44,11 @@ mod gated_tool_call_test;
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
 mod gated_tool_turn_test;
+/// Issue #1963: the serde migration table for `WorkflowRun` — every shape it
+/// was ever journaled in still deserializes, a full round-trip loses nothing,
+/// and a default-valued run still serializes as the old wire form.
+#[cfg(test)]
+mod migration_test;
 /// Issue #978: a run that fans out to N gated nodes is cleared by approving,
 /// not multiplied by it — the composition of #395, #243 and #469 that each of
 /// their own suites is blind to.
