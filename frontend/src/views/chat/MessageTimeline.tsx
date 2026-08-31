@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
-import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -60,8 +59,6 @@ interface Props {
    * client the blob route needs. Absent where nothing renders attachments.
    */
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
-  /** Board task id -> live state for card-linked background turns (#1758). */
-  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /**
    * Places a first brief into the composer on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
@@ -134,7 +131,6 @@ export function MessageTimeline({
   onDismissCard,
   dismissingCardId,
   resolveAttachmentUrl,
-  taskStatusByTaskId,
   onStartBrief,
   onAddPeople,
   now,
@@ -309,8 +305,6 @@ export function MessageTimeline({
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
                 resolveAttachmentUrl={resolveAttachmentUrl}
-                taskStatusByTaskId={taskStatusByTaskId}
-                now={now ?? Date.now()}
                 cognition={cognition}
               />
             </div>

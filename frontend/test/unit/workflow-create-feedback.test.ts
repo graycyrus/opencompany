@@ -108,27 +108,6 @@ async function fillValidDraft() {
   });
 }
 
-/** The confirm's own Create action (#1808), portalled onto `document.body`. */
-function confirmCreateButton(): HTMLButtonElement {
-  const el = document.querySelector<HTMLButtonElement>(
-    '[data-testid="workflow-id-confirm-create"]',
-  );
-  expect(el, "the id confirm did not open").toBeTruthy();
-  return el as HTMLButtonElement;
-}
-
-/** Create now confirms the permanent id first (#1808): the form's Create opens a
- * confirm, and the confirm's own action runs the write. This drives both, for
- * the tests below whose subject is the write, not the confirm step itself. */
-async function submitThroughConfirm() {
-  await act(async () => {
-    submitButton().click();
-  });
-  await act(async () => {
-    confirmCreateButton().click();
-  });
-}
-
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
@@ -159,9 +138,9 @@ describe("the create dialog while a create is in flight", () => {
     expect(dialogContent().getAttribute("aria-busy")).toBe("false");
     expect(submitButton().querySelector(".animate-spin")).toBeNull();
 
-    // Create opens the id confirm (#1808); the confirm's action runs the write,
-    // which is what puts the form in flight.
-    await submitThroughConfirm();
+    await act(async () => {
+      submitButton().click();
+    });
 
     expect(post).toHaveBeenCalledTimes(1);
     expect(dialogContent().getAttribute("aria-busy")).toBe("true");
@@ -203,30 +182,24 @@ describe("the create dialog while a create is in flight", () => {
     expect(document.querySelectorAll('[aria-label="Remove node"]').length).toBe(rowsBefore);
   });
 
-  it("posts once when the operator clicks the confirm Create twice in one tick", async () => {
+  it("posts once when the operator clicks Create twice in one tick", async () => {
     const post = vi.fn(() => new Promise<never>(() => {}));
     await open(stubClient(post));
     await fillValidDraft();
 
-    // Create opens the id confirm (#1808); the write is behind the confirm's
-    // own action, so the re-entrancy guard now lives on that click.
-    await act(async () => {
-      submitButton().click();
-    });
-
     // BOTH clicks inside ONE `act`, deliberately. React commits state at the
     // end of the block, so the button is still enabled for the second one and
-    // `create()` is genuinely re-entered — which is the only way to reach the
+    // `submit()` is genuinely re-entered — which is the only way to reach the
     // guard. Split across two `act`s the first commit has landed, `disabled` is
     // set, React drops the event on the disabled fiber, and the assertion below
-    // passes for a reason that has nothing to do with `create()`.
+    // passes for a reason that has nothing to do with `submit()`.
     //
     // So this is the assertion that pins `submittingRef`: against a guard
     // reading the `submitting` STATE both calls see the pre-commit `false` and
     // this fails with two posts.
     await act(async () => {
-      confirmCreateButton().click();
-      confirmCreateButton().click();
+      submitButton().click();
+      submitButton().click();
     });
 
     expect(post).toHaveBeenCalledTimes(1);
@@ -241,7 +214,9 @@ describe("the create dialog when the host refuses", () => {
     await open(stubClient(post));
     await fillValidDraft();
 
-    await submitThroughConfirm();
+    await act(async () => {
+      submitButton().click();
+    });
 
     const banner = inDialog<HTMLElement>('[data-testid="create-error"]');
     expect(banner).toBeTruthy();
@@ -282,7 +257,9 @@ describe("the create dialog when the host refuses", () => {
       ),
     );
     await fillValidDraft();
-    await submitThroughConfirm();
+    await act(async () => {
+      submitButton().click();
+    });
     expect(inDialog('[data-testid="create-error"]')).toBeTruthy();
   }
 
@@ -337,9 +314,6 @@ describe("the create dialog when the host refuses", () => {
     await act(async () => {
       type('[placeholder="display name"]', "Second node", 1);
     });
-    // The freshly-added agent node has no assignee yet, so `validate()` refuses
-    // client-side and the banner is back BEFORE the id-confirm gate — a plain
-    // submit is enough here (no confirm opens on a failed validate).
     await act(async () => {
       submitButton().click();
     });

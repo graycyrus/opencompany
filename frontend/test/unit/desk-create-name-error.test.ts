@@ -231,12 +231,10 @@ describe("the desk creator teammate picker", () => {
     const lead = rosterButton("Teammate 0");
     const second = rosterButton("Teammate 2");
     expect(lead.getAttribute("aria-pressed")).toBe("true");
-    // The lead carries the "Lead" badge (a row sibling of the toggle), the
-    // non-lead carries a "Make lead" promote control instead.
-    expect(lead.parentElement!.querySelector('[data-testid="desk-lead-badge"]')).toBeTruthy();
+    expect(lead.textContent).toContain("1 · Lead");
     expect(lead.querySelector(".lucide-check")).toBeTruthy();
     expect(second.getAttribute("aria-pressed")).toBe("true");
-    expect(second.parentElement!.querySelector('[data-testid="desk-make-lead"]')).toBeTruthy();
+    expect(second.textContent).toContain("2");
 
     await act(async () => {
       type(filter!, "Teammate 2");

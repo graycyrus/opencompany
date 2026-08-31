@@ -15,9 +15,6 @@
 //! mocks in tests, real impls when a feature is on); the OAuth write routes are
 //! compiled only under the `oauth` feature and 404 otherwise.
 
-/// `GET {scope}/activation` — the account-activation funnel read projection
-/// (issue #1843). See [`crate::company::activation`] for the derivation.
-pub mod activation;
 pub mod artifacts;
 /// Avatar uploads (`docs/spec/runtime/avatars.md`): the custom-image half of
 /// choosing a face for a teammate or for yourself.
@@ -89,7 +86,6 @@ mod team_agent;
 /// company can grant an agent — built-ins, MCP servers and Composio toolkits —
 /// in one vocabulary. Read-only and openhuman-free.
 pub mod tool_catalog;
-pub mod tool_grants;
 pub mod usage;
 pub mod workflows;
 pub mod workspace;
@@ -230,9 +226,7 @@ pub fn router() -> Router<AppState> {
         .merge(inference::router())
         .merge(team::router())
         .merge(setup::router())
-        .merge(activation::router())
         .merge(policy::router())
-        .merge(tool_grants::router())
         .merge(workflows::router())
         .merge(mail::router());
     #[cfg(feature = "oauth")]

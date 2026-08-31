@@ -60,12 +60,6 @@ import {
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
-import {
-  listInflight,
-  listTasks,
-  taskStatusesById,
-  type TaskStatus,
-} from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
@@ -154,30 +148,6 @@ const WorkspaceView = lazy(() =>
 const FinanceSection = lazy(() =>
   import("@/views/finance/FinanceSection").then((m) => ({ default: m.FinanceSection })),
 );
-
-/**
- * The `h1` a cold visit to `#/finances/<sub>` announces before the chunk lands.
- *
- * On a direct visit — a bookmark, a pasted link — this boundary *is* the whole
- * page for as long as the chunk takes, so its heading is what a screen reader
- * announces. A single "Finances" for every subpage told someone who had opened
- * `#/finances/wallet` that they were somewhere else, and it corrected itself
- * only once the chunk arrived, which is exactly when they no longer needed it.
- *
- * Spelled out here rather than imported from `FinanceSection`: a static import
- * of anything in that module pulls the chunk eagerly and there is no lazy
- * boundary left to name. `the finance fallback names every subpage` holds these
- * to `FINANCE_PAGES`, which a test may import freely.
- */
-const FINANCE_FALLBACK_TITLES: Readonly<Record<string, string>> = {
-  invoicing: "Invoicing",
-  wallet: "Wallet",
-};
-
-/** The fallback heading for `#/finances/<sub>`, defaulting to the section. */
-export function financeFallbackTitle(sub: string | null): string {
-  return (sub && FINANCE_FALLBACK_TITLES[sub]) || "Finances";
-}
 // Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
 // as the other heavier, less-visited surfaces.
 const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
@@ -610,17 +580,6 @@ export function AppShell({
   // because it outlives `ChatView`: it is what an unaddressed system line is
   // addressed to after the operator has walked off to Approvals (issue #368).
   const activeChatChannelRef = useRef<string | null>(null);
-  // Whether `ChatView`'s transcript is actually rendered right now, as opposed
-  // to `activeChatChannelRef` merely still *naming* the channel last shown
-  // before the operator dropped to the mobile channel rail. Starts `true` to
-  // match `ChatView`'s own initial pane state; kept out of `activeChatChannelRef`
-  // because that ref has a second job — addressing an unaddressed system line
-  // after a walk to Approvals — that must keep using the last channel even
-  // while the rail is what's on screen (#1768 codex review).
-  const chatPaneVisibleRef = useRef(true);
-  const onChatPaneVisibilityChange = useCallback((visible: boolean) => {
-    chatPaneVisibleRef.current = visible;
-  }, []);
   // When each channel was last looked at, and the floor for a channel never
   // looked at. Together with `transcripts` these *derive* the unread counts
   // below — nothing increments a counter, so a message that turns out to be a
@@ -638,15 +597,6 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
-  /**
-   * Board-card state for chat's durable background-work indicator (#1758).
-   * Owned here because ChatView unmounts on navigation while the task keeps
-   * running, and because the task SSE tick already terminates in this shell.
-   */
-  const [taskStatusByTaskId, setTaskStatusByTaskId] = useState<
-    Record<string, TaskStatus>
-  >({});
-  const taskStatusRead = useRef(0);
   // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
   // sees an attempt move rather than waiting up to four seconds for its poll —
   // and sees it at all while the tab is hidden, which the poll deliberately does
@@ -804,36 +754,6 @@ export function AppShell({
   // decisions are in flight or freshly settled, which is never many.
   const ownApprovalDecisionsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
-
-  const refreshTaskStatuses = useCallback(async () => {
-    const read = ++taskStatusRead.current;
-    const [tasks, inflight] = await Promise.allSettled([
-      listTasks(client, company),
-      listInflight(client, company),
-    ]);
-    if (read !== taskStatusRead.current) return;
-    // Both reads are best-effort, like the board's own decoration read. Keep a
-    // last good snapshot when the host is offline instead of making a running
-    // pill disappear because one poll failed.
-    if (tasks.status === "rejected" && inflight.status === "rejected") return;
-    setTaskStatusByTaskId(
-      taskStatusesById(
-        tasks.status === "fulfilled" ? tasks.value : [],
-        inflight.status === "fulfilled" ? inflight.value : [],
-      ),
-    );
-  }, [client, company]);
-
-  useEffect(() => {
-    taskStatusRead.current += 1;
-    setTaskStatusByTaskId({});
-  }, [client, company]);
-
-  // Ride the existing visible-tab company poll, and also re-read immediately
-  // when the task stream reports a dispatch, move or settle (#1758).
-  useEffect(() => {
-    void refreshTaskStatuses();
-  }, [feed.now, taskEventTick, refreshTaskStatuses]);
   // Issue #379: the inline approval cards' console-local state, owned here
   // rather than in `ChatView` for the same reason `transcripts` is — the shell
   // mounts and unmounts that view per route, and an operator who approves in a
@@ -2371,22 +2291,6 @@ export function AppShell({
     // moves a card between columns and needs saying in the conversation the
     // card came from.
     onDispatchTerminal: injectDispatchMarker,
-    // The inline terminal marker is enough only while its origin channel is
-    // actually on screen. Elsewhere — including another chat channel — the
-    // event hook raises the linked completion toast (#1758).
-    isViewingTaskOrigin: useCallback(
-      (event: CompanyStreamEvent) => {
-        if (event.type !== "desk_task_completed" || view !== "chat") return false;
-        // Below `lg`, selecting the channel rail hides the transcript while
-        // leaving `activeChatChannelRef` naming whatever was last shown — a
-        // completion from that channel must not suppress its toast while the
-        // operator cannot actually see the inline marker (#1768 codex review).
-        if (!chatPaneVisibleRef.current) return false;
-        const origin = dispatchMarkerPlacement(event, chatChannelByThread)?.channelId;
-        return origin != null && activeChatChannelRef.current === origin;
-      },
-      [view, chatChannelByThread],
-    ),
     // Issue #327. The payload is carried, not folded into a counter — see
     // `workspaceEvent` above. The view still re-reads the tree from the host
     // rather than patching it from the frame: the frame carries no node name
@@ -2655,12 +2559,10 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
-              onChatPaneVisibilityChange={onChatPaneVisibilityChange}
               mentionFeedRevision={mentionFeedVersion}
               mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
-              taskStatusByTaskId={taskStatusByTaskId}
               now={feed.now}
               onDecideApproval={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
@@ -2854,20 +2756,7 @@ export function AppShell({
             />
           )}
           {view === "observatory" && (
-          <Suspense
-            fallback={
-              <RouteLoading
-                // `ObservatoryView` titles itself `runId ? "Run" : "Observatory"`,
-                // and on a cold direct visit to `#/observatory/<runId>` this
-                // boundary is the whole page — so announcing "Observatory" told
-                // someone who had bookmarked a run they were on the index, and
-                // corrected itself only once the chunk landed. Same rule, same
-                // `sub`, as the finance boundary above.
-                title={sub ? "Run" : "Observatory"}
-                label={sub ? "Loading run…" : "Loading observatory…"}
-              />
-            }
-          >
+          <Suspense fallback={<RouteLoading title="Observatory" label="Loading observatory…" />}>
             <ObservatoryView
               client={client}
               company={company}
@@ -2928,14 +2817,7 @@ export function AppShell({
             </Suspense>
           )}
           {view === "finances" && (
-            <Suspense
-              fallback={
-                <RouteLoading
-                  title={financeFallbackTitle(sub)}
-                  label={`Loading ${financeFallbackTitle(sub).toLowerCase()}…`}
-                />
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Finances" label="Loading finances…" />}>
               <FinanceSection
                 client={client}
                 company={company}
