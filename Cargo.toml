@@ -609,6 +609,16 @@ tinymemory-conformance = { path = "vendor/openhuman/vendor/tinymemory/crates/tin
 # into normal builds, so the shipped binary is unchanged.
 tokio = { version = "1", features = ["test-util"] }
 
+# Property-based generation for the workflow-adapter suites (issue #1963). The
+# adapter's failures are shape-dependent — a branch a run never takes, a
+# binding that resolves to null on one wiring and not another — and a
+# hand-written fixture only ever covers the shape whoever wrote it thought of.
+# `proptest` generates the rest, over the graph builder in
+# `src/workflows/testkit`. Landed here ahead of the property tests themselves so
+# the lockfile change is reviewable on its own rather than buried in the PR that
+# starts using it. Dev-only: nothing in the shipped binary links it.
+proptest = "1"
+
 # Issue #392: measures what a per-append flush costs, so the per-record-kind
 # durability policy rests on a number rather than an intuition. Default features
 # off — the plotting and rayon extras would be dead weight in every test lane's
