@@ -38,9 +38,9 @@ use crate::ports::WorkflowRun;
 struct Era {
     /// What a reader of a failure needs first: which payload broke.
     label: &'static str,
-    /// The commit that added the field this shape predates, so the next
+    /// The commit that ended this era by adding the next field, so the next
     /// person can read the diff rather than trust this file.
-    added_by: &'static str,
+    ended_by: &'static str,
     /// The payload as a `WorkflowRunFinished` of that era carried it.
     payload: Value,
 }
@@ -60,42 +60,42 @@ fn eras() -> Vec<Era> {
 
     shapes.push(Era {
         label: "pre-#170 (before output-node delivery)",
-        added_by: "0728d9a2e added deliveries",
+        ended_by: "0728d9a2e added deliveries",
         payload: current.clone(),
     });
 
     extend(&mut current, "deliveries", json!([]));
     shapes.push(Era {
         label: "pre-#383 (before a run could be stopped)",
-        added_by: "3a4d1380d added cancelled",
+        ended_by: "3a4d1380d added cancelled",
         payload: current.clone(),
     });
 
     extend(&mut current, "cancelled", json!(false));
     shapes.push(Era {
         label: "pre-#542 (before per-node rows)",
-        added_by: "406626cbb added nodes",
+        ended_by: "406626cbb added nodes",
         payload: current.clone(),
     });
 
     extend(&mut current, "nodes", json!([]));
     shapes.push(Era {
         label: "pre-#638 (before operator notices)",
-        added_by: "4d723c755 added notices",
+        ended_by: "4d723c755 added notices",
         payload: current.clone(),
     });
 
     extend(&mut current, "notices", json!([]));
     shapes.push(Era {
         label: "pre-#661 (before board rows)",
-        added_by: "1c06157ca added board",
+        ended_by: "1c06157ca added board",
         payload: current.clone(),
     });
 
     extend(&mut current, "board", json!([]));
     shapes.push(Era {
         label: "pre-#881/#880 (before blocked nodes and approval receipts)",
-        added_by: "fa846eded added blocked_nodes and approvals",
+        ended_by: "fa846eded added blocked_nodes and approvals",
         payload: current.clone(),
     });
 
@@ -103,7 +103,7 @@ fn eras() -> Vec<Era> {
     extend(&mut current, "approvals", json!([]));
     shapes.push(Era {
         label: "current",
-        added_by: "(head)",
+        ended_by: "(head)",
         payload: current,
     });
 
@@ -136,9 +136,11 @@ fn every_historical_run_payload_still_deserializes() {
     for era in eras() {
         let run: WorkflowRun = serde_json::from_value(era.payload.clone()).unwrap_or_else(|err| {
             panic!(
-                "a {} payload no longer loads ({err}) — see {}. This is replayed at boot, so \
-                 the symptom is a company's run history getting shorter, not a red build.",
-                era.label, era.added_by
+                "a {} payload no longer loads: {err}. A field added without \
+                 #[serde(default)] breaks every era older than it; this era ran until {}. \
+                 WorkflowRunFinished is replayed at boot, so the symptom is a company's run \
+                 history getting shorter, not a red build.",
+                era.label, era.ended_by
             )
         });
         assert_eq!(
