@@ -56,6 +56,12 @@ mod publish_refusal_notice_test;
 /// made, instead of making them a second time.
 pub mod replay;
 pub mod runner;
+/// Issue #1963: every shipped `workflows/*.toml` — the graphs under
+/// `companies/<id>/` and `globals/` — parses, translates and compiles.
+/// Table-driven off a `build.rs` glob so a graph added to a bundle is covered
+/// because it exists, not because a list was updated.
+#[cfg(test)]
+mod shipped_corpus_test;
 /// Issue #1963: the graph builder and the assertion vocabulary the suites in
 /// this module are written against. Test-only — nothing in a shipped build
 /// links it.
