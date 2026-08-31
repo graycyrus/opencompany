@@ -60,7 +60,7 @@ path = "src/main.rs"
 #   and compiles without it; turning it on would additionally wire
 #   `RuntimeBuilder::with_acp_agents`, which is a separate decision from having
 #   a harness at all.
-opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp"] }
+opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp", "composio", "media", "acp"] }
 
 tauri = { version = "2", features = [] }
 # The OS credential store, so a device session token never has to live in the
