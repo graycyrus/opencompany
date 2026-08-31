@@ -383,6 +383,12 @@ mod http {
 #[cfg(all(test, feature = "analytics"))]
 mod test {
     use super::*;
+    // The three pure classifiers below live in the `http` submodule as
+    // `pub(super)` items. `use super::*` imports *this* module's namespace, not
+    // its children's, so it reaches `http` and not what is inside it — which is
+    // why `loggable_send_error` is already spelled `super::http::…` at its one
+    // call site. Named here so the tests can read as they do.
+    use super::http::{accepted, geo_free, ingestion_verdict};
     use crate::analytics::config::{ENABLE_ENV, ENDPOINT_ENV, TOKEN_ENV, resolve};
     use crate::analytics::types::OpaqueId;
     use crate::analytics::{Event, Outcome, Trigger};

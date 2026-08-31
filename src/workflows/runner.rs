@@ -4715,7 +4715,12 @@ to = "done"
         };
         assert_ne!(status, "failed", "a run that warmed is not a warm failure");
         assert!(nodes > 0, "a run that warmed ran nodes");
-        assert!(duration_ms > 0, "a run that warmed took time");
+        // Deliberately NOT `duration_ms > 0` (CodeRabbit, review round 2):
+        // `as_millis` floors, so a fast run legitimately reports 0 and the
+        // assertion would fail on a correct emit. `nodes` is the non-time
+        // invariant that separates the two arms, and it cannot be zero for a
+        // run the engine actually executed.
+        let _ = duration_ms;
     }
 
     /// The port implementation ensures the roster itself, so a caller need not

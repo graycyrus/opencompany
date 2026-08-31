@@ -163,15 +163,23 @@ reached the envelope until 2026-08-29.
 It is the one envelope string that is **not** a literal compiled into this
 repository, so it is folded like every other. `build_stamp.rs` prefers
 `OPENCOMPANY_BUILD_COMMIT` over `git` on purpose — an escape hatch for a build
-environment nothing else covers — and it *sanitizes* rather than validates, so
-`release-2026-08-25`, or a branch name carrying a customer's name, would reach
-`crate::BUILD_COMMIT` intact and ride every event this instance ever sends.
-`types::commit_slug` therefore admits only an object id (7–40 hex digits, at
-most the `-dirty` suffix `build_stamp.rs` itself appends) and answers `unknown`
-for everything else. The stamp is left alone elsewhere: `/spec` and the
-operator-facing surfaces still report whatever was stamped, because the person
-reading them is the person who stamped it — this narrows only what leaves the
-process as telemetry.
+environment nothing else covers — and it *sanitizes* rather than validates. So
+`release-2026-08-25`, or a branch name carrying a customer's name, reaches
+`crate::BUILD_COMMIT` intact, and until 2026-08-31 it rode every event this
+instance sent.
+
+It no longer does. **`types::commit_slug` folds the value on its way into the
+envelope**: it admits only an object id (7–40 hex digits, with at most the
+`-dirty` suffix `build_stamp.rs` itself appends) and emits `unknown` for
+anything else, so a build stamped `release-2026-08-25` reports `build_commit:
+unknown` rather than the label.
+
+The two readings are therefore deliberately different, and both are correct.
+`crate::BUILD_COMMIT`, `/spec` and every operator-facing surface still carry the
+**raw** stamp, because the person reading them is the person who stamped it and
+the label is the whole point of the escape hatch. Analytics carries the folded
+one. This narrows what leaves the process as telemetry and takes nothing away
+from the builder.
 
 ## What is never collected
 
