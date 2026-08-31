@@ -1445,6 +1445,35 @@ impl CompanyRuntime {
                 "blocker parked and journaled, but its event-log entry failed",
             );
         }
+        // Issue #1739, raised in review: a planning blocker is a park, and the
+        // funnel needs it.
+        //
+        // `CycleRunner::park_for_approval` calls itself the single write path
+        // into the operator's queue; it is the single write path into *the
+        // cycle's*. This is a second one and `workflows::delivery` is a third,
+        // and until this line only the other two reported. A planning blocker
+        // an operator later approves or denies still reaches
+        // `CycleRunner::track_decided`, so every one of them contributed a
+        // decision with no park behind it — the denominator of the only rate
+        // this pair exists to produce.
+        //
+        // Emitted **after** the journal write, so a park that was rolled back
+        // above (`discard_unrecorded_park`, then `return Err`) reports nothing:
+        // nothing was durably parked, so nothing is counted as parked. The
+        // event-log append between the two is warn-only and deliberately not
+        // gated on — the park is real whether or not its console feed entry
+        // landed.
+        //
+        // `group` is `Other` and `priced` is `false` by construction: the
+        // effect is built at the top of this function with
+        // `EffectGroup::Other` and `amount_usd: None`, because a planning
+        // blocker is a question about a card rather than a consequence with a
+        // taxonomy. Read off the effect rather than written as literals, so it
+        // follows if that ever changes.
+        self.tracker.track(crate::analytics::Event::ApprovalParked {
+            group: crate::policy::gate::group_slug(effect.group),
+            priced: effect.amount_usd.is_some(),
+        });
         Ok(approval_id)
     }
 
@@ -3930,6 +3959,11 @@ impl CompanyRuntime {
         // invented.
         let parked_at_millis = self.approval_gate.expired_parked_at_millis(id);
         let expired_effect = self.approval_gate.take_expired_effect(id);
+        let expired_group = expired_effect.as_ref().map(|effect| effect.group);
+        let explicit_request = expired_effect
+            .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+            .and_then(|effect| effect.agent.clone().map(|agent| (agent, effect)));
+        self.journal.record_expired(id, at_millis, reason).await?;
         // Reported from **here**, and only here, for both ways an approval can
         // run out of time.
         //
@@ -3946,15 +3980,36 @@ impl CompanyRuntime {
         // approvals worth looking at, while a dashboard of promptly-resolved
         // cards read as healthy.
         //
+        // **After `record_expired`, and only on its success** (raised in
+        // review). The retirement is durable at that point and not before: a
+        // failed append returns `Err` here, the journal still holds the approval
+        // as pending, and boot replays it — so a report sent above the write
+        // would be counted again by the retirement that eventually succeeds. An
+        // expiry reported once per attempt rather than once per approval is the
+        // one way this verdict can over-count, and it over-counts hardest on a
+        // host whose store is failing, which is when the number is read.
+        //
+        // **`Ttl` only** (raised in the same review). `CardUnwritable` is
+        // `unpark_blocker` compensating for a task-card write that failed after
+        // its blocker was parked — a withdrawal by this host, seconds later,
+        // with no deadline anywhere near it. The journal keeps the two apart by
+        // name for exactly that reason (see [`ExpiryReason::CardUnwritable`]),
+        // and calling one the other would put a store fault in the bucket that
+        // means "nobody answered". It reports no verdict at all rather than a
+        // fourth word: `approved`, `denied` and `expired` are things a *person*
+        // or a *deadline* did, and a rollback is neither.
+        //
         // A missing entry means an earlier retirement already consumed it, so
         // this is a repeat and reporting again would double-count one expiry.
         // Nothing is awaited: `Tracker::track` is synchronous and infallible, so
         // a retirement is never delayed by, and can never fail because of,
         // analytics.
-        if let (Some(effect), Some(parked_at)) = (expired_effect.as_ref(), parked_at_millis) {
+        if let (ExpiryReason::Ttl, Some(group), Some(parked_at)) =
+            (reason, expired_group, parked_at_millis)
+        {
             self.tracker
                 .track(crate::analytics::Event::ApprovalDecided {
-                    group: crate::policy::gate::group_slug(effect.group),
+                    group: crate::policy::gate::group_slug(group),
                     verdict: "expired",
                     // Saturating on the same terms as the settle seam: the park
                     // instant and `at_millis` are separate wall-clock reads, and
@@ -3963,10 +4018,6 @@ impl CompanyRuntime {
                     waited_ms: at_millis.saturating_sub(parked_at),
                 });
         }
-        let explicit_request = expired_effect
-            .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
-            .and_then(|effect| effect.agent.clone().map(|agent| (agent, effect)));
-        self.journal.record_expired(id, at_millis, reason).await?;
         // Issue #796: the parked approval is gone, so its work unit is no
         // longer awaiting a resume — drop the pending mark so the checkout it
         // was holding across the park becomes sweepable.
