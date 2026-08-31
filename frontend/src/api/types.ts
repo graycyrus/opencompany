@@ -39,6 +39,19 @@ export interface CompanyStatus {
   emergency_paused?: boolean;
 }
 
+/**
+ * `GET /api/v1/companies/provisioning` — the sign-in mode a company provisioned
+ * on this host right now would land in, so the create/reset dialog can collect
+ * the right identity field before it builds a manifest. Mirrors
+ * `ProvisioningInfoDto` in `src/server/provision.rs`.
+ */
+export interface ProvisioningInfo {
+  /** The effective sign-in mode: `wallet`, `email`, or `none`. */
+  auth_mode: "wallet" | "email" | "none";
+  /** Whether provisioning requires at least one `[users].wallets` address. */
+  wallets_required: boolean;
+}
+
 /** What kind of processing step this is (drives the timeline icon). */
 export type TurnStepKind = "tool_call" | "thinking" | "note";
 
@@ -201,11 +214,37 @@ export interface DeskDto {
    */
   overlayMembers?: string[];
   /**
+   * How this desk's unmentioned messages find their answerer (issue #1835):
+   * `"auto"` is a channel with **no lead** — `members[0]` carries no rank, and
+   * the host picks a best-fit member per message — so every lead affordance
+   * (crown, badge, Make lead) is suppressed for it. Omitted means `"lead"`,
+   * which is every manifest desk and every desk created before the field
+   * existed.
+   */
+  responder?: "lead" | "auto";
+  /**
    * Whether the whole desk was operator-created (an overlay desk) rather than
    * declared in the manifest blueprint. The console offers a delete action only
    * for these. Omitted (undefined/false) for blueprint desks.
    */
   overlayCreated?: boolean;
+}
+
+/**
+ * `GET {scope}/operator-channel` — the identity of the company's
+ * always-present, durable Operator feed (issue #1757 rework): a read-only
+ * "what happened" feed aggregating workflow-run reports and the owner/
+ * no-mailbox fallback. Its own surface, not a desk — the console pins it
+ * below a divider in the chat rail instead of folding it into `GET
+ * {scope}/desks`. Mirrors `OperatorChannelDto` in `src/server/operator.rs`.
+ */
+export interface OperatorChannelDto {
+  /** The channel id — the `desk` query param `chat/history` reads through. */
+  id: string;
+  /** Always "Operator" — the console's pinned-row label. */
+  name: string;
+  /** The channel's purpose line, shown under the name in the pinned row. */
+  description: string;
 }
 
 /**
@@ -218,6 +257,12 @@ export interface CreateDeskInput {
   description?: string;
   id?: string;
   members?: string[];
+  /**
+   * How the desk routes its unmentioned messages (issue #1835). Absent means
+   * `"lead"` — today's model, what the org chart's create sends. `"auto"`
+   * creates a leadless channel whose answerer is picked per message.
+   */
+  responder?: "lead" | "auto";
 }
 
 /**
@@ -476,16 +521,31 @@ export interface ApprovalSummary {
    */
   group?: "spend" | "send" | "sign" | "publish" | "hire" | "identity" | "other";
   /**
-   * Which board task this approval was parked for (#333). Mirrors `TaskLink` in
-   * `src/runtime/journal.rs`.
+   * Which board task **owns** this approval (#333, resolved by #1891).
    *
    * Three states, deliberately: `{link: "task"}` is owned by that card,
    * `{link: "unlinked"}` is owned by no card (a workflow delivery, an
    * operator-chat turn, a scheduler tick), and *absent* means the park predates
    * the field. Only the last one is ambiguous — the server keeps a run-window
    * heuristic for it, and for nothing else.
+   *
+   * **The host's answer, not the park's stamp.** Until #1891 this mirrored the
+   * raw `TaskLink` the parking cycle wrote, which is only the *fallback* half
+   * of the host's ownership rule: the attempt behind a park outranks the card
+   * it was stamped with wherever there is one, and the task detail read has
+   * always applied that (`approval_owner`). So an approval parked under one
+   * card's attempt and stamped with another's arrived here under the stamp, and
+   * a client joining on it put the row on the wrong card. `pending_approvals_resolved`
+   * now applies the same rule before serialising, so this field and
+   * `…/tasks/{id}`'s `approvals` cannot disagree.
+   *
+   * That is what makes joining on it safe enough to hang a decision off — see
+   * `approvalsForTask` in `@/lib/task-approvals`, which is how the board card
+   * finds what it is blocked on and what it is offering to resolve.
    */
   task?: { link: "task"; id: string } | { link: "unlinked" };
+  /** The host-resolved task owner, when an authoritative task-detail projection provides it. */
+  ownerTaskId?: string;
   /**
    * The roster teammate whose blocked tool call this is (#372). Mirrors
    * `Effect::agent`: present exactly when the effect came from a harness tool
@@ -685,44 +745,24 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  * structurally unable to be widened into an argument-matching rule, and why this
  * list needs no redaction of its own.
  */
+export interface BudgetPauseMarker {
+  id: string;
+  agent: string;
+  chatId?: string;
+  message: string;
+  summary: string;
+  atMillis: number;
+}
+
 export interface StandingGrant {
   id: string;
-  /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
-   * which names its subject in `workflow` instead. */
   agent: string;
-  /** The authored workflow allowed to redeem it, when the grant is to a
-   * workflow rather than a teammate (issue #1098) — `agent` is empty then.
-   * Absent on every teammate grant. */
   workflow?: string;
-  /** The tool it admits, with any arguments. */
   tool: string;
   verdict: Verdict;
-  /** Who granted it: a signed-in user, or the platform credential. */
   granted_by: { kind: string; id: string };
   at_millis: number;
-  /** Epoch-millis it stops admitting calls. */
   expires_at_millis: number;
-  /**
-   * The slice of the tool it is confined to, when the tool's name is not the
-   * whole of what it can do (#457).
-   *
-   * **Two kinds of value, in one untyped string** — both minted by the host's
-   * `standing_scope_of`, and a reader that assumes either one is the bug #785
-   * was:
-   *
-   * * a **Composio toolkit** identifier like `github` — a slug, which has to be
-   *   spelled out before an operator can read it;
-   * * a **URL origin** like `https://docs.rs`, added for `web_fetch` by
-   *   #673/#739 — already exactly what the operator approved, and to be shown
-   *   untouched.
-   *
-   * Render it through `grantHeadline` in `lib/language`, which is the one place
-   * that tells them apart. Do not spell a scope out at a call site.
-   *
-   * Absent for every tool whose name already says everything, and absent from
-   * an older host that predates the field. Both mean "nothing to narrow", so
-   * the row simply says what it always said.
-   */
   scope?: string;
 }
 
@@ -1103,12 +1143,15 @@ export interface AgentDetailDto {
  *
  * The distinction is the point: `requested` is what the agent's own `tools`
  * line asks for, `companyAllow` is the ceiling it is intersected with, and
- * `effective` is what the agent actually holds. An **empty `requested` means
- * the company's standard grant**, not "no tools", so a surface that renders the
- * request alone reports the opposite of the truth for exactly those agents.
+ * `effective` is what the agent actually holds. Since issue #1804 `requested`
+ * is three-state: **`null` means the company's standard grant** (the agent
+ * lists no tools of its own and inherits `[tools].allow`), an **empty array
+ * `[]` is a deliberate deny-all** (holds nothing), and a **non-empty array
+ * narrows**. A surface that treats `null` and `[]` alike reports the opposite
+ * of the truth for exactly those agents.
  */
 export interface AgentToolsDto {
-  requested: string[];
+  requested: string[] | null;
   companyAllow: string[];
   /**
    * The ceiling contributed by the desks this agent sits on — the union of
@@ -1176,8 +1219,16 @@ export interface EditAgentInput {
   model?: string | null;
   /** Which declared harness this teammate runs on. */
   harness?: string | null;
-  /** The teammate's own tool-grant globs. */
-  tools?: string[];
+  /**
+   * The teammate's own tool-grant globs, three-state since issue #1804 (like a
+   * double-`Option` on the wire): `undefined` leaves the grant untouched,
+   * `null` resets it to the standard company-wide grant, an empty array `[]` is
+   * a deliberate deny-all (holds nothing), and a non-empty array narrows. The
+   * four are different on the wire (`JSON.stringify` keeps `null`/`[]`, drops
+   * `undefined`) and must never be collapsed, or a partial save would silently
+   * re-scope a grant the operator did not touch.
+   */
+  tools?: string[] | null;
 }
 
 /** One declared or detected harness. */

@@ -45,9 +45,12 @@ import {
   type FinancesDto,
   type GrantScope,
   type HarnessDto,
+  type BudgetPauseMarker,
   type InboxDto,
   type InboxMessageDto,
+  type OperatorChannelDto,
   type PageManifestDto,
+  type ProvisioningInfo,
   type ResolveReceipt,
   type SetBudgetInput,
   type StandingGrant,
@@ -568,6 +571,11 @@ export class OpenCompanyClient {
     return this.request<DeskDto[]>("GET", `${this.scope(company)}/desks`);
   }
 
+  /** The identity of the company's durable, read-only Operator feed. */
+  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
+    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
+  }
+
   /**
    * Add a teammate to a desk through the operator overlay (issue #72). The
    * teammate must be on the company roster; the desk must exist. Adding one
@@ -670,18 +678,24 @@ export class OpenCompanyClient {
   }
 
   /**
-   * This person's notification feed — today, their mentions.
+   * This person's notification feed, filtered to one `kind` — mentions by
+   * default.
    *
    * The durable half of a mention: the live feed only reaches an open browser,
-   * so a mention that landed overnight is here and nowhere else.
+   * so a mention that landed overnight is here and nowhere else. Issue #1845's
+   * week-1 nudge banner is the second consumer, passing `kind:
+   * "workflow_nudge"` — see the route's own docs
+   * (`src/server/ops/notifications.rs`) for why this is a query parameter
+   * rather than a second route.
    *
    * A host that predates this route answers 404; callers treat that as an empty
-   * feed and simply show no mention badges, rather than throwing on load.
+   * feed and simply show no badge/banner, rather than throwing on load.
    */
-  notifications(company?: string | null): Promise<NotificationFeedResponse> {
+  notifications(company?: string | null, kind?: string): Promise<NotificationFeedResponse> {
+    const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
     return this.request<NotificationFeedResponse>(
       "GET",
-      `${this.scope(company)}/notifications`,
+      `${this.scope(company)}/notifications${query}`,
     );
   }
 
@@ -878,6 +892,66 @@ export class OpenCompanyClient {
       body,
     );
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
+  }
+
+  /**
+   * The parked budget-pause marker for an agent (issue #1846), or `null` when
+   * nothing is paused. Read-only — does not consume the marker.
+   */
+  getBudgetPause(
+    agentId: string,
+    company?: string | null,
+  ): Promise<BudgetPauseMarker | null> {
+    return this.request<BudgetPauseMarker | null>(
+      "GET",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause`,
+    );
+  }
+
+  /**
+   * The Add-Credits CTA (issue #1846): redeems the parked marker and
+   * re-dispatches the original message. Not true resume (#561) — a fresh
+   * turn runs from the top on the same chat thread the pause happened on.
+   *
+   * `expectedId` is the marker id the caller last read via
+   * {@link getBudgetPause} (issue #1846 review, Codex #3866418876 /
+   * #3866802268) — sent as `?id=` so the server can refuse with a `409` when
+   * a background turn (a workflow node, an unstreamed task) has since
+   * overwritten the SAME agent's marker with one that has no chat
+   * destination, rather than silently re-dispatching whatever is parked NOW
+   * under the assumption it is still what the operator clicked. Omitted only
+   * for a caller with no prior read to compare against, in which case the
+   * server falls back to its pre-fix unconditional redeem.
+   */
+  redeemBudgetPause(
+    agentId: string,
+    company?: string | null,
+    expectedId?: string | null,
+  ): Promise<BudgetPauseMarker> {
+    const qs = expectedId ? `?id=${encodeURIComponent(expectedId)}` : "";
+    return this.request<BudgetPauseMarker>(
+      "POST",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause/redeem${qs}`,
+    );
+  }
+
+  /**
+   * Push a parked approval's deadline out to a fresh full TTL window (#1805),
+   * so a stalled run does not default-deny before someone can decide it.
+   *
+   * Returns the approval's **new** default-deny instant (epoch-millis) — the
+   * number the card's countdown will now project — so the caller can redraw the
+   * deadline without re-fetching the whole approvals list. A 404 means there was
+   * nothing to extend: an unknown id, or one that has since resolved or expired,
+   * which the caller should treat by refreshing the list rather than as a
+   * failure to report.
+   */
+  async extendApproval(approvalId: string, company?: string | null): Promise<number> {
+    const answer = await this.request<{ expiresAtMillis: number }>(
+      "POST",
+      `${this.scope(company)}/approvals/${encodeURIComponent(approvalId)}/extend`,
+    );
+    return answer.expiresAtMillis;
   }
 
   /** The live standing permissions, newest first (#374). */
@@ -1218,6 +1292,43 @@ export class OpenCompanyClient {
   // were never checked against the wire and the view built on them crashed on
   // open (issue #414). Add MCP calls to `api/mcp.ts`, next to the ones the host
   // answers.
+
+  /**
+   * Provision a company from a manifest (issue #1807).
+   *
+   * Platform-scoped on the host (`PlatformScope`): only a client that carries a
+   * platform bearer ({@link carriesPlatformBearer}) can reach it — a person
+   * signed in with a session cookie is refused by construction, the same wall
+   * `suspend`/`archive` sit behind. The console gates the New-company control on
+   * that flag rather than letting the call 401 after the operator has typed a
+   * name (the #1401 dishonest-button lesson).
+   *
+   * `manifest_toml` is the company manifest as TOML; the host fills in
+   * `[policy].mode = "auto"` and `[users].mode = "email"` when the text omits
+   * them, so `[company].name` alone is a valid body. `id` overrides the id the
+   * host would otherwise derive from the company name.
+   *
+   * Returns the fresh company's status (the host answers `201`), which the
+   * caller switches the console into.
+   */
+  provisionCompany(body: { manifest_toml: string; id?: string }): Promise<CompanyStatus> {
+    return this.request<CompanyStatus>("POST", "/api/v1/companies", body);
+  }
+
+  /**
+   * The auth-mode preflight: the sign-in mode a company
+   * provisioned on this host right now would land in, and whether wallet
+   * addresses are required.
+   *
+   * Platform-scoped like {@link provisionCompany}, so a client that carries a
+   * platform bearer ({@link carriesPlatformBearer}) can read it. The create /
+   * reset dialog calls this on open so it can render the mode's identity field
+   * — an email admin or a wallet address — before it builds a manifest, rather
+   * than provisioning an `admins`-only manifest a `wallet`-mode host refuses.
+   */
+  provisioningInfo(): Promise<ProvisioningInfo> {
+    return this.request<ProvisioningInfo>("GET", "/api/v1/companies/provisioning");
+  }
 
   /** Platform lifecycle control (requires a scoped company id). */
   lifecycle(action: LifecycleAction, company?: string | null): Promise<CompanyStatus> {

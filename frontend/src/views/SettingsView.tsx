@@ -6,6 +6,7 @@ import {
   Pause,
   Play,
   Power,
+  RotateCcw,
   TriangleAlert,
   Archive as ArchiveIcon,
 } from "lucide-react";
@@ -14,6 +15,7 @@ import { toast } from "sonner";
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -52,6 +54,8 @@ interface Props {
   company: string | null;
   feed: CompanyFeed;
   onFlag: () => void;
+  /** Start the reset (archive + start clean) flow for the active company (#1807). */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 // These are the optional capability families closest to the mandatory core /
@@ -67,18 +71,28 @@ const MANDATORY_ADJACENT_MEMORY_FAMILIES = [
 ];
 
 /** Connection details, lifecycle controls, and the feedback entry point. */
-export function SettingsView({ client, company, feed, onFlag }: Props) {
+export function SettingsView({ client, company, feed, onFlag, onResetCompany }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const { status } = feed;
   const scoped = company ?? client.defaultCompany;
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
-        {/* This sub-page draws no visible title of its own — the sub-nav rail
-            beside it already says "Settings" (issue #1221). */}
-        <h1 className="text-2xl font-semibold tracking-tight lg:sr-only">General settings</h1>
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/*
+        This page used to hide its own title above `lg` (issue #1221), on the
+        reasoning that the sub-nav rail beside it already says "Settings".
+
+        Issue #1763 makes it visible at every width, because that reasoning
+        stopped being true of only this page: Brain, Skills, People, Hosting,
+        Search, OAuth, MCP, Inference and Usage all sit beside the same rail and
+        all show a title. General was the one settings page that did not, so the
+        rail argument had become an argument for an exception rather than for a
+        rule — and the rail says "Settings", which is the section, while this
+        says "General settings", which is the page.
+      */}
+      <PageHeader title="General settings" width="3xl" />
+      <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* Device pairing was here. Sessions are the frontend client's own
             business now — the desktop app holds its session the same way the
             browser does — so there is no machine for this page to pair. */}
@@ -136,7 +150,16 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
 
         {/* Lifecycle */}
         {scoped ? (
-          <LifecycleControls client={client} company={scoped} feed={feed} />
+          <LifecycleControls
+            client={client}
+            company={scoped}
+            feed={feed}
+            onReset={
+              onResetCompany
+                ? () => onResetCompany(scoped, feed.status.name)
+                : undefined
+            }
+          />
         ) : (
           <Card>
             <CardHeader>
@@ -229,14 +252,23 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
   );
 }
 
-function LifecycleControls({
+/**
+ * Exported (rather than kept view-local) so the Reset / Start clean button's
+ * gating and click wiring can be rendered and asserted on directly, without
+ * pulling in every other card `SettingsView` composes
+ * (`settings-lifecycle-reset-button.test.ts`).
+ */
+export function LifecycleControls({
   client,
   company,
   feed,
+  onReset,
 }: {
   client: OpenCompanyClient;
   company: string;
   feed: CompanyFeed;
+  /** Open the reset (archive + start clean) flow for this company (#1807). */
+  onReset?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   /**
@@ -361,6 +393,16 @@ function LifecycleControls({
               destructive
               onConfirm={() => void run("archive")}
             />
+          )}
+          {/* Reset = archive this company (data retained, not deleted) and
+              provision a fresh empty one in its place — the only truthful
+              "start clean" the host offers, since there is no purge route.
+              Platform-scoped like archive, so it rides the same `platform`
+              gate and is left out entirely for a magic-link operator. */}
+          {onReset && platform && !archived && (
+            <Button variant="destructive" disabled={busy} onClick={onReset}>
+              <RotateCcw className="size-4" /> Reset / Start clean
+            </Button>
           )}
           {archived && (
             <p className="text-sm text-muted-foreground">This company is archived.</p>

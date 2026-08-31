@@ -42,7 +42,8 @@ import {
   type ApprovalSummary,
   type GrantScope,
 } from "@/api/types";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { MAIN_THREAD_ID } from "@/lib/chat";
+import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -54,7 +55,13 @@ import {
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { workflowHref } from "@/lib/task-output";
-import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
+import {
+  channelForThread,
+  channelIdForThread,
+  deskFromDto,
+  dmChannelId,
+  memberForThread,
+} from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -250,7 +257,14 @@ export function ApprovalMeta({
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
-  const conversationChannelId = a.thread ? (chatChannelByThread?.[a.thread] ?? null) : null;
+  // Resolved through `channelForThread`, not a bare `map[key]` index: the
+  // host compares General spellings case-insensitively and echoes back
+  // whichever one it was addressed with, so an approval raised in `#general`
+  // can carry a thread id the map's own literal keys miss (issue #1781
+  // review, Codex P2). A bare index breaks the "Asked in" link for exactly
+  // that case.
+  const conversationChannelId =
+    a.thread && chatChannelByThread ? channelForThread(chatChannelByThread, a.thread) : null;
   const workflowId = workflowIdForApproval(a);
   const workflowRunHref =
     workflowId && a.workflow_run_id ? workflowHref(workflowId, a.workflow_run_id) : null;
@@ -429,8 +443,15 @@ function workflowIdForApproval(approval: ApprovalSummary): string | null {
  * returns nothing at all and inherits the meta line's muted grey, which keeps
  * the quiet case exactly as it shipped — the emphasis is only worth anything if
  * most cards do not have it.
+ *
+ * Exported for the board card (#1891), which paints the deadline without the
+ * rest of {@link ApprovalMeta}: a `w-65` column has no room for the origin
+ * pills, and "Open the card" on the card you are already looking at is the same
+ * redundancy `OutputLinkRow` exists to avoid. The *tone* is not the board's to
+ * re-decide, though — a surface that invented its own amber would be the one
+ * place a passing deadline looked routine.
  */
-function deadlineToneClass(tone: DeadlineTone): string | undefined {
+export function deadlineToneClass(tone: DeadlineTone): string | undefined {
   if (tone === "passed") return "font-medium text-status-failed-text";
   if (tone === "soon") return "font-medium text-status-blocked-text";
   return undefined;
@@ -538,17 +559,57 @@ export interface ApprovalThreadLink {
  */
 export function approvalThreadLink(
   approval: ApprovalSummary,
-  desks: Desk[],
+  /**
+   * The company's desks, or `null` when the read failed and the topology is
+   * unknown.
+   *
+   * The two were one value until desk fabrication was removed: an empty answer
+   * used to be replaced by `defaultDesks()`, so `[]` could only mean a failed
+   * read. It now means what it says — a company with no desks — and the
+   * failure it used to stand for is spelled `null`, because the `#general`
+   * label below must be withheld from one and not from the other.
+   */
+  desks: Desk[] | null,
   members: TeamMember[],
 ): ApprovalThreadLink | null {
   if (!approval.thread) return null;
-  const channelId = channelIdForThread(approval.thread, desks, members);
+  const known = desks ?? [];
+  const channelId = channelIdForThread(approval.thread, known, members);
   if (!channelId) return null;
 
-  const desk = desks.find((candidate) => candidate.id === approval.thread);
+  // Looked up by the **resolved channel**, not by the raw thread id. They are
+  // the same string for an ordinary desk, and deliberately different when a
+  // blueprint desk is grandfathered onto the company-wide line: an approval
+  // raised under `main` resolves to that desk's channel, and asking for a desk
+  // called `main` would find nothing and label it "Origin unavailable" — on a
+  // conversation whose transcript is right there on screen.
+  const desk = known.find((candidate) => candidate.id === channelId);
   if (desk) return { channelId, label: `#${desk.channel}` };
 
-  const member = members.find((candidate) => candidate.id === approval.thread);
+  // The built-in `#general` channel (issue #1743), which is deliberately in no
+  // desk list — so the scan above can never name it, and an approval raised on
+  // the company's main line resolved to a channel and then failed to find a
+  // label, leaving "Origin unavailable" on the one channel every company has.
+  // After the desk scan, deliberately: a blueprint desk that authored one of
+  // the General ids keeps its own name, exactly as `channelIdForThread` keeps
+  // it its own thread.
+  //
+  // Guarded on the topology being *known* rather than on the list being
+  // non-empty. A failed read must not be guessed at — `ChatView` surfaces the
+  // error and renders no rail, so a link into it would land nowhere — but a
+  // company that genuinely declares no desks still has `#general`, and that is
+  // the one channel every company has. While an empty answer was overwritten
+  // with `defaultDesks()` the two cases were the same value, and reading the
+  // length was the only test available; now the failure says `null`.
+  if (channelId === MAIN_THREAD_ID && desks !== null) {
+    return { channelId, label: `#${GENERAL_CHANNEL}` };
+  }
+
+  // Matched through `dmThreadId`, not against the bare id: a DM for a teammate
+  // whose id is a General spelling records its thread as `dm:<id>`, and a raw
+  // comparison returned `null` — so the Approvals page called the origin
+  // unavailable for a conversation it could perfectly well link to (#1743).
+  const member = memberForThread(members, approval.thread);
   return member ? { channelId: dmChannelId(member), label: member.name } : null;
 }
 
@@ -587,14 +648,15 @@ export function useApprovalThreadLinks(
     [approvals],
   );
   const [topology, setTopology] = useState<{
-    desks: Desk[];
+    /** `null` when the desks read failed — see `approvalThreadLink`. */
+    desks: Desk[] | null;
     members: TeamMember[];
   } | null>(null);
   // Topology that resolved during a hold. `null` means nothing pending; an
   // empty topology is a real answer and must not be mistaken for "nothing
   // arrived".
   const pending = useRef<{
-    desks: Desk[];
+    desks: Desk[] | null;
     members: TeamMember[];
   } | null>(null);
   // Live is read inside the async topology read, which must not close over a
@@ -609,15 +671,17 @@ export function useApprovalThreadLinks(
     }
     let live = true;
     void Promise.all([
-      // Same empty-response fallback as ChatView and AppShell: a company with
-      // no declared `[[group_chat]]` entries still has the default desks, and
-      // an approval raised in one of those (e.g. the `main` thread) must be
-      // resolvable even though `/desks` came back empty. The fallback lives in
-      // the success handler on purpose — a failed read must not be guessed at.
+      // The host's answer, taken as given — the same rule ChatView and
+      // AppShell now follow. An empty list is a company with no desks, and an
+      // approval raised on its `main` thread still resolves to `#general`. It
+      // used to be swapped for `defaultDesks()`, which resolved approvals to
+      // fabricated channels the rail no longer shows.
+      //
+      // A *failed* read is `null`, not `[]`: unknown, and not to be guessed at.
       client
         .listDesks(company)
-        .then((dtos) => (dtos.length ? dtos.map(deskFromDto) : defaultDesks()))
-        .catch(() => []),
+        .then((dtos) => dtos.map(deskFromDto))
+        .catch(() => null),
       client.listTeam(company).catch(() => []),
     ]).then(([desks, roster]) => {
       if (!live) return;

@@ -134,16 +134,58 @@ describe("resolving an address", () => {
   // follows it) is what keeps a bookmark or habit written before the move alive.
   it.each([
     ["#/connections", "settings", "oauth"],
-    ["#/memory", "settings", "brain"],
     ["#/oauth", "settings", "oauth"],
     ["#/mcp", "settings", "mcp"],
     ["#/people", "settings", "people"],
+    ["#/work", "ledgers", "tasks"],
     ["#/settings/not-a-page", "settings", "general"],
   ])("rewrites retired %s onto its replacement", async (hash, view, sub) => {
     rewrite = REWRITE_RETIRED;
     await visit(hash);
     expect(seen).toEqual([view, sub]);
     expect(window.location.hash).toBe(`#/${view}/${sub}`);
+  });
+
+  // Brain's two former addresses, which rewrite onto a view with no sub-page —
+  // so the replacement hash is bare, not `#/<view>/<sub>`. `#/memory` was the
+  // surface's first name; `#/settings/brain` is where it lived for as long as
+  // it was a settings sub-page, and that is the one an operator is most likely
+  // to have bookmarked.
+  it.each(["#/memory", "#/settings/brain"])(
+    "rewrites %s onto the Brain nav row",
+    async (hash) => {
+      rewrite = REWRITE_RETIRED;
+      await visit(hash);
+      expect(seen).toEqual(["brain", null]);
+      expect(window.location.hash).toBe("#/brain");
+    },
+  );
+
+  // #1867 review: `#/work` is a bare-only alias onto the ledgers board — the
+  // Work surface's real sub-pages are addressed under `#/ledgers/...` (for
+  // example `#/ledgers/manage`), never under `#/work/...`. Before this test,
+  // the rewrite ignored `sub` entirely, so a plausible-looking deep link like
+  // `#/work/manage` silently collapsed onto the bare board instead of the
+  // named page. That is worse than the address simply being unknown: it looks
+  // like it worked. An address with a sub-segment is unknown here and falls
+  // through to the same not-found handling any other unrecognized head gets.
+  it("does not swallow a deep link under the bare-only #/work alias (#1797)", async () => {
+    rewrite = REWRITE_RETIRED;
+    await visit("#/work/manage");
+    expect(seen).toEqual(["not-found", "work"]);
+    expect(window.location.hash).toBe("#/not-found/work");
+  });
+
+  // A trailing slash with nothing after it (`#/work/`) is not a deep link —
+  // `readSegments` in `use-hash-view.ts` filters the empty final segment out,
+  // so this is indistinguishable from the bare `#/work` and resolves the same
+  // way. Asserted explicitly so the decision is a passing test, not something
+  // left to fall out of string-splitting.
+  it("treats a trailing slash on #/work the same as the bare address (#1797)", async () => {
+    rewrite = REWRITE_RETIRED;
+    await visit("#/work/");
+    expect(seen).toEqual(["ledgers", "tasks"]);
+    expect(window.location.hash).toBe("#/ledgers/tasks");
   });
 
   it("sends an empty address to the operator overview (#1321)", async () => {

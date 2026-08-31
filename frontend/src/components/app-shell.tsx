@@ -2,12 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   Activity,
   // AppWindow,  // re-add with the Pages nav entry below
+  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
   MessagesSquare,
   Network,
-  Settings2,
   ShieldCheck,
   BookText,
   Wallet,
@@ -45,10 +45,11 @@ import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { RouteLoading } from "@/components/route-loading";
+import { WindowControlsInset } from "@/components/window-chrome";
 import {
   RESTING_ROW,
-  SidebarCollapseButton,
-  SidebarControls,
+  SidebarUtilityBar,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
 import {
@@ -57,11 +58,40 @@ import {
   setupHandoffHasScope,
 } from "@/setup/state";
 import { TourController } from "@/tour/TourController";
+import { OnboardingGate } from "@/onboarding/OnboardingGate";
+import { useActivationGate } from "@/onboarding/useActivationGate";
+import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import {
+  resolveGateAdminCheckError,
+  shouldHoldShellPending,
+  shouldPollActivationForRole,
+  shouldShowOnboardingGate,
+} from "@/onboarding/gate-logic";
+import { me as fetchMe } from "@/api/auth";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
+import {
+  listInflight,
+  listTasks,
+  taskStatusesById,
+  type TaskStatus,
+} from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
-import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
-import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
+import { withReadTimeout } from "@/lib/read-timeout";
+import {
+  hasOtherOpenTurns,
+  mergeOpenTurns,
+  openTurnsFromRuns,
+  PendingSyncPosts,
+  type OpenTurn,
+} from "@/lib/live-reply";
+import {
+  type AgentReplyEvent,
+  budgetProximityExpiresAt,
+  type CompanyStreamEvent,
+  isBudgetProximityExpired,
+  useEvents,
+} from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import {
   mentionCountsByChannel,
@@ -69,6 +99,13 @@ import {
   threadViewAdvancesChannel,
   threadsToReReadForMentions,
 } from "@/lib/mention-badge";
+import {
+  flushPendingAcknowledgements,
+  operationalNotificationSeverity,
+  operationalNotificationsToAnnounce,
+  scheduleAcknowledgement,
+  type PendingAcknowledgement,
+} from "@/lib/operational-notifications";
 import { usePresence } from "@/hooks/use-presence";
 import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
@@ -92,24 +129,30 @@ import {
   mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { lifecycle } from "@/lib/language";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
-import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
+import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
-import { OperatorOverview } from "@/views/OperatorOverview";
+import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
+import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
+import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
 import {
+  channelForThread,
   channelIdForThread,
   deskFromDto,
   dmChannelId,
+  dmThreadId,
   HISTORY_UNSTARTED,
+  isOperatorChannelDto,
   type DecidedApproval,
   type HistoryHydration,
   type HistoryStatus,
@@ -141,12 +184,42 @@ const ObservatoryView = lazy(() =>
 const WorkspaceView = lazy(() =>
   import("@/views/WorkspaceView").then((m) => ({ default: m.WorkspaceView })),
 );
+// The company's durable memory. Its own route since it left the settings rail;
+// lazy for the same reason its neighbours are — the shell should paint before a
+// page nobody has asked for yet is parsed.
+const MemoryView = lazy(() =>
+  import("@/views/MemoryView").then((m) => ({ default: m.MemoryView })),
+);
 // The Finance section: Overview (the ledger fold), Invoicing (Chargebee) and
 // Wallet (PayPal). Load on demand — its Overview page is Recharts-backed and
 // its two provider pages are only reached by an operator who went looking.
 const FinanceSection = lazy(() =>
   import("@/views/finance/FinanceSection").then((m) => ({ default: m.FinanceSection })),
 );
+
+/**
+ * The `h1` a cold visit to `#/finances/<sub>` announces before the chunk lands.
+ *
+ * On a direct visit — a bookmark, a pasted link — this boundary *is* the whole
+ * page for as long as the chunk takes, so its heading is what a screen reader
+ * announces. A single "Finances" for every subpage told someone who had opened
+ * `#/finances/wallet` that they were somewhere else, and it corrected itself
+ * only once the chunk arrived, which is exactly when they no longer needed it.
+ *
+ * Spelled out here rather than imported from `FinanceSection`: a static import
+ * of anything in that module pulls the chunk eagerly and there is no lazy
+ * boundary left to name. `the finance fallback names every subpage` holds these
+ * to `FINANCE_PAGES`, which a test may import freely.
+ */
+const FINANCE_FALLBACK_TITLES: Readonly<Record<string, string>> = {
+  invoicing: "Invoicing",
+  wallet: "Wallet",
+};
+
+/** The fallback heading for `#/finances/<sub>`, defaulting to the section. */
+export function financeFallbackTitle(sub: string | null): string {
+  return (sub && FINANCE_FALLBACK_TITLES[sub]) || "Finances";
+}
 // Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
 // as the other heavier, less-visited surfaces.
 const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
@@ -246,6 +319,11 @@ const NAV: NavItem[] = [
   // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
+  // What the company remembers, beside what it keeps. It was a settings
+  // sub-page, which put a surface an operator *reads* behind the rail where
+  // they *change* things — and three clicks in front of "does it already know
+  // this". `#/settings/brain` and `#/memory` both rewrite onto this row.
+  { view: "brain", label: "Brain", icon: Brain },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   // Re-listed. Issue #302 parked the flat Finances page — a single ledger
   // projection with nowhere to go. What comes back is a section: that same
@@ -267,7 +345,13 @@ const NAV: NavItem[] = [
   // (issue #1311). Remove a nav row here and the surface is hidden; remove it
   // from `console-routes.ts` and the surface is gone.
   // { view: "pages", label: "Pages", icon: AppWindow },
-  { view: "settings", label: "Settings", icon: Settings2 },
+  // Settings is NOT here, and its absence is deliberate in the same way the
+  // Pages line above is. It is a utility, not a place an operator works, so it
+  // sits on the sidebar's utility bar with Feedback, Discord and Collapse
+  // (`SidebarUtilityBar`) — which still carries the `data-tour="nav-settings"`
+  // anchor the guided tour spotlights. `#/settings` keeps answering because of
+  // its entry in `@/lib/console-routes`; removing THAT is what would take the
+  // surface away.
 ];
 
 // The console is hash-routed, so a normal `href="#main-content"` would also
@@ -350,6 +434,57 @@ const WORKFLOW_EVENT_WINDOW = 300;
 const TURN_POLL_MS = 4000;
 
 /**
+ * How long the onboarding gate's admin check (PR #1875 review finding) waits
+ * before retrying a `fetchMe` failure that was not a definitive `401` — a
+ * dropped connection or a proxy 5xx, not "this user is not an admin". A few
+ * seconds is generous relative to how rarely this fires (a fresh mount's
+ * first read, or a genuine network blip) and cheap relative to how bad the
+ * alternative is: giving up and reading as non-admin would fail the blocking
+ * gate open for an actual admin.
+ */
+const GATE_ADMIN_CHECK_RETRY_MS = 3000;
+
+/**
+ * How long a single `fetchMe` call is allowed to sit with no response at all
+ * before it is treated as a failure (PR #1875 review finding).
+ *
+ * `resolveGateAdminCheckError`/`GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` only
+ * ever run once the call's promise *settles* — one way or the other. `fetchMe`
+ * goes through `OpenCompanyClient`, and its request path has no timeout of
+ * its own (`api/transport/browser.ts` calls bare `fetch`, no `AbortSignal`),
+ * so a stalled proxy or a backend that accepts the connection and then never
+ * answers leaves that promise pending forever: no rejection ever reaches the
+ * `catch` below, `failures` never increments, and `isGateAdminStuck` never
+ * flips even though the admin is exactly as wedged as the retry-forever case
+ * three rounds of this file's history already closed. `withReadTimeout` turns
+ * that silence into an ordinary rejection at this bound, which
+ * `resolveGateAdminCheckError` already classifies as non-terminal — so the
+ * existing failure counter below is what actually recovers, this only makes
+ * sure it gets the chance to. Long enough that the legitimate "cold host"
+ * case (the same class of cost `useActivationGate`'s poll interval doc calls
+ * out) is never mistaken for a hang.
+ */
+const GATE_ADMIN_CHECK_TIMEOUT_MS = 20000;
+
+/**
+ * How many consecutive non-settled `fetchMe` failures before the admin check
+ * reports itself stuck, mirroring `useActivationGate`'s `STUCK_AFTER_FAILURES`
+ * (PR #1875 review finding).
+ *
+ * That hook's `stuck` only tracks its own `getActivation` reads — it has no
+ * way to know the admin check is the one wedged. A durable non-401 `fetchMe`
+ * failure (the same class of backend fault: a proxy 5xx, a downstream outage)
+ * leaves `isGateAdmin` at `null` forever, which keeps `shouldHoldShellPending`
+ * returning `true` (its own `input.isAdmin === null` branch) even while
+ * activation itself is reading fine — so `activationGate.stuck` never flips
+ * and the recovery affordance below never appears, wedging an admin who
+ * cannot reach it behind a loader indistinguishable from the one the
+ * activation-side fix already closed. Three failures matches
+ * `STUCK_AFTER_FAILURES`'s own ~9s-at-`GATE_ADMIN_CHECK_RETRY_MS` reasoning.
+ */
+const GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES = 3;
+
+/**
  * Operator-facing copy for a legacy `connect_error` query from the former
  * native OAuth callback (issue #300). The callback now ends in its own dated
  * explanatory page (#838), but an older bookmarked URL still gets a safe
@@ -392,8 +527,29 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
-  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
-  for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
+  // Every spelling the host folds the company-wide line under (issue #1743).
+  //
+  // The main line used to be seeded with the first desk's id instead: with no
+  // `#general` channel to land in, it was parked on whichever desk sorted
+  // first, so it would still be somewhere the operator could find it. That is
+  // now actively wrong — an unaddressed message and its reply were rendered in
+  // `#engineering`, complete with an unread badge, while the host's own
+  // history for that desk was empty.
+  //
+  // Resolved through `channelIdForThread` rather than answered here, so there
+  // is one rule and not two: a blueprint desk grandfathered under a General id
+  // owns the line in its own company, and `buildChannels` renders no built-in
+  // channel beside it — pointing these spellings at a `main` nothing renders
+  // parks live frames and their unread badges where they cannot be opened.
+  for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) {
+    const channelId = channelIdForThread(spelling, desks, members);
+    if (channelId) map[spelling] = channelId;
+  }
+  // `dmThreadId`, not `m.id`: a teammate whose id is a General spelling is
+  // addressed on `dm:<id>`, and the host emits its live frames under that key.
+  // Seeded bare, `channelForThread` could place neither that DM's reply nor its
+  // working indicator anywhere at all (issue #1743).
+  for (const threadId of [...desks.map((d) => d.id), ...members.map(dmThreadId)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
   }
@@ -407,6 +563,13 @@ interface Props {
   companies: CompanyStatus[];
   onSwitchCompany: (id: string) => void;
   onBackToPicker?: () => void;
+  /** Start the New-company flow (issue #1807), owned by `ConnectionConsole`. */
+  onCreateCompany?: () => void;
+  /**
+   * Start the reset (archive + start clean) flow for the given company. Called
+   * from Settings → Lifecycle with the active company's id and name.
+   */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
@@ -417,6 +580,8 @@ export function AppShell({
   companies,
   onSwitchCompany,
   onBackToPicker,
+  onCreateCompany,
+  onResetCompany,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -500,6 +665,27 @@ export function AppShell({
   // whether setup is about to open, and an unheld tour would flash its welcome
   // over it.
   const [setupOpen, setSetupOpen] = useState(true);
+  /**
+   * Whether `SetupController`'s own roster read has landed (PR #1875 review
+   * finding, round 12).
+   *
+   * `setupOpen` starting `true` and a roster read that already landed with
+   * the company genuinely unstaffed are indistinguishable to anything that
+   * only reads `setupOpen` — `shouldHoldShellPending` needs to tell them
+   * apart (see its own doc). `SetupController`'s `onOpenChange` only ever
+   * fires once its internal `checked` is true, so its firing at all is
+   * itself the signal; `handleSetupOpenChange` below turns that into state
+   * the gate predicate can read. A separate flag rather than folding into
+   * `setupOpen` itself: `setupOpen` must stay a plain "is setup on screen or
+   * blocking" boolean for every other reader (`TourController`'s `hold`,
+   * `shouldShowOnboardingGate`), and conflating "resolved" into its value is
+   * exactly the bug this fixes.
+   */
+  const [setupChecked, setSetupChecked] = useState(false);
+  const handleSetupOpenChange = useCallback((open: boolean) => {
+    setSetupChecked(true);
+    setSetupOpen(open);
+  }, []);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
   // `#/setup` is an intentional, manual recovery path. It is a route rather
@@ -579,6 +765,17 @@ export function AppShell({
   // because it outlives `ChatView`: it is what an unaddressed system line is
   // addressed to after the operator has walked off to Approvals (issue #368).
   const activeChatChannelRef = useRef<string | null>(null);
+  // Whether `ChatView`'s transcript is actually rendered right now, as opposed
+  // to `activeChatChannelRef` merely still *naming* the channel last shown
+  // before the operator dropped to the mobile channel rail. Starts `true` to
+  // match `ChatView`'s own initial pane state; kept out of `activeChatChannelRef`
+  // because that ref has a second job — addressing an unaddressed system line
+  // after a walk to Approvals — that must keep using the last channel even
+  // while the rail is what's on screen (#1768 codex review).
+  const chatPaneVisibleRef = useRef(true);
+  const onChatPaneVisibilityChange = useCallback((visible: boolean) => {
+    chatPaneVisibleRef.current = visible;
+  }, []);
   // When each channel was last looked at, and the floor for a channel never
   // looked at. Together with `transcripts` these *derive* the unread counts
   // below — nothing increments a counter, so a message that turns out to be a
@@ -596,6 +793,15 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  /**
+   * Board-card state for chat's durable background-work indicator (#1758).
+   * Owned here because ChatView unmounts on navigation while the task keeps
+   * running, and because the task SSE tick already terminates in this shell.
+   */
+  const [taskStatusByTaskId, setTaskStatusByTaskId] = useState<
+    Record<string, TaskStatus>
+  >({});
+  const taskStatusRead = useRef(0);
   // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
   // sees an attempt move rather than waiting up to four seconds for its poll —
   // and sees it at all while the tab is hidden, which the poll deliberately does
@@ -699,6 +905,17 @@ export function AppShell({
   const [liveStepsByThread, setLiveStepsByThread] = useState<
     Record<string, (TurnStep & { toolCallId?: string })[]>
   >({});
+  // The live receipt for each synchronous chat turn in flight (issue #1934),
+  // keyed by host thread id — armed on `onSendStart`, bumped by every live
+  // frame (which also captures who picked the turn up), and cleared on whichever
+  // outcome the POST reaches. Its lifecycle mirrors `liveStepsByThread`'s: the
+  // reply landing on `onSendEnd` is what clears it, exactly as the reply bubble
+  // is appended, so the two swap with no empty frame between them.
+  const [receiptByThread, setReceiptByThread] = useState<Record<string, ChatReceipt>>({});
+  // Roster agent id → display name, so the receipt names the teammate rather
+  // than rendering a raw id (issue #1934). Populated by the desks/roster read
+  // below, which already fetches the roster this is derived from.
+  const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   // The threads with a chat POST currently in flight, so the SSE `agent_reply`
   // echo for each is suppressed — the awaited POST reply is the authoritative,
   // steps-bearing copy (fixes the duplicate-bubble race).
@@ -753,6 +970,146 @@ export function AppShell({
   // decisions are in flight or freshly settled, which is never many.
   const ownApprovalDecisionsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
+
+  /**
+   * The account-activation funnel (issue #1844): blocks the shell behind
+   * `OnboardingGate` until the company is named, has an integration and has
+   * run a workflow — see `useActivationGate` for the polling contract.
+   *
+   * `gateSkippedThisSession` is read once, into state rather than a plain
+   * `const`, so clicking "skip for now" re-renders past the gate without a
+   * page reload — `sessionStorage` alone would need one.
+   */
+  const [gateSkipped, setGateSkipped] = useState(() => gateSkippedThisSession(scope));
+  useEffect(() => {
+    setGateSkipped(gateSkippedThisSession(scope));
+  }, [scope]);
+  const skipGate = useCallback(() => {
+    markGateSkipped(scope);
+    setGateSkipped(true);
+  }, [scope]);
+
+  /**
+   * Whether the signed-in user is this company's admin (PR #1875 review
+   * finding) — `null` until the read lands. Mirrors the `admin =
+   * (await fetchMe(...)).role === "admin"` pattern every other admin-gated
+   * view in this app already uses (`OAuthView`, `TeamView`, etc.), with two
+   * differences, both because this reader feeds a *blocking* gate rather
+   * than a read-only view:
+   *
+   * - The `null` "not yet known" state — see `shouldShowOnboardingGate`'s own
+   *   guard for why the gate must never flash open on it.
+   * - A failed read is classified through `resolveGateAdminCheckError`
+   *   instead of settling straight to `false`. Every other view's `catch {
+   *   admin = false }` is safe because the worst case is a control staying
+   *   disabled one round trip longer; here `false` is what suppresses the
+   *   gate, so a transient failure (a dropped connection, a proxy 5xx) would
+   *   read exactly like a real "not an admin" and fail the gate open for an
+   *   actual admin for the rest of that mount (PR #1875 review finding,
+   *   round 2). Only a definitive `401` settles to `false`; anything else
+   *   retries.
+   *
+   * Declared before `activationGate` (below) because that hook's `enabled`
+   * input now reads this state — PR #1875 review finding, round 5.
+   */
+  const [isGateAdmin, setIsGateAdmin] = useState<boolean | null>(null);
+  /**
+   * True once `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` consecutive `fetchMe`
+   * failures have failed to settle — see that constant's own doc. Read
+   * alongside `activationGate.stuck` below so the recovery affordance covers
+   * either read wedging, not only the activation one.
+   */
+  const [isGateAdminStuck, setIsGateAdminStuck] = useState(false);
+  useEffect(() => {
+    let live = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    setIsGateAdmin(null);
+    setIsGateAdminStuck(false);
+    const load = () => {
+      void (async () => {
+        try {
+          const admin =
+            (await withReadTimeout(fetchMe(client, company), GATE_ADMIN_CHECK_TIMEOUT_MS)).role ===
+            "admin";
+          if (!live) return;
+          setIsGateAdmin(admin);
+          failures = 0;
+          setIsGateAdminStuck(false);
+        } catch (err) {
+          if (!live) return;
+          const outcome = resolveGateAdminCheckError(err);
+          if (outcome.settled) {
+            setIsGateAdmin(outcome.isAdmin);
+            failures = 0;
+            setIsGateAdminStuck(false);
+          } else {
+            failures += 1;
+            if (failures >= GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES) setIsGateAdminStuck(true);
+            retryTimer = setTimeout(load, GATE_ADMIN_CHECK_RETRY_MS);
+          }
+        }
+      })();
+    };
+    load();
+    return () => {
+      live = false;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+    };
+  }, [client, company]);
+
+  // The poll below is passed `shouldPollActivationForRole(isGateAdmin)`, NOT
+  // a bare `true` (PR #1875 review finding, round 5) and NOT `!gateSkipped`
+  // (round 4): `GET {scope}/activation` is the only production caller of
+  // `compute_and_latch` on the host, so an admin who skips and then finishes
+  // the funnel anyway (connects an integration, runs a workflow from the
+  // ordinary shell) needs the poll to still be running to ever notice and
+  // persist it — see `shouldPollActivation` for that half. Round 5 also tried
+  // to stop this poll for a confirmed non-admin, on the premise that no
+  // funnel step is reachable by anyone but the admin; round 7 found that
+  // premise false (`POST {scope}/workflows/{wid}/run` is `ScopedCompany`, not
+  // admin-gated) and reverted it — see `shouldPollActivationForRole`'s own
+  // doc for why every role now polls alike. The poll still stops itself once
+  // the company is actually activated; nothing here needs to.
+  const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
+
+  // PR #1875 review finding, round 4: a skip marker from before the funnel
+  // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
+  // already stops gating on it either way), but leaving it in `sessionStorage`
+  // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
+  useEffect(() => {
+    if (activationGate.status?.isActivated) clearGateSkipped(scope);
+  }, [activationGate.status?.isActivated, scope]);
+
+  const refreshTaskStatuses = useCallback(async () => {
+    const read = ++taskStatusRead.current;
+    const [tasks, inflight] = await Promise.allSettled([
+      listTasks(client, company),
+      listInflight(client, company),
+    ]);
+    if (read !== taskStatusRead.current) return;
+    // Both reads are best-effort, like the board's own decoration read. Keep a
+    // last good snapshot when the host is offline instead of making a running
+    // pill disappear because one poll failed.
+    if (tasks.status === "rejected" && inflight.status === "rejected") return;
+    setTaskStatusByTaskId(
+      taskStatusesById(
+        tasks.status === "fulfilled" ? tasks.value : [],
+        inflight.status === "fulfilled" ? inflight.value : [],
+      ),
+    );
+  }, [client, company]);
+
+  useEffect(() => {
+    taskStatusRead.current += 1;
+    setTaskStatusByTaskId({});
+  }, [client, company]);
+
+  // Ride the existing visible-tab company poll, and also re-read immediately
+  // when the task stream reports a dispatch, move or settle (#1758).
+  useEffect(() => {
+    void refreshTaskStatuses();
+  }, [feed.now, taskEventTick, refreshTaskStatuses]);
   // Issue #379: the inline approval cards' console-local state, owned here
   // rather than in `ChatView` for the same reason `transcripts` is — the shell
   // mounts and unmounts that view per route, and an operator who approves in a
@@ -906,6 +1263,23 @@ export function AppShell({
     setDecidedApprovals({});
     setDecidingApprovals(new Map());
     setFailedApprovals({});
+    // Another company's live receipts are another namespace too (issue #1935
+    // review, codex 3892523790 / coderabbit 3892517512). Host thread ids like
+    // `main` recur across companies, so left uncleared here a switch could
+    // render the previous company's still-ticking "Sent"/"Picked up by" row
+    // on the new company's identically-named thread until that thread's own
+    // next send re-arms it. The generation-guarded `clearReceipt` (see
+    // `shouldClearReceipt`) closes the OTHER half of this bug — a late
+    // completion from the old company arriving *after* this reset must not
+    // delete whatever the new company has since armed — this reset only
+    // covers the instant of the switch itself.
+    setReceiptByThread((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+    // The name map a receipt resolves an agent id through is exactly as
+    // company-scoped as the receipts it names (same issue). Cleared here too
+    // rather than left to the roster fetch below: that fetch is async, so
+    // without this an id captured off a fresh frame on the new company would
+    // resolve through the previous company's roster until it answers.
+    setAgentNames((prev) => (Object.keys(prev).length === 0 ? prev : {}));
 
     // How far each channel's cold hydration has got, and which thread's
     // request is still in flight, so the 5-second poll below (`rehydrateAll`
@@ -1014,22 +1388,50 @@ export function AppShell({
       );
     };
 
-    client
-      .listDesks(company)
-      .then(async (desks) => {
+    Promise.all([
+      client.listDesks(company).catch(() => null),
+      // The always-present Operator feed's identity (issue #1757 rework) —
+      // fetched alongside desks, not derived from them, since it is its own
+      // surface now. `null` on any failure (offline, or a host that predates
+      // the route) rather than sinking the whole pass: a company can still
+      // rehydrate its real desks/DMs without the pinned Operator row.
+      //
+      // One retry (issue #1781 review, Codex P2): `ChatView` fetches this
+      // same identity independently for rendering the pinned row, so a
+      // single dropped request here — while `ChatView`'s own, later call
+      // succeeds — used to render the row but permanently omit its id from
+      // this pass's rehydration targets and five-second polling, since this
+      // pass had already given up. A bounded retry closes the common
+      // transient case without turning the fetch into an open-ended one; see
+      // `fetchWithOneRetry`'s doc for why it is extracted rather than inline.
+      fetchWithOneRetry(() => client.getOperatorChannel(company)),
+    ])
+      .then(async ([desks, operatorChannelRaw]) => {
+        // See `isOperatorChannelDto`'s doc comment — a client stub that
+        // resolves every unlisted method to `[]` would otherwise satisfy the
+        // `Promise.all` type and reach the field reads below.
+        const operatorChannel = isOperatorChannelDto(operatorChannelRaw)
+          ? operatorChannelRaw
+          : null;
         if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
         // that 404s `/team` keeps its desks rather than losing the whole list.
         const team = await client.listTeam(company).catch(() => []);
         if (cancelled) return;
-        const deskThreads = threadsFromDesks(desks);
+        const deskThreads = desks === null ? defaultThreads() : threadsFromDesks(desks);
         const resolved = [
           ...deskThreads,
           ...agentDmThreads(
             team,
             deskThreads.map((t) => t.id),
           ),
+          // The legacy `#/conversation` route's own copy of the pinned
+          // Operator row — Chat's channel model gets it through
+          // `operatorSection`, but `Conversation` reads this thread list
+          // directly and never received one, so its `readOnly` plumbing had
+          // nothing to gate (issue #1781 review, Codex P2).
+          ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
         ];
         setThreads((prev) => {
           const byId = new Map(prev.map((t) => [t.id, t]));
@@ -1038,15 +1440,86 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        const chatDesks = desks.length ? desks.map(deskFromDto) : defaultDesks();
+        // The host answered, so this is the company's desk list — empty
+        // included. `defaultDesks()` stands in only when `listDesks` itself
+        // failed (`desks === null`, from the `.catch(() => null)` above); a
+        // company that simply declares no `[[group_chat]]` used to be given
+        // three fabricated ones here.
+        const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);
         const roster = team.map(fromDto);
+        // The name map the live receipt resolves an agent id through (issue
+        // #1934) — derived from the roster this effect already read, so it costs
+        // no extra request and is scoped to the company the effect ran for.
+        setAgentNames(Object.fromEntries(roster.map((m) => [m.id, m.name])));
         // Keep the addressing this loop resolves, not just its side effect.
-        setChatChannelByThread(channelMap(chatDesks, roster));
-        setFirstDeskChannelId(chatDesks[0]?.id ?? null);
-        const threadIds = resolved.map((t) => t.id);
+        //
+        // The Operator feed's id is folded in here too (issue #1781 review,
+        // Codex P2): `channelMap` only knows desks and roster teammates, so
+        // without this the map a **live** SSE frame is resolved through
+        // (`channelForThread(chatChannelByThread, event.chatId)`, a few
+        // hundred lines below) missed the Operator channel entirely and
+        // dropped the frame — `renderAgentReply` returns on the very next
+        // line when the lookup misses. The five-second history poll still
+        // recovered it eventually, because the `channels` rehydration-target
+        // list a little further down already carries this same id→id pair;
+        // this closes the live-event gap the poll was quietly papering over.
+        setChatChannelByThread({
+          ...channelMap(chatDesks, roster),
+          ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
+        });
+        // The channel `ChatView` lands on when the hash names none, which since
+        // issue #1743 is the built-in `#general` rather than the first desk —
+        // the two must agree, or a line with nowhere else to go lands in a
+        // channel the operator is not looking at. Resolved rather than
+        // hard-coded, for the reason `generalChannelId` gives: a grandfathered
+        // blueprint desk owns the line in its own company, and `main` is then
+        // not a channel at all.
+        setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
+        // Fold the Operator feed's id into the same rehydration pass, keyed on
+        // its own id both as channel and thread (its channel id *is* its
+        // thread id — `chat/history?desk=<id>` reads it through the ordinary
+        // path). Without this, `ChatView`'s pinned row would sit on a channel
+        // id `historyReady` never sees a status for until `discovered` alone
+        // resolves it, and `transcripts[operatorChannel.id]` would never fill
+        // in — the spinner-forever failure mode this pass exists to avoid.
+        const threadIds = [
+          ...resolved.map((t) => t.id),
+          ...(operatorChannel ? [operatorChannel.id] : []),
+        ];
         const channels = [
+          // `#general` is not in the desk list (it is not a desk), so its
+          // history has to be named here or nothing would rehydrate it on
+          // reload — the one channel every company has would come back empty.
+          {
+            channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
+            threadId: MAIN_THREAD_ID,
+          },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-          ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+          // A DM's history is fetched under the teammate's **own id** — but
+          // that id is not always this DM's address. A manifest may declare a
+          // teammate whose id is a General spelling (`mint_agent_id` reserves
+          // `main` and `General`, but a blueprint is not something this console
+          // overrules), and `GET chat/history?desk=main` then returns the
+          // *folded General conversation*, not that teammate's transcript:
+          // `is_general_chat` has folded `""`, `main`, `General` and `general`
+          // into one conversation since issue #65. Naming `dm:<id>` as its
+          // channel therefore poured the company-wide line into that DM on
+          // every reload.
+          //
+          // Resolved through `channelIdForThread` so the one rule that decides
+          // where a thread renders decides it here too (issue #1743). For every
+          // ordinary teammate that is exactly `dm:<id>`, unchanged.
+          ...roster.map((m) => ({
+            channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
+            // The address the DM is actually written under. Bare, this fetched
+            // the folded General history for a teammate whose id is a General
+            // spelling, so its own transcript could never be recovered after a
+            // reload (issue #1743).
+            threadId: dmThreadId(m),
+          })),
+          ...(operatorChannel
+            ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
+            : []),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message
@@ -1059,15 +1532,33 @@ export function AppShell({
         setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
-        // Host without `/desks`, or offline — keep the static default
-        // threads, but the operator/General line still deserves a
-        // rehydration attempt (it's the one every deployment has).
+        // Last-resort safety net: `listDesks`/`getOperatorChannel` already
+        // degrade to `null` on their own failure above, so this only fires on
+        // something unexpected inside the `.then` (e.g. a state setter
+        // throwing) — keep the static default threads so the console still
+        // renders something rather than getting stuck.
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
+        // No roster answered, so no agent names for this company — clear rather
+        // than carry the previous company's map into a receipt here (#1934).
+        setAgentNames({});
         setChatChannelByThread(channelMap(fallbackDesks, []));
-        setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
+        // `MAIN_THREAD_ID`, not `fallbackDesks[0]?.id`: `defaultDesks()` no
+        // longer carries a fabricated `main` row (issue #1743), so the first
+        // fallback desk is just whichever one sorts first — landing the
+        // console on an arbitrary desk on an unexpected error instead of the
+        // company-wide line every other path opens on (issue #1781 review,
+        // Codex P2/medium).
+        setFirstDeskChannelId(MAIN_THREAD_ID);
         const threadIds = defaultThreads().map((t) => t.id);
-        const channels = fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id }));
+        const channels = [
+          // `#general` is not a desk here either — same reason the success
+          // path above names it explicitly. Without this entry `mainThread()`
+          // is still in `threadIds` (via `defaultThreads()`) but has no
+          // channel to rehydrate history through.
+          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
+          ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+        ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         rehydrateAll();
         disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
@@ -1136,6 +1627,21 @@ export function AppShell({
   useEffect(() => {
     chatChannelByThreadRef.current = chatChannelByThread;
   }, [chatChannelByThread]);
+  /**
+   * Mirrors `openTurns` for the same reason `chatChannelByThreadRef` mirrors
+   * its map: `reReadSettledThread` needs the value as of *when its response
+   * lands*, not as of when the request started.
+   *
+   * What it guards is the live-row clear below. `settle` drops only the turn
+   * that ended and deliberately keeps a queued sibling watched, so a thread
+   * with more work still has an entry here — and a thread-wide clear that
+   * ignored it would delete the rows of a turn that is still running, on the
+   * wide window a history round trip opens (PR #1904 review).
+   */
+  const openTurnsRef = useRef(openTurns);
+  useEffect(() => {
+    openTurnsRef.current = openTurns;
+  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1189,7 +1695,7 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string) => {
+    (threadId: string, settledTurnId?: string) => {
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1206,6 +1712,29 @@ export function AppShell({
             scopeRef.current.client !== client
           ) return;
           const hydrated = fromHistory(entries);
+          // The turn is over, so its transient tool rows have served their
+          // purpose — the durable record just folded in is what stands now.
+          //
+          // `injectAgentReply` does this for a turn that *answered*, and for a
+          // long time that covered everything a console would see. A turn that
+          // settles **failed** journals a `TurnFailed` line and emits no
+          // `agent_reply`, so nothing cleared its rows: a detached POST has
+          // already resolved, `onSendEnd` has already run, and the live
+          // timeline sat under the channel claiming work was in flight until
+          // the next send or a reload (PR #1904 review). Harmless while ACP
+          // published no rows at all; not harmless now that it does.
+          //
+          // …but only when the thread has nothing else running. A thread can
+          // hold several detached turns, and `settle` keeps the queued ones
+          // watched; clearing unconditionally would wipe a *newer* turn's rows
+          // whenever its frames arrived while this history read was in flight,
+          // which on a round trip is a wide window. The newer turn's own
+          // settle clears them when it gets there.
+          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
+            setLiveStepsByThread((prev) =>
+              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+            );
+          }
           setThreads((ts) =>
             ts.map((t) => {
               if (t.id !== threadId) return t;
@@ -1214,7 +1743,7 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = chatChannelByThreadRef.current[threadId];
+          const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
           // (issue #1701). The `threads` fold above still ran; park the id so
@@ -1297,7 +1826,10 @@ export function AppShell({
       // Deliberately not awaited here, and deliberately not written inline —
       // see `reReadSettledThread` for why the re-read cannot live inside this
       // effect. The line above is what tears this effect down.
-      reReadSettledThread(threadId);
+      //
+      // The turn id goes with it: the re-read's own clear must not be fooled
+      // by a ref that has not caught up with the `setOpenTurns` above.
+      reReadSettledThread(threadId, turnId);
     };
 
     const poll = () => {
@@ -1397,6 +1929,16 @@ export function AppShell({
   // thread for. One re-read per mention, not one per poll: a re-read that
   // fails (offline) is retried by the next reload rather than hammered.
   const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
+  // Ids of non-mention (`dispatch_failed` / `approval_expired` /
+  // `workflow_run_*`) rows this session has already toasted. These rows come
+  // back on every poll until marked read server-side, so this local guard is
+  // what keeps a single dispatch failure from toasting once per interval
+  // instead of once — see `@/lib/operational-notifications`.
+  const operationalAnnouncedRef = useRef<Set<string>>(new Set());
+  // Toasted operational ids waiting for the tab to become visible before the
+  // server-side ack fires (Codex #1883 P2). See
+  // `scheduleAcknowledgement`/`flushPendingAcknowledgements`.
+  const pendingAckRef = useRef<PendingAcknowledgement[]>([]);
   const refreshMentions = useCallback(() => {
     const requestCompany = company;
     const revision = ++mentionFeedRevision.current;
@@ -1442,6 +1984,53 @@ export function AppShell({
           subjects.forEach((s) => mentionReReadSubjectsRef.current.add(s));
           threadIds.forEach((threadId) => reReadSettledThread(threadId));
         }
+        // `dispatch_failed` / `approval_expired` / `workflow_run_*` rows go
+        // through this same durable feed but are not mentions, so nothing
+        // above ever renders or acknowledges them — they would sit "unread"
+        // forever despite coming back on every poll (Codex #1883 P1). A toast
+        // is this feed's minimal rendering. The row is marked read once the
+        // toast has actually been SEEN, not the instant it is enqueued
+        // (Codex #1883 P2 fallout): sonner still renders a toast raised in a
+        // hidden tab (only `toast-lifetime.ts`'s auto-dismiss clock pauses for
+        // one), so an immediate ack survived even a tab closed/reloaded before
+        // the operator ever returned to see it — the row reads as handled and
+        // nobody saw it, defeating the point of this consumer.
+        const toAnnounce = operationalNotificationsToAnnounce(
+          next,
+          operationalAnnouncedRef.current,
+        );
+        if (toAnnounce.length > 0) {
+          const ids = toAnnounce.map((n) => n.id);
+          // Added the instant a row is toasted, hidden tab or not — this is
+          // what stops a still-unacknowledged row from being re-toasted on
+          // the next poll, independent of when (or whether) the server-side
+          // ack below fires.
+          ids.forEach((id) => operationalAnnouncedRef.current.add(id));
+          for (const n of toAnnounce) {
+            if (operationalNotificationSeverity(n) === "error") toast.error(n.title);
+            else toast.warning(n.title);
+          }
+          setMentionFeed((current) =>
+            current.map((n) => (ids.includes(n.id) ? { ...n, readAt: Date.now() } : n)),
+          );
+          const { ackNow, pending } = scheduleAcknowledgement(
+            ids,
+            requestCompany,
+            document.hidden,
+            pendingAckRef.current,
+          );
+          pendingAckRef.current = pending;
+          if (ackNow.length > 0) {
+            void client.markNotificationsRead(ackNow, requestCompany).catch(() => {
+              // A failed mark-read leaves the row unread server-side; the next
+              // poll re-fetches it, finds it still in `readAt: undefined`, but
+              // `operationalAnnouncedRef` has already seen its id, so it is not
+              // re-toasted. The row itself is not lost — it is still durable
+              // and still returned — only the toast is best-effort, matching
+              // how mention marking already treats offline/older-host failure.
+            });
+          }
+        }
       })
       .catch(() => {
         // A transient refresh failure must not erase the last successful feed:
@@ -1464,6 +2053,32 @@ export function AppShell({
   useEffect(() => {
     refreshMentions();
   }, [feed.now, refreshMentions]);
+
+  // The other half of the deferred ack above: flush whatever was toasted
+  // while the tab was hidden the moment it is actually seen (Codex #1883
+  // P2). `scopeRef.current.company`, not the `company` prop, so this effect
+  // does not need to resubscribe on every company switch — it only needs the
+  // value at the instant visibility flips.
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      const { ackNow, pending } = flushPendingAcknowledgements(
+        scopeRef.current.company,
+        pendingAckRef.current,
+      );
+      pendingAckRef.current = pending;
+      if (ackNow.length > 0) {
+        void client.markNotificationsRead(ackNow, scopeRef.current.company).catch(() => {
+          // Same best-effort contract as the immediate path above — a failed
+          // flush leaves the rows unread server-side, re-fetched (but not
+          // re-toasted, `operationalAnnouncedRef` already has their ids) on
+          // the next poll.
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [client]);
 
   const mentionCounts = useMemo(() => {
     // `main` may be undefined while the desks/roster effect has not resolved —
@@ -1597,7 +2212,7 @@ export function AppShell({
    */
   const onThreadViewed = useCallback(
     (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
-      const channelId = chatChannelByThreadRef.current[threadId];
+      const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
       if (!channelId) return;
       onChannelViewed(
         channelId,
@@ -1665,7 +2280,10 @@ export function AppShell({
    * next — #368's bug, re-introduced one surface over.
    */
   const noteInChannel = (threadId: string | null | undefined, line: string) => {
-    const target = threadId ? chatChannelByThread[threadId] : undefined;
+    // Through `channelForThread`, not a bare index: the host accepts any casing
+    // of a General spelling and echoes back the one the caller used, so a map
+    // of four literals misses `MAIN` from an API client (issue #1743).
+    const target = threadId ? (channelForThread(chatChannelByThread, threadId) ?? undefined) : undefined;
     if (!target) {
       noteSystem(line);
       return;
@@ -1722,7 +2340,12 @@ export function AppShell({
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op, the
       // same as the thread store above: better silent than in the wrong place.
-      const channelId = chatChannelByThread[event.chatId];
+      //
+      // `channelForThread`, for the reason `noteInChannel` gives: the map holds
+      // four literal General spellings and the host echoes whatever casing the
+      // caller addressed, so a bare index drops the live reply and it appears
+      // only when polling recovers the durable history (issue #1743).
+      const channelId = channelForThread(chatChannelByThread, event.chatId);
       if (!channelId) return;
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
@@ -1769,9 +2392,25 @@ export function AppShell({
       // `onSendEnd` does this for a turn this console POSTed; a turn it did not
       // has no send to end, and without this its rows would sit under the
       // channel until the next turn on the same thread replaced them.
-      setLiveStepsByThread((prev) =>
-        prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
-      );
+      //
+      // Guarded on the same condition `reReadSettledThread` uses, and for the
+      // same reason (PR #1904 review): a thread can hold several detached
+      // turns, and this clear is thread-wide. An earlier turn's reply landing
+      // while a later one is still working would erase the rows of the turn
+      // that is *currently* running — which reads as a teammate that stopped,
+      // the exact appearance this timeline exists to prevent. The rows left
+      // standing belong to work that really happened, and the open turn's own
+      // settle clears them.
+      // No turn id to exclude here: a reply arriving over SSE and its turn
+      // settling on the poll are independent events, so the replying turn may
+      // still be listed. That only defers the clear to its own settle, which
+      // then runs the re-read above — the conservative direction, and the one
+      // that never erases a running turn's rows.
+      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+        setLiveStepsByThread((prev) =>
+          prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
+        );
+      }
     },
     // `useEvents` holds its callbacks in refs, so this identity churning as the
     // map lands cannot re-open the SSE stream.
@@ -1876,19 +2515,55 @@ export function AppShell({
   // Mark/unmark a thread's in-flight POST. `onSendStart` also resets its live
   // timeline so a fresh turn starts clean; `onSendEnd` clears it because the
   // final reply now carries the authoritative folded steps.
+  // Drop a thread's receipt when its POST reaches any terminal outcome (issue
+  // #1934). `onSendEnd` is the resolved path and clears it as the reply bubble
+  // lands; a detached/failed/stale POST clears it too, so a receipt never
+  // outlives the send bracket that armed it — from there the openTurns-driven
+  // working row is the live surface, not the receipt.
+  //
+  // `gen`, when given, is the generation the clearing send's own `onSendStart`
+  // returned (issue #1935 review — see `shouldClearReceipt`'s doc for the
+  // cross-company race this closes). Omitted by `Conversation`/
+  // `conversation/runtime.ts`'s calls, which clear unconditionally as before.
+  const clearReceipt = useCallback((threadId: string, gen?: number) => {
+    setReceiptByThread((prev) => {
+      if (!shouldClearReceipt(prev[threadId], gen)) return prev;
+      const next = { ...prev };
+      delete next[threadId];
+      return next;
+    });
+  }, []);
+  // The generation counter a receipt is stamped with at arm time (issue #1935
+  // review). A plain ref, not state: it drives no render on its own, only the
+  // value handed back to the caller and threaded through to whichever
+  // terminal callback eventually clears the receipt it stamped.
+  const receiptGenRef = useRef(0);
   const onSendStart = useCallback((threadId: string) => {
     pendingPostThreadsRef.current.started(threadId);
     activeTurnThreadRef.current = threadId;
     setLiveStepsByThread((prev) => ({ ...prev, [threadId]: [] }));
+    // `lastFrameAt` seeds to `startedAt` so the stall check is "no frame for
+    // 30s" from the send, not an instant stall.
+    const now = Date.now();
+    const gen = ++receiptGenRef.current;
+    setReceiptByThread((prev) => ({
+      ...prev,
+      [threadId]: { startedAt: now, lastFrameAt: now, gen },
+    }));
+    return gen;
   }, []);
-  const onSendEnd = useCallback((threadId: string) => {
-    pendingPostThreadsRef.current.ended(threadId);
-    if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
-    setLiveStepsByThread((prev) => {
-      if (!prev[threadId]?.length) return prev;
-      return { ...prev, [threadId]: [] };
-    });
-  }, []);
+  const onSendEnd = useCallback(
+    (threadId: string, gen?: number) => {
+      pendingPostThreadsRef.current.ended(threadId);
+      if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
+      setLiveStepsByThread((prev) => {
+        if (!prev[threadId]?.length) return prev;
+        return { ...prev, [threadId]: [] };
+      });
+      clearReceipt(threadId, gen);
+    },
+    [clearReceipt],
+  );
   /**
    * A chat POST that resolved for a company the operator has since left
    * (issue #1000).
@@ -1907,9 +2582,18 @@ export function AppShell({
    * clear a live step timeline or the `activeTurnThreadRef` fallback that a
    * *current* company's own in-flight POST is using.
    */
-  const onSendStale = useCallback((threadId: string) => {
-    pendingPostThreadsRef.current.detached(threadId);
-  }, []);
+  const onSendStale = useCallback(
+    (threadId: string, gen?: number) => {
+      pendingPostThreadsRef.current.detached(threadId);
+      // The reply belongs to a company the operator has left; nothing about
+      // this turn is in the active scope, so its receipt must not linger —
+      // unless a newer send has already re-armed this thread id for the
+      // company now on screen, in which case `gen` (this stale send's own
+      // generation) will not match and `clearReceipt` leaves it alone.
+      clearReceipt(threadId, gen);
+    },
+    [clearReceipt],
+  );
   /**
    * The host accepted the turn and handed back its id instead of its answer
    * (issue #983).
@@ -1930,7 +2614,7 @@ export function AppShell({
    * suppression lose nothing: the frame was never dropped, only queued.
    */
   const onSendDetached = useCallback(
-    (threadId: string, turnId?: string) => {
+    (threadId: string, turnId?: string, gen?: number) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
       // Append, never replace (issue #1000). The serial lock queues a second
       // send behind the running turn, and a replace would stop the poll
@@ -1943,8 +2627,11 @@ export function AppShell({
         return { ...prev, [threadId]: [...turns, { turnId, queued: true }] };
       });
       held.forEach((frame) => renderAgentReply(frame));
+      // The turn is now the openTurns row's job, not the receipt's — from a
+      // 202 the working row is armed above and takes over (issue #1934).
+      clearReceipt(threadId, gen);
     },
-    [renderAgentReply],
+    [renderAgentReply, clearReceipt],
   );
   /**
    * The chat POST **threw** — no body, nothing rendered by the view (#1000).
@@ -1979,9 +2666,13 @@ export function AppShell({
    * behind it is not a working row to be invented.
    */
   const onSendFailed = useCallback(
-    (threadId: string) => {
+    (threadId: string, gen?: number) => {
       const held = pendingPostThreadsRef.current.failed(threadId);
       held.forEach((frame) => renderAgentReply(frame));
+      // The request died; the view has rendered its `Couldn't send` line. Drop
+      // the receipt so it does not tick on over a dead POST (issue #1934) — any
+      // durable turn re-armed below drives the working row instead.
+      clearReceipt(threadId, gen);
 
       // Discover whether the host kept the turn after the request died. The
       // throw tells us nothing, but the run rows do: a `pending`/`running` row
@@ -2009,7 +2700,7 @@ export function AppShell({
           /* host without /runs, or offline — nothing to re-arm */
         });
     },
-    [client, company, renderAgentReply],
+    [client, company, renderAgentReply, clearReceipt],
   );
 
   // Fold one live turn frame into the in-flight thread's timeline: a `tool_call`
@@ -2021,6 +2712,67 @@ export function AppShell({
   // the state they feed has to live where that stream is read.
   const presence = usePresence(client, company);
   const typing = useTyping(client, company);
+  /**
+   * The coarse "near your credit limit" warning (issue #1846), off the live
+   * `budget_proximity` frame. Shell-owned for the same reason presence/typing
+   * are: the SSE subscription lives here, and the banner must outlive a
+   * channel switch (the warning is about the company, not one conversation).
+   * `null` once dismissed or once a fresh dispatch has not re-raised it.
+   *
+   * "Outlive a channel switch" stops at the company boundary, though — see
+   * the reset effect right below, the same shape `workflowRunEvents` and
+   * `openTurns` already use for their own company-scoped state.
+   */
+  const [budgetProximity, setBudgetProximity] = useState<{
+    message: string;
+    atMillis: number;
+    // The frame's own `agentId` (issue #1846 review, Codex #3869601278):
+    // present for one teammate's daily cap, absent for the company-wide
+    // ceiling. Carried through to state (not just read at arrival) because
+    // the expiry effect below needs it too, to pick the right boundary —
+    // see `isBudgetProximityExpired`'s doc.
+    agentId?: string;
+  } | null>(null);
+  // Issue #1846 review (Codex #3864988188): company-scoped, and reset on
+  // company change for the same reason `workflowRunEvents`/`openTurns` are
+  // (see their own reset effects above) — this state has no company id on
+  // it, so switching without clearing left company A's warning rendered
+  // under company B until B dismissed it or emitted its own.
+  useEffect(() => {
+    setBudgetProximity((prev) => (prev === null ? prev : null));
+  }, [client, company]);
+  // Issue #1846 review (Codex #3866418899, refined by #3868962376 /
+  // #3869601278): bounded self-expiry, since the backend only ever
+  // publishes a `budget_proximity` frame while usage is at least 90%
+  // (`is_approaching_budget_ceiling`'s callers in `harness/built_in/mod.rs`)
+  // and never a "cleared" counterpart. Without this, a daily agent cap
+  // resetting at 00:00 UTC, a plan period rolling over, or an operator
+  // raising the cap all leave usage back below that threshold with nothing
+  // on the wire to say so, and the banner claimed the previous period's
+  // status forever.
+  //
+  // The boundary itself depends on `agentId` — see
+  // `isBudgetProximityExpired`/`budgetProximityExpiresAt`'s docs: a per-agent
+  // DAILY warning is anchored to the next UTC midnight (that reset's actual
+  // instant), but the COMPANY-WIDE warning has no such fixed boundary the
+  // console can compute, so it keeps the flat 24h ceiling instead — anchoring
+  // IT to midnight too would clear a still-valid warning hours or days before
+  // its own (not-necessarily-UTC-day-aligned) plan period actually ends. A
+  // dispatch that is STILL near the cap re-publishes its own frame well
+  // inside the window, which reaches this effect as a new `budgetProximity`
+  // value and re-arms the timer, so a genuinely ongoing warning never
+  // flickers off mid-window.
+  useEffect(() => {
+    if (budgetProximity === null) return;
+    if (isBudgetProximityExpired(budgetProximity.atMillis, Date.now(), budgetProximity.agentId)) {
+      setBudgetProximity(null);
+      return;
+    }
+    const remainingMs =
+      budgetProximityExpiresAt(budgetProximity.atMillis, budgetProximity.agentId) - Date.now();
+    const timer = setTimeout(() => setBudgetProximity(null), Math.max(remainingMs, 0));
+    return () => clearTimeout(timer);
+  }, [budgetProximity]);
   /**
    * The company's people, id → label.
    *
@@ -2126,6 +2878,7 @@ export function AppShell({
         let idx = event.toolCallId
           ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
           : -1;
+        if (idx < 0 && event.toolCallId) return prev;
         if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
         const status = event.status === "error" ? ("error" as const) : ("ok" as const);
         if (idx >= 0) {
@@ -2133,6 +2886,15 @@ export function AppShell({
             ...rows[idx],
             status,
             detail: event.detail ?? rows[idx].detail,
+            // `result` is what came back — the summary `StepTimeline` renders
+            // under the label. Carried for the same reason `detail` is: the
+            // live row and the folded step it is replaced by should not say
+            // different amounts about the same call. It was dropped here while
+            // only the built-in harness streamed (its rows lean on `detail`,
+            // derived from the arguments); an ACP tool call carries its
+            // summary in `result` and nothing else, so a dropped `result` is
+            // the whole of what the row could have said.
+            result: event.result ?? rows[idx].result,
             elapsedMs: event.elapsedMs,
           };
         } else {
@@ -2141,6 +2903,7 @@ export function AppShell({
             status,
             label: event.label ?? "Working",
             detail: event.detail,
+            result: event.result,
             elapsedMs: event.elapsedMs,
             toolCallId: event.toolCallId,
           });
@@ -2151,6 +2914,18 @@ export function AppShell({
         rows.push({ kind: "thinking", status: "ok", label: "Thinking" });
       }
       return { ...prev, [threadId]: rows };
+    });
+    // Keep this thread's receipt alive off the same frame (issue #1934): a frame
+    // arriving means the turn is advancing, so bump `lastFrameAt` (which clears
+    // any stall) and capture the first agent id we see. Guarded on an existing
+    // receipt — a stray background frame for a thread we never sent on must not
+    // conjure one, mirroring the `if (!threadId) return` guard above.
+    setReceiptByThread((prev) => {
+      const existing = prev[threadId];
+      if (!existing) return prev;
+      const frameAgentId = "agentId" in event ? event.agentId : undefined;
+      const agentId = existing.agentId ?? (frameAgentId || undefined);
+      return { ...prev, [threadId]: { ...existing, lastFrameAt: Date.now(), agentId } };
     });
   }, []);
 
@@ -2290,6 +3065,22 @@ export function AppShell({
     // moves a card between columns and needs saying in the conversation the
     // card came from.
     onDispatchTerminal: injectDispatchMarker,
+    // The inline terminal marker is enough only while its origin channel is
+    // actually on screen. Elsewhere — including another chat channel — the
+    // event hook raises the linked completion toast (#1758).
+    isViewingTaskOrigin: useCallback(
+      (event: CompanyStreamEvent) => {
+        if (event.type !== "desk_task_completed" || view !== "chat") return false;
+        // Below `lg`, selecting the channel rail hides the transcript while
+        // leaving `activeChatChannelRef` naming whatever was last shown — a
+        // completion from that channel must not suppress its toast while the
+        // operator cannot actually see the inline marker (#1768 codex review).
+        if (!chatPaneVisibleRef.current) return false;
+        const origin = dispatchMarkerPlacement(event, chatChannelByThread)?.channelId;
+        return origin != null && activeChatChannelRef.current === origin;
+      },
+      [view, chatChannelByThread],
+    ),
     // Issue #327. The payload is carried, not folded into a counter — see
     // `workspaceEvent` above. The view still re-reads the tree from the host
     // rather than patching it from the frame: the frame carries no node name
@@ -2317,6 +3108,14 @@ export function AppShell({
       },
       [typing],
     ),
+    onBudgetProximityEvent: useCallback((event: CompanyStreamEvent) => {
+      if (event.type !== "budget_proximity") return;
+      setBudgetProximity({
+        message: event.message,
+        atMillis: event.atMillis,
+        agentId: event.agentId,
+      });
+    }, []),
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive
       // the live canvas. Progress frames are far more frequent than outcomes,
@@ -2394,6 +3193,169 @@ export function AppShell({
     }, []),
   });
 
+  // PR #1875 review finding, round 13: `shouldHoldShellPending` holds on
+  // `!setupChecked` precisely because `SetupController`'s own `onOpenChange`
+  // is the *only* thing that ever sets it (see `setupChecked`'s own doc) —
+  // but the JSX that mounted `<SetupController>` lived below both of this
+  // function's early returns, reachable only once the ordinary shell itself
+  // was chosen. Every fresh mount starts `setupChecked === false`, so the
+  // very predicate this component exists to satisfy made `SetupController`
+  // unreachable: the hold fired, returned before that JSX, `SetupController`
+  // never mounted, `onOpenChange` never fired, and `setupChecked` stayed
+  // `false` forever — a permanent loader, not a brief hold, for every
+  // signed-in operator except a confirmed non-admin (`isAdmin === false`,
+  // the one path `shouldHoldShellPending` returns early on before ever
+  // reaching `setupChecked`) or one who had already skipped in this tab.
+  // Hoisted here and rendered in every branch below so its roster read can
+  // land regardless of which content this render currently picks. Radix's
+  // `Dialog` (via `SetupDialog`) portals its own content and renders nothing
+  // into normal flow while closed, so mounting it alongside `RouteLoading`
+  // or `OnboardingGate` costs nothing visually.
+  //
+  // Round 14: rendering it in every branch is not enough on its own — it has to
+  // sit at the *same* position in all three, or React reconciles it as a
+  // different node and unmounts it on the very transition it exists to survive.
+  // An unstaffed company's first roster result sets `setupChecked` and
+  // `setupOpen` together, which flips this render from a branch below to the
+  // ordinary shell; with the controller under a different root there, React
+  // would throw away the already-proven `unstaffed`/`open` state and issue a
+  // second `listTeam` — exposing the interactive shell while that read is in
+  // flight, and leaving the dialog shut for good if it hangs or fails. So all
+  // three outcomes root at the same `ConsoleProvider` with this as its first
+  // child. That provider is pure context and renders no DOM of its own, so
+  // wrapping the loader and the gate in it costs nothing and hands them the
+  // same ambient `(client, company)` the shell already has.
+  const setupController = (
+    <SetupController
+      client={client}
+      company={company}
+      force={setupForced}
+      routeOpen={view === "setup"}
+      deepLinked={deepLinked}
+      onForceHandled={() => setSetupForced(false)}
+      onOpenChange={handleSetupOpenChange}
+      onCompleted={() => {
+        // Keep these together: Company mounts with the new refresh key, and
+        // setup's payoff is the roster rather than the Overview graph.
+        setTeamBuilt((n) => n + 1);
+        setSetupCompleted(true);
+        setView("company");
+      }}
+      onRouteDismiss={() => setView("overview")}
+    />
+  );
+
+  // PR #1875 review finding, round 8 (widened round 10): hold the shell in a
+  // neutral pending state — never the ordinary interactive shell, never the
+  // gate itself — for as long as the first activation read is unresolved,
+  // whether it is still in flight or already failed once and is retrying.
+  // Without this, the gap below fell straight through to the full shell (its
+  // `shouldShowOnboardingGate` guard reads "not checked yet" identically for
+  // an unresolved read of any cause), leaving an operator clicking around a
+  // shell the funnel had not actually cleared for them to be in, until the
+  // read finally landed and abruptly yanked the gate over it — including on
+  // a merely slow first read (the host scans the journal for this company's
+  // funnel; see `shouldHoldShellPending`'s own doc), not only a proven
+  // outage. `RouteLoading` is the same neutral loader every code-split route
+  // fallback in this file already uses — see its own doc for why a bare
+  // "Loading…" line is not enough (`title` names the page for a screen reader
+  // that never sees a mounted heading otherwise).
+  if (
+    shouldHoldShellPending({
+      status: activationGate.status,
+      checked: activationGate.checked,
+      setupOpen,
+      setupChecked,
+      skippedThisSession: gateSkipped,
+      isAdmin: isGateAdmin,
+      retrying: activationGate.retrying,
+    })
+  ) {
+    // A durable read failure must not read as a hang. `stuck` means three
+    // consecutive non-terminal `getActivation` failures (see
+    // `STUCK_AFTER_FAILURES`) — a malformed event failing the host's
+    // whole-journal scan on every read, say. `checked` never settles, so the
+    // hold above is permanent, and the "skip for now" escape lives inside
+    // `OnboardingGate`, which this branch never mounts: the operator would be
+    // locked out of the whole console by a backend fault with no way forward
+    // (PR #1875 review finding). Offer the same escape here instead of a
+    // loader that never resolves. The polling continues underneath, so a
+    // recovered backend still settles the gate on its own.
+    //
+    // `isGateAdminStuck` covers the other read this hold depends on (PR #1875
+    // review finding): a durable non-401 `fetchMe` failure leaves `isGateAdmin`
+    // at `null` forever with activation reading fine the whole time, so
+    // `activationGate.stuck` alone never flips even though the hold above is
+    // just as permanent — see `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES`'s own
+    // doc.
+    if (activationGate.stuck || isGateAdminStuck) {
+      return (
+        <ConsoleProvider client={client} company={company}>
+          {setupController}
+          <div className="flex min-h-svh items-center justify-center p-6">
+            <div className="max-w-md space-y-3 text-center">
+              <h1 className="text-lg font-medium">We can’t check your setup right now</h1>
+              <p className="text-sm text-muted-foreground">
+                The console keeps failing to read this company’s setup status. It will keep
+                retrying, but you don’t have to wait.
+              </p>
+              <button
+                type="button"
+                onClick={skipGate}
+                className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Continue to the console
+              </button>
+            </div>
+          </div>
+        </ConsoleProvider>
+      );
+    }
+    return (
+      <ConsoleProvider client={client} company={company}>
+        {setupController}
+        <RouteLoading title="Console" label="Loading…" />
+      </ConsoleProvider>
+    );
+  }
+
+  // Issue #1844: the blocking first-run gate. Held behind `!setupOpen` —
+  // `setupOpen` is already true for as long as `SetupController`'s dialog is
+  // open OR the company is unstaffed (see its own `onOpenChange`), the exact
+  // signal `TourController` holds on below for the same reason: staffing runs
+  // first, so an operator is never asked to run a workflow with nobody on the
+  // roster yet to have written it. `activationGate.status` gates on `checked`
+  // rather than rendering the instant `company` is known, so a fresh mount
+  // never flashes the gate open for the one round trip it takes to learn the
+  // company already cleared it.
+  if (
+    shouldShowOnboardingGate({
+      status: activationGate.status,
+      checked: activationGate.checked,
+      setupOpen,
+      skippedThisSession: gateSkipped,
+      isAdmin: isGateAdmin,
+    }) &&
+    // Narrows `status` for the render below — `shouldShowOnboardingGate`
+    // already guarantees this is non-null whenever it returns `true`, but
+    // that guarantee lives in a separate module TypeScript cannot see through.
+    activationGate.status
+  ) {
+    return (
+      <ConsoleProvider client={client} company={company}>
+        {setupController}
+        <OnboardingGate
+          client={client}
+          company={company}
+          status={activationGate.status}
+          currentName={feed.status.name}
+          onRefresh={activationGate.refresh}
+          onSkip={skipGate}
+        />
+      </ConsoleProvider>
+    );
+  }
+
   return (
     // The ambient `(client, company)` for the leaves that have to fetch and are
     // drawn from too many parents to thread props to — today, the avatar tile,
@@ -2401,6 +3363,8 @@ export function AppShell({
     // cannot carry a credential. See `lib/console-context.tsx` for why this is
     // deliberately not a general escape from props.
     <ConsoleProvider client={client} company={company}>
+      {setupController}
+
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
           why that fill lives there and not here (issue #1178). */}
       <SidebarProvider className="h-svh overflow-hidden">
@@ -2416,12 +3380,19 @@ export function AppShell({
         </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
+          {/* macOS floats the traffic lights over this corner once the window
+              gives up its title bar, and this corner is the company switcher.
+              Reserve the strip they land in, and let it drag. Renders nothing
+              anywhere else — see `window-chrome.tsx`. */}
+          <WindowControlsInset />
           {/* The header is the column talking about itself: which host this
-              console is looking at, and whether the column is showing.
+              console is looking at, the utilities that act on the console
+              rather than on the company, and whether the column is showing.
               Everything BELOW it — the nav group and the footer's standing
-              controls — takes you somewhere. Collapse used to be the first row
-              under the switcher, which put a chrome control at the head of a
-              list of destinations and made it read as one (issue #1177).
+              controls — is the company. Collapse used to be the first row under
+              the switcher, which put a chrome control at the head of a list of
+              destinations and made it read as one (issue #1177); it now sits on
+              the utility bar with the three other controls of its kind.
 
               `flex-col` on the rail is not a preference. The collapsed column
               is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
@@ -2437,30 +3408,44 @@ export function AppShell({
                 `min-w-0` so the nameplate truncates instead of pushing the
                 button off the end of a 13.5rem column. */}
             <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
-              <HostSwitcher companyName={feed.status.name} />
+              <HostSwitcher
+                companyName={feed.status.name}
+                // The company's lifecycle, and every company on this host:
+                // both were rows in the sidebar footer, and both are facts
+                // about *which company you are in* — which is what this control
+                // is. See `HostSwitcher`'s `companyState` for why the lifecycle
+                // is not folded into the connection dot.
+                companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
+                companies={companies}
+                activeCompany={company}
+                onSwitchCompany={onSwitchCompany}
+                onBackToPicker={onBackToPicker}
+                onCreateCompany={onCreateCompany}
+                canCreateCompany={client.carriesPlatformBearer}
+              />
             </div>
-            <SidebarCollapseButton />
           </div>
+          {/* Directly under the switcher: Settings, Feedback, Discord and
+              Collapse, as one bar of icons rather than four full-width rows
+              spread across the nav and the footer. See `SidebarUtilityBar`. */}
+          <SidebarUtilityBar view={view} onNavigate={setView} />
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
         <SidebarFooter>
-          {/* Who you are signed in as, above the controls that act on the
-              company. It renders nothing where there is nobody to name — a host
-              with no sign-in, or a session that has just gone. */}
+          {/* Who you are signed in as, and nothing else.
+
+              The lifecycle row and the "Switch company" row that used to stand
+              here have both moved into the host switcher at the top of the
+              column — see its `companyState` and its Companies group. Both were
+              answers to "which company am I in, and how is it doing", asked at
+              the opposite end of the sidebar from the control that names it.
+
+              It renders nothing where there is nobody to name — a host with no
+              sign-in, or a session that has just gone. */}
           <ProfileRow client={client} company={company} />
-          <SidebarControls
-            lifecycleState={feed.status.lifecycle}
-            emergencyPaused={feed.status.emergency_paused}
-            companies={companies}
-            activeCompany={company}
-            onSwitchCompany={onSwitchCompany}
-            onBackToPicker={onBackToPicker}
-            view={view}
-            onNavigate={setView}
-          />
         </SidebarFooter>
         </nav>
         <SidebarRail />
@@ -2487,18 +3472,16 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
+          {/* `#/overview` is the company graph again — the page #1321 swapped
+              out for the operator landing view. The graph keeps the
+              `#/company/graph` alias that issue gave it, so every link minted
+              while it lived there still resolves.
+
+              `OperatorOverview` is left in the tree, unrouted: its panels are
+              real work (#1015, #1700, #1745) and the decision about where they
+              belong is not this change's to make. Nothing renders it today. */}
           {(view === "overview" || view === "setup") && (
-            <OperatorOverview
-              client={client}
-              company={company}
-              companyName={feed.status.name}
-              feed={feed}
-              scope={scope}
-              // Issue #1015: re-read the run panels when a run parks or fails
-              // while this page stays open (the same tick TaskDetailView
-              // re-reads on).
-              attemptEventTick={attemptEventTick}
-            />
+            <Overview client={client} company={company} companyName={feed.status.name} />
           )}
           {view === "company" && (
             <CompanyView
@@ -2556,12 +3539,16 @@ export function AppShell({
           scopeRef={scopeRef}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
+              receiptByThread={receiptByThread}
+              agentNames={agentNames}
               unread={unread}
               onChannelViewed={onChannelViewed}
+              onChatPaneVisibilityChange={onChatPaneVisibilityChange}
               mentionFeedRevision={mentionFeedVersion}
               mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
+              taskStatusByTaskId={taskStatusByTaskId}
               now={feed.now}
               onDecideApproval={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
@@ -2569,6 +3556,8 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
+              budgetProximity={budgetProximity}
+              onDismissBudgetProximity={() => setBudgetProximity(null)}
             />
           )}
           {view === "conversation" && (
@@ -2604,6 +3593,19 @@ export function AppShell({
               // than only counting it. The feed the sidebar badge already polls,
               // so the screen says what it is waiting on with no second request.
               parked={feed.approvals}
+              // Issue #1891: and decided here too, not only named. The same
+              // bundle the board and the run drawer get, so a verdict given on
+              // any of the three settles on the others with no reload. Named
+              // as this route's own props rather than the `…Approvals` suffix
+              // the section views take: it is a thin wrapper whose props mirror
+              // `TaskDetailView`'s, which has no other kind of decision to
+              // qualify these against.
+              deciding={decidingApprovals}
+              decided={decidedApprovals}
+              failed={failedApprovals}
+              onDecide={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -2676,11 +3678,25 @@ export function AppShell({
               // second request.
               approvals={feed.approvals}
               now={feed.now}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Issue #1891: a blocked card decides in place rather than only
+              // reporting that it is blocked. The same four maps the run drawer
+              // receives, owned here for the same reason — an operator who
+              // decides on the board, steps over to Approvals and comes back
+              // must not find a card that forgot what they did. `decided` is
+              // fed by the `approval_resolved` frame as well as by this
+              // console's own resolves, so a decision taken on the page settles
+              // on the board with no reload.
+              //
+              // This replaces `onReviewApprovals`: the card's own "View
+              // details" is an `href` built with `withHostParam`, which lands
+              // the same `#/approvals/<taskId>` in the hash — surviving a
+              // refresh and the Back button — without a callback to route it.
+              decidingApprovals={decidingApprovals}
+              decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
+              onDecideApproval={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
               // Lists, which reads the same instance) with no reload.
@@ -2716,11 +3732,7 @@ export function AppShell({
           )}
           {view === "workspace" && (
             <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading workspace…
-                </div>
-              }
+              fallback={<RouteLoading title="Workspace" label="Loading workspace…" />}
             >
               <WorkspaceView
                 client={client}
@@ -2737,6 +3749,11 @@ export function AppShell({
                 // the host rather than this shell guessing here.
                 initialNodeId={sub}
               />
+            </Suspense>
+          )}
+          {view === "brain" && (
+            <Suspense fallback={<RouteLoading title="Brain" label="Loading what your company remembers…" />}>
+              <MemoryView client={client} company={company} />
             </Suspense>
           )}
           {view === "approvals" && (
@@ -2763,9 +3780,11 @@ export function AppShell({
           {view === "observatory" && (
           <Suspense
             fallback={
-              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
-                Loading observatory…
-              </div>
+              // Matches `ObservatoryView`'s own rule for the same reason
+              // `RouteLoading`'s doc gives: the loading state has to settle on
+              // the name the loaded header will actually show, or the title
+              // flips the moment the chunk lands.
+              <RouteLoading title={sub ? "Run" : "Observatory"} label="Loading observatory…" />
             }
           >
             <ObservatoryView
@@ -2785,9 +3804,12 @@ export function AppShell({
         {view === "workflows" && (
             <Suspense
               fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading canvas…
-                </div>
+                // Static, not sub-aware: the loaded header's "Workflows" /
+                // "Runs" split reads `indexTab`, a tab this boundary cannot
+                // see (persisted client-side, not carried by the route) — see
+                // `RouteLoading`'s own doc for why a guess here would be worse
+                // than no bar.
+                <RouteLoading title="Workflows" label="Loading canvas…" />
               }
             >
               <WorkflowsView
@@ -2829,22 +3851,21 @@ export function AppShell({
             </Suspense>
           )}
           {view === "pages" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading pages…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Pages" label="Loading pages…" />}>
               <PagesView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (
             <Suspense
               fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading finances…
-                </div>
+                // Names the section itself while its own lazy chunk is still
+                // in flight — before `FinanceSection` has even mounted to run
+                // its own per-subpage Suspense (which already uses
+                // `RouteLoading` with this same static title, one level in).
+                <RouteLoading
+                  title={financeFallbackTitle(sub)}
+                  label={`Loading ${financeFallbackTitle(sub).toLowerCase()}…`}
+                />
               }
             >
               <FinanceSection
@@ -2862,6 +3883,7 @@ export function AppShell({
               feed={feed}
               sub={sub}
               onFlag={() => setFeedbackOpen(true)}
+              onResetCompany={onResetCompany}
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
@@ -2892,24 +3914,6 @@ export function AppShell({
         company={company}
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
-      />
-
-      <SetupController
-        client={client}
-        company={company}
-        force={setupForced}
-        routeOpen={view === "setup"}
-        deepLinked={deepLinked}
-        onForceHandled={() => setSetupForced(false)}
-        onOpenChange={setSetupOpen}
-        onCompleted={() => {
-          // Keep these together: Company mounts with the new refresh key, and
-          // setup's payoff is the roster rather than the Overview graph.
-          setTeamBuilt((n) => n + 1);
-          setSetupCompleted(true);
-          setView("company");
-        }}
-        onRouteDismiss={() => setView("overview")}
       />
 
       <TourController

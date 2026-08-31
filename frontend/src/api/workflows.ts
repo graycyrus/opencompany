@@ -89,6 +89,23 @@ export interface WorkflowNode {
    * classifies its call as reaching outside the company.
    */
   repeatable?: boolean;
+  /**
+   * A deterministic postcondition (issue #1866): a mechanical predicate
+   * checked against the node's output before it is allowed to flow
+   * downstream — `require` is `"non_empty"` | `"field_present"` |
+   * `"non_empty_list"`, `field` a dotted path into the output (required for
+   * `field_present`, optional for `non_empty_list`).
+   *
+   * Only ever set through the write route, on `agent` nodes today. This
+   * console has no control for it, so every read/write path here must carry
+   * it through verbatim like `onError`/`retry`/`requiresApproval`/
+   * `repeatable` — dropping it on an unrelated edit silently removes a
+   * run-safety gate the operator declared (issue #1937 review).
+   */
+  postcondition?: {
+    require: string;
+    field?: string;
+  };
   /** Where an `output` node's report goes when the run finishes. */
   destination?: WorkflowDestination;
 }
@@ -157,6 +174,20 @@ export interface WorkflowGraph {
   id: string;
   name: string;
   description?: string;
+  /**
+   * The owning desk (issue #1862 prerequisite) — a desk id or name, resolved
+   * against the company's wired desks host-side. `undefined` for a graph with
+   * no owner (every graph saved before this field existed, or one an author
+   * chose not to assign).
+   *
+   * **No control in this dialog edits it yet** — the create/edit form has no
+   * field for it. It is carried on {@link GraphDraft} and round-tripped
+   * verbatim by {@link assembleGraph} purely so a Save never clears it: a
+   * `PUT` replaces the whole graph, so an edit that omitted this field here
+   * would silently wipe whatever desk an operator (or the workflow-proposal
+   * defaulting) had set (issue #1882 review).
+   */
+  ownerDesk?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   /** See {@link WorkflowSummary.editable}. Same "only `false` means no" rule. */
@@ -251,6 +282,13 @@ export interface DeliveryReport {
  * `blocked` and `awaiting-approval` because it contradicts them — both tell an
  * operator to go and decide something, and this is the state in which there is
  * nothing there.
+ *
+ * `degraded` is the newest addition (issue #1865): a node under
+ * `on_error: continue|route` errored and the graph kept going past it, or an
+ * agent node's turn truncated at the iteration cap. Checked LAST, immediately
+ * above `ok` — every reading above it describes something more actionable, so
+ * a run that is also failed, stopped, stranded, blocked, undelivered or
+ * awaiting approval reports that instead.
  */
 export type WorkflowRunVerdict =
   | "running"
@@ -260,6 +298,7 @@ export type WorkflowRunVerdict =
   | "blocked"
   | "undelivered"
   | "awaiting-approval"
+  | "degraded"
   | "ok";
 
 /** The result of a run: the engine's final state and any pending approvals. */
@@ -735,10 +774,11 @@ interface WiredChannelsResponse {
  * output node's `channel` destination may name (issue #813): its desk chats and
  * its enabled OpenHuman-provider manifest channels.
  *
- * **`operator` is not one of them** (issue #981). It is an in-memory response
- * surface with no durable reader, so workflow delivery refuses it by name; the
- * host used to include it here anyway, which offered authors the one target
- * guaranteed to fail.
+ * **`operator` is always one of them** (issue #1757). It was excluded per
+ * issue #981, back when the in-memory `operator` adapter had no durable reader
+ * and workflow delivery refused it by name; the built-in Operator channel is
+ * now a durable, journal-backed delivery target present on every running
+ * company, so the host serves it here like any other real channel.
  *
  * The console reads this to offer a picker instead of a free-text box that only
  * fails at delivery with `ChannelNotWired`. An empty list has two causes and the

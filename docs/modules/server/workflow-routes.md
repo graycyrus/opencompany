@@ -82,6 +82,23 @@ without a client migration.
 `400`. The id keys the union read path, the scheduler and every journalled run,
 so a rename would silently orphan all three. A rename is a create plus a delete.
 
+**The `ownerDesk` field (issue #1862).** `GET` returns `ownerDesk` (camelCase)
+alongside `version`; on disk it is `owner_desk` in the workflow's TOML. `POST`
+and `PUT` accept the same field in the body. There is no console control to set
+or change it today — the create/edit dialog only carries forward whatever a
+previous read hydrated it with — so an API caller is currently the only way to
+assign or move one. Because `PUT` replaces the graph wholesale, **`ownerDesk`
+must be echoed back exactly like `version`**; omitting it on an edit clears the
+desk assignment rather than leaving it untouched.
+
+A stored `ownerDesk` can stop resolving after the desk it names is renamed or
+removed. The `GET` path already tolerates that — a saved graph must still load
+— and `PUT` now grandfathers it too: a desk that is both unresolvable *and*
+unchanged from what was already stored does not block the save, so editing
+some other field is never refused by desk drift the console gave the operator
+no way to fix. A **newly typed or selected** desk that fails to resolve is
+still a validation error.
+
 **Past runs are orphaned, not reaped.** A deleted workflow's
 `WorkflowRunFinished` entries stay in the company journal and keep coming back
 from `GET …/workflows/runs`. The journal is append-only and shared with chat and
@@ -100,14 +117,18 @@ job is re-syncing cron rows that live in a second durable store.
 # Read the graph and its concurrency token.
 curl -s "$HOST/api/v1/company/workflows/weekly_digest" \
      -H "Authorization: Bearer $TOKEN"
-# → { "id": "weekly_digest", …, "editable": true, "version": "73e8ccc6…" }
+# → { "id": "weekly_digest", …, "ownerDesk": "engineering", "editable": true,
+#     "version": "73e8ccc6…" }
 
 # Correct the schedule, conditional on nothing having changed since that read.
+# `ownerDesk` is echoed back verbatim from the read above — a PUT that drops
+# it clears the desk assignment instead of leaving it alone.
 curl -X PUT "$HOST/api/v1/company/workflows/weekly_digest" \
      -H "Authorization: Bearer $TOKEN" \
      -H 'content-type: application/json' -d '{
   "id": "weekly_digest",
   "name": "Weekly digest",
+  "ownerDesk": "engineering",
   "nodes": [ { "id": "start", "kind": "trigger", "name": "Monday 10:00",
                "schedule": "0 10 * * MON" },
              { "id": "done", "kind": "output", "name": "Owner summary",
@@ -165,8 +186,20 @@ are refused with a `400` when the workflow is written, not only when it runs:
 
 | Destination | Refused when | Checked in |
 | --- | --- | --- |
-| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker, and which never includes `operator` | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
+| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker. Desk channels and enabled OpenHuman-provider manifest channels, plus the always-present `operator` channel (issue #1757) — now a durable, journal-backed destination, so the console offers it like any other rather than excluding it | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
 | `email` | this company's `[tools].allow` does not grant `email`, which delivery answers with `Denied` / `EmailNotGranted` before it even looks for a mailbox | `validate_draft_against_record` in `src/company/workflow_create.rs`, beside the `tool_call` grant gate — so the orchestrator's `create_workflow` tool is held to it too |
+
+The `operator` destination above is a delivery-plane fact only — it is unrelated
+to how the console *lists* the feed. `GET {scope}/desks` carries zero operator
+logic: it is the company's real desks (manifest `[[group_chat]]`s plus
+operator-created overlay desks) and nothing else. The Operator feed's identity
+— its id (ordinarily `operator`, or the collision-fallback id for the one
+grandfathered company shape where a roster teammate already owns that id — see
+`CompanyRecord::operator_feed_channel`), name, and description — is served by
+its own read-only endpoint, `GET {scope}/operator-channel`, which the console
+renders as a pinned row below a divider in the chat rail rather than folding
+into the desk list (issue #1757 rework, replacing an earlier synthetic-desk
+approach that collided with #1762's `#general`).
 
 The `channel` rule lived on the two write routes until issue #1191, which is
 why applying a copilot proposal persisted a graph the editor then refused to
