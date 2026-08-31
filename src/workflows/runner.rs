@@ -497,6 +497,10 @@ async fn run_workflow_inner(
         let workflow_id = workflow.id.clone();
         let run_id = run_id.clone();
         let collector_attempts = attempts.clone();
+        // Issue #1865 (CodeRabbit review on #1905): read by the journal write
+        // below so the durable event records the same status the settle-time
+        // `reclassify_capped_nodes` will put on the in-memory row.
+        let collector_capped = capped.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
             // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
@@ -540,12 +544,36 @@ async fn run_workflow_inner(
                         transcript,
                         diagnostics,
                     } => {
+                        // Issue #1865: the engine reports a turn that
+                        // truncated at `max_tool_iterations` (or paused for
+                        // budget) as `Ok` — in its own terms it is, the node
+                        // returned — and the host relabels it at settle via
+                        // `reclassify_capped_nodes`. That relabel only ever
+                        // reached the in-memory `WorkflowRun.nodes`, so the
+                        // journal kept saying `Ok` and a run re-read from
+                        // history scored `ok` where the synchronous response
+                        // said `degraded`: one run, two verdicts, depending on
+                        // which surface you asked.
+                        //
+                        // Written correctly here rather than carried on
+                        // `WorkflowRunFinished` and relabelled on the read (the
+                        // shape `relabel_blocked` uses): the fact is already
+                        // known at this point — the cap is pushed inside the
+                        // turn, strictly before the engine emits this node's
+                        // `Finished` — so the durable event can simply be right
+                        // the first time instead of being corrected by every
+                        // reader forever.
+                        let journaled_status = if collector_capped.contains(&node_id) {
+                            crate::ports::WorkflowNodeStatus::Error
+                        } else {
+                            status
+                        };
                         if let Some(events) = journal_nodes.as_ref() {
                             let event = CompanyEvent::WorkflowNodeFinished {
                                 workflow_id: workflow_id.clone(),
                                 run_id: run_id.clone(),
                                 node_id: node_id.clone(),
-                                status,
+                                status: journaled_status,
                                 elapsed_ms,
                                 // Issue #1014: the broken-wiring paths ride the
                                 // durable event too, so a re-read run (folded
@@ -705,7 +733,7 @@ async fn run_workflow_inner(
     // on the failure/blocked arms below; `nodes` stays the output-free row list
     // the journal and `WorkflowRun.nodes` carry. A drain failure yields an empty
     // map, so a persist on that path simply records "produced none".
-    let (nodes, partial_nodes, node_transcripts): (
+    let (mut nodes, partial_nodes, node_transcripts): (
         Vec<crate::ports::WorkflowRunNodeRow>,
         serde_json::Map<String, Value>,
         serde_json::Map<String, Value>,
@@ -806,6 +834,13 @@ async fn run_workflow_inner(
                     // snapshot on the failure arm exactly as on the blocked one.
                     notices.push(run_output_persist_failed_notice());
                 }
+                // Reclassify capped nodes before they move into the partial run,
+                // the same as the settled arm does. A node that hit the iteration
+                // cap reports Ok but settled Failed, so both must agree on Error.
+                // Ordered after `reclassify_blocked` but the two cannot collide:
+                // `run_turn` returns `Err` on the blocked arm before reaching
+                // max_tool_iterations, so no node is both blocked and capped.
+                reclassify_capped_nodes(&mut nodes, &capped.take());
                 // Issue #1008 (second half): the failure carries the partial run
                 // rather than only a message. The nodes that ran before the break
                 // really did open board cards, park approvals and raise notices,
@@ -880,6 +915,10 @@ async fn run_workflow_inner(
                 &ctx.started_by,
             )
             .await;
+            // Reclassify capped nodes before they move into the blocked run, the
+            // same as the settled arm does. A node that hit the iteration cap
+            // reports Ok but settled Failed, so both must agree on Error.
+            reclassify_capped_nodes(&mut nodes, &capped.take());
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
@@ -1171,7 +1210,6 @@ async fn run_workflow_inner(
     // wrote `on_error = "continue"` or `"route"` asked for the branch to survive
     // the block, and gets it. The run-level record stays truthful either way, so
     // the post-pass runs on this arm too rather than only on the halted one.
-    let mut nodes = nodes;
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
@@ -2575,6 +2613,43 @@ mod tests {
         }
     }
 
+    /// The third half of that reconciliation, and the one that was missing
+    /// (CodeRabbit review on #1905): what the **journal** records.
+    ///
+    /// `reclassify_capped_nodes` below only ever reached the in-memory
+    /// `WorkflowRun.nodes`, so a capped node's durable `WorkflowNodeFinished`
+    /// kept the engine's `Ok`. `GET /workflows/runs` folds its rows from those
+    /// events, so the same run read back scored `ok` while the synchronous
+    /// response said `degraded` — one run, two verdicts, depending on which
+    /// surface you asked. The collector now consults `RunCappedNodes` before it
+    /// writes, so the event carries the relabelled status and both surfaces
+    /// derive the verdict from the same fact.
+    ///
+    /// Pinned on `RunCappedNodes::contains` rather than by driving a whole run:
+    /// the read is the entire mechanism, and it has to answer without draining
+    /// — `take` would leave the settle-time relabel with an empty list, which
+    /// is the one way to "fix" history and break the live path instead.
+    #[test]
+    fn the_capped_read_answers_without_draining_the_settle_time_list() {
+        let capped = super::super::caps::RunCappedNodes::default();
+        capped.push("summarize".to_string());
+
+        assert!(capped.contains("summarize"), "the journal write asks first");
+        assert!(!capped.contains("fetch"), "and only about its own node");
+        assert!(
+            capped.contains("summarize"),
+            "asking must not consume it — the settle-time relabel comes after"
+        );
+
+        let mut nodes = vec![node_row("summarize", WorkflowNodeStatus::Ok)];
+        reclassify_capped_nodes(&mut nodes, &capped.take());
+        assert_eq!(
+            nodes[0].status,
+            WorkflowNodeStatus::Error,
+            "the in-memory row still gets its flip, so the two surfaces agree"
+        );
+    }
+
     /// Issue #1865: the run-level half of the iteration-cap reconciliation —
     /// `caps::mod`'s own test
     /// (`a_capped_turn_settles_failed_and_feeds_run_capped_nodes`) pins that a
@@ -3512,6 +3587,329 @@ to = "done"
         assert!(output.contains("hello-marker"), "{output}");
     }
 
+    /// CodeRabbit review on #1937 (issue #1866) — a downstream binding of the
+    /// SAME value the postcondition gate certified.
+    ///
+    /// `agent = "ceo"` replies with the literal JSON text `{"items":[1,2,3]}`.
+    /// `field_present`/`field = "json.items"` certifies it. `reflect`'s
+    /// `=item.json.items` binding is the "downstream" this issue is about:
+    /// it reads straight off `ceo`'s emitted item exactly the way
+    /// `translate.rs`'s own doc comment says a downstream node must be able
+    /// to ("a downstream node reads `=item.text` / `=item.json.<field>`").
+    /// Before the emitted-output fix, the gate passed while this bound to
+    /// `null` — the postcondition envelope's parsed value never reached the
+    /// node's own emitted `json`, only a transient local used for the check.
+    /// This is the real engine (full graph execution, real expression
+    /// resolution), not a unit-level inspection of the returned tuple.
+    const STRUCTURED_REPLY_WF: &str = r#"
+id = "structured_wf"
+name = "Structured WF"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+
+[node.postcondition]
+require = "field_present"
+field = "json.items"
+
+[[node]]
+id = "reflect"
+kind = "transform"
+name = "Reflect"
+
+[node.config.set]
+wrapped = "=item.json.items"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+
+[[edge]]
+from = "start"
+to = "ceo"
+
+[[edge]]
+from = "ceo"
+to = "reflect"
+
+[[edge]]
+from = "reflect"
+to = "done"
+"#;
+
+    /// A [`RunTurn`](crate::runtime::delegation::RunTurn) that always answers
+    /// with the literal JSON text of `{"items":[1,2,3]}`, for any agent —
+    /// the engine's own `run_background_workflow` default chain
+    /// (`run_background_workflow` -> `run_background` -> `run`) reaches
+    /// `run` below, so overriding just the three required methods is enough
+    /// to stand in for the full workflow-node dispatch path, not only the
+    /// direct chat one.
+    struct StructuredJsonReplyTurn;
+
+    #[async_trait::async_trait]
+    impl crate::runtime::delegation::RunTurn for StructuredJsonReplyTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "{\"items\": [1, 2, 3]}".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_structured_agent_reply_is_readable_by_a_downstream_json_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(STRUCTURED_REPLY_WF).expect("workflow parses");
+
+        let run = run_workflow_lane_aware(
+            Arc::new(StructuredJsonReplyTurn),
+            deps(dir.path()),
+            &record(),
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
+
+        // The gate itself: `ceo`'s postcondition (field_present on json.items)
+        // must have let the node succeed, not halted the run.
+        assert!(
+            !run.output["nodes"]["ceo"]["items"].is_null(),
+            "the postcondition must have passed — ceo should have emitted: {}",
+            run.output
+        );
+
+        // The actual finding: `reflect`'s `=item.json.items` binding — reading
+        // `ceo`'s own emitted item downstream, the same way any real workflow
+        // node would — must resolve to the SAME [1, 2, 3] the gate certified,
+        // not null.
+        let wrapped = &run.output["nodes"]["reflect"]["items"][0]["json"]["wrapped"];
+        assert_eq!(
+            wrapped,
+            &serde_json::json!([1, 2, 3]),
+            "a downstream `=item.json.items` binding must resolve to the same \
+             structured value the postcondition gate certified, not null: {}",
+            run.output
+        );
+    }
+
+    /// A graph identical in shape to `STRUCTURED_REPLY_WF` above, but the
+    /// declared `field_present` targets the bare `json` root (not
+    /// `json.items`) and the scripted reply is a bare JSON scalar rather
+    /// than an object — see
+    /// `a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
+    /// below for what this proves.
+    const SCALAR_REPLY_WF: &str = r#"
+id = "scalar_wf"
+name = "Scalar WF"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+
+[node.postcondition]
+require = "field_present"
+field = "json"
+
+[[node]]
+id = "reflect"
+kind = "transform"
+name = "Reflect"
+
+[node.config.set]
+wrapped = "=item.json"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+
+[[edge]]
+from = "start"
+to = "ceo"
+
+[[edge]]
+from = "ceo"
+to = "reflect"
+
+[[edge]]
+from = "reflect"
+to = "done"
+"#;
+
+    /// A [`RunTurn`] that always answers with the literal JSON text `"42"` —
+    /// a bare scalar, not an object or array.
+    struct ScalarJsonReplyTurn;
+
+    #[async_trait::async_trait]
+    impl crate::runtime::delegation::RunTurn for ScalarJsonReplyTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "42".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+    }
+
+    /// Codex #3894162757 on #1937 — verified through the REAL engine, the
+    /// same technique that proved the original certify-vs-consume bug (see
+    /// `a_structured_agent_reply_is_readable_by_a_downstream_json_binding`
+    /// above). A prior round added an emission arm that replaced `value`
+    /// wholesale for a scalar reply too, mirroring the array case, and
+    /// asserted only `run_turn`'s OWN return value (`workflows::caps::tests`)
+    /// — which DID come back as the bare `42`. That test missed the actual
+    /// defect: tinyflows' own envelope construction
+    /// (`finish_agent_run`/`envelope::structured_of`, vendored) clamps
+    /// `AgentRunOutcome.json` to `Value::Null` for anything that is not an
+    /// `Object`/`Array` — "scalars carry no structure" is that crate's own
+    /// stated invariant. Run against the code as it stood after that round
+    /// (gate passes, `value` = `42`), this exact graph produced:
+    /// `ceo.items[0].json = {"json": null, "text": "42", "raw": 42, "meta":
+    /// {...}}` and `reflect.items[0].json.wrapped = null` — the gate had
+    /// certified `42`, and `=item.json` downstream got `null` anyway, one
+    /// layer further out than the original bug this PR started from.
+    ///
+    /// The fix moves to the gate itself: `field_present` on the bare `json`
+    /// root now refuses to certify a scalar at all (see
+    /// `postcondition::evaluate_postcondition`'s `field_present` arm), so
+    /// this run must fail outright rather than silently passing a value
+    /// nothing downstream can read.
+    #[tokio::test]
+    async fn a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(SCALAR_REPLY_WF).expect("workflow parses");
+
+        let result = run_workflow_lane_aware(
+            Arc::new(ScalarJsonReplyTurn),
+            deps(dir.path()),
+            &record(),
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await;
+
+        let err = result.expect_err(
+            "a bare scalar reply must not satisfy field_present on the bare `json` \
+             root — the run must halt at `ceo` rather than let `reflect` (and \
+             `done`) advance on a `wrapped` binding that resolves to null",
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("ceo")
+                && message.contains("postcondition")
+                && message.contains("bare scalar"),
+            "the halting error should name the node and the reason: {message}"
+        );
+    }
+
     /// A GREET-shaped graph whose agent node carries a config `=`-expression
     /// pointing at a trigger field that does not exist (issue #1014). The engine
     /// resolves the expression to `null` and records a `NullResolution`, which
@@ -4284,6 +4682,7 @@ to = "done"
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: Vec::new(),
         };
