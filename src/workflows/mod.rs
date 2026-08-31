@@ -33,6 +33,13 @@ mod blocked_node_test;
 mod board_turn_test;
 pub mod caps;
 pub mod delivery;
+/// Issue #1963: a fan-out and its join at RUN level — that the turn text a join
+/// node is sent is a property of the graph rather than of which arm won the
+/// race, plus the three fan-in shapes nothing covered (a `merge` whose
+/// predecessors disagree, a `split_out` over an empty list, a diamond whose
+/// arms both park a gate).
+#[cfg(test)]
+mod fan_out_test;
 /// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes
 /// stop for an operator, before the run reaches them.
 pub mod gate;
@@ -55,7 +62,16 @@ mod publish_refusal_notice_test;
 /// Issue #846: a continuation replays the outward calls its lineage already
 /// made, instead of making them a second time.
 pub mod replay;
+/// Issue #1963: what `retry` DOES at run time — the attempt count and the
+/// backoff curve, which nothing asserted between the authoring contract and the
+/// engine config keys.
+#[cfg(test)]
+mod retry_test;
 pub mod runner;
+/// Issue #1963: the settle post-pass, asserted on all six of
+/// `run_workflow_inner`'s exits at once rather than one arm per regression.
+#[cfg(test)]
+mod settle_arms_test;
 /// Issue #1963: every shipped `workflows/*.toml` — the graphs under
 /// `companies/<id>/` and `globals/` — parses, translates and compiles.
 /// Table-driven off a `build.rs` glob so a graph added to a bundle is covered
