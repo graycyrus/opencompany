@@ -115,7 +115,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::oc_connect,
             commands::oc_pair_device,
-            commands::oc_adopt_session,
             commands::oc_forget_device,
             commands::oc_disconnect,
             commands::oc_connections,

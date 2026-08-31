@@ -93,12 +93,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  rosterDisplayName,
-  rosterIdKey,
-  rosterNameMap,
-  type RosterNames,
-} from "@/lib/roster-names";
+import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster-names";
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { createSaveBuffer, createUnloadGuard, type SaveBuffer } from "@/lib/workspace-save-buffer";
@@ -130,13 +125,13 @@ import {
   pathOf,
   readLegacyLocalNodes,
   renameAudienceWarning,
-  rosterOwnerOf,
   SECRETS_LABEL,
   SECRETS_REASON,
   sortedFolders,
   subtreeCounts,
   subtreeIds,
-  titleOf, headerNoteCount } from "@/lib/workspace";
+  titleOf,
+} from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { MoveAudienceConfirm } from "@/views/workspace/MoveAudienceConfirm";
 import { SearchResults } from "@/views/workspace/SearchResults";
@@ -459,15 +454,6 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // uploaded faces, not only deletes initiated by this view.
   const nodesRef = useRef<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
-  /**
-   * Has a tree ever actually loaded?
-   *
-   * Distinct from `!loading`, which a non-silent refresh sets back to `true`
-   * over a tree already on screen, and from `nodes.length`, which cannot tell
-   * "not fetched yet" from "fetched, and empty" — the two states the header
-   * count has to keep apart (codex review on #1785).
-   */
-  const [treeKnown, setTreeKnown] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The roster names the `agents/` folders resolve against (issue #973). Best
@@ -614,7 +600,6 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
             ),
           );
         }
-        setTreeKnown(true);
         return tree;
       } catch (e) {
         if (mine !== treeGen.current) return null;
@@ -1524,7 +1509,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       */}
       <PageHeader
         title="Workspace"
-        count={headerNoteCount(noteCount, treeKnown)}
+        count={noteCount}
         /*
           Not "every note this company's teammates can read and write", which
           the tree contradicts in two places: `secrets/` is the one folder the
@@ -1688,7 +1673,6 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               loading={searching || searchQuery !== searchInput.trim()}
               error={searchError}
               onOpen={(hit) => void openHit(hit)}
-              rosterNames={rosterNames}
             />
           ) : loading ? (
             <div className="space-y-2 px-2 py-2">
@@ -1937,7 +1921,6 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 <Authorship
                   createdBy={openFile?.createdBy ?? openNode.createdBy}
                   updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
-                  rosterNames={rosterNames}
                 />
               )}
               {/* Labelled (issue #1382). A bare "2 days ago" beside the title
@@ -2350,17 +2333,12 @@ const ORIGIN_STYLES: Record<WorkspaceOrigin["kind"], string> = {
 function Authorship({
   createdBy,
   updatedBy,
-  rosterNames,
 }: {
   createdBy: WorkspaceOrigin;
   updatedBy: WorkspaceOrigin;
-  /** The roster read, so an agent origin reads as a name (issue #1723). */
-  rosterNames: RosterNames;
 }) {
-  const created = originLabel(createdBy, rosterNames);
-  const edited = sameOrigin(createdBy, updatedBy)
-    ? null
-    : originLabel(updatedBy, rosterNames);
+  const created = originLabel(createdBy);
+  const edited = sameOrigin(createdBy, updatedBy) ? null : originLabel(updatedBy);
   if (!created && !edited) return null;
   return (
     <span className="flex shrink-0 items-center gap-1.5" data-testid="workspace-authorship">
@@ -2405,25 +2383,6 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // a roster id one level below one of those two roots.
   const isRosterFolder = isFolder && isRosterRoot(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
-  /**
-   * The provenance pill for this row, resolved — or `null` when there is
-   * nothing worth saying (issue #1723).
-   *
-   * Suppressed inside the author's own `agents/`/`artifacts/` subtree, where
-   * the enclosing folder already attributes everything under it: on the
-   * teammate's own folder the pill would repeat the row's own label back
-   * verbatim, and on the `<task>/` folders and files beneath it, the same pill
-   * four times down the pane — each one taking the width the name needs.
-   * Everywhere else it is the one place the tree says who wrote a node, which
-   * is the whole of #326's marker, and a node one teammate wrote inside
-   * another's folder still wears it.
-   */
-  const owner = rosterOwnerOf(nodes, node.id);
-  const agentBadge =
-    node.createdBy.kind === "agent" &&
-    (owner === undefined || rosterIdKey(owner) !== rosterIdKey(node.createdBy.id))
-      ? { id: node.createdBy.id, name: rosterDisplayName(node.createdBy.id, rosterNames) }
-      : null;
   /** What this row is actually called on screen. */
   const label = isFolder ? displayName : titleOf(node);
   /**
@@ -2575,24 +2534,15 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           {/* Agent-created nodes get a marker in the tree itself, so "what has
               the company been writing" is answerable by scanning rather than by
               opening each note. Only the agent case — badging the operator's
-              own notes back at them says nothing.
-
-              The pill reads the teammate's NAME, through the same
-              `rosterDisplayName` the row label one line up already goes through
-              (issue #1723). It used to print the raw roster handle —
-              `seo_specialist` beside a row already labelled "SEO Specialist" —
-              which is #1688's and #1369's leak on the one surface those fixes
-              did not cover. The handle is still reachable, on `title`, because
-              it is the folder's real name and the identity every artifact is
-              stamped with. */}
-          {agentBadge && (
+              own notes back at them says nothing. */}
+          {node.createdBy.kind === "agent" && (
             <Badge
               variant="outline"
               className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
-              title={`Created by teammate ${agentBadge.id}`}
+              title={`Created by teammate ${node.createdBy.id}`}
               data-testid="workspace-tree-agent-badge"
             >
-              {agentBadge.name}
+              {node.createdBy.id}
             </Badge>
           )}
         </button>

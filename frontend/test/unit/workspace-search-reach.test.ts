@@ -62,7 +62,6 @@ function render(hits: SearchHit[], total: number, query = "design") {
         loading: false,
         error: null,
         onOpen: vi.fn(),
-        rosterNames: new Map(),
       }),
     );
   });

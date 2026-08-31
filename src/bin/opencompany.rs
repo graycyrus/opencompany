@@ -2372,14 +2372,7 @@ async fn async_main() -> Result<()> {
             args,
         }) => run_openhuman(root, mode, release, dry_run, args).await,
         None => {
-            // The commit as well as the version: `0.1.0` has been thousands of
-            // commits wide, so this line could not tell an operator which
-            // build they are actually holding.
-            println!(
-                "opencompany {} ({})",
-                opencompany::VERSION,
-                opencompany::BUILD_COMMIT
-            );
+            println!("opencompany {}", opencompany::VERSION);
             Ok(())
         }
     }

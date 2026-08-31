@@ -511,12 +511,6 @@ interface Options {
    */
   onDispatchTerminal?: (event: CompanyStreamEvent) => void;
   /**
-   * Whether this console is currently showing the channel a completed task
-   * came from (#1758). Only that exact view suppresses the completion toast;
-   * the channel's inline terminal marker is already the notification there.
-   */
-  isViewingTaskOrigin?: (event: CompanyStreamEvent) => boolean;
-  /**
    * Called for each `workspace_changed` frame (issue #327) so the Workspace
    * view can re-read the tree — and the open note — live.
    *
@@ -632,7 +626,6 @@ export function useEvents(
     onTaskEvent,
     onRunEvent,
     onDispatchTerminal,
-    isViewingTaskOrigin,
     onWorkspaceEvent,
     onTurnEvent,
     onPresenceEvent,
@@ -662,10 +655,6 @@ export function useEvents(
   useEffect(() => {
     onDispatchTerminalRef.current = onDispatchTerminal;
   }, [onDispatchTerminal]);
-  const isViewingTaskOriginRef = useRef(isViewingTaskOrigin);
-  useEffect(() => {
-    isViewingTaskOriginRef.current = isViewingTaskOrigin;
-  }, [isViewingTaskOrigin]);
   const onWorkspaceEventRef = useRef(onWorkspaceEvent);
   useEffect(() => {
     onWorkspaceEventRef.current = onWorkspaceEvent;
@@ -783,7 +772,6 @@ export function useEvents(
             onTaskEvent: onTaskEventRef.current,
             onRunEvent: onRunEventRef.current,
             onDispatchTerminal: onDispatchTerminalRef.current,
-            isViewingTaskOrigin: isViewingTaskOriginRef.current,
             onWorkspaceEvent: onWorkspaceEventRef.current,
             onTurnEvent: onTurnEventRef.current,
             onPresenceEvent: onPresenceEventRef.current,
@@ -838,7 +826,6 @@ export function handleEvent(
     onTaskEvent,
     onRunEvent,
     onDispatchTerminal,
-    isViewingTaskOrigin,
     onWorkspaceEvent,
     onTurnEvent,
     onPresenceEvent,
@@ -915,23 +902,13 @@ export function handleEvent(
     // missing: a reader watching only the relay prose could not tell a card
     // that parked in `paused` from one that finished.
     //
-    // The origin channel's inline marker remains the notification while it is
-    // on screen. Away from that exact channel, #1758 adds one linked toast so a
-    // background turn cannot finish silently while the operator works elsewhere.
+    // Still **no toast**, and for the reason written above the board arm: this
+    // fires on every settle, and the marker appearing in the channel IS the
+    // notification. A toast on top would be the second notification for one
+    // action that #379 argues against.
     case "desk_task_completed":
       onTaskEvent?.(event);
       onDispatchTerminal?.(event);
-      if (!isViewingTaskOrigin?.(event)) {
-        toast("Task run finished", {
-          description: "Background work has stopped. Open the card for its result and next state.",
-          action: {
-            label: "Open task",
-            onClick: () => {
-              window.location.hash = `/tasks/${encodeURIComponent(event.taskId)}`;
-            },
-          },
-        });
-      }
       break;
     // Issue #327, and **no toast** for the same reason the board frames above
     // raise none — more strongly, if anything. A workspace write is not an

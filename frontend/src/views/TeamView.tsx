@@ -30,9 +30,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { emptyDraft, missingRequired, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
-import { draftNewAgentField } from "@/api/agent-copilot";
-import { getInferenceStatus, type CognitionPath } from "@/api/inference";
+import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
 import {
@@ -47,7 +45,6 @@ import { personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
-import { FieldCopilot } from "@/views/team/FieldCopilot";
 
 interface Props {
   client: OpenCompanyClient;
@@ -328,9 +325,6 @@ export function TeamView({
           name: fields.name,
           role: fields.role,
           description: fields.description || undefined,
-          // Blank stays off the wire: at creation there is no blueprint to
-          // override, so an empty box means "no persona", not "an empty one".
-          instructions: fields.instructions || undefined,
           // Omitted unless the operator typed one: an add that carries a cap is
           // admin-only on the host, while a plain add is open to any member.
           budgetUsdDaily: fields.budgetUsdDaily,
@@ -569,8 +563,6 @@ export function TeamView({
         onOpenChange={setAddOpen}
         onAdd={addMember}
         canSetBudget={isAdmin && fromHost}
-        client={client}
-        company={company}
       />
     </div>
   );
@@ -589,16 +581,6 @@ interface AddMemberFields {
   name: string;
   role: string;
   description: string;
-  /**
-   * The persona typed into the dialog's Instructions box.
-   *
-   * Collected since #264 put `instructions` in `AGENT_FIELDS`, and dropped on
-   * the floor until #1776 noticed: the box was rendered, filled in, and never
-   * sent. The host has accepted `instructions` at creation since #1530 and
-   * `addTeamMember` has carried it since — this was the one link missing, so an
-   * operator who wrote a persona in the add dialog watched it vanish.
-   */
-  instructions: string;
   inbox?: boolean;
   /** An optional daily cap. Undefined means "don't set one", never "$0". */
   budgetUsdDaily?: number;
@@ -637,10 +619,7 @@ function MemberCard({
   return (
     <Card
       data-testid="team-card"
-      className={cn(
-        "relative transition-colors",
-        onOpen && "cursor-pointer hover:border-primary/40 hover:shadow-sm",
-      )}
+      className="transition-colors"
     >
       <CardContent className="flex h-full flex-col gap-3">
         <div className="flex items-start gap-3">
@@ -658,10 +637,7 @@ function MemberCard({
             <button
               type="button"
               onClick={onOpen}
-              // Issue #1810: stretch the title's native button over the card,
-              // instead of turning a container with nested controls into a
-              // button. The menu and desk links sit above this layer below.
-              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left after:absolute after:inset-0 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="team-card-open"
             >
               <span className="block truncate font-medium">{member.name}</span>
@@ -695,8 +671,7 @@ function MemberCard({
               )}
             </div>
           )}
-          {/* Above the title button's stretched click target (issue #1810). */}
-          <div className="relative z-10">
+          <div>
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
@@ -761,10 +736,7 @@ function MemberCard({
               <Badge
                 key={desk.id}
                 variant="secondary"
-                className={cn(
-                  "gap-1 text-3xs",
-                  onNavigateToDesk && "relative z-10 cursor-pointer",
-                )}
+                className={cn("gap-1 text-3xs", onNavigateToDesk && "cursor-pointer")}
                 data-testid={`team-card-desk-${desk.id}`}
                 onClick={
                   onNavigateToDesk
@@ -920,17 +892,12 @@ function AddMemberDialog({
   onOpenChange,
   onAdd,
   canSetBudget,
-  client,
-  company,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onAdd: (fields: AddMemberFields) => void;
   /** Whether to offer the cap field — setting one is admin-only on the host. */
   canSetBudget: boolean;
-  /** For the copilot's draft call (issue #1776) — this dialog writes nothing. */
-  client: OpenCompanyClient;
-  company: string | null;
 }) {
   // The same three authored fields the detail view edits, held in the same
   // shape (issue #264) so "Add teammate" and "Edit teammate" cannot drift into
@@ -938,39 +905,6 @@ function AddMemberDialog({
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft);
   const [inbox, setInbox] = useState(false);
   const [budget, setBudget] = useState("");
-  /**
-   * The cognition path this company booted onto (issue #1776), read while the
-   * dialog is open so the copilot can say "no model is configured" rather than
-   * offering a draft that can only come back refused. `null` until the check
-   * settles and on a host without the route, which leaves it enabled — see
-   * `AgentDetailView` for why that is the right way to be wrong.
-   */
-  const [cognition, setCognition] = useState<CognitionPath | null>(null);
-  /**
-   * The required fields still blank (issue #1776).
-   *
-   * Read from `AGENT_FIELDS` rather than re-spelled as
-   * `!draft.name.trim() || !draft.role.trim()`, which is what this button
-   * checked before: two forms deciding separately what a teammate needs is how
-   * they drift, and the edit form asks the same question one import away.
-   */
-  const missing = missingRequired(draft);
-
-  useEffect(() => {
-    if (!open) return;
-    let live = true;
-    (async () => {
-      try {
-        const status = await getInferenceStatus(client, company);
-        if (live) setCognition(status.cognition);
-      } catch {
-        if (live) setCognition(null);
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [open, client, company]);
 
   function reset() {
     setDraft(emptyDraft());
@@ -993,7 +927,6 @@ function AddMemberDialog({
       name: draft.name,
       role: draft.role,
       description: draft.description,
-      instructions: draft.instructions,
       inbox,
       budgetUsdDaily,
     });
@@ -1017,37 +950,6 @@ function AddMemberDialog({
           idPrefix="member"
           draft={draft}
           onChange={(key: AgentFieldKey, value) => setDraft((d) => ({ ...d, [key]: value }))}
-          copilot={(key) =>
-            key === "description" || key === "instructions" ? (
-              <FieldCopilot
-                field={key}
-                // No id to address — this teammate does not exist yet — so the
-                // fields being typed ride the request. Everything else the
-                // draft is grounded in still comes from the record host-side.
-                onTurn={(conversation) =>
-                  draftNewAgentField(client, company, key, conversation, {
-                    role: draft.role,
-                    name: draft.name,
-                    description: draft.description,
-                    instructions: draft.instructions,
-                  })
-                }
-                onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
-                // A draft is written FROM the role, so there is nothing to
-                // write one from until it is filled in — the same rule the
-                // host enforces, said here before the operator meets it as a
-                // refusal.
-                disabled={!draft.role.trim() || cognition === "echo"}
-                disabledNotice={
-                  cognition === "echo"
-                    ? "No model is configured, so the copilot can't draft yet."
-                    : !draft.role.trim()
-                      ? "Give this teammate a role first — the copilot drafts from it."
-                      : undefined
-                }
-              />
-            ) : null
-          }
         />
         {canSetBudget && (
           <div className="grid gap-2">
@@ -1071,22 +973,13 @@ function AddMemberDialog({
           </span>
           <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this teammate an inbox" />
         </label>
-        <DialogFooter className="items-center">
-          {/* Why the button is dead, next to the button (issue #1776) — the
-              same answer the edit form gives, from the same definition, so the
-              two forms cannot come to disagree about what a teammate needs. */}
-          {missing.length > 0 && (
-            <p className="mr-auto text-2xs text-muted-foreground" data-testid="team-add-blocked">
-              {missing.map((field) => field.label).join(" and ")}{" "}
-              {missing.length > 1 ? "are" : "is"} required.
-            </p>
-          )}
+        <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button
             onClick={submit}
-            disabled={missing.length > 0 || budgetInvalid}
+            disabled={!draft.name.trim() || !draft.role.trim() || budgetInvalid}
           >
             Add teammate
           </Button>

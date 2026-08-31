@@ -768,10 +768,6 @@ async fn create_workflow(
         Some(company.runtime.events()),
         draft,
         Some(&company.runtime.deliverable_channel_ids()),
-        // Issue #1843: the signed-in human behind this write, when there is
-        // one — the REST create path is real user activation, unlike the
-        // orchestrator's own `create_workflow` tool.
-        company.actor.clone(),
     )
     .await
     .map_err(ApiError)?;
@@ -4667,13 +4663,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -4751,13 +4744,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -5077,13 +5067,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: Default::default(),
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -5300,13 +5287,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -6108,13 +6092,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -6435,13 +6416,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -8135,13 +8113,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -9690,13 +9665,10 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -9992,14 +9964,11 @@ label = "ok"
                     }],
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -10689,14 +10658,11 @@ label = "ok"
                     }],
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
-                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
                     setup: None,
-                    name_confirmed: false,
-                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
