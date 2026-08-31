@@ -210,6 +210,17 @@ pub(crate) use workflow_file::{
     RawEdge, RawNode, RawWorkflow, channel_destination_missing_target_message,
     raw_workflow_from_toml, render_workflow, required_config_problems,
 };
+// Test-only (issue #1963): the workflow testkit builds a graph, renders it and
+// re-parses it through `parse_workflow` — which validates LENIENTLY (issue
+// #682). This is how a test asks the other question: would the strict
+// author-time path accept this graph too, or is the builder quietly producing
+// shapes the console itself would refuse? Gated on `cfg(test)` because that is
+// its only caller, and on `feature = "openhuman"` because that is what
+// compiles `crate::workflows` at all — an ungated re-export is an unused
+// import in every shipped build, and a `cfg(test)`-only one is an unused
+// import in the default test lane.
+#[cfg(all(test, feature = "openhuman"))]
+pub(crate) use workflow_file::validate as validate_workflow;
 // Issue #661 (M7): the read half of the agent workflow-admin surface — a stored
 // graph projected onto the narrow agent authoring schema, plus the policy
 // residue that schema cannot carry. Lives with the parser it reads, and stays

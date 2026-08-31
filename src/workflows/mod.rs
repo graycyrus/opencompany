@@ -56,6 +56,11 @@ mod publish_refusal_notice_test;
 /// made, instead of making them a second time.
 pub mod replay;
 pub mod runner;
+/// Issue #1963: the graph builder and the assertion vocabulary the suites in
+/// this module are written against. Test-only — nothing in a shipped build
+/// links it.
+#[cfg(test)]
+mod testkit;
 pub mod translate;
 /// Issue #1098: a scheduled workflow granted a standing permission stops
 /// re-asking on every run — two runs, because a single-run test cannot see it.
