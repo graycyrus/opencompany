@@ -495,6 +495,8 @@ pub struct Envelope {
     pub deployment: Deployment,
     /// The crate version.
     pub app_version: &'static str,
+    /// The commit this binary was built from ([`crate::BUILD_COMMIT`]).
+    pub build_commit: &'static str,
     /// The OS this build runs on.
     pub os: &'static str,
     /// The CPU architecture.
@@ -516,6 +518,7 @@ impl Envelope {
             id,
             deployment,
             app_version: env!("CARGO_PKG_VERSION"),
+            build_commit: crate::BUILD_COMMIT,
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             cognition_path: cognition.path,
@@ -555,6 +558,16 @@ impl Envelope {
         vec![
             ("deployment", PropValue::Word(self.deployment.as_str())),
             ("app_version", PropValue::Word(self.app_version)),
+            // The commit, not just the version. `app_version` is the crate
+            // version, which moves on a release and not on a deploy — so every
+            // build between two releases is indistinguishable, and "did this
+            // start after Tuesday's rollout?" is exactly the question a
+            // regression asks. #1771 already stamps this into the binary and
+            // `/spec` reports it; it simply never reached the envelope.
+            //
+            // A fixed-shape hex string or `unknown`, so it carries no user
+            // content and needs no classifier.
+            ("build_commit", PropValue::Word(self.build_commit)),
             ("os", PropValue::Word(self.os)),
             ("arch", PropValue::Word(self.arch)),
             ("cognition_path", PropValue::Word(self.cognition_path)),
@@ -610,6 +623,73 @@ pub enum Event {
         effects_executed: u64,
         /// How many effects parked for an operator decision.
         approvals_parked: u64,
+    },
+    /// An effect was parked for an operator decision (issue #1739).
+    ///
+    /// The **group**, never the effect's payload: `spend`, `send`, `sign` and
+    /// the rest are the supervised taxonomy, already a closed set, and they are
+    /// what a funnel about oversight is asking about.
+    ApprovalParked {
+        /// The supervised taxonomy group.
+        group: &'static str,
+        /// Whether the effect named an amount at all. Not the amount: a figure
+        /// is a fact about the company's business, not about the product.
+        priced: bool,
+    },
+    /// A parked approval was settled.
+    ApprovalDecided {
+        /// The supervised taxonomy group.
+        group: &'static str,
+        /// Approved, denied, or expired without an answer.
+        verdict: &'static str,
+        /// How long it sat parked. The number the oversight loop is actually
+        /// about — an approval nobody answers is the failure mode.
+        waited_ms: u64,
+    },
+    /// One tool call finished.
+    ToolCalled {
+        /// Where the tool came from: `built-in`, `mcp`, `composio`, `other`.
+        source: &'static str,
+        /// Whether it returned or failed.
+        outcome: Outcome,
+        /// Wall-clock milliseconds.
+        duration_ms: u64,
+    },
+    /// One workflow run reached a terminal state.
+    WorkflowRunFinished {
+        /// How it ended: `completed`, `failed`, `blocked`, `cancelled`.
+        status: &'static str,
+        /// How many nodes ran.
+        nodes: u64,
+        /// Wall-clock milliseconds for the whole run.
+        duration_ms: u64,
+    },
+    /// A ledger record was appended.
+    ///
+    /// The **kind and the count**, never a cell: a ledger holds the company's
+    /// own business data, which is the single richest source of content in the
+    /// product and the last thing that may reach a payload.
+    LedgerAppended {
+        /// The declared record shape, folded onto a closed vocabulary.
+        shape: &'static str,
+        /// How many records the append carried.
+        records: u64,
+    },
+    /// A connection or MCP server changed state.
+    ConnectionChanged {
+        /// The provider, folded onto the same closed vocabulary the envelope
+        /// uses for cognition providers.
+        provider: &'static str,
+        /// `connected`, `disconnected`, `refreshed`, `failed`.
+        transition: &'static str,
+    },
+    /// The operator opened a console view.
+    ///
+    /// The **route**, from a closed list the console cannot add to at runtime —
+    /// never the hash, which carries ids (`#/chat/dm:ada`, `#/tasks/<id>`).
+    ConsoleViewed {
+        /// The routed view, folded onto the closed vocabulary.
+        view: &'static str,
     },
     /// One usage sample was metered — tokens or a counted call.
     TurnMetered {
@@ -674,12 +754,62 @@ impl Event {
             Self::InstanceStarted { .. } => "instance_started",
             Self::TurnFinished { .. } => "turn_finished",
             Self::TurnMetered { .. } => "turn_metered",
+            Self::ApprovalParked { .. } => "approval_parked",
+            Self::ApprovalDecided { .. } => "approval_decided",
+            Self::ToolCalled { .. } => "tool_called",
+            Self::WorkflowRunFinished { .. } => "workflow_run_finished",
+            Self::LedgerAppended { .. } => "ledger_appended",
+            Self::ConnectionChanged { .. } => "connection_changed",
+            Self::ConsoleViewed { .. } => "console_viewed",
         }
     }
 
     /// The event's own properties, excluding the envelope's.
     pub fn props(&self) -> Vec<Prop> {
         match *self {
+            Self::ApprovalParked { group, priced } => vec![
+                ("group", PropValue::Word(group)),
+                ("priced", PropValue::Flag(priced)),
+            ],
+            Self::ApprovalDecided {
+                group,
+                verdict,
+                waited_ms,
+            } => vec![
+                ("group", PropValue::Word(group)),
+                ("verdict", PropValue::Word(verdict)),
+                ("waited_ms", PropValue::Count(waited_ms)),
+            ],
+            Self::ToolCalled {
+                source,
+                outcome,
+                duration_ms,
+            } => vec![
+                ("source", PropValue::Word(source)),
+                ("outcome", PropValue::Word(outcome.as_str())),
+                ("duration_ms", PropValue::Count(duration_ms)),
+            ],
+            Self::WorkflowRunFinished {
+                status,
+                nodes,
+                duration_ms,
+            } => vec![
+                ("status", PropValue::Word(status)),
+                ("nodes", PropValue::Count(nodes)),
+                ("duration_ms", PropValue::Count(duration_ms)),
+            ],
+            Self::LedgerAppended { shape, records } => vec![
+                ("shape", PropValue::Word(shape)),
+                ("records", PropValue::Count(records)),
+            ],
+            Self::ConnectionChanged {
+                provider,
+                transition,
+            } => vec![
+                ("provider", PropValue::Word(provider)),
+                ("transition", PropValue::Word(transition)),
+            ],
+            Self::ConsoleViewed { view } => vec![("view", PropValue::Word(view))],
             Self::InstanceStarted {
                 companies,
                 storage,

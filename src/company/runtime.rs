@@ -3601,9 +3601,46 @@ impl CompanyRuntime {
         reason: ExpiryReason,
         at_millis: u64,
     ) -> Result<()> {
-        let explicit_request = self
-            .approval_gate
-            .take_expired_effect(id)
+        // Issue #1739: the park instant is read BEFORE the take below consumes
+        // the entry — `expired_parked_at_millis` peeks, `take_expired_effect`
+        // removes, and read the other way round the wait would have to be
+        // invented.
+        let parked_at_millis = self.approval_gate.expired_parked_at_millis(id);
+        let expired_effect = self.approval_gate.take_expired_effect(id);
+        // Reported from **here**, and only here, for both ways an approval can
+        // run out of time.
+        //
+        // This is the single retirement primitive (see this function's doc
+        // comment), so the TTL sweep and an operator's click that landed a
+        // second too late both arrive at this one line. `CycleRunner`'s settle
+        // seam deliberately reports nothing for its `Expired` arm: it owes this
+        // function the retirement, so reporting there too would have counted the
+        // late click twice and the sweep — an approval nobody answered at all —
+        // not at all. That is the population `approval_decided` exists to find:
+        // the whole event answers "does the oversight loop close, and how fast",
+        // and a sweep IS the loop failing to close. Instrumenting only the
+        // click would have made `expired` systematically undercount exactly the
+        // approvals worth looking at, while a dashboard of promptly-resolved
+        // cards read as healthy.
+        //
+        // A missing entry means an earlier retirement already consumed it, so
+        // this is a repeat and reporting again would double-count one expiry.
+        // Nothing is awaited: `Tracker::track` is synchronous and infallible, so
+        // a retirement is never delayed by, and can never fail because of,
+        // analytics.
+        if let (Some(effect), Some(parked_at)) = (expired_effect.as_ref(), parked_at_millis) {
+            self.tracker
+                .track(crate::analytics::Event::ApprovalDecided {
+                    group: crate::policy::gate::group_slug(effect.group),
+                    verdict: "expired",
+                    // Saturating on the same terms as the settle seam: the park
+                    // instant and `at_millis` are separate wall-clock reads, and
+                    // a clock stepping backwards between them must not wrap a
+                    // short wait into eighteen quintillion milliseconds.
+                    waited_ms: at_millis.saturating_sub(parked_at),
+                });
+        }
+        let explicit_request = expired_effect
             .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
             .and_then(|effect| effect.agent.clone().map(|agent| (agent, effect)));
         self.journal.record_expired(id, at_millis, reason).await?;

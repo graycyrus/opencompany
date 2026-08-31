@@ -186,6 +186,79 @@ mod http {
     /// carries no URL at all, and the destination on the same log line comes
     /// from that one helper, so the transport learns about a new place a URL can
     /// hold a secret at the same moment the boot line does.
+    /// The endpoint with Mixpanel's IP geolocation turned off.
+    ///
+    /// `ip=0` is Mixpanel's own switch. Applied to the URL we send to rather
+    /// than to the configured value, which stays exactly what the operator
+    /// wrote — that is what the boot line prints and what `loggable_endpoint`
+    /// redacts, and rewriting it would make those two disagree with the setting.
+    ///
+    /// A custom collector that already carries a query string keeps it; one that
+    /// already sets `ip` is left alone, because an operator who wrote it meant it.
+    pub(super) fn geo_free(endpoint: &str) -> String {
+        let (path, query) = match endpoint.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (endpoint, None),
+        };
+        let already_set = query.is_some_and(|q| {
+            q.split('&')
+                .any(|pair| pair == "ip" || pair.starts_with("ip="))
+        });
+        match (already_set, query) {
+            (true, _) => endpoint.to_string(),
+            (false, Some(query)) => format!("{path}?{query}&ip=0"),
+            (false, None) => format!("{path}?ip=0"),
+        }
+    }
+
+    /// Did the collector actually take the batch?
+    ///
+    /// Mixpanel's non-strict Track API answers `200` for a refusal, with the
+    /// reason in the body: `1`/`{"status": 1}` for accepted, `0` or an `error`
+    /// key for refused. A collector that answers something else entirely — a
+    /// proxy returning its own JSON, an empty body — is given the benefit of the
+    /// doubt: this exists to catch a *stated* refusal, and treating every
+    /// unfamiliar 2xx as a failure would fill the log for a working setup.
+    pub(super) fn accepted(body: &str) -> bool {
+        let trimmed = body.trim();
+        if trimmed.is_empty() || trimmed == "1" {
+            return true;
+        }
+        if trimmed == "0" {
+            return false;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) => {
+                if value.get("error").is_some() {
+                    return false;
+                }
+                match value.get("status") {
+                    Some(serde_json::Value::Number(n)) => n.as_i64() != Some(0),
+                    _ => true,
+                }
+            }
+            // Not JSON and not `0`: unfamiliar, not a stated refusal.
+            Err(_) => true,
+        }
+    }
+
+    /// A **classified** reason a 2xx batch was refused — never the body.
+    ///
+    /// The body is the collector's own text and can carry the event payload
+    /// back, so logging it verbatim would print exactly what this module spends
+    /// its vocabulary avoiding. One of a closed set of words instead.
+    pub(super) fn ingestion_verdict(body: &str) -> &'static str {
+        let trimmed = body.trim();
+        if trimmed == "0" {
+            return "refused";
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) if value.get("error").is_some() => "error",
+            Ok(_) => "status-zero",
+            Err(_) => "unparsed",
+        }
+    }
+
     pub(super) fn loggable_send_error(error: reqwest::Error) -> String {
         error.without_url().to_string()
     }
@@ -228,8 +301,41 @@ mod http {
                 })
                 .collect();
 
-            match self.client.post(&self.endpoint).json(&events).send().await {
-                Ok(response) if response.status().is_success() => {}
+            // `ip=0` disables Mixpanel's request-IP geolocation.
+            //
+            // Left on, the Track API enriches every event server-side with
+            // `$city`, `$region` and `mp_country_code` — properties that never
+            // pass through `PropValue`, are not in the payload this module
+            // documents, and amount to a tenant's approximate location. The
+            // whole design here is "shape and outcome, never content", and a
+            // property added after the request leaves is the one way to break
+            // that without a line of code saying so.
+            //
+            // A query parameter rather than an `$ip: 0` property on each event:
+            // it applies to the batch, and it cannot be forgotten by a new call
+            // site the way a per-event property can. Appended per-send rather
+            // than baked into `endpoint`, so the configured value stays exactly
+            // what the operator wrote — which is what the boot line prints and
+            // what `loggable_endpoint` redacts.
+            let destination = geo_free(&self.endpoint);
+            match self.client.post(&destination).json(&events).send().await {
+                // A 2xx is not an acceptance. In non-strict mode Mixpanel
+                // answers `200` with `{"error": …}` — an invalid token, a
+                // malformed event — so a misconfigured project dropped every
+                // batch while this arm counted each one as delivered, and the
+                // "collector refused" line below never fired. The body is the
+                // only thing that actually says.
+                Ok(response) if response.status().is_success() => match response.text().await {
+                    Ok(body) if accepted(&body) => {}
+                    Ok(body) => tracing::debug!(
+                        verdict = %ingestion_verdict(&body),
+                        "[analytics] the collector answered 2xx but refused the batch; dropping it"
+                    ),
+                    Err(error) => tracing::debug!(
+                        error = %loggable_send_error(error),
+                        "[analytics] could not read the collector's answer; assuming the batch was dropped"
+                    ),
+                },
                 Ok(response) => tracing::debug!(
                     status = %response.status(),
                     "[analytics] the collector refused a batch; dropping it"
@@ -385,6 +491,105 @@ mod test {
     /// on, the client exists, the endpoint resolves, the token is present. The
     /// only thing that is not is consent. That is the configuration a
     /// self-hoster who copied a hosted deployment's env file would have.
+    /// The whole path, once: a hosted tenant's event reaches a collector with
+    /// the envelope this module documents, geolocation off, and no content.
+    ///
+    /// Every other test here covers one link. This is the only one that asserts
+    /// the *delivered bytes*, which is the thing an operator actually gets — and
+    /// until it existed, "analytics works" rested on each half being correct
+    /// separately.
+    #[tokio::test]
+    async fn a_hosted_tenants_event_arrives_whole_and_carries_no_content() {
+        let collector = spawn_collector().await;
+        let env = MapEnv::new([
+            (DEPLOYMENT_ENV, "hosted-tenant"),
+            (TOKEN_ENV, "not-a-real-token"),
+            (ENDPOINT_ENV, collector.url.as_str()),
+        ]);
+        let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+
+        // One of each new surface, with values chosen so a leak would be
+        // unmistakable in the assertion below.
+        tracker.track(Event::ApprovalParked {
+            group: "spend",
+            priced: true,
+        });
+        tracker.track(Event::ConsoleViewed { view: "tasks" });
+        tracker.flush().await;
+
+        let bodies = collector.bodies.lock().unwrap().clone();
+        assert!(!bodies.is_empty(), "nothing reached the collector");
+        let rendered = serde_json::to_string(&bodies).expect("serialisable");
+
+        // The envelope every event carries.
+        for key in [
+            "deployment",
+            "app_version",
+            "build_commit",
+            "os",
+            "arch",
+            "cognition_path",
+        ] {
+            assert!(rendered.contains(key), "envelope lost {key}: {rendered}");
+        }
+        // The events themselves.
+        assert!(rendered.contains("approval_parked"), "{rendered}");
+        assert!(rendered.contains("console_viewed"), "{rendered}");
+
+        collector.stop().await;
+    }
+
+    /// `ip=0` rides on the request, so Mixpanel adds no location properties.
+    ///
+    /// Asserted on the URL the transport actually sends to rather than on the
+    /// configured endpoint: the configured value is deliberately left alone so
+    /// the boot line prints what the operator wrote, which means the only place
+    /// this is observable is the request itself.
+    #[test]
+    fn the_send_url_turns_geolocation_off() {
+        assert_eq!(
+            geo_free("https://api.mixpanel.com/track"),
+            "https://api.mixpanel.com/track?ip=0"
+        );
+        // A collector with its own query keeps it.
+        assert_eq!(
+            geo_free("https://collector.invalid/track?team=acme"),
+            "https://collector.invalid/track?team=acme&ip=0"
+        );
+        // An operator who set `ip` themselves meant it.
+        for already in [
+            "https://collector.invalid/track?ip=1",
+            "https://collector.invalid/track?a=b&ip=1",
+        ] {
+            assert_eq!(geo_free(already), already, "{already}");
+        }
+    }
+
+    /// A `200` is not an acceptance.
+    ///
+    /// Mixpanel's non-strict Track API answers `200` with the refusal in the
+    /// body, so an invalid token dropped every batch while the transport
+    /// counted each one delivered. The classifier also never returns the body,
+    /// which is the collector's own text and can echo the payload back.
+    #[test]
+    fn a_two_hundred_can_still_be_a_refusal() {
+        for accepted_body in ["1", "", "{\"status\": 1}", "{\"ok\": true}"] {
+            assert!(accepted(accepted_body), "{accepted_body:?}");
+        }
+        for refused in ["0", "{\"status\": 0}", "{\"error\": \"invalid token\"}"] {
+            assert!(!accepted(refused), "{refused:?}");
+            let verdict = ingestion_verdict(refused);
+            assert!(
+                ["refused", "status-zero", "error"].contains(&verdict),
+                "unclassified verdict {verdict}"
+            );
+            assert!(
+                !verdict.contains("invalid token"),
+                "the verdict echoed the collector's body: {verdict}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_self_hosted_build_makes_no_request() {
         let collector = spawn_collector().await;

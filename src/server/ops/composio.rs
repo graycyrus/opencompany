@@ -76,6 +76,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
 use crate::server::error::ApiError;
 use crate::server::ops::composio_toolkits::{self, CatalogSource, OpenModeToolkits};
+use crate::server::ops::connections::{Transition, track_connection};
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// The reminder attached to a set / rotate response.
@@ -504,6 +505,14 @@ async fn get_status(company: ScopedCompany) -> Result<Json<ComposioStatusDto>, A
 /// to Composio, so whoever sets it decides which account those agents act
 /// through. That is a decision made *for* the company, not a member's own, and
 /// [`AdminScopedCompany`] is what says so in the signature.
+/// What a Composio change reports itself as, before folding.
+///
+/// The **plane**, not the toolkit: `set_token` names no toolkit at all, and
+/// `disconnect` is given a Composio connection id rather than one. A slug that
+/// [`provider_slug`](crate::analytics::types::provider_slug) already knows, so
+/// it survives the fold as itself.
+const COMPOSIO_ANALYTICS_PROVIDER: &str = "composio";
+
 async fn set_token(
     company: AdminScopedCompany,
     Json(body): Json<SetToken>,
@@ -527,6 +536,22 @@ async fn set_token(
         "credential_set"
     };
     journal(&company, change, None).await?;
+    // After the store and the journal, so only a completed change is reported.
+    // The credential itself is never in reach of this call: `provider` is the
+    // literal below and `transition` is one of four compiled-in words, so the
+    // token cannot travel even by accident. Clearing is a `disconnected`, not a
+    // failure — the operator withdrew the access on purpose, and folding the
+    // two together would make the failure rate this event exists to measure
+    // read as whatever the churn rate happens to be.
+    track_connection(
+        runtime,
+        COMPOSIO_ANALYTICS_PROVIDER,
+        if body.token.trim().is_empty() {
+            Transition::Disconnected
+        } else {
+            Transition::Connected
+        },
+    );
     Ok(Json(MutationResponse {
         status: effective_status(runtime).await?,
         note: if body.token.trim().is_empty() {
@@ -800,6 +825,14 @@ async fn disconnect(
 ) -> Result<Json<DisconnectDto>, ApiError> {
     let dto = disconnect_impl(company.runtime.as_ref(), &connection_id).await?;
     journal(&company, "provider_disconnected", None).await?;
+    // `connection_id` is Composio's own opaque handle for this company's
+    // account and is deliberately not offered here — the plane is the
+    // segmentation, and an id is a correlation key into somebody else's system.
+    track_connection(
+        company.runtime.as_ref(),
+        COMPOSIO_ANALYTICS_PROVIDER,
+        Transition::Disconnected,
+    );
     Ok(dto)
 }
 

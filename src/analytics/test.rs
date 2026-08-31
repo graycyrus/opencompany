@@ -230,14 +230,20 @@ fn every_string_in_a_payload_comes_from_the_compiled_vocabulary() {
     let envelope = envelope();
     let vocabulary = vocabulary();
 
-    // The three values that are strings but are not vocabulary: the opaque id,
-    // and the two platform facts `std::env::consts` supplies. All three are
+    // The values that are strings but are not vocabulary: the opaque id, the two
+    // platform facts `std::env::consts` supplies, and the build stamp. All are
     // fixed for the life of the process and none originates with a user.
+    //
+    // `build_commit` is here rather than in the vocabulary because it cannot be
+    // a compiled-in literal — `build.rs` stamps it per build, and on a dirty
+    // tree it carries a `-dirty` suffix, so no fixed list could name it. It is
+    // still not user content: it is a hex commit or the literal `unknown`.
     let allowed_platform = [
         envelope.id.as_str().to_string(),
         envelope.app_version.to_string(),
         envelope.os.to_string(),
         envelope.arch.to_string(),
+        envelope.build_commit.to_string(),
     ];
 
     for event in hostile_events() {
