@@ -2351,6 +2351,15 @@ mod tests {
         }
     }
 
+    // Issue #1963: direct units for the settle path's pure helpers, split out
+    // because this file is already the largest in the crate and a suite
+    // appended to the bottom of its test module disappears into it. The
+    // `include!` idiom is the one `tinyflows::engine_tests` uses, and it is
+    // what lets these reach the private functions they exercise.
+    include!("runner/pure_units_part_01_tests.rs");
+    include!("runner/pure_units_part_02_tests.rs");
+    include!("runner/pure_units_part_03_tests.rs");
+
     /// The third half of that reconciliation, and the one that was missing
     /// (CodeRabbit review on #1905): what the **journal** records.
     ///
