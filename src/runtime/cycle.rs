@@ -10709,6 +10709,56 @@ members = ["writer"]
             "an expiry whose journal write failed added a second event: {:?}",
             decided(&recorder)
         );
+
+        // And the amend path, which is the same build-early/send-late shape in
+        // a second function: `resolve_amended_outcome` settles in memory, then
+        // `record_amended` and `record_resolved` make it durable. Covered here
+        // rather than left implied, because "the identical structure" is what
+        // every uncovered second copy of a fix is called.
+        journal.refuse(false);
+        let amended = rt
+            .park_blocker(&blocker_payload(), "task-4")
+            .await
+            .expect("the fourth blocker parks");
+        journal.refuse(true);
+        let failed = CycleRunner::new(&rt)
+            .settle_approval_amended(
+                &amended,
+                serde_json::json!({ "needed": "the later date" }),
+                operator(),
+            )
+            .await;
+        assert!(
+            failed.is_err(),
+            "the fixture must fail the amend's durable write: {failed:?}"
+        );
+        assert_eq!(
+            decided(&recorder).len(),
+            1,
+            "an amend whose journal write failed was reported: {:?}",
+            decided(&recorder)
+        );
+
+        // Self-check on the same path: with the store working it does report.
+        journal.refuse(false);
+        let commits = rt
+            .park_blocker(&blocker_payload(), "task-5")
+            .await
+            .expect("the fifth blocker parks");
+        CycleRunner::new(&rt)
+            .settle_approval_amended(
+                &commits,
+                serde_json::json!({ "needed": "the later date" }),
+                operator(),
+            )
+            .await
+            .expect("the amend commits");
+        assert_eq!(
+            decided(&recorder).len(),
+            2,
+            "a durable amend must report: {:?}",
+            decided(&recorder)
+        );
     }
 
     /// **Issue #1739.** A decision that decided nothing reports nothing.

@@ -195,19 +195,44 @@ mod http {
     ///
     /// A custom collector that already carries a query string keeps it; one that
     /// already sets `ip` is left alone, because an operator who wrote it meant it.
+    ///
+    /// # The fragment is split off first
+    ///
+    /// A fragment is everything after the first `#` (RFC 3986), and the query
+    /// sits *between* `?` and `#`. Appending to the raw string therefore lands
+    /// the flag inside the fragment — `…/track?key=x#proxy` became
+    /// `…/track?key=x#proxy&ip=0` — and a fragment is never transmitted, so the
+    /// request carried no opt-out at all while every log and test read as though
+    /// it did (raised in review of #1950). That is the worst shape a privacy
+    /// guarantee can fail in: silently, and only for the operators who
+    /// configured something unusual.
+    ///
+    /// Split with `str` rather than a URL parser on purpose. This function's
+    /// contract is that the operator's endpoint comes back **byte-for-byte**
+    /// apart from one appended pair; a parser normalises — default ports,
+    /// percent-encoding, a trailing slash — and would quietly hand a different
+    /// URL to a collector that was working.
     pub(super) fn geo_free(endpoint: &str) -> String {
-        let (path, query) = match endpoint.split_once('?') {
-            Some((path, query)) => (path, Some(query)),
+        let (addressable, fragment) = match endpoint.split_once('#') {
+            Some((addressable, fragment)) => (addressable, Some(fragment)),
             None => (endpoint, None),
+        };
+        let (path, query) = match addressable.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (addressable, None),
         };
         let already_set = query.is_some_and(|q| {
             q.split('&')
                 .any(|pair| pair == "ip" || pair.starts_with("ip="))
         });
-        match (already_set, query) {
-            (true, _) => endpoint.to_string(),
+        let addressable = match (already_set, query) {
+            (true, _) => addressable.to_string(),
             (false, Some(query)) => format!("{path}?{query}&ip=0"),
             (false, None) => format!("{path}?ip=0"),
+        };
+        match fragment {
+            Some(fragment) => format!("{addressable}#{fragment}"),
+            None => addressable,
         }
     }
 
@@ -568,6 +593,38 @@ mod test {
             "https://collector.invalid/track?a=b&ip=1",
         ] {
             assert_eq!(geo_free(already), already, "{already}");
+        }
+
+        // A fragment is not part of the request (raised in review of #1950).
+        // Appending past it put the flag somewhere no server ever sees, so the
+        // opt-out was silently absent while everything read as though it were
+        // there. The pair goes in the query, ahead of the `#`.
+        assert_eq!(
+            geo_free("https://collector.invalid/track#proxy"),
+            "https://collector.invalid/track?ip=0#proxy"
+        );
+        assert_eq!(
+            geo_free("https://collector.invalid/track?key=x#proxy"),
+            "https://collector.invalid/track?key=x&ip=0#proxy"
+        );
+        // And an `ip` an operator set is still theirs, fragment or not — the
+        // fragment survives untouched rather than being dropped on the way.
+        assert_eq!(
+            geo_free("https://collector.invalid/track?ip=1#proxy"),
+            "https://collector.invalid/track?ip=1#proxy"
+        );
+        // The guard that makes the three above mean something: `ip=0` must be
+        // in the part a server receives, which is everything before the `#`.
+        for endpoint in [
+            "https://collector.invalid/track#proxy",
+            "https://collector.invalid/track?key=x#proxy",
+        ] {
+            let sent = geo_free(endpoint);
+            let addressable = sent.split('#').next().expect("a URL before the fragment");
+            assert!(
+                addressable.contains("ip=0"),
+                "the opt-out landed in the fragment, which is never transmitted: {sent}"
+            );
         }
     }
 
