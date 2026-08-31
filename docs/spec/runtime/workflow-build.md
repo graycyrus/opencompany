@@ -12,7 +12,7 @@ This document is the contract for that path: how a card is routed, what the
 builder pass is allowed to do, why the graph lands **In Review** before it
 exists, and what apply and reject do.
 
-Implementation: `src/harness/workflow_build.rs` (the pass),
+Implementation: `src/harness/built_in/workflow_build.rs` (the pass),
 `src/ports/tasks.rs` (`TaskDeliverable`, `TaskWorkflowProposal`),
 `src/company/workflow_create.rs` (the host-authority conversion + courtesy
 validation + `create_company_workflow`), `src/server/ops/tasks.rs` (the
