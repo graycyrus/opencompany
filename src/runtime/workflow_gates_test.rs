@@ -327,3 +327,136 @@ fn a_rehydrate_forgets_verdicts_banked_before_it() {
         "only the gate the journal still had parked is in the ledger"
     );
 }
+
+/// A verdict delivered against one run's turn key cannot settle a gate that
+/// belongs to a different run.
+///
+/// Issue #1970. Two tests here look like they cover run isolation on `decide`
+/// and neither can:
+/// `a_verdict_on_something_this_queue_never_armed_is_a_no_op` names an *unarmed*
+/// turn with an id that **is** armed, so an implementation that looked the id up
+/// across every batch would find the right one and still satisfy the assertion;
+/// `two_runs_parked_at_once_do_not_release_each_other` gives the two runs
+/// *distinct* ids, which an id-keyed lookup can never cross. Dropping the turn
+/// key from `decide` entirely therefore left all eleven gate tests green.
+///
+/// Here both runs are armed and `a1` belongs to exactly one of them, so a
+/// turn-blind lookup settles run 1's gate on run 2's verdict and the count moves
+/// — the "busy company approving one run's gate releases another's" failure the
+/// module docs name as the reason this queue is keyed by turn at all.
+#[test]
+fn a_verdict_naming_one_runs_turn_cannot_settle_another_runs_gate() {
+    let queue = WorkflowGateQueue::default();
+    let other = "acme:wf:run-2";
+    queue.arm(TURN, &id("a1"), &gate("draft"));
+    queue.arm(other, &id("b1"), &gate("publish"));
+
+    // Run 2's card is decided, but the id carried over is run 1's.
+    queue.decide(other, &id("a1"), Verdict::Approve);
+
+    assert_eq!(
+        queue.undecided(TURN),
+        1,
+        "run 1's gate was settled by a verdict delivered against run 2's turn — the queue is keyed \
+         by turn precisely so one company's approval cannot release another run"
+    );
+    assert_eq!(
+        queue.undecided(other),
+        1,
+        "run 2 still awaits its own operator: nothing it armed was decided"
+    );
+
+    let released = queue.release(other).expect("run 2's batch is still held");
+    assert!(
+        released.approved.is_empty() && released.denied.is_empty(),
+        "run 1's node must not appear in run 2's ledgers, or the continuation replays a node this \
+         run never gated: {released:?}"
+    );
+}
+
+/// One approval id live on two runs at once settles only the run the verdict
+/// named.
+///
+/// Issue #1970, and the sharpest form of the same gap: ids are unique per card
+/// in production, but nothing in this type's contract says so, and a lookup that
+/// searches every batch for an id is exactly what the turn key exists to
+/// prevent. The verdict is delivered twice against run 1 — a resolve and a TTL
+/// sweep both reach `decide`, and the second is documented as a no-op — so a
+/// turn-blind implementation empties run 2's batch whichever batch it happens to
+/// find first, rather than depending on `HashMap` iteration order.
+#[test]
+fn one_approval_id_live_on_two_runs_settles_only_the_run_it_was_named_with() {
+    let queue = WorkflowGateQueue::default();
+    let other = "acme:wf:run-2";
+    let shared = id("approval-1");
+    queue.arm(TURN, &shared, &gate("draft"));
+    queue.arm(other, &shared, &gate("publish"));
+
+    queue.decide(TURN, &shared, Verdict::Approve);
+    queue.decide(TURN, &shared, Verdict::Approve);
+
+    assert_eq!(
+        queue.undecided(other),
+        1,
+        "run 2 is still blocked on its own gate — every verdict here named run 1's turn"
+    );
+    assert!(
+        queue.is_armed(other),
+        "run 2's batch must survive run 1's release path untouched"
+    );
+
+    let released = queue.release(TURN).expect("run 1's batch releases");
+    assert_eq!(
+        released.approved,
+        vec!["draft".to_string()],
+        "run 1 carries its own node and not run 2's"
+    );
+}
+
+/// A rearm rebuilds a turn's batch from the journal, so a gate the journal no
+/// longer has parked does not survive it.
+///
+/// Issue #1970. `rearming_twice_leaves_a_run_blocked_on_the_gates_it_is_actually_blocked_on`
+/// replays *the same two ids* into a `HashMap`, and re-inserting a key cannot
+/// raise a count — so making `rearm` extend the existing batch instead of
+/// replacing it was invisible. The rebuilt set has to be shown to **shrink**:
+/// two of the three gates below resolved before the restart, and a batch that
+/// keeps them is a run blocked on decisions no card can ever deliver.
+#[test]
+fn a_rearm_drops_a_gate_the_journal_no_longer_has_parked() {
+    let queue = WorkflowGateQueue::default();
+    let draft = gate("draft");
+    let publish = gate("publish");
+    let announce = gate("announce");
+    queue.arm(TURN, &id("a1"), &draft);
+    queue.arm(TURN, &id("a2"), &publish);
+    queue.arm(TURN, &id("a3"), &announce);
+
+    // The journal comes back holding one of the three; the other two resolved
+    // before the restart.
+    queue.rearm(vec![(TURN.to_string(), id("a2"), &publish)]);
+
+    assert_eq!(
+        queue.undecided(TURN),
+        1,
+        "the rebuilt batch must be the journal's, not the journal's added to what was already \
+         here — a run holding gates the journal has let go can never be released"
+    );
+
+    queue.decide(TURN, &id("a1"), Verdict::Approve);
+    queue.decide(TURN, &id("a3"), Verdict::Approve);
+    assert_eq!(
+        queue.undecided(TURN),
+        1,
+        "a gate the rearm dropped is not decidable, so a stale verdict cannot settle the run"
+    );
+
+    queue.decide(TURN, &id("a2"), Verdict::Approve);
+    assert_eq!(queue.undecided(TURN), 0);
+    let released = queue.release(TURN).expect("the rebuilt batch releases");
+    assert_eq!(
+        released.approved,
+        vec!["publish".to_string()],
+        "only the gate the journal still had parked reaches the continuation's ledger"
+    );
+}
