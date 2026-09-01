@@ -169,7 +169,15 @@ test("first-run setup builds a real team from three answers", async ({ page, req
     }
   });
 
-  await page.goto("/#/overview");
+  // The console's own landing address, NOT a named view. First-run setup only
+  // offers itself when the operator *opened the console* rather than followed a
+  // link into it — `app-shell.tsx` decides that with
+  // `view !== DEFAULT_VIEW || Boolean(sub)`. This used to be spelled
+  // `/#/overview` because Overview was the default; the four-row restructure
+  // made Room the default, which turned `/#/overview` into a deep link and
+  // suppressed the dialog. `/` is what the assertion always meant, and it stays
+  // correct the next time the default moves.
+  await page.goto("/");
 
   // 1. It opens by itself — nobody clicked anything.
   const dialog = page.getByTestId("setup-dialog");
@@ -235,7 +243,12 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   // 7. A reload does not re-offer setup: the roster is no longer empty, which is
   // the whole reason emptiness is the signal rather than a stored flag.
   await page.reload();
-  await page.goto("/#/overview");
+  // Back to the landing address, not `/#/overview`. On a deep-linked address the
+  // dialog is suppressed by `deepLinked` regardless of the roster, so this would
+  // have gone on passing while proving nothing — which is the failure mode this
+  // lane exists to catch. From `/` the only thing that can keep it hidden is the
+  // roster no longer being empty, which is what step 7 is about.
+  await page.goto("/");
   await expect(dialog).toBeHidden();
 });
 
@@ -248,7 +261,15 @@ test("skipping setup leaves a way back in", async ({ page, request }) => {
     }
   });
 
-  await page.goto("/#/overview");
+  // The console's own landing address, NOT a named view. First-run setup only
+  // offers itself when the operator *opened the console* rather than followed a
+  // link into it — `app-shell.tsx` decides that with
+  // `view !== DEFAULT_VIEW || Boolean(sub)`. This used to be spelled
+  // `/#/overview` because Overview was the default; the four-row restructure
+  // made Room the default, which turned `/#/overview` into a deep link and
+  // suppressed the dialog. `/` is what the assertion always meant, and it stays
+  // correct the next time the default moves.
+  await page.goto("/");
   await expect(page.getByTestId("setup-dialog")).toBeVisible({ timeout: 20_000 });
 
   await page.getByTestId("setup-skip").click();
