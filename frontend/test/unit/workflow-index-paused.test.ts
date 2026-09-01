@@ -85,6 +85,13 @@ function makeClient(rows: WorkflowSummary[] = ROWS, created?: WorkflowGraph) {
       if (path.endsWith("/workflows")) return rows;
       if (path.includes("/workflows/tool-slugs")) return { slugs: [], unwired: [] };
       if (path.includes("/workflows/wired-channels")) return { channels: [] };
+        // The New-workflow dialog is two dialogs now: a copilot that can draft
+        // reduces it to one description box, and only a company that CANNOT draft
+        // gets the manual Name/ID/Description/Nodes/Connections form. This suite is
+        // about that form, so the cognition read answers `echo` — the offline
+        // brain, which is exactly the company the form exists for. See
+        // `createSurface` in `@/lib/workflow-create-surface`.
+      if (path.endsWith("/inference")) return { cognition: "echo" };
       if (path.includes("/workflows/runs")) return { runs: [], hasMore: false };
       const m = path.match(/\/workflows\/([^/?]+)$/);
       if (m) return graphFor(decodeURIComponent(m[1]));

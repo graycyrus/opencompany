@@ -45,8 +45,16 @@ function stubClient(): OpenCompanyClient {
   return {
     scopeFor: () => "/api/companies/acme",
     listTeam: async () => [],
-    get: async (path: string) =>
-      path.endsWith("/wired-channels") ? { channels: [] } : [],
+    // The New-workflow dialog is two dialogs now: a copilot that can draft
+    // reduces it to one description box, and only a company that CANNOT draft
+    // gets the manual Name/ID/Description/Nodes/Connections form. This suite is
+    // about that form, so the cognition read answers `echo` — the offline
+    // brain, which is exactly the company the form exists for. See
+    // `createSurface` in `@/lib/workflow-create-surface`.
+    get: async (path: string) => {
+      if (path.endsWith("/inference")) return { cognition: "echo" };
+      return path.endsWith("/wired-channels") ? { channels: [] } : [];
+    },
   } as unknown as OpenCompanyClient;
 }
 

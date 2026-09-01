@@ -42,7 +42,16 @@ function stubClient(opts: {
 }): OpenCompanyClient {
   return {
     scopeFor: () => SCOPE,
-    get: () => Promise.reject(new Error("not offered by this host")),
+    // The New-workflow dialog is two dialogs now: a copilot that can draft
+    // reduces it to one description box, and only a company that CANNOT draft
+    // gets the manual Name/ID/Description/Nodes/Connections form. This suite is
+    // about that form, so the cognition read answers `echo` — the offline
+    // brain, which is exactly the company the form exists for. See
+    // `createSurface` in `@/lib/workflow-create-surface`.
+    get: (path: string) =>
+      path.endsWith("/inference")
+        ? Promise.resolve({ cognition: "echo" })
+        : Promise.reject(new Error("not offered by this host")),
     listTeam: () => Promise.reject(new Error("not offered by this host")),
     post: (path: string, body?: unknown) => {
       if (path.endsWith("/workflows/validate")) {

@@ -31,11 +31,20 @@ import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 function stubClient(post: (path: string, body?: unknown) => Promise<unknown>) {
   return {
     scopeFor: () => "/api/companies/acme",
-    // Every GET the dialog fires on open is an optional picker source (roster,
-    // sub-workflow list, wired channels, cognition path) and each has a
+    // Every other GET the dialog fires on open is an optional picker source
+    // (roster, sub-workflow list, wired channels) and each has a
     // degrade-on-failure path, so one rejection stands in for "this host offers
     // none of them" and leaves the form fully authorable.
-    get: () => Promise.reject(new Error("not offered by this host")),
+    // The New-workflow dialog is two dialogs now: a copilot that can draft
+    // reduces it to one description box, and only a company that CANNOT draft
+    // gets the manual Name/ID/Description/Nodes/Connections form. This suite is
+    // about that form, so the cognition read answers `echo` — the offline
+    // brain, which is exactly the company the form exists for. See
+    // `createSurface` in `@/lib/workflow-create-surface`.
+    get: (path: string) =>
+      path.endsWith("/inference")
+        ? Promise.resolve({ cognition: "echo" })
+        : Promise.reject(new Error("not offered by this host")),
     listTeam: () => Promise.reject(new Error("not offered by this host")),
     post,
   } as unknown as OpenCompanyClient;
