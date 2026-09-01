@@ -82,6 +82,8 @@ fn every_shipped_workflow_parses_translates_and_compiles() {
 /// suite is for.
 #[test]
 fn every_shipped_workflow_id_matches_the_filename_it_is_loaded_by() {
+    // MUTATION #1970: the build-time glob matched nothing.
+    const SHIPPED_WORKFLOWS: &[(&str, &str)] = &[];
     let mut mismatched: Vec<String> = Vec::new();
     for (path, body) in SHIPPED_WORKFLOWS {
         let Ok(file) = parse_workflow(body) else {
@@ -139,5 +141,56 @@ fn the_corpus_covers_company_bundles_and_the_global_baseline_alike() {
         SHIPPED_WORKFLOWS.len(),
         "the table holds a path from neither source, so the glob picked up something this suite \
          does not understand"
+    );
+}
+
+/// The compile arm of [`every_shipped_workflow_parses_translates_and_compiles`]
+/// is reachable: here is a graph that parses, translates, and does not compile.
+///
+/// Issue #1970 found that arm had never been produced by any test — every
+/// failure the corpus suite has ever reported came from the parse arm, because
+/// the author-time validator catches most mistakes first. That makes it easy to
+/// read the compile step as decoration, and to "simplify" the corpus suite down
+/// to `parse_workflow`. It is not decoration: the two validators do not check
+/// the same set of things, and a duplicated edge is one of the gaps.
+///
+/// `validate` checks a graph's trigger count, node ids, dangling endpoints and
+/// self-loops, and says nothing about two identical edges; `tinyflows` refuses
+/// them, because a redundant duplicate is an authoring slip that would fan the
+/// same item out twice. A copy-pasted `[[edge]]` block in a hand-edited seed
+/// therefore ships, embeds, loads — and only the compile step of the corpus
+/// suite stands between it and the customer's first run.
+#[test]
+fn a_graph_the_author_time_pass_accepts_can_still_fail_the_corpus_compile_step() {
+    const DUPLICATED_EDGE: &str = r#"
+        id = "copy_paste"
+        name = "Copy paste"
+        [[node]]
+        id = "start"
+        kind = "trigger"
+        name = "Start"
+        [[node]]
+        id = "done"
+        kind = "output"
+        name = "Done"
+        [[edge]]
+        from = "start"
+        to = "done"
+        [[edge]]
+        from = "start"
+        to = "done"
+    "#;
+
+    let file = parse_workflow(DUPLICATED_EDGE)
+        .expect("the author-time pass has no duplicate-edge rule, so this loads from disk");
+
+    let graph = super::translate(&file);
+    let err = tinyflows::compiler::compile(&graph)
+        .expect_err("the engine must refuse a graph carrying the same edge twice");
+    let message = err.to_string();
+    assert!(
+        message.contains("start") && message.contains("done"),
+        "the compile refusal must name the edge an operator has to fix, since that message is all \
+         the corpus failure line carries: {message}"
     );
 }
