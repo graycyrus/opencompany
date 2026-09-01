@@ -295,3 +295,98 @@ fn an_output_nodes_destination_round_trips_for_every_kind_it_may_name() {
         "the graph must read as one that is trying to deliver somewhere"
     );
 }
+
+/// `strict_problems` runs the **strict** pass, and the lenient one is not a
+/// weaker version of it — it is a different answer.
+///
+/// Issue #1970: `a_builder_made_graph_is_one_the_console_would_also_accept`
+/// asserts only `problems.is_empty()`, which a **lenient** pass satisfies more
+/// easily than a strict one, so flipping `validate_workflow(&self.raw, true)` to
+/// `false` made that assertion weaker rather than redder and left the guard
+/// every graph-based suite leans on standing in name only. This is the
+/// discriminator: the graph below loads through `parse_workflow` — the lenient
+/// read path a pre-#661 file still has to survive (issue #682) — and the console
+/// would refuse to save it, so an empty problem list here can only mean the
+/// strict pass never ran.
+///
+/// Both strict-only families are named, because they are enforced in different
+/// places: per-kind required config (`workflow_file.rs`, issue #661) and the
+/// `condition` branch label vocabulary.
+#[test]
+fn strict_problems_reports_what_only_the_strict_author_time_pass_refuses() {
+    let graph = wf("pre_661")
+        .trigger("start")
+        // A condition with no branch expression, whose branch carries no
+        // `yes`/`no` label. Both are strict-only refusals.
+        .condition("gate", "")
+        .output("done")
+        .edge("start", "gate")
+        .edge("gate", "done");
+
+    graph.try_build().expect(
+        "the lenient read path must still load this, or the graph proves nothing about which pass \
+         ran",
+    );
+
+    let problems = graph.strict_problems();
+    assert!(
+        problems.iter().any(|p| p.contains("config.field")),
+        "the strict pass must report a `condition` with no `config.field` (issue #661); a lenient \
+         pass reports nothing at all, which is why an `is_empty()` assertion cannot tell them \
+         apart: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("must be labeled `yes` or `no`")),
+        "the strict pass must report a condition branch that names no port — the label rule is \
+         the other half of what the console refuses and the loader accepts: {problems:?}"
+    );
+}
+
+/// Every node keeps a display name, and so does the workflow.
+///
+/// Issue #1970: nothing asserted `RawNode::name` or `RawWorkflow::name`, so a
+/// builder that emitted an empty name for every node was invisible — such a
+/// graph still parses, still translates, still compiles, and every suite built
+/// on it stays green. The name is what the console lists and what an operator
+/// reads on a run card, so a corpus of nameless nodes is a corpus of graphs no
+/// operator could tell apart.
+#[test]
+fn a_node_and_the_workflow_both_keep_the_display_name_the_builder_gave_them() {
+    let file = every_kind().build();
+    let named = |id: &str| {
+        file.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| panic!("node `{id}` is in the built graph"))
+            .name
+            .as_str()
+    };
+
+    assert_eq!(
+        file.name, "Every kind",
+        "`display_name` must reach the parsed graph — it is the title the console lists"
+    );
+    assert_eq!(
+        named("start"),
+        "Nightly",
+        "`named` must override the default rather than being dropped on the way through TOML"
+    );
+    assert_eq!(
+        named("draft"),
+        "draft",
+        "a node given no explicit name is named after its id, never left blank"
+    );
+
+    let default = wf("unnamed")
+        .trigger("start")
+        .output("done")
+        .edge("start", "done")
+        .build();
+    assert_eq!(
+        default.name, "unnamed",
+        "a workflow given no `display_name` is named after its id, so no builder-made graph is \
+         ever anonymous"
+    );
+}
