@@ -18,36 +18,62 @@
 //! Each fix arrived with a test pinning **its own** arm. Nothing asserted the
 //! invariant across the set, so the fourth omission was only ever a matter of
 //! which exit someone next added a field to. That is what this table is: one
-//! statement of the post-pass, evaluated against all six exits, so a new exit
-//! is covered by adding a row rather than by somebody remembering.
+//! statement of the post-pass, evaluated against all six exits, so a reviewer
+//! comparing two exits reads two rows rather than two unrelated tests.
+//!
+//! # What the table does not do
+//!
+//! It cannot notice a **seventh** exit. Nothing here reads
+//! `run_workflow_inner`'s source, so an exit added without a row is an exit
+//! nothing drives — the same silence as before, one file further along. The
+//! table's value is that adding the row is a two-line change and the six
+//! expectations are stated side by side, not that anything will demand it.
+//! Do not read [`TABLE`] as an enforced inventory.
+//!
+//! Deliberately absent for the same reason: a test asserting that `TABLE`
+//! itself lists what it lists, or that the `partial` flags in `TABLE` follow
+//! the rule the module docs state. Both were written first and both were
+//! removed — they compare a constant in this file against another constant in
+//! this file, so no change to `run_workflow_inner` can make either fail. Every
+//! claim below is instead evaluated against a real run.
 //!
 //! # Why a unit test could not have caught any of the three
 //!
 //! `reclassify_capped_nodes` itself was never broken — it has unit tests, and
 //! they passed throughout all three regressions. The defect was always that a
 //! *call site* did not exist. A unit test of a function cannot observe a
-//! caller's failure to call it; only driving each exit end to end can.
+//! caller's failure to call it; only driving each exit end to end can. That is
+//! also why [`assert_settle_invariants`] drives the runner rather than calling
+//! the post-pass helpers itself: a table that re-implemented the arms locally
+//! and compared them to itself would pin nothing at all.
+//!
+//! # `persist_run_output`'s `partial` flag
+//!
+//! `persist_run_output` is reached from four call sites, `partial = true` on
+//! two of them. The rule is `partial == true` **iff** the engine returned no
+//! `outcome.output`, and no test asserted it before this file: the existing
+//! ones all check the snapshot's *content* and ignore the one bit that tells a
+//! reader whether they are looking at a whole run or a fragment. Each row below
+//! states the flag its exit must write, and the assertion reads it back off the
+//! durable record.
 //!
 //! # The seventh arm
 //!
-//! `run_workflow_inner` also has a [`PROGRESS_DRAIN_TIMEOUT`] fallback, where
-//! the node-progress collector fails to shut down and the run settles with an
-//! empty row list. It is **not a seventh settle exit**: it is a fallback
-//! *inside* the drain, upstream of the `match` that chooses one of the six, and
-//! whichever exit is taken afterwards is one of the six below. Reaching it
-//! deliberately would need an observer `Arc` clone parked somewhere longer-lived
-//! than the engine future, which no test can arrange from outside the runner —
-//! so what is assertable about it is its **latency**, and
+//! `run_workflow_inner` also has a `PROGRESS_DRAIN_TIMEOUT` fallback, where the
+//! node-progress collector fails to shut down and the run settles with an empty
+//! row list. It is **not a seventh settle exit**: it is a fallback *inside* the
+//! drain, upstream of the `match` that chooses one of the six, and whichever
+//! exit is taken afterwards is one of the six below. Reaching it deliberately
+//! would need an observer `Arc` clone parked somewhere longer-lived than the
+//! engine future, which no test can arrange from outside the runner — so what
+//! is assertable about it is its **latency**, and
 //! `a_cancelled_run_settles_fast_keeping_only_its_completed_nodes` in
 //! `runner.rs` already asserts exactly that (it fails at the full 10s drain
-//! timeout when the engine future is not dropped before the observer). This
-//! file notes it in [`ExitUnderTest`]'s docs rather than pretending to drive it.
+//! timeout when the engine future is not dropped before the observer).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use serde_json::Value;
 
 use crate::Result;
 use crate::company::WorkflowFile;
@@ -115,12 +141,6 @@ enum CappedReading {
 }
 
 /// Whether `persist_run_output` ran on an exit, and with which `partial` flag.
-///
-/// The flag is the property nothing asserted before: five call sites, `true` on
-/// two and `false` on three, and every existing test checks the snapshot's
-/// *content* while ignoring the one bit that tells a reader whether they are
-/// looking at a whole run or a fragment. The rule is
-/// `partial == true` **iff** the engine returned no `outcome.output`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PersistedAs {
     /// Called with `partial = true` — the arm has no `outcome.output` and falls
@@ -141,8 +161,8 @@ struct ExitExpectation {
     capped: CappedReading,
     /// Whether the durable snapshot was written, and with which flag.
     persist: PersistedAs,
-    /// Whether the tail node must read `Blocked` (`None` when the fixture makes
-    /// no node block on this exit).
+    /// The status the tail node must settle with, or `None` on the two exits
+    /// where the stop lands before it settles at all.
     tail_status: Option<WorkflowNodeStatus>,
     /// Whether `run.cancelled` must be set.
     cancelled: bool,
@@ -155,9 +175,6 @@ struct ExitExpectation {
 }
 
 /// The six exits and the single post-pass they must all perform.
-///
-/// Adding an exit to `run_workflow_inner` without adding a row here fails
-/// [`the_table_covers_every_settle_exit_exactly_once`].
 const TABLE: &[ExitExpectation] = &[
     ExitExpectation {
         exit: ExitUnderTest::GenuineFailure,
@@ -215,355 +232,27 @@ const TABLE: &[ExitExpectation] = &[
     },
 ];
 
-// ---------------------------------------------------------------------------
-// The fixture
-// ---------------------------------------------------------------------------
-
-/// `start -> capped_work -> tail_work -> done`, built through the testkit so the
-/// graph every exit is driven over is one an operator could have saved.
+/// The one row describing `exit`.
 ///
-/// Strictly sequential on purpose: `capped_work` therefore always settles — and
-/// always pushes into `RunCappedNodes` — **before** `tail_work` does whatever
-/// the exit under test needs, with no race to arrange. Every row in [`TABLE`]
-/// is then a statement about the same graph, which is what makes the table a
-/// comparison rather than six unrelated tests.
-fn settle_arms_graph() -> WorkflowFile {
-    wf("settle_arms")
-        .display_name("Settle arms")
-        .trigger("start")
-        .agent("capped_work", "capped_agent")
-        .summary("Loop until the iteration cap.")
-        .agent("tail_work", "tail_agent")
-        .summary("Settle however the exit under test needs.")
-        .output("done")
-        .edge("start", "capped_work")
-        .edge("capped_work", "tail_work")
-        .edge("tail_work", "done")
-        .build()
-}
-
-/// What `tail_agent` does, which is the only thing that differs between exits.
-enum TailBehaviour {
-    /// Return a plain successful turn.
-    Succeed,
-    /// Return an error the blocker classifier does **not** recognise, so it
-    /// fails the node rather than parking a blocker card — a genuine failure.
-    Fail,
-    /// Park an approval request, which `HarnessAgentRunner` turns into a block.
-    Block {
-        approvals: crate::harness::policy::ApprovalRequestQueue,
-    },
-    /// Announce arrival, then wait to be released. The test cancels first and
-    /// releases second, so the token is already flipped when the turn resolves
-    /// and the engine winds down at the next boundary.
-    HoldUntilReleased {
-        entered: Arc<tokio::sync::Notify>,
-        release: Arc<tokio::sync::Notify>,
-    },
-    /// Announce arrival and never return, so the run can only be stopped by the
-    /// hard abort.
-    Wedge {
-        entered: Arc<tokio::sync::Notify>,
-    },
-}
-
-/// The turn double for [`settle_arms_graph`].
-///
-/// `capped_agent` always truncates at the iteration cap — `Ok` with
-/// `hit_iteration_cap: true`, the exact signal `reclassify_capped_nodes`
-/// reconciles — so every exit has a capped node upstream to make a claim about.
-struct SettleArmsTurn {
-    tail: TailBehaviour,
-    /// How many turns the double served, so a fixture that never reached the
-    /// tail can say so instead of asserting on a run it did not shape.
-    turns: Arc<AtomicUsize>,
-}
-
-impl SettleArmsTurn {
-    async fn execute(&self, agent_id: &str) -> Result<crate::harness::TurnOutcome> {
-        self.turns.fetch_add(1, Ordering::SeqCst);
-        if agent_id == "capped_agent" {
-            return Ok(capped_turn());
-        }
-        match &self.tail {
-            TailBehaviour::Succeed => Ok(plain_turn("the tail finished")),
-            TailBehaviour::Fail => Err(crate::error::OpenCompanyError::Harness(
-                "synthetic tail failure, deliberately unclassifiable as a blocker".to_string(),
-            )),
-            TailBehaviour::Block { approvals } => {
-                approvals.push(crate::harness::policy::ApprovalRequest {
-                    tool: "shell".to_string(),
-                    reason: "synthetic approval parked by the tail node".to_string(),
-                    effect: crate::ports::types::Effect {
-                        kind: "shell".to_string(),
-                        group: crate::ports::types::EffectGroup::Other,
-                        amount_usd: None,
-                        established_thread: false,
-                        first_time_counterparty: false,
-                        payload: serde_json::json!({ "command": "finish-report" }),
-                        agent: Some(agent_id.to_string()),
-                        run_id: None,
-                    },
-                });
-                Ok(plain_turn("Waiting for approval."))
-            }
-            TailBehaviour::HoldUntilReleased { entered, release } => {
-                entered.notify_waiters();
-                release.notified().await;
-                Ok(plain_turn("released"))
-            }
-            TailBehaviour::Wedge { entered } => {
-                entered.notify_waiters();
-                std::future::pending::<()>().await;
-                unreachable!("a wedged turn is only ever dropped, never resumed")
-            }
-        }
-    }
-}
-
-/// A turn that truncated at the `max_tool_iterations` cap: `Ok` at the engine
-/// boundary, `Failed` on its own attempt row — the disagreement issue #1865's
-/// post-pass exists to reconcile.
-fn capped_turn() -> crate::harness::TurnOutcome {
-    crate::harness::TurnOutcome {
-        reply: "partial answer, still going".to_string(),
-        steps: Vec::new(),
-        hit_iteration_cap: true,
-        abnormal_stop: None,
-        halted_for_spend: None,
-        budget_paused: None,
-    }
-}
-
-fn plain_turn(reply: &str) -> crate::harness::TurnOutcome {
-    crate::harness::TurnOutcome {
-        reply: reply.to_string(),
-        steps: Vec::new(),
-        hit_iteration_cap: false,
-        abnormal_stop: None,
-        halted_for_spend: None,
-        budget_paused: None,
-    }
-}
-
-#[async_trait]
-impl crate::runtime::delegation::RunTurn for SettleArmsTurn {
-    async fn run(
-        &self,
-        _company: &CompanyId,
-        agent_id: &str,
-        _message: &str,
-        _chat_id: crate::runtime::delegation::ChatTarget<'_>,
-    ) -> Result<crate::harness::TurnOutcome> {
-        self.execute(agent_id).await
-    }
-
-    async fn run_steered(
-        &self,
-        _company: &CompanyId,
-        agent_id: &str,
-        _message: &str,
-        _control: &crate::company::steer::SteerControl,
-        _chat_id: crate::runtime::delegation::ChatTarget<'_>,
-        _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
-    ) -> Result<crate::harness::TurnOutcome> {
-        self.execute(agent_id).await
-    }
-
-    async fn run_steered_background(
-        &self,
-        _company: &CompanyId,
-        agent_id: &str,
-        _message: &str,
-        _control: &crate::company::steer::SteerControl,
-        _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
-    ) -> Result<crate::harness::TurnOutcome> {
-        self.execute(agent_id).await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Driving one exit
-// ---------------------------------------------------------------------------
-
-/// What one exit left behind: the run body (the partial one on the failure
-/// exit) and the durable snapshot, if any.
-struct Settled {
-    run: WorkflowRun,
-    stored: Option<crate::ports::WorkflowRunOutputRecord>,
-}
-
-/// Drives `exit` over [`settle_arms_graph`] and returns what it settled into.
-async fn drive(exit: ExitUnderTest) -> Settled {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (mut deps, _journal) =
-        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
-    let store = Arc::new(FsOps::new(dir.path()));
-    deps.run_output_store = Some(store.clone());
-    let record = super::gated_tool_turn_test::record();
-    let turns = Arc::new(AtomicUsize::new(0));
-
-    let mut ctx = WorkflowRunContext::new(false);
-    ctx.dry_run = exit == ExitUnderTest::DryRun;
-    let run_id = ctx.run_id.clone();
-    let cancel = ctx.cancel.clone();
-
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let tail = match exit {
-        ExitUnderTest::GenuineFailure => TailBehaviour::Fail,
-        ExitUnderTest::OnlyBlocked => TailBehaviour::Block {
-            approvals: deps.approval_requests.clone(),
-        },
-        ExitUnderTest::HardAbort => TailBehaviour::Wedge {
-            entered: entered.clone(),
-        },
-        ExitUnderTest::CleanCancel => TailBehaviour::HoldUntilReleased {
-            entered: entered.clone(),
-            release: release.clone(),
-        },
-        ExitUnderTest::DryRun | ExitUnderTest::Normal => TailBehaviour::Succeed,
-    };
-    let turn = Arc::new(SettleArmsTurn {
-        tail,
-        turns: turns.clone(),
-    });
-
-    let mut running = Box::pin(run_workflow_lane_aware(
-        turn,
-        deps,
-        &record,
-        &settle_arms_graph(),
-        serde_json::json!({ "request": "go" }),
-        &ctx,
-    ));
-
-    // The two cancelling exits have to reach the tail node before the stop, or
-    // they would be testing a cancel that arrived before the run started.
-    let result = match exit {
-        ExitUnderTest::HardAbort | ExitUnderTest::CleanCancel => {
-            let reached = entered.notified();
-            tokio::select! {
-                _ = &mut running => panic!(
-                    "the run settled before the tail node was reached, so this fixture drove \
-                     some other exit than {exit:?}"
-                ),
-                () = reached => {}
-            }
-            cancel.cancel();
-            // Clean cancel: release AFTER the token is flipped, so the turn
-            // resolves into a wound-down engine. Hard abort: never released.
-            if exit == ExitUnderTest::CleanCancel {
-                release.notify_one();
-            }
-            tokio::time::timeout(HARD_ABORT_CEILING, running)
-                .await
-                .unwrap_or_else(|_| {
-                    panic!("the stopped run never came back within {HARD_ABORT_CEILING:?}")
-                })
-        }
-        _ => running.await,
-    };
-
-    let run = match result {
-        Ok(run) => run,
-        Err(err) => err
-            .partial_run()
-            .expect("a genuine failure carries the partial run it had already done")
-            .clone(),
-    };
-    let stored = store
-        .get_run_output(&record.id, &run_id)
-        .await
-        .expect("reading the durable snapshot back must not itself fail");
-    Settled { run, stored }
-}
-
-// ---------------------------------------------------------------------------
-// The shared assertion
-// ---------------------------------------------------------------------------
-
-/// The whole post-pass, asserted against one row of [`TABLE`].
-async fn assert_settle_invariants(expected: &ExitExpectation) {
-    let exit = expected.exit;
-    let settled = drive(exit).await;
-    let run = &settled.run;
-
-    assert_eq!(
-        run.cancelled, expected.cancelled,
-        "on the {exit:?} exit the run's own reading of whether an operator stopped it is wrong, \
-         which is what decides whether it lands in the failure count: {:?}",
-        run.nodes
+/// Looked up rather than indexed by position, so reordering [`TABLE`] cannot
+/// silently re-point a test at another exit — the failure mode the old
+/// positional `TABLE[3]` calls needed a guard test of their own to survive.
+fn row(exit: ExitUnderTest) -> &'static ExitExpectation {
+    let mut matches = TABLE.iter().filter(|row| row.exit == exit);
+    let found = matches
+        .next()
+        .unwrap_or_else(|| panic!("no TABLE row describes the {exit:?} exit"));
+    assert!(
+        matches.next().is_none(),
+        "TABLE describes the {exit:?} exit more than once, so the two rows can disagree and only \
+         the first would ever be checked"
     );
-
-    match expected.capped {
-        CappedReading::Reclassified => {
-            assert_node_ran(run, "capped_work");
-            assert_node_status(run, "capped_work", WorkflowNodeStatus::Error);
-        }
-        CappedReading::NoRowsAtAll => {
-            assert!(
-                run.nodes.is_empty(),
-                "the {exit:?} exit reports no result, so it must carry no node rows — a row here \
-                 means the exit grew a body and its post-pass expectations are now unstated: {:?}",
-                run.nodes
-            );
-        }
-        CappedReading::NothingCanBeCapped => {
-            assert_node_ran(run, "capped_work");
-            assert_node_status(run, "capped_work", WorkflowNodeStatus::Ok);
-        }
-    }
-
-    match expected.tail_status {
-        Some(status) => assert_node_status(run, "tail_work", status),
-        None => assert_node_skipped(run, "done"),
-    }
-
-    match expected.persist {
-        PersistedAs::NotCalled => assert!(
-            settled.stored.is_none(),
-            "the {exit:?} exit must persist no run-output snapshot at all, and one was written: \
-             {:?}",
-            settled.stored
-        ),
-        PersistedAs::Partial | PersistedAs::Complete => {
-            let stored = settled.stored.as_ref().unwrap_or_else(|| {
-                panic!(
-                    "the {exit:?} exit must persist a run-output snapshot, and none was written — \
-                     reopening this run from History would report that it predates output capture"
-                )
-            });
-            let want_partial = expected.persist == PersistedAs::Partial;
-            assert_eq!(
-                stored.partial, want_partial,
-                "the {exit:?} exit persisted its snapshot with partial = {}, but the flag must be \
-                 true exactly when the engine returned no outcome.output — an operator reading \
-                 this record cannot tell a whole run from a fragment: {stored:?}",
-                stored.partial
-            );
-            assert_eq!(
-                stored.workflow_id, "settle_arms",
-                "the snapshot must name the workflow that produced it"
-            );
-        }
-    }
-
-    assert_eq!(
-        !run.approvals.is_empty(),
-        expected.keeps_approval_receipts,
-        "the {exit:?} exit's handling of the approval receipts its nodes filed is wrong. A card \
-         is durable the moment it is written, so an exit that drops the row leaves a card on the \
-         operator's Approvals page that no run admits to opening: {:?}",
-        run.approvals
-    );
-    assert_eq!(
-        !run.blocked_nodes.is_empty(),
-        expected.keeps_blocked_nodes,
-        "the {exit:?} exit's reading of which nodes are waiting on a person is wrong: {:?}",
-        run.blocked_nodes
-    );
+    found
 }
+
+// Split for the repo's 500-line ceiling; both halves are part of this module.
+include!("settle_arms_test/settle_arms_test_part_01_tests.rs");
+include!("settle_arms_test/settle_arms_test_part_02_tests.rs");
 
 // ---------------------------------------------------------------------------
 // One test per exit
@@ -578,7 +267,7 @@ async fn assert_settle_invariants(expected: &ExitExpectation) {
 /// exit, and a function's tests cannot observe a caller that never calls it.
 #[tokio::test]
 async fn a_genuine_failure_settles_with_a_partial_snapshot_and_its_capped_nodes_reclassified() {
-    assert_settle_invariants(&TABLE[0]).await;
+    assert_settle_invariants(ExitUnderTest::GenuineFailure).await;
 }
 
 /// Issue #1963. The `Some(Err)` exit the containment check relabels as a block,
@@ -590,7 +279,7 @@ async fn a_genuine_failure_settles_with_a_partial_snapshot_and_its_capped_nodes_
 /// during a real engine run, so the classification only exists end to end.
 #[tokio::test]
 async fn an_only_blocked_halt_settles_ok_keeping_its_receipts_and_its_partial_snapshot() {
-    assert_settle_invariants(&TABLE[1]).await;
+    assert_settle_invariants(ExitUnderTest::OnlyBlocked).await;
 }
 
 /// Issue #1963. The `None` exit: the node could not reach a boundary, so the
@@ -606,7 +295,7 @@ async fn an_only_blocked_halt_settles_ok_keeping_its_receipts_and_its_partial_sn
 /// real wedged turn.
 #[tokio::test]
 async fn a_hard_abort_settles_cancelled_with_no_rows_and_persists_nothing() {
-    assert_settle_invariants(&TABLE[2]).await;
+    assert_settle_invariants(ExitUnderTest::HardAbort).await;
 }
 
 /// Issue #1963. The clean node-boundary cancel — a third early return with its
@@ -619,7 +308,7 @@ async fn a_hard_abort_settles_cancelled_with_no_rows_and_persists_nothing() {
 /// inferred.
 #[tokio::test]
 async fn a_clean_cancel_settles_with_a_complete_snapshot_and_its_capped_nodes_reclassified() {
-    assert_settle_invariants(&TABLE[3]).await;
+    assert_settle_invariants(ExitUnderTest::CleanCancel).await;
 }
 
 /// Issue #1963. The dry-run exit, which skips the capped reclassification
@@ -632,7 +321,7 @@ async fn a_clean_cancel_settles_with_a_complete_snapshot_and_its_capped_nodes_re
 /// forgotten one.
 #[tokio::test]
 async fn a_dry_run_settles_without_reclassifying_its_capped_nodes_and_persists_nothing() {
-    assert_settle_invariants(&TABLE[4]).await;
+    assert_settle_invariants(ExitUnderTest::DryRun).await;
 }
 
 /// Issue #1963. The ordinary finish — the one exit whose post-pass was never
@@ -640,95 +329,5 @@ async fn a_dry_run_settles_without_reclassifying_its_capped_nodes_and_persists_n
 /// exceptions.
 #[tokio::test]
 async fn a_normal_finish_settles_with_a_complete_snapshot_and_its_capped_nodes_reclassified() {
-    assert_settle_invariants(&TABLE[5]).await;
-}
-
-/// Issue #1963. The table itself: every exit appears exactly once, and the rows
-/// are in the order the tests index them.
-///
-/// This is what makes adding an exit to `run_workflow_inner` cost a row rather
-/// than a silent gap — the failure mode the three historical regressions all
-/// share is an exit nobody wrote anything about.
-#[test]
-fn the_table_covers_every_settle_exit_exactly_once() {
-    use ExitUnderTest::*;
-    let want = [
-        GenuineFailure,
-        OnlyBlocked,
-        HardAbort,
-        CleanCancel,
-        DryRun,
-        Normal,
-    ];
-    let got: Vec<ExitUnderTest> = TABLE.iter().map(|row| row.exit).collect();
-    assert_eq!(
-        got,
-        want.to_vec(),
-        "the settle table no longer lists every exit of `run_workflow_inner` exactly once, in \
-         order. Each `#[tokio::test]` above indexes TABLE by position, so a reordered or missing \
-         row silently re-points a test at another exit."
-    );
-}
-
-/// Issue #1963. `persist_run_output`'s flag is not free-form: across the whole
-/// table `partial = true` happens on exactly the two exits that have no
-/// `outcome.output` to persist.
-///
-/// Asserted over the table rather than per exit because the property is about
-/// the *set*: a fifth call site added with the wrong flag would pass every
-/// single-exit test above while breaking the rule an operator reads the record
-/// under.
-#[test]
-fn partial_is_flagged_on_exactly_the_two_exits_that_have_no_engine_output() {
-    let partial: Vec<ExitUnderTest> = TABLE
-        .iter()
-        .filter(|row| row.persist == PersistedAs::Partial)
-        .map(|row| row.exit)
-        .collect();
-    assert_eq!(
-        partial,
-        vec![ExitUnderTest::GenuineFailure, ExitUnderTest::OnlyBlocked],
-        "`partial` must be set exactly on the exits the engine returns no output for. Any other \
-         exit flagging partial is telling the console a complete run is a fragment, or worse, a \
-         fragment is complete."
-    );
-}
-
-/// Issue #1963. Guards the fixture rather than the runner: the settle graph
-/// really does put a capped node upstream of the tail on every exit, so a row
-/// asserting `Reclassified` is asserting something.
-///
-/// Without this a later edit that dropped `hit_iteration_cap` from the double
-/// would leave four rows passing vacuously — the node's row would read `Ok`,
-/// nothing would be capped, and `assert_node_status(.., Error)` would simply
-/// start failing for the wrong reason with a message about the runner.
-#[tokio::test]
-async fn the_fixture_really_caps_its_upstream_node_before_the_tail_settles() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (deps, _journal) =
-        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
-    let turns = Arc::new(AtomicUsize::new(0));
-    let turn = Arc::new(SettleArmsTurn {
-        tail: TailBehaviour::Succeed,
-        turns: turns.clone(),
-    });
-    let run = run_workflow_lane_aware(
-        turn,
-        deps,
-        &super::gated_tool_turn_test::record(),
-        &settle_arms_graph(),
-        Value::Null,
-        &WorkflowRunContext::new(false),
-    )
-    .await
-    .expect("the plain fixture run settles");
-
-    assert_eq!(
-        turns.load(Ordering::SeqCst),
-        2,
-        "both agent nodes must have taken a turn, or the graph the table drives is not the graph \
-         it claims to drive: {:?}",
-        run.nodes
-    );
-    assert_node_ran(&run, "done");
+    assert_settle_invariants(ExitUnderTest::Normal).await;
 }

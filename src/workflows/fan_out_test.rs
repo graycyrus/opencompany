@@ -228,7 +228,10 @@ async fn run_fan_out(
 // ---------------------------------------------------------------------------
 
 /// `start` fans out to `left` and `right`, both of which feed `join`.
-fn diamond_graph(join_kind: DiamondJoin) -> WorkflowFile {
+///
+/// `join_first` is the arm whose `-> join` edge is declared **first**, which is
+/// the only thing that varies between the two graphs the ordering test drives.
+fn diamond_graph(join_kind: DiamondJoin, join_first: Arm) -> WorkflowFile {
     let builder = wf("diamond")
         .display_name("Diamond")
         .trigger("start")
@@ -240,14 +243,40 @@ fn diamond_graph(join_kind: DiamondJoin) -> WorkflowFile {
         DiamondJoin::Agent => builder.agent("join", "join_agent").summary("Fold both arms."),
         DiamondJoin::Merge => builder.merge("join"),
     };
-    builder
+    let builder = builder
         .output("done")
         .edge("start", "left")
-        .edge("start", "right")
-        .edge("left", "join")
-        .edge("right", "join")
-        .edge("join", "done")
-        .build()
+        .edge("start", "right");
+    let builder = match join_first {
+        Arm::Left => builder.edge("left", "join").edge("right", "join"),
+        Arm::Right => builder.edge("right", "join").edge("left", "join"),
+    };
+    builder.edge("join", "done").build()
+}
+
+/// One arm of the diamond.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arm {
+    Left,
+    Right,
+}
+
+impl Arm {
+    /// The reply that arm's agent gives, and therefore the text to look for in
+    /// the join's folded turn.
+    fn finding(self) -> &'static str {
+        match self {
+            Arm::Left => "the left arm's finding",
+            Arm::Right => "the right arm's finding",
+        }
+    }
+
+    fn other(self) -> Arm {
+        match self {
+            Arm::Left => Arm::Right,
+            Arm::Right => Arm::Left,
+        }
+    }
 }
 
 /// Which node kind sits at the bottom of the diamond.
@@ -259,17 +288,40 @@ enum DiamondJoin {
     Merge,
 }
 
-/// Issue #1963. **The keystone.** The turn text a join node is sent is
-/// identical across runs of the same graph over the same data, whichever arm of
-/// the fan-out happens to finish first.
+/// Issue #1963. **The keystone.** The order a join node's predecessors appear
+/// in its folded turn is the order the graph declares their edges — never the
+/// order the two arms happened to finish in.
 ///
-/// A unit test cannot make this claim. `caps::upstream`'s own order tests hand
-/// the fold its sources in a chosen order and check the allocation is stable —
-/// they can never observe the *run* choosing a different order, because in a
-/// unit test there is no run and nothing races. Here the two arms really do
-/// finish in opposite orders (the delays are swapped between runs), which is
-/// the only way to see whether the composed turn follows the graph or the
-/// stopwatch.
+/// # Why the claim is directional
+///
+/// The first version of this test asserted only that four runs composed the
+/// *same* text, alternating which arm won the race. That claim is true, but it
+/// is true by construction and no realistic change to the engine or the host
+/// can falsify it: `collect_input` walks a node's incoming **edges**, which are
+/// a static property of the compiled graph, so there is no path by which a
+/// completion order could reach the fold at all. A test that cannot fail is not
+/// coverage, however good its failure message reads.
+///
+/// So this asserts the stronger, falsifiable thing: `left`'s finding appears
+/// **before** `right`'s exactly when the `left -> join` edge is declared first,
+/// and after it when the edges are declared the other way round. Reversing the
+/// order predecessors are rendered in — in the engine's `collect_input` or in
+/// the host's `render_upstream_input` — turns one of the two halves red.
+///
+/// Three separate orderings are pulled apart by that, and only the edge order
+/// survives:
+///
+/// | candidate ordering | ruled out by |
+/// |---|---|
+/// | completion order | the delays are swapped between rounds and the text does not move |
+/// | node-id order (`left` < `right`) | the second graph declares `right -> join` first and gets `right` first |
+/// | edge declaration order | — the one that holds |
+///
+/// # Why a unit test cannot make this claim
+///
+/// `caps::upstream`'s own order tests hand the fold its sources in a chosen
+/// order and check the allocation is stable. They can never observe the *run*
+/// choosing an order, because in a unit test there is no run and nothing races.
 ///
 /// If this ever fails, note what it means before treating it as a test bug: the
 /// same graph over the same inputs sends the model different text on different
@@ -277,62 +329,77 @@ enum DiamondJoin {
 /// becomes true-on-some-runs. That is precisely the coin-flip failure
 /// `caps::upstream` exists to end, one layer up from where it was fixed.
 #[tokio::test]
-async fn a_joins_folded_turn_is_identical_however_its_predecessors_race() {
-    let graph = diamond_graph(DiamondJoin::Agent);
-    let slow = Duration::from_millis(80);
+async fn a_joins_folded_turn_follows_the_graphs_edge_order_not_the_race() {
+    for declared_first in [Arm::Left, Arm::Right] {
+        let graph = diamond_graph(DiamondJoin::Agent, declared_first);
+        let slow = Duration::from_millis(80);
+        let mut texts: Vec<String> = Vec::new();
 
-    let mut texts: Vec<String> = Vec::new();
-    // Four runs, alternating which arm wins, so a fold that followed completion
-    // order would produce two distinct texts rather than one.
-    for round in 0..4 {
-        let left_first = round % 2 == 0;
-        let (run, lane) = run_fan_out(
-            &graph,
-            vec![
-                (
-                    "left_agent",
-                    ArmBehaviour::ReplyAfter {
-                        delay: if left_first { Duration::ZERO } else { slow },
-                        reply: "the left arm's finding",
-                    },
-                ),
-                (
-                    "right_agent",
-                    ArmBehaviour::ReplyAfter {
-                        delay: if left_first { slow } else { Duration::ZERO },
-                        reply: "the right arm's finding",
-                    },
-                ),
-            ],
-            json!({ "request": "compare both arms" }),
-        )
-        .await;
-        let run = run.expect("a clean diamond settles");
-        assert_node_ran(&run, "join");
-        assert_no_null_bindings_over(&run, &graph);
-        texts.push(
-            lane.turn_text("join_agent")
-                .expect("the join node's turn must have been composed and sent"),
-        );
-    }
+        // Four runs, alternating which arm wins the race, so an ordering that
+        // followed the stopwatch would disagree with itself between rounds.
+        for round in 0..4 {
+            let left_first = round % 2 == 0;
+            let (run, lane) = run_fan_out(
+                &graph,
+                vec![
+                    (
+                        "left_agent",
+                        ArmBehaviour::ReplyAfter {
+                            delay: if left_first { Duration::ZERO } else { slow },
+                            reply: Arm::Left.finding(),
+                        },
+                    ),
+                    (
+                        "right_agent",
+                        ArmBehaviour::ReplyAfter {
+                            delay: if left_first { slow } else { Duration::ZERO },
+                            reply: Arm::Right.finding(),
+                        },
+                    ),
+                ],
+                json!({ "request": "compare both arms" }),
+            )
+            .await;
+            let run = run.expect("a clean diamond settles");
+            assert_node_ran(&run, "join");
+            assert_no_null_bindings_over(&run, &graph);
 
-    let first = &texts[0];
-    for (round, text) in texts.iter().enumerate().skip(1) {
-        assert_eq!(
-            text,
-            first,
-            "run {round} composed the join node's turn differently from run 0, and the only \
-             thing that differed between them is which arm of the fan-out finished first. The \
-             text a node is sent must be a property of the graph, not of the race — otherwise \
-             the same workflow over the same data produces different work on different days.\n\
-             run 0: {first}\nrun {round}: {text}"
-        );
+            let text = lane
+                .turn_text("join_agent")
+                .expect("the join node's turn must have been composed and sent");
+            let first = text.find(declared_first.finding()).unwrap_or_else(|| panic!(
+                "the fold dropped the `{declared_first:?}` arm entirely, so this run is not a \
+                 fan-in at all: {text}"
+            ));
+            let second = text.find(declared_first.other().finding()).unwrap_or_else(|| panic!(
+                "the fold dropped the `{:?}` arm entirely, so this run is not a fan-in at all: \
+                 {text}",
+                declared_first.other()
+            ));
+            assert!(
+                first < second,
+                "with `{declared_first:?} -> join` declared first, the join was sent the \
+                 `{:?}` arm's finding ahead of it (round {round}, {} finished first). A join's \
+                 turn must be composed in the order the graph declares its edges: an author who \
+                 reorders the two paragraphs by editing the workflow gets nothing, and the same \
+                 graph over the same data sends the model different text on different days.\n\
+                 {text}",
+                declared_first.other(),
+                if left_first { "left" } else { "right" }
+            );
+            texts.push(text);
+        }
+
+        let first = &texts[0];
+        for (round, text) in texts.iter().enumerate().skip(1) {
+            assert_eq!(
+                text, first,
+                "with `{declared_first:?} -> join` declared first, run {round} composed the \
+                 join's turn differently from run 0, and the only thing that differed between \
+                 them is which arm finished first.\nrun 0: {first}\nrun {round}: {text}"
+            );
+        }
     }
-    assert!(
-        first.contains("the left arm's finding") && first.contains("the right arm's finding"),
-        "the fold must carry BOTH predecessors, or this test is comparing two runs that each \
-         dropped the same one: {first}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -412,29 +479,45 @@ async fn a_merge_runs_and_keeps_the_good_arm_when_its_sibling_failed() {
 // 3. split_out over an empty array
 // ---------------------------------------------------------------------------
 
-/// Issue #1963. `split_out` over an empty list fans out to nothing: it emits no
-/// items and invents none.
+/// The graph the two empty-fan-out tests below share:
+/// `start -> fan(split_out) -> worker(agent) -> done`.
+///
+/// A real `agent` sits between the fan and the output deliberately. The first
+/// version of this fixture ended at `done` and asserted that the output node
+/// had been sent no turn — which an output node never is, in any graph, so the
+/// assertion could not fail for any reason. `worker` is an agent the turn
+/// double records, so "nobody downstream was given work" becomes a claim about
+/// the run instead of a claim about the vocabulary.
+fn empty_fan_out_graph() -> WorkflowFile {
+    wf("split_empty")
+        .display_name("Split empty")
+        .trigger("start")
+        .split_out("fan", "items")
+        .agent("worker", "worker_agent")
+        .summary("Work one split item.")
+        .output("done")
+        .edge("start", "fan")
+        .edge("fan", "worker")
+        .edge("worker", "done")
+        .build()
+}
+
+/// Issue #1963. `split_out` over an empty list emits no items and invents none.
 ///
 /// The degenerate case of the vocabulary's fan-out node, and the one a real
 /// graph meets constantly — "split the search results" on the day the search
 /// returned none. The failure worth guarding is not a crash: it is a
-/// `split_out` that emits one item carrying the empty list, which sends a
-/// downstream agent off to work on nothing and reports a green run for it.
+/// `split_out` that emits one item carrying the empty list, which a downstream
+/// node then treats as a real result.
 ///
-/// A unit test of the node would choose its own input; only a run can show what
-/// the trigger's empty array actually resolves to through the binding.
+/// A unit test of the node would choose its own input. `split_out_tests.rs`'s
+/// `empty_array_emits_no_items` hands the executor an array directly; this
+/// drives the value from the trigger payload through the authored `=`-binding,
+/// which is where a graph an operator saved actually gets its list from.
 #[tokio::test]
 async fn a_split_out_over_an_empty_list_emits_no_items_and_invents_none() {
-    let graph = wf("split_empty")
-        .display_name("Split empty")
-        .trigger("start")
-        .split_out("fan", "items")
-        .output("done")
-        .edge("start", "fan")
-        .edge("fan", "done")
-        .build();
-
-    let (run, lane) = run_fan_out(&graph, Vec::new(), json!({ "items": [] })).await;
+    let graph = empty_fan_out_graph();
+    let (run, _lane) = run_fan_out(&graph, Vec::new(), json!({ "items": [] })).await;
     let run = run.expect("splitting an empty list is not an error");
 
     assert_node_ran(&run, "fan");
@@ -445,11 +528,48 @@ async fn a_split_out_over_an_empty_list_emits_no_items_and_invents_none() {
          nothing that a downstream node will treat as real work: {items:?}",
         items.len()
     );
-    assert!(
-        lane.turn_text("done").is_none(),
-        "nothing downstream of an empty fan-out should have been given a turn"
-    );
     assert_no_null_bindings_over(&run, &graph);
+}
+
+/// Issue #1963, and the defect it found: **the agent below an empty fan-out is
+/// given a turn anyway**. Tracked as issue #1971; `#[ignore]`d until that is
+/// decided, because fixing it is a change to run semantics and not this PR's to
+/// make.
+///
+/// What happens today, verbatim from the run this test drives: `fan` emits zero
+/// items, and `worker` is nevertheless activated and sent its authored summary
+/// with no upstream section at all. The model answers, the answer becomes the
+/// node's output, it travels to `done`, and the run settles green. So a
+/// workflow whose search returned nothing still pays for a model call and
+/// reports a result for it — and the result is whatever the model says when
+/// asked to work on an empty desk.
+///
+/// It is engine-level behaviour rather than an accident here: tinyflows routes
+/// on edges rather than on item counts, so a node that emitted nothing still
+/// activates its successors with an empty input list. That is a defensible rule
+/// for a `merge` or an `output`; for an `agent` it is a paid call with nothing
+/// to work on. Which of the two the vocabulary wants is the decision #1971 asks
+/// for.
+///
+/// No unit test could have found it. `split_out_tests.rs` already proves the
+/// executor emits nothing, and that test passes; what nothing observed was what
+/// the *run* does next.
+#[tokio::test]
+#[ignore = "issue #1971: an empty split_out still activates the agent below it"]
+async fn a_split_out_over_an_empty_list_gives_the_node_below_it_no_work() {
+    let graph = empty_fan_out_graph();
+    let (run, lane) = run_fan_out(&graph, Vec::new(), json!({ "items": [] })).await;
+    let run = run.expect("splitting an empty list is not an error");
+
+    assert!(
+        lane.turn_text("worker_agent").is_none(),
+        "the agent below an empty fan-out was given a turn, so a workflow that found nothing \
+         still paid a model to work on it and reported a green run for the result.\n\
+         sent: {:?}\nrows: {:?}\noutput: {}",
+        lane.turn_text("worker_agent"),
+        run.nodes,
+        run.output
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +591,7 @@ async fn a_split_out_over_an_empty_list_emits_no_items_and_invents_none() {
 /// `only_blocked_nodes_errored` over rows two concurrent agent turns produced.
 #[tokio::test]
 async fn a_diamond_whose_arms_both_park_reports_both_and_never_reaches_its_join() {
-    let graph = diamond_graph(DiamondJoin::Merge);
+    let graph = diamond_graph(DiamondJoin::Merge, Arm::Left);
 
     let (run, _lane) = run_fan_out(
         &graph,
