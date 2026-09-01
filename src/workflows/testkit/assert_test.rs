@@ -204,3 +204,45 @@ fn assert_completed_rejects_a_run_an_operator_stopped() {
 
     assert_completed(&run);
 }
+
+/// A run whose node stopped for a person did not complete, however clean the
+/// rest of its rows read.
+///
+/// Issue #1970: every run handed to `assert_completed` above carries only `ok`
+/// rows, so its unsettled filter was never given anything to reject — narrowing
+/// `status != Ok` to `status == Error`, which lets a `Blocked` node through, was
+/// green across all fifteen tests in this file, and so was a filter of
+/// `|_| false`. The `pending_approvals` check does not cover it: a node can
+/// settle `blocked` with nothing parked on the run (issue #881), which is
+/// exactly the shape below.
+#[test]
+#[should_panic(expected = "did not settle `ok`: [(\"publish\", Blocked)]")]
+fn assert_completed_rejects_a_run_whose_node_stopped_for_a_person() {
+    let run = run_with(json!([
+        ok_row("draft"),
+        { "node_id": "publish", "status": "blocked", "elapsed_ms": 2 },
+    ]));
+
+    assert!(
+        run.pending_approvals.is_empty(),
+        "the run parks nothing, so only the node status can catch this"
+    );
+    assert_completed(&run);
+}
+
+/// A failed node is the other half of the same filter.
+///
+/// Issue #1970: pinned alongside the blocked case so that a filter which keeps
+/// neither reading — the degenerate `|_| false` the audit called out — cannot
+/// pass. The failure must also *name* the node, because a caller who only
+/// learns "the run was not clean" has to go read the rows themselves.
+#[test]
+#[should_panic(expected = "did not settle `ok`: [(\"publish\", Error)]")]
+fn assert_completed_rejects_a_run_with_a_failed_node() {
+    let run = run_with(json!([
+        ok_row("draft"),
+        { "node_id": "publish", "status": "error", "elapsed_ms": 2 },
+    ]));
+
+    assert_completed(&run);
+}
