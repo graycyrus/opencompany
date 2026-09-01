@@ -688,12 +688,17 @@ export function WorkflowsView({
    * from a literal reading of the sentence, which is worth reading once and
    * dismissing deliberately.
    *
-   * Keyed by the workflow they describe rather than held bare, because a create
-   * MOVES the selection — so the selection-change sweep below has to tell
-   * "the operator navigated away from it" from "the operator has just this
-   * instant arrived on it", and a bare value cannot.
+   * Keyed by the workflow AND the company they describe rather than held bare.
+   * The workflow half is because a create MOVES the selection — so the
+   * selection-change sweep below has to tell "the operator navigated away from
+   * it" from "the operator has just this instant arrived on it", and a bare
+   * value cannot. The company half is because ids are only unique within a
+   * company: two companies with a `weekly-digest` would otherwise carry one's
+   * corrections onto the other's canvas, which is the failure every other
+   * persistent banner here is swept on the same axis to avoid.
    */
   const [createdNotes, setCreatedNotes] = useState<{
+    company: string | null;
     workflowId: string;
     notes: string[];
   } | null>(null);
@@ -1890,7 +1895,9 @@ export function WorkflowsView({
     // BEFORE the selection moves, so the sweep on `[selectedId, company]` sees
     // them already keyed to the workflow it is arriving at.
     const kept = (notes ?? []).filter((note) => note.trim().length > 0);
-    setCreatedNotes(kept.length ? { workflowId: created.id, notes: kept } : null);
+    setCreatedNotes(
+      kept.length ? { company, workflowId: created.id, notes: kept } : null,
+    );
     // Newer than any list request already in flight — see `localWriteRef`.
     // This is the race the operator would notice most: the workflow they just
     // created disappearing out of the picker a moment after it appeared.
@@ -1940,7 +1947,7 @@ export function WorkflowsView({
     // reconciles that response when it lands.
     hasCreatedLocallyRef.current = true;
     clearNudge();
-  }, [announceDisarm, clearNudge]);
+  }, [announceDisarm, clearNudge, company]);
 
   // Issue #1110: leave the workflow on screen and go back to the index.
   //
@@ -2283,7 +2290,9 @@ export function WorkflowsView({
     // the workflow they are about. A create sets them and moves the selection
     // in the same batch, so an unconditional clear here would wipe them on the
     // very render that was supposed to show them.
-    setCreatedNotes((prev) => (prev && prev.workflowId === selectedId ? prev : null));
+    setCreatedNotes((prev) =>
+      prev && prev.workflowId === selectedId && prev.company === company ? prev : null,
+    );
     // Issue #1704: and the graph-load error, whose reach is wider still. It
     // renders outside the `detailOpen` gate, so "could not load the workflow
     // graph" about the workflow just left follows the operator all the way back
@@ -3083,7 +3092,7 @@ export function WorkflowsView({
           the canvas is the first surface these can be read on — and they are
           the answer to "why does this graph not say quite what I asked for?".
           Not destructive: nothing is wrong, something was decided for you. */}
-      {detailOpen && createdNotes && createdNotes.workflowId === selectedId && (
+      {detailOpen && createdNotes && (
         <div className="px-4 pt-3">
           <Alert data-testid="workflow-created-notes">
             <AlertDescription className="flex flex-wrap items-start justify-between gap-2">

@@ -99,7 +99,14 @@ function client(): OpenCompanyClient {
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
-      if (path.endsWith("/workflows")) return [{ id: "other", name: "Other", enabled: true }];
+      // Both companies list the SAME id, which is the whole point of the
+      // company-switch case below: ids are unique only within a company, so a
+      // sweep keyed on the workflow alone still matches after the switch.
+      if (path.endsWith("/workflows"))
+        return [
+          { id: "other", name: "Other", enabled: true },
+          { id: CREATED.id, name: CREATED.name, enabled: true },
+        ];
       if (path.includes("/workflows/tool-slugs")) return { slugs: [], unwired: [] };
       if (path.includes("/workflows/wired-channels")) return { channels: [] };
       if (path.includes("/workflows/runs")) return { runs: [], hasMore: false };
@@ -224,5 +231,29 @@ describe("the copilot's corrections, after a one-box create", () => {
       );
     });
     expect(notesBanner(), "corrections belong to the workflow they were made on").toBeNull();
+  });
+
+  it("does not follow the operator into another company", async () => {
+    // Ids are only unique within a company. Two companies with a
+    // `weekly-digest` would otherwise carry one's corrections onto the other's
+    // canvas — a sweep keyed on the workflow alone matches, and keeps them.
+    createdNotes = NOTES;
+    const c = client();
+    window.location.hash = "#/workflows";
+    await render(c);
+    await openDialog();
+    await create();
+    expect(notesBanner()).not.toBeNull();
+
+    await act(async () => {
+      root.render(
+        createElement(WorkflowsView, {
+          client: c,
+          company: "beta",
+          sub: CREATED.id,
+        }),
+      );
+    });
+    expect(notesBanner(), "corrections belong to the company they were made in").toBeNull();
   });
 });
