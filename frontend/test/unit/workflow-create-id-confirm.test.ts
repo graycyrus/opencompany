@@ -42,12 +42,11 @@ function stubClient(opts: {
 }): OpenCompanyClient {
   return {
     scopeFor: () => SCOPE,
-    // The New-workflow dialog is two dialogs now: a copilot that can draft
-    // reduces it to one description box, and only a company that CANNOT draft
-    // gets the manual Name/ID/Description/Nodes/Connections form. This suite is
-    // about that form, so the cognition read answers `echo` — the offline
-    // brain, which is exactly the company the form exists for. See
-    // `createSurface` in `@/lib/workflow-create-surface`.
+    // Creating a workflow is one description box now, on every company —
+    // `echo`, the offline brain, included. This suite is about the manual
+    // Name/ID/Description/Nodes/Connections form, which `openCreate` below
+    // reaches the way an operator does. See `createSurface` in
+    // `@/lib/workflow-create-surface`.
     get: (path: string) =>
       path.endsWith("/inference")
         ? Promise.resolve({ cognition: "echo" })
@@ -116,6 +115,32 @@ function idFieldValue(): string {
   return inDialog<HTMLInputElement>(ID_INPUT)!.value;
 }
 
+/** Sets a controlled textarea the way a keystroke would. */
+function typeDescription(value: string) {
+  const box = document.querySelector<HTMLTextAreaElement>(
+    '[data-testid="workflow-describe-box"]',
+  );
+  expect(box, "the create dialog should open as one description box").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  )!.set!;
+  setter.call(box, value);
+  box!.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/**
+ * Opens the create dialog **on its manual form**, by the route an operator
+ * takes to it.
+ *
+ * Create mode opens as one description box. The fields come back when the
+ * dialog cannot finish without them, and the shortest such case is the one
+ * driven here: this company cannot draft (`echo`), and a sentence with no words
+ * in it derives no name — so rather than mint an empty id, the permanent join
+ * key nothing can fix afterwards, the dialog hands over the fields and asks for
+ * a name. That leaves exactly the blank create form this suite is about: no id,
+ * no name, and the id still derivable from the first name typed.
+ */
 async function openCreate(client: OpenCompanyClient) {
   await act(async () => {
     root.render(
@@ -127,6 +152,13 @@ async function openCreate(client: OpenCompanyClient) {
       }),
     );
   });
+  await act(async () => {
+    typeDescription("...");
+  });
+  await act(async () => {
+    submitButton().click();
+  });
+  expect(inDialog(ID_INPUT), "the hand-over should have put the fields back").toBeTruthy();
 }
 
 async function openEditing(client: OpenCompanyClient, workflow: WorkflowGraph) {

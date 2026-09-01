@@ -10,20 +10,22 @@ import type { WorkflowGraph } from "@/api/workflows";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 
 /**
- * The New-workflow dialog is two dialogs, and the wrong one fails silently.
+ * Creating a workflow is one description box and a Create button: no Name, no
+ * Workflow ID, no Description, no Nodes, no Connections, and none of the
+ * validation that serves them — including "Give the workflow an id.", which
+ * used to fire on a dialog the operator had not finished reading.
  *
- * When the copilot can draft, the dialog is one description box and a Create
- * button: no Name, no Workflow ID, no Description, no Nodes, no Connections,
- * and none of the validation that serves them — including "Give the workflow an
- * id.", which used to fire on a dialog the operator had not finished reading.
- * When it cannot draft, the manual form is exactly what it always was, because
- * it is the only way such a company authors anything.
+ * **On every company and every build.** The copilot's availability used to pick
+ * between two dialogs; a host with no model configured got the full graph form,
+ * which is the dialog this redesign exists to retire. Now it changes only what
+ * Create *does* — draft, or fall back to the operator's own sentence — and what
+ * the box says above itself. The `echo` cases below are the ones that prove it,
+ * and they are the reason this file renders the component rather than trusting
+ * `createSurface` (unit-tested next door): the branch has to reach the DOM.
  *
- * `createSurface` is unit-tested exhaustively next door. What is proved HERE is
- * the wiring: that the branch actually reaches the DOM, in both directions.
- * Rendering the form on a company that CAN draft is the dangerous failure —
- * nothing about it looks wrong, it just looks like the version before this
- * change — so it is asserted directly rather than inferred from the helper.
+ * The manual form is unchanged and still reachable, by the one route that
+ * needs it — a create the host refused, which names an id there is otherwise no
+ * control to obey.
  */
 
 const SCOPE = "/api/v1/companies/acme";
@@ -49,6 +51,8 @@ const DRAFTED: WorkflowGraph = {
 interface Stub {
   /** What `POST …/workflows/draft-from-description` answers, or throws. */
   draft?: () => Promise<unknown>;
+  /** Counts every draft attempt, so "it never asked" can be asserted. */
+  drafts?: { count: number };
   /** What `POST …/workflows` answers, or throws. */
   create?: (body: unknown) => Promise<unknown>;
   /** The company's cognition path. `"hosted"` is a company that can draft. */
@@ -70,6 +74,7 @@ function stubClient(opts: Stub): OpenCompanyClient {
         : Promise.reject(new Error("not offered by this host")),
     post: (path: string, body?: unknown) => {
       if (path.endsWith("/workflows/draft-from-description")) {
+        if (opts.drafts) opts.drafts.count += 1;
         return (
           opts.draft?.() ??
           Promise.resolve({ automatable: true, summary: "a digest", workflow: DRAFTED })
@@ -310,12 +315,21 @@ describe("the New-workflow dialog when the copilot can draft", () => {
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
-  it("hands over the fields when the build turns out to have no copilot", async () => {
+  it("keeps the box when the build turns out to have no copilot, and still creates", async () => {
+    // A capability gap is a fact about the deployment, not about the sentence,
+    // so it retires DRAFTING — not the dialog. The fields do not come back;
+    // the notice above the box changes to the host's own words and Create
+    // builds the workflow from what the operator wrote.
+    const posted: unknown[] = [];
     await open(
       stubClient({
         cognition: "hosted",
         draft: () =>
           Promise.reject(new ApiError(404, "not_wired", "This build has no copilot wired.")),
+        create: (body) => {
+          posted.push(body);
+          return Promise.resolve(body as WorkflowGraph);
+        },
       }),
     );
 
@@ -326,47 +340,129 @@ describe("the New-workflow dialog when the copilot can draft", () => {
       submitButton().click();
     });
 
-    expect(inDialog(NAME_INPUT), "the manual form is the fallback").toBeTruthy();
-    expect(inDialog(ID_INPUT)).toBeTruthy();
-    expect(dialogText()).toContain("This build has no copilot wired.");
-  });
-});
+    // The one box is still the whole dialog — this is the reversal.
+    expect(describeBox(), "the box must survive a capability gap").toBeTruthy();
+    expect(inDialog(NAME_INPUT), "the manual form must NOT come back").toBeNull();
+    expect(inDialog(ID_INPUT)).toBeNull();
+    expect(dialogText()).not.toContain("Nodes");
+    // …saying what happened, in the host's own words, and what Create does now.
+    const notice = inDialog('[data-testid="workflow-draft-unavailable"]');
+    expect(notice, "the operator must be told the copilot could not draft").toBeTruthy();
+    expect(notice!.textContent).toContain("This build has no copilot wired.");
+    expect(notice!.textContent).toContain("empty canvas");
+    expect(posted, "the failed draft writes nothing on its own").toHaveLength(0);
 
-describe("the New-workflow dialog when the copilot cannot draft", () => {
-  it("renders the manual form and today's notice, unchanged", async () => {
-    await open(stubClient({ cognition: "echo" }));
-
-    // Every field the one-box dialog removes is here, because this is the only
-    // way a company with no model configured authors anything.
-    expect(inDialog(NAME_INPUT), "Name").toBeTruthy();
-    expect(inDialog(ID_INPUT), "Workflow ID").toBeTruthy();
-    expect(inDialog(DESCRIPTION_BOX), "Description").toBeTruthy();
-    expect(dialogText()).toContain("Nodes");
-    expect(dialogText()).toContain("Add node");
-    expect(dialogText()).toContain("Connections");
-    expect(dialogText()).toContain("Add edge");
-    // Today's notice, word for word.
-    expect(dialogText()).toContain(
-      "This company has no model configured, so the copilot can't draft yet — " +
-        "set one in Settings → Inference, or build the graph by hand below.",
-    );
-    // …and today's disabled composer, not the one-box one.
-    const draftIt = inDialog<HTMLButtonElement>('[data-testid="workflow-copilot-draft"]');
-    expect(draftIt, "the Draft it button stays on this path").toBeTruthy();
-    expect(draftIt!.disabled).toBe(true);
-    expect(describeBox(), "the one-box control must not render here").toBeNull();
-  });
-
-  it("still refuses a create with no id, from the field that asks for one", async () => {
-    await open(stubClient({ cognition: "echo" }));
-
+    // …and Create is not a dead button. The second press builds the workflow
+    // from the sentence and lands on the canvas.
     await act(async () => {
       submitButton().click();
     });
-    // The complaint the one-box dialog must never raise is exactly right here:
-    // there is an id field on screen, empty, and it is what Create needs.
+    expect(posted, "Create must still create with no copilot").toHaveLength(1);
+    const graph = posted[0] as WorkflowGraph;
+    expect(graph.name).toBe("Every Monday");
+    expect(graph.description).toBe("Every Monday, draft the digest.");
+    expect(graph.nodes.map((n) => n.kind)).toEqual(["trigger"]);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+describe("the New-workflow dialog on a company with no model configured", () => {
+  it("is the same one box — the graph form does not come back for `echo`", async () => {
+    await open(stubClient({ cognition: "echo" }));
+
+    // The reversal, asserted where the operator sees it. Every field the
+    // one-box dialog removes stays removed on the offline brain, because a
+    // company with no model is the LAST one to hand a graph editor to.
+    expect(describeBox(), "the description box is the whole dialog").toBeTruthy();
+    expect(inDialog(NAME_INPUT), "Name must not render").toBeNull();
+    expect(inDialog(ID_INPUT), "Workflow ID must not render").toBeNull();
+    expect(inDialog(DESCRIPTION_BOX), "the second Description box must not render").toBeNull();
+    expect(dialogText()).not.toContain("Nodes");
+    expect(dialogText()).not.toContain("Connections");
+    expect(dialogText()).not.toContain("Add node");
+    expect(dialogText()).not.toContain("Add edge");
+    expect(inDialog('[data-testid="workflow-copilot-draft"]')).toBeNull();
+  });
+
+  it("says what Create will do before it is pressed, and where to fix it", async () => {
+    await open(stubClient({ cognition: "echo" }));
+
+    const notice = inDialog('[data-testid="workflow-draft-unavailable"]');
+    expect(notice, "an operator must not be promised a draft that cannot happen").toBeTruthy();
+    expect(notice!.textContent).toContain("no model configured");
+    expect(notice!.textContent).toContain("Settings → Inference");
+    expect(notice!.textContent).toContain("empty canvas");
+    // NOT the copy this path used to carry, which pointed at a form that is no
+    // longer under it.
+    expect(dialogText()).not.toContain("build the graph by hand below");
+  });
+
+  it("creates from the sentence and lands on the canvas, without a doomed draft", async () => {
+    const drafts = { count: 0 };
+    const posted: unknown[] = [];
+    await open(
+      stubClient({
+        cognition: "echo",
+        drafts,
+        create: (body) => {
+          posted.push(body);
+          return Promise.resolve({ ...(body as WorkflowGraph), version: "v1" });
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Chase overdue invoices every Friday.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // No round trip that is already known to fail — the cognition read has
+    // settled on the offline brain, so there is nothing to ask.
+    expect(drafts.count, "the copilot must not be asked on the offline brain").toBe(0);
+    // …and the same route "Create it anyway" takes: the sentence names it and
+    // describes it, over the single trigger the blank form has always started
+    // from.
+    expect(posted, "Create must never be a button that cannot create").toHaveLength(1);
+    const graph = posted[0] as WorkflowGraph;
+    expect(graph.name).toBe("Chase overdue invoices every Friday");
+    expect(graph.id).toBe("chase-overdue-invoices-every-friday");
+    expect(graph.description).toBe("Chase overdue invoices every Friday.");
+    expect(graph.nodes.map((n) => n.kind)).toEqual(["trigger"]);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated.mock.calls[0]![0].version).toBe("v1");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("hands over the fields when the sentence names nothing, rather than minting an empty id", async () => {
+    // The id is the permanent join key and it is derived from the name, so a
+    // sentence with no words in it has to be asked about — never guessed.
+    const posted: unknown[] = [];
+    await open(
+      stubClient({
+        cognition: "echo",
+        create: (body) => {
+          posted.push(body);
+          return Promise.resolve(body as WorkflowGraph);
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("...");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(posted, "an empty name must not be written").toHaveLength(0);
+    expect(inDialog(NAME_INPUT), "the fields come back to be filled in").toBeTruthy();
+    expect(inDialog<HTMLInputElement>(NAME_INPUT)!.value).toBe("");
+    expect(inDialog<HTMLInputElement>(ID_INPUT)!.value).toBe("");
     expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
-      "Give the workflow an id.",
+      "Give this workflow a name",
     );
   });
 });

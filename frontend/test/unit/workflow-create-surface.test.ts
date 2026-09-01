@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import type { CognitionPath } from "@/api/inference";
 import { ApiError } from "@/api/types";
 import {
   createSurface,
@@ -12,105 +11,54 @@ import {
  * Which of the two New-workflow dialogs renders.
  *
  * This is the branch the redesign lives or dies on, and its failure is silent
- * in one direction: answer `form` on a company whose copilot works and the
- * dialog looks exactly as it did before, so nothing reports that the one-box
- * dialog never shipped. A rendered test can only prove the cases somebody
- * thought to render; the decision is a pure function so every input can be.
+ * in one direction: answer `form` on a create and the dialog looks exactly as
+ * it did before, so nothing reports that the one-box dialog never shipped. A
+ * rendered test can only prove the cases somebody thought to render; the
+ * decision is a pure function so every input can be.
+ *
+ * There are only two inputs left, and that IS the change. The copilot's
+ * availability used to be a third — an `echo` company and a build that answered
+ * a capability gap both got the manual graph form. Running it settled it: a
+ * host with no model showed the operator the full form, in the one case where
+ * hand-authoring a graph is least likely to be what they wanted. What the
+ * copilot can do now changes what Create *does*, never what the dialog *is*,
+ * and that is asserted where it is visible — against the rendered dialog in
+ * `workflow-one-box-dialog.test.ts`, with an `echo` company.
  */
 
-/** Every cognition path the host can report, so no new one is silently untested. */
-const PATHS: CognitionPath[] = [
-  "harness",
-  "hosted",
-  "sidecar",
-  "echo",
-  "custom",
-  "test",
-];
-
 describe("createSurface", () => {
-  it("shows the one box for every cognition path that is not the offline brain", () => {
-    for (const cognition of PATHS.filter((p) => p !== "echo")) {
-      expect(
-        createSurface({
-          editing: false,
-          cognition,
-          capabilityGap: null,
-          writeRefused: false,
-        }),
-        `cognition=${cognition} can draft, so the dialog must be one box`,
-      ).toBe("describe");
-    }
+  it("is the one box on every create, whatever the copilot can do", () => {
+    expect(createSurface({ editing: false, writeRefused: false })).toBe("describe");
   });
 
-  it("shows the one box while the cognition read has not landed", () => {
-    // `null` is both "in flight" and "this host has no /inference route". Issue
-    // #753 leaves the copilot ENABLED in that case rather than refusing to draft
-    // because it could not confirm, and this follows it: guessing `describe`
-    // wrong is corrected out loud by the capability gap on the first Create,
-    // where guessing `form` wrong is corrected by nothing at all.
-    expect(
-      createSurface({
-        editing: false,
-        cognition: null,
-        capabilityGap: null,
-        writeRefused: false,
-      }),
-    ).toBe("describe");
+  it("is the manual form in edit mode — an edit already has a graph", () => {
+    expect(createSurface({ editing: true, writeRefused: false })).toBe("form");
   });
 
-  it("shows the manual form on the offline brain", () => {
-    expect(
-      createSurface({
-        editing: false,
-        cognition: "echo",
-        capabilityGap: null,
-        writeRefused: false,
-      }),
-    ).toBe("form");
-  });
-
-  it("shows the manual form once a draft has reported a capability gap", () => {
-    for (const cognition of PATHS) {
-      expect(
-        createSurface({
-          editing: false,
-          cognition,
-          capabilityGap: "This build has no copilot wired.",
-          writeRefused: false,
-        }),
-        `a capability gap outranks cognition=${cognition}`,
-      ).toBe("form");
-    }
-  });
-
-  it("shows the manual form once a one-box create has been refused", () => {
+  it("is the manual form once a one-box create has been refused", () => {
     // The refusal that actually happens: the host mints a draft's id by
     // slugging and deduping against SAVED workflows only, so two similar
     // descriptions drafted before either is created mint the same id and the
     // second Create is told to pick a different one — by a dialog with no id
     // field. The fields have to come back or that is a dead end.
-    expect(
-      createSurface({
-        editing: false,
-        cognition: "hosted",
-        capabilityGap: null,
-        writeRefused: true,
-      }),
-    ).toBe("form");
+    expect(createSurface({ editing: false, writeRefused: true })).toBe("form");
   });
 
-  it("is always the manual form in edit mode, whatever the copilot can do", () => {
-    for (const cognition of PATHS) {
+  it("answers every combination of its two inputs, so none is left to inference", () => {
+    // Four rows is the whole truth table. Spelled out rather than looped,
+    // because the one that matters is the first: a plain create, on any company
+    // and any build, is the box.
+    const table: [boolean, boolean, "describe" | "form"][] = [
+      [false, false, "describe"],
+      [false, true, "form"],
+      [true, false, "form"],
+      [true, true, "form"],
+    ];
+    for (const [editing, writeRefused, expected] of table) {
       expect(
-        createSurface({
-          editing: true,
-          cognition,
-          capabilityGap: null,
-          writeRefused: false,
-        }),
-        `editing outranks cognition=${cognition}`,
-      ).toBe("form");
+        createSurface({ editing, writeRefused }),
+        `editing=${editing} writeRefused=${writeRefused}`,
+      ).toBe(expected);
     }
   });
 });

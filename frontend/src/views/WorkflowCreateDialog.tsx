@@ -1190,13 +1190,33 @@ export function WorkflowCreateDialog({
    * one direction: rendering the manual form on a company that CAN draft looks
    * precisely like the dialog did before this change, so nothing reports it.
    */
-  const describing =
-    createSurface({
-      editing,
-      cognition,
-      capabilityGap: draftGap,
-      writeRefused,
-    }) === "describe";
+  // Issue #753: `echo` is the offline brain — there is no model to draft with.
+  // Declared here rather than beside the composer it used to serve, because
+  // `draftUnavailable` below is computed with the surface and reads it.
+  const echoing = cognition === "echo";
+
+  const describing = createSurface({ editing, writeRefused }) === "describe";
+
+  /**
+   * Why the copilot cannot draft here, in the host's own words — `null` when it
+   * can, or when nothing has said otherwise yet.
+   *
+   * This no longer changes which dialog is on screen (see {@link createSurface}
+   * for why it used to). It changes what the dialog *says* and what Create
+   * *does*: the notice above the box tells the operator the copilot cannot draft
+   * this, and Create builds the workflow from their sentence — the same route
+   * "Create it anyway" takes past a decline — instead of a round trip that is
+   * already known to fail.
+   *
+   * `echo` is the case we know before the operator has clicked anything: it is
+   * the offline brain, so there is no model to draft with and no host message to
+   * quote yet. The rest arrive as a capability gap from a draft that was tried.
+   */
+  const draftUnavailable =
+    draftGap ??
+    (echoing
+      ? "This company has no model configured, so the copilot can’t draft yet — set one in Settings → Inference."
+      : null);
 
   /**
    * Whether the form holds edits that closing would destroy (issue #1006).
@@ -1693,10 +1713,6 @@ export function WorkflowCreateDialog({
     }
   }
 
-  // Issue #753: `echo` is the offline brain — there is no model to draft with, so
-  // the copilot composer is disabled until the check settles onto a real path.
-  const echoing = cognition === "echo";
-
   /** Whether the form holds anything a copilot draft would overwrite. The blank
    * starter — no id/name/description, no edges, one untouched `start` trigger —
    * is NOT dirty, so the first draft hydrates without a confirm; anything the
@@ -2011,6 +2027,16 @@ export function WorkflowCreateDialog({
   async function describeAndCreate() {
     const sentence = copilotPrompt.trim();
     if (!sentence || drafting) return;
+    // Nothing to draft with — an `echo` company, or a draft this open already
+    // came back with a capability gap. Take the route "Create it anyway" takes
+    // rather than a request that is known to fail: the sentence becomes the
+    // name and the description, the graph is the blank starter, and the canvas
+    // is where it gets built. The notice above the box has already said exactly
+    // that, so this is what the operator pressed Create expecting.
+    if (draftUnavailable) {
+      await createAnyway();
+      return;
+    }
     const requestedEpoch = draftEpochRef.current;
     setDrafting(true);
     setError(null);
@@ -2022,13 +2048,15 @@ export function WorkflowCreateDialog({
     try {
       drafted = await draftWorkflowFromDescription(client, company, sentence);
     } catch (e) {
-      // A build that cannot draft at all says so with a code, not with prose:
-      // hand over the manual form, which is the same dialog an `echo` company
-      // gets before it clicks anything. Anything else — a network blip, a 500 —
-      // is about this attempt and leaves the one box where it is.
+      // A build that cannot draft at all says so with a code, not with prose.
+      // It retires DRAFTING for this open, not the dialog: the notice above the
+      // box changes to the host's own message, and the next Create builds the
+      // workflow from the sentence. Anything else — a network blip, a 500 — is
+      // about this one attempt and says nothing about the copilot, so it stays
+      // an error and the next Create tries again.
       const gap = draftCapabilityGap(e);
       if (gap) setDraftGap(gap);
-      setDraftError(gap ?? (e instanceof Error ? e.message : "could not draft a workflow"));
+      else setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
       return;
     } finally {
       // Only the request that still owns the dialog may clear the spinner.
@@ -2198,7 +2226,9 @@ export function WorkflowCreateDialog({
             {editing
               ? "Change the nodes, how they connect, or when it runs. Saving replaces the whole graph."
               : describing
-                ? "Say what it should do in a sentence. The copilot builds the graph and opens it on the canvas."
+                ? draftUnavailable
+                  ? "Say what it should do in a sentence. It opens on the canvas, ready to build."
+                  : "Say what it should do in a sentence. The copilot builds the graph and opens it on the canvas."
                 : "Describe it and let the copilot draft it, or define the graph by hand — nodes, then how they connect."}
           </DialogDescription>
         </DialogHeader>
@@ -2254,11 +2284,13 @@ export function WorkflowCreateDialog({
           </div>
         )}
 
-        {/* The one-box dialog. When the copilot can draft, this is the whole
-            of it: a sentence, and the Create button in the footer. Name,
-            Workflow ID, Description, Nodes and Connections are not rendered —
-            the host mints the id, the copilot writes the rest, and the canvas
-            is where a graph is actually edited. */}
+        {/* The one-box dialog — every create, on every company and every build.
+            A sentence, and the Create button in the footer. Name, Workflow ID,
+            Description, Nodes and Connections are not rendered: the host mints
+            the id, the copilot writes the rest where it can, and the canvas is
+            where a graph is actually edited. Where it cannot, the notice below
+            says so and Create starts the workflow from the sentence — the box
+            is the dialog either way. */}
         {!editing && describing && (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
             <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">
@@ -2274,10 +2306,23 @@ export function WorkflowCreateDialog({
               disabled={drafting || submitting}
               data-testid="workflow-describe-box"
             />
-            <p className="text-2xs leading-snug text-muted-foreground">
-              The copilot drafts the graph, names it, and opens it on the canvas —
-              rename it, rewire it or delete it from there.
-            </p>
+            {/* What Create will actually do, said before it is pressed. The
+                copilot's availability changes this sentence and nothing else on
+                screen — never which controls the operator is looking at. */}
+            {draftUnavailable ? (
+              <Alert data-testid="workflow-draft-unavailable">
+                <AlertDescription>
+                  {draftUnavailable} Create still works — it names the workflow
+                  from your description and opens it on an empty canvas, ready to
+                  build.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <p className="text-2xs leading-snug text-muted-foreground">
+                The copilot drafts the graph, names it, and opens it on the canvas —
+                rename it, rewire it or delete it from there.
+              </p>
+            )}
             {/* The copilot judged the work better done once. Advice, not a
                 verdict: an operator who disagrees gets a workflow anyway,
                 started from their own sentence, rather than an argument. */}
@@ -2311,11 +2356,11 @@ export function WorkflowCreateDialog({
             the form below with it; the operator reviews and edits in that form,
             then presses Create as usual. Nothing is saved by drafting.
 
-            This is the CAN'T-DRAFT dialog now: an `echo` company, a build with
-            no brain, or a create the host refused. Deliberately unchanged —
-            same notice, same disabled composer, same form below — so no company
-            is ever locked out of authoring and there is no second
-            implementation of the graph editor to keep in step. */}
+            One thing reaches this now: a create the host REFUSED. The refusal
+            names an id or a node, so the fields have to be on screen to obey it
+            — and once they are, this is the dialog it has always been.
+            Deliberately unchanged, so there is no second implementation of the
+            graph editor to keep in step. */}
         {!editing && !describing && (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
             <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">

@@ -1,16 +1,17 @@
-import type { CognitionPath } from "@/api/inference";
 import { ApiError } from "@/api/types";
 
 /**
  * Which of the two New-workflow dialogs is on screen.
  *
- * - `describe` — the copilot can draft, so the dialog is **one box**: a sentence
- *   and Create. Name, Workflow ID, Description, Nodes and Connections are not
- *   rendered at all, and neither is the validation that serves them. Create
- *   drafts, saves, and lands the operator on the canvas.
+ * - `describe` — **one box**: a sentence and Create. Name, Workflow ID,
+ *   Description, Nodes and Connections are not rendered at all, and neither is
+ *   the validation that serves them. This is what *creating* a workflow is now,
+ *   on every company and every build. Create drafts if the copilot can, falls
+ *   back to the operator's own sentence if it cannot, and either way lands them
+ *   on the canvas.
  * - `form` — the manual graph form, byte-for-byte what the dialog has always
- *   been. Edit mode is always this; so is a create on a company whose copilot
- *   cannot draft.
+ *   been. Two things reach it: an **edit**, which already has a graph, and a
+ *   create the host **refused**, which needs controls for the thing it refused.
  */
 export type CreateSurface = "describe" | "form";
 
@@ -18,39 +19,34 @@ export type CreateSurface = "describe" | "form";
  * The **one** place the two dialogs are told apart.
  *
  * A pure function, exported and exhaustively tested, because the failure here is
- * silent in one direction: if the copilot is reachable and this answers `form`,
- * nothing breaks — the dialog just looks like it always did, and nobody notices
- * the redesign never shipped. A predicate spelled inline in the component would
- * be provable only by rendering it, and only for the cases somebody thought to
- * render.
+ * silent in one direction: if this answers `form` on a create, nothing breaks —
+ * the dialog just looks like it always did, and nobody notices the redesign
+ * never shipped. A predicate spelled inline in the component would be provable
+ * only by rendering it, and only for the cases somebody thought to render.
  *
- * ## Why an unsettled cognition read means `describe`
+ * ## Why the copilot's availability is not an input
  *
- * `cognition` is `null` both while `/inference` is in flight and on a host with
- * no such route (issue #753 leaves the copilot enabled in that case rather than
- * refusing to draft because we could not confirm). Both are answered `describe`,
- * biasing toward the new dialog, because the two directions fail very
- * differently:
+ * It used to be: an `echo` company (no model configured) and a build that
+ * answered a capability gap both got the manual form, on the reasoning that a
+ * description box is useless with nothing to draft with. Running it proved the
+ * opposite — the operator on a host with no model got the full graph form, which
+ * is the dialog this redesign exists to retire, and got it in exactly the case
+ * where they are least likely to want to hand-author a graph.
  *
- * - Guessing `describe` on a company that turns out not to be able to draft is
- *   **self-correcting and loud**: Create calls the draft route, the host answers
- *   a capability gap, {@link draftCapabilityGap} catches it, and the form
- *   appears with the host's own message. One click, and the operator sees why.
- * - Guessing `form` on a company that *can* draft is **silent**: it looks
- *   exactly like the dialog did before this change, so nothing reports it.
+ * So the box is unconditional. What changes when the copilot cannot draft is
+ * what Create *does*, not what the dialog *is*: the sentence becomes the name
+ * and the description, the graph is the blank starter, and the canvas is where
+ * it gets built. {@link draftCapabilityGap} still classifies the refusal, but it
+ * now feeds the dialog's own copy — so the operator is told the copilot could
+ * not draft this — rather than swapping the dialog out from under them.
  *
- * The cheap-and-recoverable wrong answer is the one to risk.
+ * A create the host **refuses** is the one thing that still brings the fields
+ * back, and it has to: the refusal that actually happens names an id, and there
+ * is no id field on the one-box dialog to obey it with.
  */
 export function createSurface(args: {
   /** Edit mode. An edit already has a graph, so there is nothing to draft. */
   editing: boolean;
-  /** The company's cognition path; `null` while unread or on a host without the route. */
-  cognition: CognitionPath | null;
-  /**
-   * The host's message from a draft attempt that hit a capability gap, from
-   * {@link draftCapabilityGap}. `null` until one happens.
-   */
-  capabilityGap: string | null;
   /**
    * Whether a one-box create was **refused** by the host.
    *
@@ -67,9 +63,6 @@ export function createSurface(args: {
   writeRefused: boolean;
 }): CreateSurface {
   if (args.editing) return "form";
-  // Issue #753: `echo` is the offline brain — there is no model to draft with.
-  if (args.cognition === "echo") return "form";
-  if (args.capabilityGap !== null) return "form";
   if (args.writeRefused) return "form";
   return "describe";
 }
@@ -82,8 +75,9 @@ export function createSurface(args: {
  * (404) is a build with no embedded brain, `inference_required` (409) a company
  * with no provider configured, `restart_required` (409) a provider configured
  * since the process booted. None of them is fixed by rewording the sentence, so
- * each one retires the one-box dialog for this open and hands the operator the
- * manual form instead of a Create button that cannot work.
+ * each one retires *drafting* for this open — the dialog says so in the host's
+ * own words, and Create builds the workflow from the operator's sentence
+ * instead. The box stays; only the promise above it changes.
  */
 const CAPABILITY_CODES = new Set(["not_wired", "inference_required", "restart_required"]);
 
@@ -96,8 +90,9 @@ const CAPABILITY_CODES = new Set(["not_wired", "inference_required", "restart_re
  * not silently change which dialog an operator sees.
  *
  * A network blip, a 500 or a 400 answers `null` deliberately. Those say nothing
- * about whether this company can draft, and collapsing the dialog to the manual
- * form over a dropped connection would be a redesign undone by a flaky wifi.
+ * about whether this company can draft — retiring the copilot over a dropped
+ * connection would leave the operator building by hand on a host that would have
+ * drafted it for them a second later.
  */
 export function draftCapabilityGap(err: unknown): string | null {
   if (!(err instanceof ApiError)) return null;
