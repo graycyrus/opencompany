@@ -2925,6 +2925,16 @@ export function AppShell({
     approval: ApprovalSummary,
     verdict: Verdict,
     scope: GrantScope = { kind: "once" },
+    /**
+     * The operator's reply to a blocker's question (B-046, 2026-09-02).
+     *
+     * Handed straight to `resolveApproval`, which drops an empty or
+     * whitespace-only one rather than putting a key on the wire. The card
+     * decides whether there is an answer to send, and this handler does not
+     * second-guess it — the same division of labour it already keeps for
+     * `scope`.
+     */
+    answer?: string,
   ) => {
     if (decidingApprovals.has(approval.id)) return;
     ownApprovalDecisionsRef.current.add(approval.id);
@@ -2933,7 +2943,7 @@ export function AppShell({
     // live one, or the operator cannot tell which attempt it belongs to.
     clearFailure(approval.id);
     try {
-      const answer = await client.resolveApproval(approval.id, verdict, undefined, company, {
+      const receipt = await client.resolveApproval(approval.id, verdict, answer, company, {
         detach: true,
         scope,
       });
@@ -2942,7 +2952,7 @@ export function AppShell({
       // #1449, had no shape at all for "the host default-denied this because the
       // deadline had passed". A card sitting in a transcript is exactly where a
       // request goes stale unnoticed, so this is the surface it happens on most.
-      const stale = staleDecisionLine(answer.outcome);
+      const stale = staleDecisionLine(receipt.outcome);
       if (stale) {
         // The witnessed verdict is deliberately NOT the one that was clicked.
         // `decidedApprovals` feeds the transcript's permanent receipt, and
@@ -2955,7 +2965,7 @@ export function AppShell({
         // `already_resolved` one may not — the host cannot tell which way it
         // went, so nothing is written and the `approval_resolved` frame (or the
         // refresh in `finally`) settles the card with the truth.
-        if (answer.outcome === "expired") {
+        if (receipt.outcome === "expired") {
           setDecidedApprovals((prev) =>
             prev[approval.id] ? prev : { ...prev, [approval.id]: { verdict: "deny", approval } },
           );
@@ -2967,7 +2977,7 @@ export function AppShell({
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
       toast.success(
         verdict === "approve"
-          ? approvedLine(answer.stillAwaiting)
+          ? approvedLine(receipt.stillAwaiting)
           : "Declined — recorded.",
       );
       // A decline ends the thread's story, and silence would read as a stall.
@@ -3601,8 +3611,8 @@ export function AppShell({
               chatChannelByThread={chatChannelByThread}
               taskStatusByTaskId={taskStatusByTaskId}
               now={feed.now}
-              onDecideApproval={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecideApproval={(approval, verdict, scope, answer) =>
+                void decideApproval(approval, verdict, scope, answer)
               }
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
@@ -3654,8 +3664,8 @@ export function AppShell({
               deciding={decidingApprovals}
               decided={decidedApprovals}
               failed={failedApprovals}
-              onDecide={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecide={(approval, verdict, scope, answer) =>
+                void decideApproval(approval, verdict, scope, answer)
               }
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
@@ -3745,8 +3755,8 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
-              onDecideApproval={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecideApproval={(approval, verdict, scope, answer) =>
+                void decideApproval(approval, verdict, scope, answer)
               }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
@@ -3895,8 +3905,8 @@ export function AppShell({
                 decidingApprovals={decidingApprovals}
                 decidedApprovals={decidedApprovals}
                 failedApprovals={failedApprovals}
-                onDecideApproval={(approval, verdict, scope) =>
-                  void decideApproval(approval, verdict, scope)
+                onDecideApproval={(approval, verdict, scope, answer) =>
+                  void decideApproval(approval, verdict, scope, answer)
                 }
               />
             </Suspense>

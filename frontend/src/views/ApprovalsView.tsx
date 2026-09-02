@@ -15,6 +15,7 @@ import {
 } from "@/api/types";
 import {
   ApprovalHeadline,
+  BlockerAnswerControl,
   DeclineScopeControl,
   ApprovalMeta,
   ApprovalPayload,
@@ -269,6 +270,17 @@ export function ApprovalsView({
     a: ApprovalSummary,
     verdict: Verdict,
     scope: GrantScope,
+    /**
+     * The operator's reply to a blocker's question (B-046, 2026-09-02).
+     *
+     * This page is the full decision surface, so it is the one that must be
+     * able to send one: the board card's "View details" and the transcript
+     * row's "Read it first" both land here. Passed through untouched —
+     * `resolveApproval` drops an empty or whitespace-only one rather than
+     * putting a key on the wire, so the bulk Approve below, which has no box
+     * and passes nothing, keeps sending exactly the request it always has.
+     */
+    answer?: string,
   ) {
     // Per-row guard: only a double-press on THIS card is ignored. The global
     // early return that used to live here made every other card inert too.
@@ -277,10 +289,10 @@ export function ApprovalsView({
     markInFlight(a.id, verdict);
     const startedAt = Date.now();
     try {
-      const answer = await client.resolveApproval(
+      const reply = await client.resolveApproval(
         a.id,
         verdict,
-        undefined,
+        answer,
         company,
         { scope },
       );
@@ -304,7 +316,7 @@ export function ApprovalsView({
       // so approving one of several releases nothing — and saying otherwise is
       // the one part of this flow that actively misleads.
       const stillAwaiting =
-        "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
+        "stillAwaiting" in reply ? reply.stillAwaiting : undefined;
       // Issue #1449, and it comes FIRST because everything below it is written
       // for a decision that actually happened. The host answers `200` to a click
       // on a card whose deadline has passed — it has to, nothing failed — and
@@ -315,7 +327,7 @@ export function ApprovalsView({
       // `null` means the host said `settled`, or is too old to say. Both keep
       // the pre-#1449 wording: guessing is the defect, in either direction.
       const stale = staleDecisionLine(
-        "outcome" in answer ? answer.outcome : undefined,
+        "outcome" in reply ? reply.outcome : undefined,
         approvalSummary(a),
       );
       if (stale) {
@@ -596,8 +608,8 @@ export function ApprovalsView({
                     deciding={inFlight.get(a.id) ?? null}
                     batchIndex={batchPos.get(a.id)?.index ?? 1}
                     batchTotal={batchPos.get(a.id)?.total ?? 1}
-                    onDecide={(verdict, scope) =>
-                      void decide(a, verdict, scope)
+                    onDecide={(verdict, scope, answer) =>
+                      void decide(a, verdict, scope, answer)
                     }
                     extending={extending.has(a.id)}
                     onExtend={() => void extendDeadline(a)}
@@ -917,7 +929,12 @@ export function ApprovalCard({
    * (#842). `1` — the default for an approval with no batch — says nothing.
    */
   batchTotal: number;
-  onDecide: (verdict: Verdict, scope: GrantScope) => void;
+  /**
+   * Decide this card. `answer` is the operator's reply to a blocker's question
+   * (B-046, 2026-09-02) — carried only on an `approve`, and only by a blocker
+   * card, which is the only kind that renders a box to write one in.
+   */
+  onDecide: (verdict: Verdict, scope: GrantScope, answer?: string) => void;
   /** Whether this card's deadline extension is in flight (#1805). */
   extending?: boolean;
   /** Push this approval's deadline out to a fresh window (#1805). Absent in
@@ -932,6 +949,10 @@ export function ApprovalCard({
   const [declineScope, setDeclineScope] = useState<GrantScope>({
     kind: "once",
   });
+  // The operator's reply to a blocker's question (B-046, 2026-09-02). Per-card
+  // like the two scopes above, and empty by default: a card approved without
+  // touching the box sends the request this page has always sent.
+  const [answer, setAnswer] = useState("");
 
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
@@ -993,6 +1014,19 @@ export function ApprovalCard({
                   `${batchIndex} of ${batchTotal} from the same turn`
                 : undefined
           }
+        />
+
+        {/* B-046, 2026-09-02: the box the operator answers the question in.
+            Directly above the footer, on #1406's own reasoning — a card is read
+            top to bottom and commits at the bottom, so the last thing before
+            Approve should be the last thing Approve carries. `ApprovalPayload`
+            and the two scope controls above all self-gate; this one does too,
+            and renders nothing at all for a kind that asked no question. */}
+        <BlockerAnswerControl
+          approval={a}
+          value={answer}
+          onChange={setAnswer}
+          disabled={deciding !== null}
         />
 
         {/* The decide footer (#1406) — deliberately the LAST thing in the card,
@@ -1067,7 +1101,7 @@ export function ApprovalCard({
               batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
             }`}
             disabled={deciding !== null}
-            onClick={() => onDecide("approve", scope)}
+            onClick={() => onDecide("approve", scope, answer)}
           >
             {deciding === "approve" ? (
               <Loader2 className="size-4 animate-spin" />

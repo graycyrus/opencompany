@@ -6422,7 +6422,7 @@ members = ["writer"]
         .await;
 
         let error = rt
-            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope(), None)
             .await
             .expect_err("the question tool is not the proposed action");
 
@@ -6855,7 +6855,7 @@ members = ["writer"]
         let (rt, id) = park_one_past_its_deadline(home_dir.path().to_path_buf()).await;
 
         let (receipt, follow_up) = rt
-            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once, None)
             .await
             .unwrap();
         assert_eq!(receipt.outcome(), "expired");
@@ -6874,7 +6874,7 @@ members = ["writer"]
 
         // A second click on the same card is now the ordinary already-gone case.
         let (again, _) = rt
-            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once, None)
             .await
             .unwrap();
         assert_eq!(again.outcome(), "already_resolved");
@@ -10093,7 +10093,7 @@ members = ["writer"]
         .await;
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10141,7 +10141,7 @@ members = ["writer"]
         .await;
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10167,7 +10167,7 @@ members = ["writer"]
         .await;
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10202,7 +10202,7 @@ members = ["writer"]
         .await;
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10237,7 +10237,7 @@ members = ["writer"]
         .await;
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope())
+            .resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10248,7 +10248,7 @@ members = ["writer"]
         );
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&ids[1], Verdict::Approve, operator(), tool_scope())
+            .resolve_approval_spawned(&ids[1], Verdict::Approve, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10281,7 +10281,7 @@ members = ["writer"]
         .await;
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope())
+            .resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10292,7 +10292,7 @@ members = ["writer"]
         );
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope())
+            .resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10330,8 +10330,8 @@ members = ["writer"]
         .await;
 
         let (a, b) = tokio::join!(
-            rt.resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope()),
-            rt.resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope()),
+            rt.resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope(), None),
+            rt.resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope(), None),
         );
         let (_, follow_up_a) = a.unwrap();
         let (_, follow_up_b) = b.unwrap();
@@ -10377,7 +10377,7 @@ members = ["writer"]
                 park_one_blocked_tool_call(home_dir.path().to_path_buf(), effect.clone()).await;
 
             let err = rt
-                .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+                .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope(), None)
                 .await
                 .expect_err("a scope the host cannot honour is refused");
             assert!(
@@ -10434,7 +10434,7 @@ members = ["writer"]
         .await;
 
         let err = match rt
-            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope(), None)
             .await
         {
             Ok(_) => panic!("a workflow standing denial must be refused at the edge"),
@@ -10581,7 +10581,7 @@ members = ["writer"]
         .await;
 
         let (_, follow_up) = rt
-            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope(), None)
             .await
             .unwrap();
         let _ = crate::company::runtime::join_follow_up(follow_up).await;
@@ -10645,6 +10645,7 @@ members = ["writer"]
                 GrantScope::Tool {
                     expires_at_millis: 1,
                 },
+                None,
             )
             .await
             .unwrap();

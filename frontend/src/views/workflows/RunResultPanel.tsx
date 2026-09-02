@@ -120,7 +120,13 @@ export function RunResultPanel({
    * racing operator on the other surface gets a real approval or a `NotParked`
    * no-op receipt, never a double execution.
    */
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+    /** The operator's answer to a blocker's question (B-046) — see `ApprovalRow`. */
+    answer?: string,
+  ) => void;
 }) {
   const nodeResults = useMemo(
     () => parseRunNodes(result.output, graph),
@@ -500,7 +506,13 @@ function RunApprovalsSection({
   askerNames: Map<string, string>;
   deciding: ReadonlyMap<string, Verdict>;
   failed: Record<string, string>;
-  onDecide: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+    /** The operator's answer to a blocker's question (B-046) — see `ApprovalRow`. */
+    answer?: string,
+  ) => void;
 }) {
   const nameById = useMemo(
     () => new Map(graph?.nodes.map((n) => [n.id, n.name]) ?? []),

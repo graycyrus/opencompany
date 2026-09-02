@@ -2101,7 +2101,7 @@ impl CompanyRuntime {
         by: Actor,
     ) -> Result<CycleReport> {
         let (_, follow_up) = self
-            .resolve_approval_spawned(id, verdict, by, GrantScope::Once)
+            .resolve_approval_spawned(id, verdict, by, GrantScope::Once, None)
             .await?;
         join_follow_up(follow_up).await
     }
@@ -2145,10 +2145,12 @@ impl CompanyRuntime {
         verdict: Verdict,
         by: Actor,
         scope: GrantScope,
+        answer: Option<&str>,
     ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
         self.ensure_accepting()?;
         #[cfg(feature = "openhuman")]
-        self.arm_console_blocker_resolution(id, verdict).await?;
+        self.arm_console_blocker_resolution(id, verdict, answer)
+            .await?;
         let receipt = CycleRunner::new(self)
             .settle_approval(id, verdict, by, scope)
             .await?;
@@ -2186,6 +2188,7 @@ impl CompanyRuntime {
         self: &Arc<Self>,
         id: &ApprovalId,
         verdict: Verdict,
+        answer: Option<&str>,
     ) -> Result<()> {
         use crate::ports::blockers::{BlockerPayload, BlockerResolution, BlockerVerdict};
         if self.grants.peek_blocker_resolution(id).is_some() {
@@ -2200,13 +2203,25 @@ impl CompanyRuntime {
         let step = serde_json::from_value::<BlockerPayload>(parked.effect.payload.clone())
             .ok()
             .and_then(|payload| payload.step);
-        let verdict = match verdict {
-            Verdict::Approve => BlockerVerdict::Retry,
-            Verdict::Deny => BlockerVerdict::Cancel,
+        // An approve carrying the operator's words is an `Amend` — the verdict
+        // whose whole purpose is to hand the answer back to the stopped step,
+        // and the only one `resume_task_card` writes onto the card note. Before
+        // this the console could send nothing but a wordless `Retry`, so
+        // approving a question re-dispatched the card with byte-identical
+        // input: the agent asked again, and the turn was billed again. The
+        // answer machinery was built for this and had no caller.
+        let answer = answer.map(str::trim).filter(|a| !a.is_empty());
+        let verdict = match (verdict, &answer) {
+            (Verdict::Approve, Some(_)) => BlockerVerdict::Amend,
+            (Verdict::Approve, None) => BlockerVerdict::Retry,
+            // A decline is a decline; words attached to one are a reason, not
+            // an answer, and re-entering the step with them would contradict
+            // the verdict.
+            (Verdict::Deny, _) => BlockerVerdict::Cancel,
         };
         let resolution = BlockerResolution {
             verdict,
-            answer: String::new(),
+            answer: answer.unwrap_or_default().to_string(),
             step,
         };
         self.journal
@@ -2469,13 +2484,9 @@ impl CompanyRuntime {
         let origin_parent = conversation
             .as_ref()
             .and_then(|conversation| conversation.parent);
+        let step = self.resolved_blocker_step(approval_id, &resolution);
         let outcome = self
-            .drive_blocker_resume(
-                &resolution,
-                resolution.step.as_ref(),
-                thread.as_deref(),
-                origin_parent,
-            )
+            .drive_blocker_resume(&resolution, step.as_ref(), thread.as_deref(), origin_parent)
             .await;
         // Retire the armed answer whether or not the drive succeeded: a failed
         // resume is reported, not retried forever, and re-arming it would resume
@@ -2496,6 +2507,42 @@ impl CompanyRuntime {
                 .await;
         }
         Ok(CycleRunner::new(self).already_resolved_report())
+    }
+
+    /// The step a resolved blocker re-enters.
+    ///
+    /// The payload's own [`BlockerStep`](crate::ports::blockers::BlockerStep)
+    /// when it named one. When it did not, the approval's recorded task link
+    /// names the card instead.
+    ///
+    /// That fallback is not new policy — it is the assumption
+    /// `escalate_to_human` already states where it omits the step: "a question
+    /// asked mid-conversation has no card behind it, and **where one does exist
+    /// the approval's own task link already names it**". Nothing read the link.
+    /// So every question an agent raised from a card parked with `step: None`,
+    /// and `drive_blocker_resume` — which routes on the step alone — sent the
+    /// answer to `post_blocker_resume_note` and re-entered nothing. The card
+    /// stayed `paused` with the operator's answer banked in the journal beside
+    /// it, and pressing Resume re-ran the card from an unchanged note, so the
+    /// agent asked the same question again and the turn was billed again.
+    ///
+    /// Still `None` for a question with no card behind it — the approval is
+    /// `TaskLink::Unlinked` there, and a note in the DM is the whole right
+    /// answer.
+    #[cfg(feature = "openhuman")]
+    fn resolved_blocker_step(
+        &self,
+        approval_id: &ApprovalId,
+        resolution: &crate::ports::blockers::BlockerResolution,
+    ) -> Option<crate::ports::blockers::BlockerStep> {
+        if let Some(step) = resolution.step.clone() {
+            return Some(step);
+        }
+        self.journal
+            .approval_task(approval_id)
+            .flatten()
+            .and_then(|link| link.task_id().map(str::to_string))
+            .map(|task_id| crate::ports::blockers::BlockerStep::Task { task_id })
     }
 
     /// Routes a resolved blocker to the right resume by its
@@ -8210,7 +8257,7 @@ mod tests {
             id: "owner".into(),
         };
         let (receipt, follow_up) = rt
-            .resolve_approval_spawned(&id, Verdict::Approve, by, GrantScope::Once)
+            .resolve_approval_spawned(&id, Verdict::Approve, by, GrantScope::Once, None)
             .await
             .unwrap();
         assert!(
@@ -9670,6 +9717,24 @@ mod tests {
             }
         }
 
+        /// A question an agent raised from a card — `escalate_to_human`'s
+        /// shape, and the one B-046 was reported against.
+        ///
+        /// `step: None` is deliberate there, on the stated grounds that "where
+        /// one does exist the approval's own task link already names it". The
+        /// link is recorded by `park_blocker`'s `task_id` argument; nothing
+        /// read it, which is what this fixture exists to pin.
+        fn question() -> BlockerPayload {
+            BlockerPayload {
+                kind: BlockerKind::Information,
+                source: BlockerSource::AgentQuestion,
+                step: None,
+                reason: "Which of the two launch dates should I write to?".to_string(),
+                needed: "an answer to the question on this card".to_string(),
+                group_key: None,
+            }
+        }
+
         fn assignee(id: &str) -> BlockerSenderSignals {
             BlockerSenderSignals {
                 started_by: None,
@@ -9945,6 +10010,215 @@ mod tests {
                 kind: crate::ports::types::ActorKind::Operator,
                 id: "operator".to_string(),
             }
+        }
+
+        /// A card parked on a question the agent asked receives the answer.
+        ///
+        /// The reported defect: the run parks saying "parked on your answer",
+        /// the answer is given, and the card never moves — each Resume re-asks
+        /// the same question and bills for the turn, with the agent reasoning
+        /// that nothing has changed. `escalate_to_human` parks with no
+        /// `BlockerStep`, and `drive_blocker_resume` routed on the step alone,
+        /// so the answer went to a DM note and re-entered nothing. Every
+        /// existing test in this module parks a step, which is why the gap
+        /// shipped.
+        #[tokio::test]
+        async fn a_question_with_no_step_still_re_enters_its_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Amend,
+                    "the 14th, not the 7th",
+                    None,
+                )
+                .await
+                .expect("resumes");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_IN_PROGRESS,
+                "a question parked from a card must re-enter that card, not just post a note"
+            );
+            let note = after.note.expect("the answer is on the card");
+            assert!(
+                note.contains("the 14th, not the 7th"),
+                "the re-dispatched turn must read the answer, or it asks again: {note}"
+            );
+        }
+
+        /// A question with no card behind it stays a note — the fallback must
+        /// not invent a card for a blocker that never had one.
+        #[tokio::test]
+        async fn a_question_with_no_card_behind_it_re_enters_nothing() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(&question(), "", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Amend, "the 14th", None)
+                .await
+                .expect("resumes");
+
+            assert!(
+                runtime
+                    .ops
+                    .tasks
+                    .list(&runtime.id)
+                    .await
+                    .expect("cards")
+                    .is_empty(),
+                "an unlinked question must not conjure a card to re-enter"
+            );
+        }
+
+        /// The console's Approve can carry the operator's words, and they reach
+        /// the card.
+        ///
+        /// Until this the console could only send a wordless retry, so
+        /// approving a question re-dispatched the card with byte-identical
+        /// input — the agent asked the same question and the turn was billed
+        /// again. That is the loop the defect describes, and answering was
+        /// possible only in the teammate's DM.
+        #[tokio::test]
+        async fn a_console_answer_reaches_the_card_as_an_amend() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            let (_receipt, follow_up) = runtime
+                .resolve_approval_spawned(
+                    &id,
+                    crate::ports::types::Verdict::Approve,
+                    operator(),
+                    crate::runtime::grants::GrantScope::Once,
+                    Some("  the 14th, not the 7th  "),
+                )
+                .await
+                .expect("resolves");
+            crate::company::runtime::join_follow_up(follow_up)
+                .await
+                .expect("follow-up");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(after.column, COLUMN_IN_PROGRESS);
+            let note = after.note.expect("the answer is on the card");
+            assert!(
+                note.contains("the 14th, not the 7th"),
+                "the console answer must reach the card note: {note}"
+            );
+        }
+
+        /// An Approve with nothing to say stays the wordless retry it has
+        /// always been — the new field must not change a caller that omits it,
+        /// and a box the operator tabbed through without typing is not an
+        /// answer either.
+        ///
+        /// Both cases on their own card: resolving one approval twice would
+        /// report `AlreadyResolved` and prove nothing about the second.
+        #[tokio::test]
+        async fn a_console_approve_with_nothing_to_say_is_still_a_wordless_retry() {
+            for (card_id, answer) in [("t-1", None), ("t-2", Some(" \n\t "))] {
+                let (runtime, _home) = runtime().await;
+                seed(&runtime, &card(card_id, COLUMN_PAUSED)).await;
+                runtime
+                    .park_blocker(&question(), card_id, assignee("eng"))
+                    .await
+                    .expect("parks");
+                let id = runtime
+                    .pending_approvals()
+                    .into_iter()
+                    .next()
+                    .expect("parked")
+                    .id;
+
+                let (_receipt, follow_up) = runtime
+                    .resolve_approval_spawned(
+                        &id,
+                        crate::ports::types::Verdict::Approve,
+                        operator(),
+                        crate::runtime::grants::GrantScope::Once,
+                        answer,
+                    )
+                    .await
+                    .expect("resolves");
+                crate::company::runtime::join_follow_up(follow_up)
+                    .await
+                    .expect("follow-up");
+
+                let after = stored(&runtime, card_id).await;
+                assert_eq!(after.column, COLUMN_IN_PROGRESS, "{answer:?}");
+                assert!(
+                    after.note.is_none(),
+                    "{answer:?} is not an answer and must write nothing onto the card: {:?}",
+                    after.note
+                );
+            }
+        }
+
+        /// Words on a decline are a reason, not an answer: the card is settled,
+        /// never re-entered carrying them.
+        #[tokio::test]
+        async fn a_decline_carrying_words_still_cancels() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            let (_receipt, follow_up) = runtime
+                .resolve_approval_spawned(
+                    &id,
+                    crate::ports::types::Verdict::Deny,
+                    operator(),
+                    crate::runtime::grants::GrantScope::Once,
+                    Some("we are not doing this"),
+                )
+                .await
+                .expect("resolves");
+            crate::company::runtime::join_follow_up(follow_up)
+                .await
+                .expect("follow-up");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_TODO,
+                "a decline settles the card rather than re-entering it"
+            );
         }
 
         /// Issue #2008: an operator answering a blocker from the console

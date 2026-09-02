@@ -48,11 +48,13 @@ import {
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
+  BlockerAnswerControl,
   DeclineScopeControl,
   approvalConsequence,
   approvalIcon,
   batchConsequences,
   deadlineToneClass,
+  isBlockerKind,
   type ApprovalThreadLink,
 } from "@/components/approval-card";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -187,6 +189,18 @@ function itemLabel(a: ApprovalSummary): string {
  * decision *means* — the all-or-nothing batch, the per-id resolve, the
  * truncated-lead gate below — is shared by all three, which is the whole reason
  * the board card renders this component instead of its own row.
+ *
+ * The one thing a variant does decide is whether there is **room** for the
+ * blocker answer box (B-046, 2026-09-02). `full` and `compact` render it;
+ * `card` does not, and the reason is width and the gesture, not the rule:
+ * ~220px of content cannot carry a labelled multi-line box legibly beside two
+ * full-width buttons, and a board card is a drag target, where pressing into a
+ * textarea competes with the drag it is drawn inside. The board card's answer
+ * is its "View details" link, which since #1891 lands on *that card's* rows on
+ * the Approvals page rather than the flat queue — a `full` surface with the box
+ * on it. Approve stays live on the board because an approve with no answer is a
+ * real decision, not a broken one: it re-enters the step unchanged, which is
+ * the right move when "go ahead" is the whole answer.
  */
 export type ApprovalRowVariant = "full" | "compact" | "card";
 
@@ -236,7 +250,20 @@ export function ApprovalRow({
    * "this one did not take" — the operator would believe they got all three.
    */
   failed: Record<string, string>;
-  onDecide: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  /**
+   * The shell's one resolve, per approval id.
+   *
+   * `answer` is the operator's reply to a blocker's question (B-046,
+   * 2026-09-02), carried only on an `approve` and only for a single blocker —
+   * see {@link BlockerAnswerControl}. Every other decision passes `undefined`,
+   * which is the request this console has always sent.
+   */
+  onDecide: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+    answer?: string,
+  ) => void;
 }) {
   // Per-card, exactly as on the page: two batches can be parked in one channel
   // and each carries its own decision. Defaults to `once`, so a card decided
@@ -244,6 +271,10 @@ export function ApprovalRow({
   // opt-in here too.
   const [scope, setScope] = useState<GrantScope>({ kind: "once" });
   const [declineScope, setDeclineScope] = useState<GrantScope>({ kind: "once" });
+  // The operator's reply to a blocker's question (B-046). Per-card like the two
+  // scopes above and for the same reason, and empty by default: an Approve
+  // given without touching the box sends exactly the request it sent before.
+  const [answer, setAnswer] = useState("");
 
   const compact = variant === "compact";
   /**
@@ -282,6 +313,32 @@ export function ApprovalRow({
   const needsFullReview = condensed && pending.some((a) => payloadLeadTruncated(a));
 
   /**
+   * Whether this card may offer the blocker answer box (B-046, 2026-09-02).
+   *
+   * Three conditions, and each removes a way the box could lie:
+   *
+   *  * **one approval, not a batch** — the host appends the answer to the card
+   *    the approval is linked to, so one box over several parks would copy one
+   *    reply onto work it was not written for. It cannot arise in practice (an
+   *    agent's question parks with `group_key: None`, so it never batches), and
+   *    it is checked anyway because the cost of being wrong is a wrong answer
+   *    attached to somebody's card.
+   *  * **still pending** — `pending[0]`, so a card whose only item was decided
+   *    on the Approvals page does not go on offering to answer it.
+   *  * **a blocker** — {@link BlockerAnswerControl} self-gates on this too; it
+   *    is repeated here because `decideAll` has to know whether to carry the
+   *    value, and the button and the box must not disagree about that.
+   *
+   * `card` is excluded on width and on the drag gesture — see
+   * {@link ApprovalRowVariant}.
+   */
+  const answerable =
+    variant !== "card" &&
+    approvals.length === 1 &&
+    pending.length === 1 &&
+    isBlockerKind(pending[0].kind);
+
+  /**
    * The decision, applied to every item the card is still asking about.
    *
    * **Every** item, and that is what makes the card honest: the turn is blocked
@@ -296,10 +353,20 @@ export function ApprovalRow({
    *
    * A decline carries no scope — there is nothing to grant, and the host
    * refuses the pairing anyway.
+   *
+   * A decline carries no answer either, for the same shape of reason: the host
+   * ignores `answer` on a deny, because a refusal ends the step rather than
+   * re-entering it, and sending words it will drop would be this console
+   * claiming something happened to them (B-046).
    */
   const decideAll = (verdict: Verdict) => {
     for (const a of pending) {
-      onDecide(a, verdict, verdict === "approve" ? scope : declineScope);
+      onDecide(
+        a,
+        verdict,
+        verdict === "approve" ? scope : declineScope,
+        verdict === "approve" && answerable ? answer : undefined,
+      );
     }
   };
 
@@ -311,6 +378,22 @@ export function ApprovalRow({
     variant === "compact" ? COMPACT_ACTION_CLASS : variant === "card" ? "h-7 flex-1" : undefined;
   const declineVariant = compact ? "ghost" : "outline";
   const approveVariant = compact ? "ghost" : "default";
+
+  // Built once and placed by each variant, because the two that render it put
+  // it in different places: the full card sits it under the headline the
+  // buttons live in, the compact row stacks it below its single flex line.
+  // Dropped once the card is settled, exactly as the scope controls are —
+  // there is no decision left for it to travel with.
+  const answerControl =
+    done || !answerable ? null : (
+      <BlockerAnswerControl
+        approval={pending[0]}
+        value={answer}
+        onChange={setAnswer}
+        disabled={busy}
+        compact={compact}
+      />
+    );
 
   const actions = done ? undefined : (
     <>
@@ -405,6 +488,7 @@ export function ApprovalRow({
         thread={thread}
         detailsHref={detailsHref}
         actions={actions}
+        answerControl={answerControl}
         busy={busy}
         status={status}
       />
@@ -445,6 +529,14 @@ export function ApprovalRow({
           ) : (
             <ApprovalHeadline approval={lead} actions={actions} />
           )}
+
+          {/* Directly under the headline, because on this variant the headline
+              is where Approve lives (unlike the Approvals page, whose buttons
+              are a footer below everything — #1406). The box has to be beside
+              the button that sends it, or an operator reads the question, hits
+              Approve, and never sees the one control that would have changed
+              the answer (B-046). */}
+          {answerControl}
 
           {approvals.length > 1 ? (
             // What the one decision covers, spelled out. Read-only: the card is
@@ -517,6 +609,7 @@ function CompactApprovalRow({
   thread,
   detailsHref,
   actions,
+  answerControl,
   busy,
   status,
 }: {
@@ -533,6 +626,17 @@ function CompactApprovalRow({
   /** Where "View details" goes — see `ApprovalRow`'s own prop. */
   detailsHref: string;
   actions: React.ReactNode;
+  /**
+   * The blocker answer box, or `null` (B-046, 2026-09-02).
+   *
+   * Stacked **below** the row rather than placed in it: the row is a single
+   * horizontal axis of glyph, label, meta and buttons, and a multi-line box on
+   * that axis would either squeeze the label that says what is being approved
+   * or grow the row's height for every approval, blocker or not. Below it, a
+   * transcript keeps its quiet one-line interruption for every other kind and
+   * grows only for the one kind that asked a question.
+   */
+  answerControl?: React.ReactNode;
   busy: boolean;
   status?: React.ReactNode;
 }) {
@@ -551,48 +655,51 @@ function CompactApprovalRow({
         data-approval-id={lead.id}
         data-approval-count={approvals.length}
         data-approval-inline="compact"
-        className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-muted/50"
+        className="rounded-lg px-2 py-1.5 hover:bg-muted/50"
       >
-        <div
-          className={cn(
-            "flex size-7 shrink-0 items-center justify-center rounded-md",
-            uniform?.iconClass ?? "bg-muted text-muted-foreground",
-          )}
-        >
-          <Icon className="size-3.5" aria-hidden />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <CompactLabel approvals={approvals} />
-            {consequences.map((c) => (
-              <span
-                key={c.label}
-                data-approval-consequence={c.label}
-                className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
-              >
-                {c.label}
-              </span>
-            ))}
-          </div>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <ApprovalMeta
-              approval={lead}
-              now={now}
-              askerNames={askerNames}
-              thread={thread}
-              status={status}
-            />
-            {!busy && (
-              <a
-                href={detailsHref}
-                className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
-              >
-                View details
-              </a>
+        <div className="flex items-center gap-2">
+          <div
+            className={cn(
+              "flex size-7 shrink-0 items-center justify-center rounded-md",
+              uniform?.iconClass ?? "bg-muted text-muted-foreground",
             )}
+          >
+            <Icon className="size-3.5" aria-hidden />
           </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <CompactLabel approvals={approvals} />
+              {consequences.map((c) => (
+                <span
+                  key={c.label}
+                  data-approval-consequence={c.label}
+                  className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+                >
+                  {c.label}
+                </span>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <ApprovalMeta
+                approval={lead}
+                now={now}
+                askerNames={askerNames}
+                thread={thread}
+                status={status}
+              />
+              {!busy && (
+                <a
+                  href={detailsHref}
+                  className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
+                >
+                  View details
+                </a>
+              )}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">{actions}</div>
         </div>
-        <div className="flex shrink-0 items-center gap-1">{actions}</div>
+        {answerControl && <div className="mt-1.5 pl-9">{answerControl}</div>}
       </section>
     </div>
   );

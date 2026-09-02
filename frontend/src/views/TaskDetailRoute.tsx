@@ -60,7 +60,13 @@ export function TaskDetailRoute({
   deciding?: ReadonlyMap<string, Verdict>;
   decided?: Readonly<Record<string, DecidedApproval>>;
   failed?: Record<string, string>;
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+    /** The operator's answer to a blocker's question (B-046) — see `ApprovalRow`. */
+    answer?: string,
+  ) => void;
   /** Opens the chat thread this card was created from (issue #246). */
   onOpenThread?: (threadId: string) => void;
   /** Where Back, and a deleted card, go: the board, which lives in Ledgers. */
