@@ -4089,6 +4089,21 @@ struct ResolveApproval {
     /// An optional payload edit; overlaid onto the parked effect on `approve`.
     #[serde(default)]
     amended_payload: Option<serde_json::Value>,
+    /// The operator's answer to a question a blocker parked on (issue #1863).
+    ///
+    /// An `approve` carrying words re-enters the stopped step with them —
+    /// the `Amend` verdict, whose answer `resume_task_card` writes onto the
+    /// card note so the re-dispatched turn reads different input. Without it
+    /// the console could only ever send a wordless retry, and a card parked on
+    /// a question was re-dispatched unchanged: the agent asked again, and the
+    /// turn was billed again.
+    ///
+    /// Absent, empty or whitespace is today's behaviour exactly, so no
+    /// existing caller changes. Ignored on a `deny` — words attached to a
+    /// refusal are a reason, not an answer, and re-entering the step with them
+    /// would contradict the verdict.
+    #[serde(default)]
+    answer: Option<String>,
     /// Answer as soon as the verdict is durable, rather than holding the
     /// response open for the agent's follow-up turn (issue #383).
     ///
@@ -4357,6 +4372,7 @@ async fn run_resolve(
     // The verdict is settled inline; only the follow-up cycle is on the handle.
     // So by the time this returns — in either mode — the decision is journaled
     // and any grant is minted.
+    let answer = body.answer.clone();
     let (receipt, follow_up) = match (body.verdict, body.amended_payload) {
         (Verdict::Approve, Some(payload)) => {
             runtime
@@ -4370,7 +4386,7 @@ async fn run_resolve(
         }
         (verdict, None) => {
             runtime
-                .resolve_approval_spawned(&id, verdict, actor, scope)
+                .resolve_approval_spawned(&id, verdict, actor, scope, answer.as_deref())
                 .await?
         }
     };
@@ -4570,6 +4586,25 @@ mod test {
             .prefix("opencompany-http-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// The wire name of the operator's answer to a blocker (issue #1863).
+    ///
+    /// Pinned separately from the behaviour tests in `company::runtime`,
+    /// because those call the runtime directly: a misspelt or renamed field
+    /// here would leave every one of them green while the console's answer
+    /// silently never arrived, which is the shape of the defect being fixed.
+    #[test]
+    fn a_resolve_body_carries_the_operators_answer() {
+        let with_answer: ResolveApproval =
+            serde_json::from_str(r#"{"verdict":"approve","answer":"the 14th, not the 7th"}"#)
+                .expect("a body carrying an answer parses");
+        assert_eq!(with_answer.answer.as_deref(), Some("the 14th, not the 7th"));
+
+        // And every existing caller, which sends no such field, is unchanged.
+        let without: ResolveApproval =
+            serde_json::from_str(r#"{"verdict":"approve"}"#).expect("today's body still parses");
+        assert_eq!(without.answer, None);
     }
 
     fn manifest() -> CompanyManifest {

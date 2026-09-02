@@ -14,7 +14,7 @@
 // would put one continuation into the channel twice. Same content, different
 // verbs — so the verbs stay with their owners.
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useId, useMemo, useState, useRef } from "react";
 import {
   AtSign,
   ChevronDown,
@@ -44,6 +44,7 @@ import {
   type ApprovalSummary,
   type GrantScope,
 } from "@/api/types";
+import { Textarea } from "@/components/ui/textarea";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
@@ -200,6 +201,86 @@ export function blockerFields(a: ApprovalSummary): {
     ? groupKey.slice("connection:".length)
     : undefined;
   return { reason: str(payload.reason), needed: str(payload.needed), connection };
+}
+
+/**
+ * Where the operator writes the answer to the question a blocker parked on
+ * (defect B-046, 2026-09-02).
+ *
+ * ## Why this control has to exist at all
+ *
+ * A blocker is the one approval kind that is a *question*: `blockerFields`
+ * above reads a `reason` ("parked on your answer to the two questions I
+ * asked") and a `needed`, and until this control the console offered no way to
+ * supply either. The only text box anywhere near the card was the Discussion
+ * tab, whose posts carry no approval id and never touch a blocker — so an
+ * answer typed there was stored and ignored, and every Approve re-entered the
+ * step with the same input, re-asked, and re-billed the turn.
+ *
+ * ## Blockers only, and one at a time
+ *
+ * Self-gating on {@link isBlockerKind} for the same reason
+ * {@link ApprovalScopeControl} self-gates on `broadly_grantable`: the surfaces
+ * that render it should not each have to remember which kinds it applies to.
+ * A `payment.send` has no question to answer, so it shows nothing here.
+ *
+ * The caller is responsible for the other half — that this is a *single*
+ * approval, not a batch. One box over a batch would be one answer silently
+ * copied onto several unrelated parks, and the host appends it to the card the
+ * approval is linked to. In practice this cannot arise: an agent's question
+ * parks with `group_key: None`, so a blocker never batches with anything.
+ */
+export function BlockerAnswerControl({
+  approval: a,
+  value,
+  onChange,
+  disabled,
+  compact = false,
+}: {
+  approval: ApprovalSummary;
+  value: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  /**
+   * A chat transcript's row, which is a quiet interruption rather than a
+   * decision surface: the label and placeholder carry the whole explanation and
+   * the sentence below the box is dropped, because a paragraph of guidance in a
+   * transcript costs more room than it earns.
+   */
+  compact?: boolean;
+}) {
+  // Before the gate, so the hook order does not depend on the approval's kind.
+  const id = useId();
+  if (!isBlockerKind(a.kind)) return null;
+
+  return (
+    <div className="flex flex-col gap-1.5" data-blocker-answer={a.id}>
+      <label htmlFor={id} className="text-xs font-medium text-foreground">
+        Your answer
+      </label>
+      <Textarea
+        id={id}
+        value={value}
+        disabled={disabled}
+        rows={compact ? 2 : 3}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Answer what was asked — this goes back with your approval"
+        className={cn("text-sm", compact && "min-h-14 py-1.5 text-xs md:text-xs")}
+      />
+      {/* Only what the host actually does with it. Approve carries the words
+          back and the teammate picks the card up with them on it; Approve with
+          the box empty is the pre-B-046 request unchanged, which is still the
+          right move when "go ahead" is the whole answer; Decline never sends
+          it, because a refusal ends the step rather than re-entering it. */}
+      {!compact && (
+        <p className="text-xs text-muted-foreground">
+          Approve sends this back and the teammate picks the card up with it.
+          Approve with the box empty and it starts again with nothing new.
+          Decline doesn't send it.
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** The glyph for an effect kind; a question for a blocker, a shield for the unknown. */
