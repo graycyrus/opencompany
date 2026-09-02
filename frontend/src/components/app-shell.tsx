@@ -6,6 +6,7 @@ import {
   type CompanyStatus,
   type GrantScope,
   type NotificationDto,
+  type TeamMemberDto,
   type TurnStep,
   type Verdict,
 } from "@/api/types";
@@ -117,7 +118,7 @@ import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
-import { fromDto, type TeamMember } from "@/lib/team";
+import { fromDto, rosterIdentity, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
@@ -1295,113 +1296,180 @@ export function AppShell({
         const team = await client.listTeam(company).catch(() => []);
         if (cancelled) return;
         const deskThreads = desks === null ? defaultThreads() : threadsFromDesks(desks);
-        const resolved = [
-          ...deskThreads,
-          ...agentDmThreads(
-            team,
-            deskThreads.map((t) => t.id),
-          ),
-          // The legacy `#/conversation` route's own copy of the pinned
-          // Operator row — Chat's channel model gets it through
-          // `operatorSection`, but `Conversation` reads this thread list
-          // directly and never received one, so its `readOnly` plumbing had
-          // nothing to gate (issue #1781 review, Codex P2).
-          ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
-        ];
-        setThreads((prev) => {
-          const byId = new Map(prev.map((t) => [t.id, t]));
-          return resolved.map((t) => {
-            const existing = byId.get(t.id);
-            return existing ? { ...t, messages: existing.messages } : t;
-          });
-        });
         // The host answered, so this is the company's desk list — empty
         // included. `defaultDesks()` stands in only when `listDesks` itself
         // failed (`desks === null`, from the `.catch(() => null)` above); a
         // company that simply declares no `[[group_chat]]` used to be given
         // three fabricated ones here.
         const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);
-        const roster = team.map(fromDto);
-        // The name map the live receipt resolves an agent id through (issue
-        // #1934) — derived from the roster this effect already read, so it costs
-        // no extra request and is scoped to the company the effect ran for.
-        setAgentNames(Object.fromEntries(roster.map((m) => [m.id, m.name])));
-        // Keep the addressing this loop resolves, not just its side effect.
+
+        // Everything below is a function of the roster, so it is derived in one
+        // place that can be re-run — not computed once and closed over.
         //
-        // The Operator feed's id is folded in here too (issue #1781 review,
-        // Codex P2): `channelMap` only knows desks and roster teammates, so
-        // without this the map a **live** SSE frame is resolved through
-        // (`channelForThread(chatChannelByThread, event.chatId)`, a few
-        // hundred lines below) missed the Operator channel entirely and
-        // dropped the frame — `renderAgentReply` returns on the very next
-        // line when the lookup misses. The five-second history poll still
-        // recovered it eventually, because the `channels` rehydration-target
-        // list a little further down already carries this same id→id pair;
-        // this closes the live-event gap the poll was quietly papering over.
-        setChatChannelByThread({
-          ...channelMap(chatDesks, roster),
-          ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
-        });
-        // The channel `ChatView` lands on when the hash names none, which since
-        // issue #1743 is the built-in `#general` rather than the first desk —
-        // the two must agree, or a line with nowhere else to go lands in a
-        // channel the operator is not looking at. Resolved rather than
-        // hard-coded, for the reason `generalChannelId` gives: a grandfathered
-        // blueprint desk owns the line in its own company, and `main` is then
-        // not a channel at all.
-        setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
-        // Fold the Operator feed's id into the same rehydration pass, keyed on
-        // its own id both as channel and thread (its channel id *is* its
-        // thread id — `chat/history?desk=<id>` reads it through the ordinary
-        // path). Without this, `ChatView`'s pinned row would sit on a channel
-        // id `historyReady` never sees a status for until `discovered` alone
-        // resolves it, and `transcripts[operatorChannel.id]` would never fill
-        // in — the spinner-forever failure mode this pass exists to avoid.
-        const threadIds = [
-          ...resolved.map((t) => t.id),
-          ...(operatorChannel ? [operatorChannel.id] : []),
-        ];
-        const channels = [
-          // `#general` is not in the desk list (it is not a desk), so its
-          // history has to be named here or nothing would rehydrate it on
-          // reload — the one channel every company has would come back empty.
-          {
-            channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
-            threadId: MAIN_THREAD_ID,
-          },
-          ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-          // A DM's history is fetched under the teammate's **own id** — but
-          // that id is not always this DM's address. A manifest may declare a
-          // teammate whose id is a General spelling (`mint_agent_id` reserves
-          // `main` and `General`, but a blueprint is not something this console
-          // overrules), and `GET chat/history?desk=main` then returns the
-          // *folded General conversation*, not that teammate's transcript:
-          // `is_general_chat` has folded `""`, `main`, `General` and `general`
-          // into one conversation since issue #65. Naming `dm:<id>` as its
-          // channel therefore poured the company-wide line into that DM on
-          // every reload.
+        // Issue B-030: it used to be computed once. A teammate hired after this
+        // effect ran was therefore addressable but unreadable. `ChatView` keeps
+        // its own live roster and adds the new DM to the rail the moment the
+        // host confirms the write, so the operator can open the DM and send —
+        // but `rehydrateAll` below closed over a `channels` list built from this
+        // one-shot read, so `chat/history?desk=<new hire>` was never requested,
+        // and `chatChannelByThread` had no entry for them either, so even the
+        // live SSE frame carrying their reply was dropped by
+        // `channelForThread`. The founder saw their own optimistic line and
+        // nothing else, for as long as the tab stayed open: the new hire did
+        // real work, was billed for, and reported nothing back.
+        //
+        // Re-running on a roster change rather than plumbing an `onHired`
+        // callback is deliberate. Four surfaces write the roster
+        // (`ChatView`, `TeamView`, `OrgChartView`, `SetupDialog`), a company's
+        // own agents can add one, and a second tab can too — a callback would
+        // have to be threaded through every one of those and would still miss
+        // the last two. Deriving from what the host says the roster *is* covers
+        // all of them and cannot drift.
+        const targets: {
+          threadIds: string[];
+          channels: { channelId: string; threadId: string }[];
+        } = { threadIds: [], channels: [] };
+        let rosterKey = "";
+
+        const applyRoster = (members: TeamMemberDto[]) => {
+          // Issue #151 §3.3: desks first, then one DM thread per roster
+          // teammate.
+          const resolved = [
+            ...deskThreads,
+            ...agentDmThreads(
+              members,
+              deskThreads.map((t) => t.id),
+            ),
+            // The legacy `#/conversation` route's own copy of the pinned
+            // Operator row — Chat's channel model gets it through
+            // `operatorSection`, but `Conversation` reads this thread list
+            // directly and never received one, so its `readOnly` plumbing had
+            // nothing to gate (issue #1781 review, Codex P2).
+            ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
+          ];
+          setThreads((prev) => {
+            const byId = new Map(prev.map((t) => [t.id, t]));
+            return resolved.map((t) => {
+              const existing = byId.get(t.id);
+              return existing ? { ...t, messages: existing.messages } : t;
+            });
+          });
+          const roster = members.map(fromDto);
+          // The name map the live receipt resolves an agent id through (issue
+          // #1934) — derived from the roster this effect already read, so it
+          // costs no extra request and is scoped to the company it ran for.
+          setAgentNames(Object.fromEntries(roster.map((m) => [m.id, m.name])));
+          // Keep the addressing this loop resolves, not just its side effect.
           //
-          // Resolved through `channelIdForThread` so the one rule that decides
-          // where a thread renders decides it here too (issue #1743). For every
-          // ordinary teammate that is exactly `dm:<id>`, unchanged.
-          ...roster.map((m) => ({
-            channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
-            // The address the DM is actually written under. Bare, this fetched
-            // the folded General history for a teammate whose id is a General
-            // spelling, so its own transcript could never be recovered after a
-            // reload (issue #1743).
-            threadId: dmThreadId(m),
-          })),
-          ...(operatorChannel
-            ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
-            : []),
-        ];
-        const rehydrateAll = () => rehydrateTargets(threadIds, channels);
+          // The Operator feed's id is folded in here too (issue #1781 review,
+          // Codex P2): `channelMap` only knows desks and roster teammates, so
+          // without this the map a **live** SSE frame is resolved through
+          // (`channelForThread(chatChannelByThread, event.chatId)`, a few
+          // hundred lines below) missed the Operator channel entirely and
+          // dropped the frame — `renderAgentReply` returns on the very next
+          // line when the lookup misses. The five-second history poll still
+          // recovered it eventually, because the `channels` rehydration-target
+          // list a little further down already carries this same id→id pair;
+          // this closes the live-event gap the poll was quietly papering over.
+          setChatChannelByThread({
+            ...channelMap(chatDesks, roster),
+            ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
+          });
+          // The channel `ChatView` lands on when the hash names none, which
+          // since issue #1743 is the built-in `#general` rather than the first
+          // desk — the two must agree, or a line with nowhere else to go lands
+          // in a channel the operator is not looking at. Resolved rather than
+          // hard-coded, for the reason `generalChannelId` gives: a
+          // grandfathered blueprint desk owns the line in its own company, and
+          // `main` is then not a channel at all.
+          setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
+          // Fold the Operator feed's id into the same rehydration pass, keyed
+          // on its own id both as channel and thread (its channel id *is* its
+          // thread id — `chat/history?desk=<id>` reads it through the ordinary
+          // path). Without this, `ChatView`'s pinned row would sit on a channel
+          // id `historyReady` never sees a status for until `discovered` alone
+          // resolves it, and `transcripts[operatorChannel.id]` would never fill
+          // in — the spinner-forever failure mode this pass exists to avoid.
+          targets.threadIds = [
+            ...resolved.map((t) => t.id),
+            ...(operatorChannel ? [operatorChannel.id] : []),
+          ];
+          targets.channels = [
+            // `#general` is not in the desk list (it is not a desk), so its
+            // history has to be named here or nothing would rehydrate it on
+            // reload — the one channel every company has would come back empty.
+            {
+              channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
+              threadId: MAIN_THREAD_ID,
+            },
+            ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+            // A DM's history is fetched under the teammate's **own id** — but
+            // that id is not always this DM's address. A manifest may declare a
+            // teammate whose id is a General spelling (`mint_agent_id` reserves
+            // `main` and `General`, but a blueprint is not something this
+            // console overrules), and `GET chat/history?desk=main` then returns
+            // the *folded General conversation*, not that teammate's
+            // transcript: `is_general_chat` has folded `""`, `main`, `General`
+            // and `general` into one conversation since issue #65. Naming
+            // `dm:<id>` as its channel therefore poured the company-wide line
+            // into that DM on every reload.
+            //
+            // Resolved through `channelIdForThread` so the one rule that
+            // decides where a thread renders decides it here too (issue #1743).
+            // For every ordinary teammate that is exactly `dm:<id>`, unchanged.
+            ...roster.map((m) => ({
+              channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
+              // The address the DM is actually written under. Bare, this
+              // fetched the folded General history for a teammate whose id is a
+              // General spelling, so its own transcript could never be
+              // recovered after a reload (issue #1743).
+              threadId: dmThreadId(m),
+            })),
+            ...(operatorChannel
+              ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
+              : []),
+          ];
+        };
+
+        applyRoster(team);
+        rosterKey = rosterIdentity(team);
+
+        const rehydrateAll = () => rehydrateTargets(targets.threadIds, targets.channels);
+
+        // One roster read per tick, alongside the history reads that already
+        // run on this cadence, and it only re-derives when the roster actually
+        // changed — `rosterIdentity` is what makes a hire, a departure or a
+        // rename the *only* things that re-render the shell here. A tick while
+        // a previous read is still in flight skips it rather than stacking, the
+        // same rule `hydrateThread` applies per thread.
+        let rosterReadInFlight = false;
+        const refreshAll = () => {
+          if (!rosterReadInFlight) {
+            rosterReadInFlight = true;
+            client
+              .listTeam(company)
+              .then((members) => {
+                if (cancelled || requestCompany !== company) return;
+                const key = rosterIdentity(members);
+                if (key === rosterKey) return;
+                rosterKey = key;
+                applyRoster(members);
+              })
+              .catch(() => {
+                /* host without `/team`, or offline — the addressing stands */
+              })
+              .finally(() => {
+                rosterReadInFlight = false;
+              });
+          }
+          rehydrateAll();
+        };
+
         // SSE remains the fast path. This catches a persisted channel message
         // whose live frame arrived during a disconnect or before its thread
         // mapping existed, and pauses automatically while the tab is hidden.
         rehydrateAll();
-        disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
+        disposeRehydratePolling = startVisiblePolling(refreshAll, 5000);
         // Every channel this pass will hydrate now has a status, so a channel
         // with none is one nothing is coming for.
         setHydration((h) => ({ ...h, discovered: true }));
