@@ -4492,6 +4492,7 @@ to = "done"
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         // No node row reported `Error` at all — a setup/validation failure the
         // engine raised before any node ran, for instance.
@@ -4513,6 +4514,7 @@ to = "done"
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         let nodes = vec![crate::ports::WorkflowRunNodeRow {
             node_id: "work".to_string(),
@@ -4533,6 +4535,7 @@ to = "done"
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         let nodes = vec![
             crate::ports::WorkflowRunNodeRow {
@@ -4718,6 +4721,7 @@ to = "boom"
             approval_ids: Vec::new(),
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         };
 
         let capture = serde_json::json!({
@@ -8772,6 +8776,7 @@ to = "done"
                 approval_ids: vec!["appr-first".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
             crate::ports::WorkflowBlockedNode {
                 node_id: "second".to_string(),
@@ -8779,6 +8784,7 @@ to = "done"
                 approval_ids: vec!["appr-second".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
         ];
 
@@ -8891,6 +8897,7 @@ to = "done"
             approval_ids: vec!["appr-solo".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         stash_blocked_agent_nodes(
             Some(&deps),
@@ -8957,6 +8964,7 @@ to = "done"
                 approval_ids: vec!["appr-first".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
             crate::ports::WorkflowBlockedNode {
                 node_id: "second".to_string(),
@@ -8964,6 +8972,7 @@ to = "done"
                 approval_ids: vec!["appr-second".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
         ];
 

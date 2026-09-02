@@ -11504,6 +11504,7 @@ mode = "full"
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
