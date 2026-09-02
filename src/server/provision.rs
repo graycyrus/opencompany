@@ -3,9 +3,13 @@
 //! `POST /api/v1/companies` provisions a company from a manifest body (raw TOML
 //! or `{ "manifest_toml", "id"? }` JSON), validates it, builds a
 //! [`CompanyRuntime`](crate::company::runtime::CompanyRuntime) over the data
-//! dir, registers it, and records its owning tenant. Provisioning and suspension
-//! require the `platform` scope; pause/resume/archive are owner-scoped and never
-//! cross tenants.
+//! dir, registers it, and records its owning tenant. Provisioning, suspension
+//! and archive require the `platform` scope. Pause, resume and the two
+//! emergency routes decide something *for* the company rather than for the
+//! caller, so they take
+//! [`AdminScopedCompany`](crate::server::ops::scope::AdminScopedCompany): a
+//! human must administer this company, and the machine principal must own it.
+//! Neither crosses tenants.
 //!
 //! Lifecycle transitions persist the new [`CompanyRecord`](crate::ports::types::CompanyRecord)
 //! `lifecycle` and append a [`LifecycleChanged`](crate::ports::types::CompanyEvent::LifecycleChanged)
@@ -39,6 +43,7 @@ use crate::runtime::types::CycleReport;
 use crate::runtime::{RuntimeBuilder, company_id_from_name};
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
+use crate::server::ops::scope::AdminScopedCompany;
 use crate::server::platform_auth::{PlatformScope, acting_tenant, authorize_address};
 use crate::server::webhook::{WebhookEvent, WebhookKind};
 use crate::store::FsCompanyStore;
@@ -660,11 +665,17 @@ fn reason_is_budget(uri: &Uri) -> bool {
 }
 
 /// Applies a lifecycle transition to `to`, returning the fresh status.
-async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) -> Response {
-    let Some(runtime) = state.registry().get(id) else {
-        return not_found(id.as_ref());
-    };
-    if let Err(err) = runtime.set_lifecycle(to, lifecycle_actor(auth)).await {
+///
+/// Takes the already-resolved runtime and the already-identified actor: the
+/// routes that reach it through [`AdminScopedCompany`] hold both by the time
+/// their handler body runs, and re-deriving either here would stand a second
+/// answer to "who is this" beside the extractor's.
+async fn transition(
+    runtime: &Arc<crate::runtime::CompanyRuntime>,
+    actor: Actor,
+    to: &str,
+) -> Response {
+    if let Err(err) = runtime.set_lifecycle(to, actor).await {
         return ApiError(err).into_response();
     }
     match runtime.status().await {
@@ -673,21 +684,42 @@ async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) 
     }
 }
 
-/// `POST /api/v1/companies/{id}/pause` — stop accepting work (owner-scoped).
-async fn pause(
-    crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    uri: Uri,
-) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
+/// [`transition`] for the two platform-scoped routes, which address a company
+/// by id rather than through an extractor that has already resolved it.
+async fn transition_by_id(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) -> Response {
+    let Some(runtime) = state.registry().get(id) else {
+        return not_found(id.as_ref());
+    };
+    transition(&runtime, lifecycle_actor(auth), to).await
+}
+
+/// The actor for a lifecycle transition made through [`AdminScopedCompany`].
+///
+/// Records exactly what [`lifecycle_actor`] already recorded — a human as
+/// themselves, a machine credential as the tenant it acts for — so closing the
+/// authorization gap does not quietly rewrite the audit trail alongside it.
+/// `AdminScopedCompany` names the machine `ActorKind::System`; these events have
+/// always named it `Operator`, and which of the two is right is a separate
+/// question from who may fire them.
+fn scoped_lifecycle_actor(scope: &AdminScopedCompany) -> Actor {
+    match &scope.admin {
+        Some(_) => scope.actor(),
+        None => Actor {
+            kind: ActorKind::Operator,
+            id: scope.actor().id,
+        },
     }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
-    let response = transition(&state, &auth, &id, "paused").await;
+}
+
+/// `POST /api/v1/companies/{id}/pause` — stop accepting work.
+///
+/// [`AdminScopedCompany`] rather than
+/// [`CompanyAuth`](crate::server::platform_auth::CompanyAuth): halting every
+/// teammate in a company is a decision made *for* the company, so it takes the
+/// same authority every other such write takes.
+async fn pause(scope: AdminScopedCompany, State(state): State<AppState>, uri: Uri) -> Response {
+    let id = scope.id().clone();
+    let response = transition(&scope.runtime, scoped_lifecycle_actor(&scope), "paused").await;
     // A budget-triggered pause emits the `budget.exhausted` webhook.
     if response.status() == StatusCode::OK && reason_is_budget(&uri) {
         emit_budget_exhausted(&state, &id).await;
@@ -695,36 +727,23 @@ async fn pause(
     response
 }
 
-/// `POST /api/v1/companies/{id}/resume` — resume accepting work (owner-scoped).
-async fn resume(
-    crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
+/// `POST /api/v1/companies/{id}/resume` — resume accepting work.
+///
+/// Same authority as [`pause`], and for the same reason.
+async fn resume(scope: AdminScopedCompany) -> Response {
     // `suspended` is a platform-forced pause (billing/abuse); only a
     // platform-scope caller may lift it. Neither an owner token nor a company's
     // own admin may resume a company the platform suspended.
-    let platform = matches!(&auth, GqlAuth::Platform(c) if c.has_platform_scope());
-    if !platform {
-        match state.registry().get(&id) {
-            Some(runtime) => match runtime.status().await {
-                Ok(status) if status.lifecycle == "suspended" => {
-                    return crate::server::platform_auth::forbidden();
-                }
-                Ok(_) => {}
-                Err(err) => return ApiError(err).into_response(),
-            },
-            None => return not_found(id.as_ref()),
+    if !scope.holds_platform_scope() {
+        match scope.runtime.status().await {
+            Ok(status) if status.lifecycle == "suspended" => {
+                return crate::server::platform_auth::forbidden();
+            }
+            Ok(_) => {}
+            Err(err) => return ApiError(err).into_response(),
         }
     }
-    transition(&state, &auth, &id, "running").await
+    transition(&scope.runtime, scoped_lifecycle_actor(&scope), "running").await
 }
 
 // ---------------------------------------------------------------------------
@@ -780,18 +799,9 @@ fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
 /// Idempotent: pressing it twice returns `200` with `changed: false` rather than
 /// an error. A panic button that punishes a second press is a bad panic button.
 async fn emergency_pause(
-    crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
+    scope: AdminScopedCompany,
     body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // A missing, empty, or malformed JSON body all read as "no step-up was
     // supplied" and fall through to the same `confirmation_required` envelope a
     // request with an absent body already gets — a panic button has to tell the
@@ -803,17 +813,15 @@ async fn emergency_pause(
     if let Some(resp) = confirmation_error(&body.confirm, PAUSE_CONFIRMATION) {
         return resp;
     }
-    let Some(runtime) = state.registry().get(&id) else {
-        return not_found(id.as_ref());
-    };
+    let runtime = &scope.runtime;
     match runtime
-        .emergency_pause(lifecycle_actor(&auth), body.reason)
+        .emergency_pause(scoped_lifecycle_actor(&scope), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Ok(changed) => emergency_response(runtime, changed, None).await,
         Err(err) => {
             emergency_response(
-                &runtime,
+                runtime,
                 false,
                 Some(format!(
                     "the emergency stop is active in memory but its journal \
@@ -838,18 +846,9 @@ async fn emergency_pause(
 /// There is no timeout anywhere in this path. A stop persists until this
 /// endpoint is called by an identified operator, across restarts included.
 async fn emergency_resume(
-    crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
+    scope: AdminScopedCompany,
     body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // Same contract as `emergency_pause`: a missing, empty, or malformed body
     // reads as "no step-up was supplied" and answers with the documented
     // `confirmation_required` envelope rather than a bare `Json` rejection.
@@ -857,20 +856,18 @@ async fn emergency_resume(
         confirm: String::new(),
         reason: None,
     });
-    if let Some(resp) = confirmation_error(&body.confirm, id.as_ref()) {
+    if let Some(resp) = confirmation_error(&body.confirm, scope.id().as_ref()) {
         return resp;
     }
-    let Some(runtime) = state.registry().get(&id) else {
-        return not_found(id.as_ref());
-    };
+    let runtime = &scope.runtime;
     match runtime
-        .emergency_resume(lifecycle_actor(&auth), body.reason)
+        .emergency_resume(scoped_lifecycle_actor(&scope), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Ok(changed) => emergency_response(runtime, changed, None).await,
         Err(err) => {
             emergency_response(
-                &runtime,
+                runtime,
                 false,
                 Some(format!(
                     "the emergency stop is still engaged in memory but its journal \
@@ -919,7 +916,7 @@ async fn suspend(
     if let Some(resp) = authorize_address(&state, &auth, &id) {
         return resp;
     }
-    transition(&state, &auth, &id, "suspended").await
+    transition_by_id(&state, &auth, &id, "suspended").await
 }
 
 /// `POST /api/v1/companies/{id}/archive` — terminally archive a company and
@@ -934,7 +931,7 @@ async fn archive(
     if let Some(resp) = authorize_address(&state, &auth, &id) {
         return resp;
     }
-    let response = transition(&state, &auth, &id, "archived").await;
+    let response = transition_by_id(&state, &auth, &id, "archived").await;
     // `response.status() == OK` is sufficient proof on its own: `transition`
     // already re-read `status()` after `set_lifecycle` and its body already
     // confirms `lifecycle: "archived"`. Re-reading a THIRD time to

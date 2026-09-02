@@ -219,10 +219,21 @@ pub(crate) struct AdminScopedCompany {
     pub(crate) runtime: Arc<CompanyRuntime>,
     /// The human admin behind the request, when the principal is a person.
     /// `None` for the machine principal, which is a tenant and not a user.
-    #[allow(dead_code, reason = "carried for handlers that need the person")]
     pub(crate) admin: Option<UserPrincipal>,
     /// Who made this change. Always identified — never anonymous.
     actor: Actor,
+    /// Whether the machine principal behind this request holds the `platform`
+    /// scope — the hosting control plane itself, as opposed to a tenant token
+    /// that merely owns this company.
+    ///
+    /// Carried because one route needs a *narrower* answer than "may decide for
+    /// this company": lifting a platform-forced `suspended` is reserved to the
+    /// platform, so neither a tenant token nor the company's own admin may do
+    /// it (`provision::resume`). Resolved here, with the rest of the principal,
+    /// rather than left for a handler to re-derive from a credential this
+    /// extractor deliberately drops. Always `false` for a human — a session
+    /// cookie can never carry the platform scope.
+    platform_scope: bool,
 }
 
 impl AdminScopedCompany {
@@ -234,6 +245,12 @@ impl AdminScopedCompany {
     /// Who made the change, for attributing it in the journal.
     pub(crate) fn actor(&self) -> Actor {
         self.actor.clone()
+    }
+
+    /// Whether the caller is the hosting control plane rather than a tenant
+    /// token or a company admin. See [`Self::platform_scope`].
+    pub(crate) fn holds_platform_scope(&self) -> bool {
+        self.platform_scope
     }
 }
 
@@ -276,12 +293,16 @@ impl FromRequestParts<AppState> for AdminScopedCompany {
                     runtime,
                     admin: Some(admin),
                     actor,
+                    // A session cookie never carries a platform scope.
+                    platform_scope: false,
                 })
             }
             // The machine principal. It already passed `authorize_address`, so
             // it owns this company (or holds the platform scope). Name it.
             None => {
                 let CompanyAuth(auth) = CompanyAuth::from_request_parts(parts, state).await?;
+                let platform_scope =
+                    matches!(&auth, GqlAuth::Platform(claims) if claims.has_platform_scope());
                 let actor = Actor {
                     kind: ActorKind::System,
                     id: crate::server::platform_auth::acting_tenant(&auth),
@@ -290,6 +311,7 @@ impl FromRequestParts<AppState> for AdminScopedCompany {
                     runtime,
                     admin: None,
                     actor,
+                    platform_scope,
                 })
             }
         }

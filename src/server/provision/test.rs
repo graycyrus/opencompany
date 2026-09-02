@@ -1317,6 +1317,130 @@ async fn owner_cannot_resume_a_platform_suspension() {
     assert_eq!(json_body(resumed).await["lifecycle"], "running");
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle authority
+// ---------------------------------------------------------------------------
+
+/// Every lifecycle route a company's *own* people can reach, with the body that
+/// would otherwise let it through.
+///
+/// Enumerated once so the two tests below cannot drift apart, and so adding a
+/// lifecycle route is a visible prompt to say who may fire it rather than a
+/// silent addition to a list nothing reads.
+fn company_scoped_lifecycle_routes() -> Vec<(&'static str, Option<serde_json::Value>)> {
+    vec![
+        ("/api/v1/companies/acme/pause", None),
+        ("/api/v1/companies/acme/resume", None),
+        (
+            "/api/v1/companies/acme/emergency-pause",
+            Some(serde_json::json!({ "confirm": "EMERGENCY-PAUSE" })),
+        ),
+        (
+            "/api/v1/companies/acme/emergency-resume",
+            Some(serde_json::json!({ "confirm": "acme" })),
+        ),
+    ]
+}
+
+/// A `POST` signed in with a session cookie rather than a machine bearer.
+fn cookie_post_req(uri: &str, cookie: &str, body: Option<serde_json::Value>) -> Request<Body> {
+    let builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("cookie", cookie);
+    match body {
+        Some(body) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    }
+}
+
+async fn lifecycle_of(state: &AppState, company: &str) -> String {
+    state
+        .registry()
+        .get(&CompanyId::new(company))
+        .expect("company registered")
+        .status()
+        .await
+        .expect("status")
+        .lifecycle
+}
+
+/// A Member may not halt the company.
+///
+/// These routes took `CompanyAuth`, which answers only "may this principal
+/// address this company" — true of every member of it. Anyone a founder invited
+/// to *use* the company could stop every teammate in it. The whole list is
+/// asserted, not just `pause`: the gap was the class of owner-scoped routes
+/// registered outside the write plane's authority extractor, not one handler.
+#[tokio::test]
+async fn a_member_cannot_move_the_company_lifecycle() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+    let member = crate::server::test_support::member_cookie("acme");
+
+    for (uri, body) in company_scoped_lifecycle_routes() {
+        let denied = app
+            .clone()
+            .oneshot(cookie_post_req(uri, &member, body))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+
+    // And nothing moved: a 403 returned after the write would be no better.
+    assert_eq!(lifecycle_of(&state, "acme").await, "running");
+    let status = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .unwrap()
+        .status()
+        .await
+        .unwrap();
+    assert!(
+        !status.emergency_paused,
+        "the emergency stop must not have engaged: {status:?}"
+    );
+}
+
+/// The counterpart: the guard denies a Member, not everybody. Without this a
+/// blanket refusal would pass the test above and take the control away from the
+/// people it belongs to.
+#[tokio::test]
+async fn an_admin_can_move_the_company_lifecycle() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    let admin = crate::server::test_support::fixed_cookie("acme");
+
+    for (uri, body) in company_scoped_lifecycle_routes() {
+        let allowed = app
+            .clone()
+            .oneshot(cookie_post_req(uri, &admin, body))
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK, "{uri}");
+    }
+    assert_eq!(lifecycle_of(&state, "acme").await, "running");
+}
+
 #[tokio::test]
 async fn archive_removes_from_registry() {
     let home_dir = home();
