@@ -81,6 +81,7 @@ pub mod grants;
 /// [`handover`].
 pub mod handover;
 pub mod journal;
+pub mod lifecycle_gate;
 /// Issue #1845: [`LifecycleScheduler`] — the process-wide daily tick that
 /// nudges a signup who hit their day-7 boundary without saving a workflow,
 /// by email and by a durable in-app [`Notification`](crate::ports::notifications::Notification)
@@ -149,6 +150,7 @@ pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;
 pub use derived_guard::DerivedGuardWorkspace;
 pub use handover::RuntimeHandover;
+pub use lifecycle_gate::LifecycleGate;
 pub use lifecycle_scheduler::LifecycleScheduler;
 pub use maintenance::MaintenanceTicker;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};

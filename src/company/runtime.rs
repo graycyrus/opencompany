@@ -350,6 +350,16 @@ pub struct CompanyRuntime {
     /// which is what makes a wedged cron fire and an agent-initiated run as
     /// stoppable from the console as a Run-button one.
     pub(crate) run_supervisor: crate::runtime::RunSupervisor,
+    /// The durable lifecycle, mirrored where a synchronous caller can read it.
+    ///
+    /// Shared with [`run_supervisor`](Self::run_supervisor), so the two choke
+    /// points every entry point into new work passes through —
+    /// [`ensure_accepting`](Self::ensure_accepting) for a cycle,
+    /// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) for a
+    /// workflow run — give one answer. Written by
+    /// [`set_lifecycle`](Self::set_lifecycle) once the transition is durable,
+    /// and hydrated at boot from the record the builder loaded.
+    pub(crate) lifecycle: crate::runtime::LifecycleGate,
     /// Issue #243: the live single-use grants minted when an operator approves a
     /// tool call an agent was blocked from making.
     ///
@@ -538,6 +548,12 @@ impl CompanyRuntime {
         grants: GrantSet,
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
+        // One gate, shared with the supervisor from the start: the default
+        // build never calls `set_run_supervisor`, so wiring it only there would
+        // leave the runtime and its own supervisor reading two values.
+        let lifecycle = crate::runtime::LifecycleGate::default();
+        let mut run_supervisor = crate::runtime::RunSupervisor::new();
+        run_supervisor.attach_lifecycle(lifecycle.clone());
         Self {
             inert_board_reported: std::sync::atomic::AtomicBool::new(false),
             // Install-wide, not per-company, so it is set by the builder from
@@ -573,7 +589,8 @@ impl CompanyRuntime {
             #[cfg(feature = "openhuman")]
             workflow_checkpoints: None,
             steer: crate::company::steer::InflightRegistry::new(),
-            run_supervisor: crate::runtime::RunSupervisor::new(),
+            run_supervisor,
+            lifecycle,
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),
@@ -849,8 +866,20 @@ impl CompanyRuntime {
     /// (wired by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) to the one
     /// the harness deps hold, so the orchestrator's `run_workflow` tool registers
     /// into the map the cancel route reads).
-    pub fn set_run_supervisor(&mut self, supervisor: crate::runtime::RunSupervisor) {
+    pub fn set_run_supervisor(&mut self, mut supervisor: crate::runtime::RunSupervisor) {
+        // The shared handle arrives with its own default gate; give it this
+        // company's, so a pause reaches the runs the harness starts too.
+        supervisor.attach_lifecycle(self.lifecycle.clone());
         self.run_supervisor = supervisor;
+    }
+
+    /// Seeds the lifecycle mirror from the record the builder loaded.
+    ///
+    /// Boot's half of [`set_lifecycle`](Self::set_lifecycle)'s write: a company
+    /// paused before a restart must come back paused to every synchronous
+    /// reader, not just to the store.
+    pub fn hydrate_lifecycle(&self, lifecycle: &str) {
+        self.lifecycle.set(lifecycle);
     }
 
     /// This company's live set of cancellable workflow runs (issue #383).
@@ -1930,12 +1959,16 @@ impl CompanyRuntime {
         &self.blocked_nodes
     }
 
-    /// Rejects a cycle on a runtime that is being replaced.
+    /// Rejects a cycle a company is not open for.
     ///
-    /// Separate from [`ensure_running`](Self::ensure_running): that one reads a
-    /// durable lifecycle an operator chose (paused, archived) and renders `409`;
-    /// this one is a process-local window that clears itself within a turn and
-    /// renders `503`.
+    /// Two refusals, because there are two ways to be closed: a durable
+    /// lifecycle an operator chose (paused, suspended, archived), which renders
+    /// `409`, and a process-local replacement window that clears itself within
+    /// a turn, which renders `503`. The lifecycle half reads the same mirror
+    /// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) reads, so
+    /// a cycle and a workflow run cannot disagree about whether the company is
+    /// stopped. [`ensure_running`](Self::ensure_running) is the same question
+    /// asked of the store, for a route that wants the durable record itself.
     /// `pub(crate)` since issue #983 rather than private: a caller that journals
     /// its own input has to be able to ask this **before** it writes, since a
     /// refusal ordered after the append would leave a message in the transcript
@@ -1943,6 +1976,15 @@ impl CompanyRuntime {
     /// one of the cycle entry points below; this exists so the chat route can
     /// run the same check one step earlier.
     pub(crate) fn ensure_accepting(&self) -> Result<()> {
+        // The operator's own stop comes first, and it is durable: a company
+        // they paused must refuse a cycle whichever ingress asked for one.
+        // This used to be `ensure_running`'s job alone, and `ensure_running` is
+        // `async` and opt-in per call site, so a route that never called it —
+        // the board's dispatch edge, an approved gate's continuation — spent
+        // real money on a company that had been stopped. Mirrored here so this
+        // synchronous pre-flight can answer it (issue #1846's comment on
+        // `ops/budget_pause.rs` named this gap on a third route).
+        self.lifecycle.ensure_running()?;
         if self.is_quiesced() {
             return Err(OpenCompanyError::Quiescing(self.id.as_ref().to_string()));
         }
@@ -6066,11 +6108,16 @@ impl CompanyRuntime {
                 &self.id,
                 CompanyEvent::LifecycleChanged {
                     from: from.clone(),
-                    to,
+                    to: to.clone(),
                     by,
                 },
             )
             .await?;
+        // Only now, with the transition durably recorded, does enforcement
+        // move — the same ordering the emergency stop's release uses. A
+        // restart between the save and this line comes up reading the record,
+        // which is what the log says the operator decided.
+        self.lifecycle.set(to);
         Ok(from)
     }
 

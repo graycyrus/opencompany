@@ -2668,6 +2668,9 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.lifecycle.clone())
             .unwrap_or_else(|| "running".to_string());
+        // Kept past the `CompanyRecord` this is moved into, for the runtime's
+        // lifecycle mirror below.
+        let boot_lifecycle = lifecycle.clone();
         // Stamped once, the first time this id is ever built (`existing:
         // None`), and carried forward untouched on every later rebuild —
         // never backdated, never refreshed. See `CompanyRecord::created_at_millis`'s
@@ -4043,6 +4046,12 @@ impl RuntimeBuilder {
         if let Some(registry) = steer_registry {
             runtime.set_steer(registry);
         }
+
+        // Boot's half of the lifecycle mirror: a company paused before this
+        // restart must come back paused to every synchronous reader, not only
+        // to the store. Set before the supervisor is attached, so the handle it
+        // receives already carries the right answer.
+        runtime.hydrate_lifecycle(&boot_lifecycle);
 
         // Issue #383: attach the same run supervisor the harness deps hold, so a
         // run started by the orchestrator's `run_workflow` tool lands in the map
@@ -8259,6 +8268,73 @@ needs_reason = true
     /// fire on a genuinely new company mid-onboarding — the moment a resume
     /// puts an unmigrated record back to `running`, rather than only ever
     /// forwarding the marker untouched.
+    /// A company that was paused before this process started refuses a
+    /// workflow run, and stops refusing when it is resumed.
+    ///
+    /// The mirror the two choke points read is process-local, so boot has to
+    /// seed it from the record the builder loaded — otherwise pause survives a
+    /// restart in the store and nowhere else, and the first Run click after a
+    /// deploy starts a billed run on a company the operator stopped. The
+    /// resume half is here rather than in a second test because it is the same
+    /// mirror: a transition that persisted but did not reach the seam is the
+    /// same defect pointing the other way.
+    #[tokio::test]
+    async fn a_company_paused_across_a_restart_still_refuses_a_run() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-paused-boot-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        let bundle = crate::store::Bundle::new(home.clone(), &id);
+        tokio::fs::create_dir_all(bundle.dir()).await.unwrap();
+        tokio::fs::write(bundle.company_toml(), toml::to_string(&manifest).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(bundle.meta_json(), r#"{"lifecycle":"paused"}"#)
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // The seam every entry point that starts a run passes through.
+        let refused = match runtime.run_supervisor().begin("digest", false) {
+            Err(err) => err,
+            Ok(_) => panic!("a company paused before this boot must start no run"),
+        };
+        assert!(
+            matches!(&refused, crate::error::OpenCompanyError::LifecycleConflict(l) if l == "paused"),
+            "{refused}"
+        );
+        // And the cycle seam agrees, so chat and a run cannot disagree about
+        // whether the company is stopped.
+        assert!(runtime.ensure_accepting().is_err());
+
+        use crate::ports::types::{Actor, ActorKind};
+        runtime
+            .set_lifecycle(
+                "running",
+                Actor {
+                    kind: ActorKind::Operator,
+                    id: "test-op".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            runtime.run_supervisor().begin("digest", false).is_ok(),
+            "a resumed company runs again"
+        );
+        assert!(runtime.ensure_accepting().is_ok());
+    }
+
     #[tokio::test]
     async fn a_paused_legacy_company_is_grandfathered_the_moment_it_resumes() {
         let home_dir = tempfile::Builder::new()

@@ -64,7 +64,7 @@ struct Slot {
 /// seen by the HTTP run route that registers runs, the cancel route that fires
 /// them, the cron scheduler, and the orchestrator's `run_workflow` tool.
 ///
-/// # The concurrency cap lives here (issue #401)
+/// # The concurrency cap — and the pause — live here (issue #401)
 ///
 /// Every entry point that starts a run — the manual run route, the cron
 /// scheduler, an approved gate's continuation, and the orchestrator's
@@ -75,12 +75,24 @@ struct Slot {
 /// count can never be raced past the limit, and the compiler forces every
 /// present and future caller to handle a refusal rather than silently
 /// overshoot. A run over the ceiling is refused, never queued.
+///
+/// The company's lifecycle is enforced here for the same reason, and it is the
+/// same argument one step out: "may this company start work at all" is not a
+/// question a run route, a cron tick, a resumed gate and an agent's own tool
+/// should each answer separately. Pause used to be checked by whichever entry
+/// point remembered to `await ensure_running`, and the Run button did not — so
+/// a paused company refused chat with `409` and started a billed workflow run
+/// on the next click. [`LifecycleGate`] makes the durable answer readable
+/// under this lock.
 #[derive(Clone)]
 pub struct RunSupervisor {
     inner: Arc<Mutex<HashMap<String, Slot>>>,
     /// The most runs that may be registered at once. Enforced by
     /// [`begin`](Self::begin) under the map lock.
     limit: usize,
+    /// Whether the company is open for work at all, shared with its
+    /// [`CompanyRuntime`](crate::company::runtime::CompanyRuntime).
+    lifecycle: crate::runtime::LifecycleGate,
 }
 
 impl Default for RunSupervisor {
@@ -109,7 +121,23 @@ impl RunSupervisor {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             limit,
+            lifecycle: crate::runtime::LifecycleGate::default(),
         }
+    }
+
+    /// Shares the runtime's lifecycle gate with this supervisor.
+    ///
+    /// Wired by [`CompanyRuntime::set_run_supervisor`](crate::company::runtime::CompanyRuntime::set_run_supervisor),
+    /// so the harness's shared supervisor and the runtime that owns it read one
+    /// value. A supervisor nobody wired keeps its own `running` gate, which is
+    /// what the default build and the unit tests want.
+    pub fn attach_lifecycle(&mut self, lifecycle: crate::runtime::LifecycleGate) {
+        self.lifecycle = lifecycle;
+    }
+
+    /// The lifecycle this supervisor enforces. For diagnostics and tests.
+    pub fn lifecycle(&self) -> &crate::runtime::LifecycleGate {
+        &self.lifecycle
     }
 
     /// This supervisor's concurrency ceiling. For diagnostics and tests.
@@ -132,6 +160,11 @@ impl RunSupervisor {
     /// context is minted: there is deliberately no run id to hand back, because
     /// nothing started.
     ///
+    /// Refused outright when the company is not `running` — paused, suspended
+    /// or archived. That check comes first, before the ceiling and before a run
+    /// id exists, so nothing is journaled, nothing is spawned and no provider
+    /// call is made: the operator's stop is the whole answer.
+    ///
     /// The returned [`RunGuard`] MUST be held for the duration of the run.
     /// Dropping it deregisters the entry, which is what keeps a settled run from
     /// lingering as a cancellable one *and* frees the slot it held against the
@@ -142,6 +175,10 @@ impl RunSupervisor {
         workflow_id: &str,
         scheduled: bool,
     ) -> Result<(WorkflowRunContext, RunGuard)> {
+        // Before the ceiling, and before any id is minted: a paused company
+        // must not have a run to show for the click, only a refusal. Answers
+        // `409 company is paused`, the same envelope chat has always given.
+        self.lifecycle.ensure_running()?;
         let mut map = self.inner.lock().expect("run supervisor poisoned");
         if map.len() >= self.limit {
             return Err(OpenCompanyError::WorkflowRunLimit { limit: self.limit });
@@ -314,6 +351,59 @@ mod test {
             "a poisoned supervisor must read as not-empty, so is_busy reports busy \
              and the manager does not park a company mid-run"
         );
+    }
+
+    /// A paused company starts no run.
+    ///
+    /// The reported defect: chat refused with `409 company is paused` while the
+    /// Run button started a real, billed run, because pause was checked by
+    /// whichever entry point remembered to. Asserted here rather than at the
+    /// route because this is the seam every entry point shares — the manual
+    /// run, the cron tick, an approved gate's continuation, and the
+    /// orchestrator's own `run_workflow` tool all mint their context through
+    /// `begin`.
+    #[test]
+    fn a_paused_company_starts_no_run() {
+        let mut supervisor = RunSupervisor::new();
+        let lifecycle = crate::runtime::LifecycleGate::default();
+        supervisor.attach_lifecycle(lifecycle.clone());
+
+        lifecycle.set("paused");
+        let refused = match supervisor.begin("digest", false) {
+            Err(err) => err,
+            Ok(_) => panic!("a paused company must not start a run"),
+        };
+        assert!(
+            matches!(&refused, OpenCompanyError::LifecycleConflict(l) if l == "paused"),
+            "{refused}"
+        );
+        // Nothing was minted: no run id to cancel, nothing to bill, nothing for
+        // the runs index to show.
+        assert!(
+            supervisor.is_empty(),
+            "a refused run must leave no registration behind"
+        );
+
+        // And the refusal lifts with the pause, on the same handle.
+        lifecycle.set("running");
+        let Ok((_ctx, _guard)) = supervisor.begin("digest", false) else {
+            panic!("a resumed company runs again")
+        };
+        assert_eq!(supervisor.len(), 1);
+    }
+
+    /// Every lifecycle that is not `running` refuses, including one nobody has
+    /// added yet — a new state must fail closed.
+    #[test]
+    fn suspended_and_archived_start_no_run_either() {
+        for lifecycle in ["suspended", "archived", "something-new"] {
+            let mut supervisor = RunSupervisor::new();
+            supervisor.attach_lifecycle(crate::runtime::LifecycleGate::new(lifecycle));
+            assert!(
+                supervisor.begin("digest", false).is_err(),
+                "{lifecycle} must not start a run"
+            );
+        }
     }
 
     /// The core loop: a begun run is registered under the id its context
