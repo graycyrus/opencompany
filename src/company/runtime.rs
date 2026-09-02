@@ -5542,7 +5542,11 @@ impl CompanyRuntime {
             if !p.effect.kind.starts_with(&prefix) {
                 continue;
             }
-            if !crate::server::chat_history::same_conversation(p.thread.as_deref(), Some(desk)) {
+            // `raised_in`, not `same_conversation`: a blocker that recorded no
+            // conversation was raised in none, and must not be swept up by an
+            // unaddressed message in the main line. See `raised_in`'s doc for
+            // what that cost.
+            if !crate::server::chat_history::raised_in(p.thread.as_deref(), desk) {
                 continue;
             }
             let Ok(payload) = serde_json::from_value::<crate::ports::blockers::BlockerPayload>(
@@ -6330,6 +6334,7 @@ impl PendingBlockerGroup {
 
 /// What resolving a blocker reply does, decided before anything is written.
 #[cfg(feature = "openhuman")]
+#[derive(Debug)]
 pub(crate) enum BlockerReplyPlan {
     /// Not a verdict, or no blocker pending here — run an ordinary turn.
     NotBlocker,
@@ -10010,6 +10015,124 @@ mod tests {
                 kind: crate::ports::types::ActorKind::Operator,
                 id: "operator".to_string(),
             }
+        }
+
+        /// A blocker that no conversation raised must not be answered by an
+        /// ordinary message in the main line.
+        ///
+        /// Reproduces B-012. A workflow node parks with `thread: None` —
+        /// deliberately: "a workflow run has no board card behind it and no
+        /// conversation to raise the question in". `pending_blocker_groups`
+        /// then matched it against the General desk, because
+        /// `same_conversation` reads a `None` as "unaddressed, therefore
+        /// General", and an unaddressed console post is exactly `chat: None`
+        /// folded to the `General` default desk. `classify_blocker_reply` falls
+        /// through to `Amend` for any substantive line, and with one group
+        /// pending no parent is needed — so a sentence about something else
+        /// entirely settled the approval.
+        ///
+        /// The observed shape: Approvals returns `[]` and the run reads
+        /// "stranded", 23 hours before the deadline, with Approve/Decline/
+        /// Extend never clicked — because the decision was never made on the
+        /// approvals surface at all.
+        ///
+        /// `chat_history::owns` already short-circuits this exact `None` and
+        /// says why: "**`None` is not the General desk** … It is the single
+        /// most bug-prone line in this function." This is the same line, one
+        /// module over, missing.
+        #[tokio::test]
+        async fn an_unaddressed_message_does_not_answer_a_blocker_no_conversation_raised() {
+            use crate::runtime::journal::TaskLink;
+            let (runtime, _home) = runtime().await;
+
+            // A node blocker: parked `Unlinked`, with no conversation.
+            let id = crate::ports::types::ApprovalId::new("appr-node");
+            let payload = question();
+            let effect = crate::ports::types::Effect {
+                kind: payload.effect_kind(),
+                group: crate::ports::types::EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: Some("run-1".to_string()),
+            };
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    1,
+                    TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("parks");
+            assert_eq!(runtime.pending_approvals().len(), 1);
+
+            // An ordinary sentence in the main line, about something else.
+            let plan = runtime
+                .plan_blocker_reply("General", None, "let's ship the launch deck tomorrow")
+                .await
+                .expect("plans");
+
+            assert!(
+                matches!(plan, super::super::BlockerReplyPlan::NotBlocker),
+                "an unaddressed message must run an ordinary turn, not silently \
+                 settle a blocker nobody raised in this conversation: {plan:?}"
+            );
+        }
+
+        /// The other side of the same line: a blocker that *was* raised in the
+        /// main line is still answerable there. Without this the fix above
+        /// could be "never match anything" and pass.
+        #[tokio::test]
+        async fn a_blocker_raised_in_the_main_line_is_still_answerable_there() {
+            use crate::runtime::journal::TaskLink;
+            let (runtime, _home) = runtime().await;
+
+            let id = crate::ports::types::ApprovalId::new("appr-general");
+            let payload = question();
+            let effect = crate::ports::types::Effect {
+                kind: payload.effect_kind(),
+                group: crate::ports::types::EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    1,
+                    TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: Some("General".to_string()),
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("parks");
+
+            // Addressed as `main`, the console's own spelling of the same desk.
+            let plan = runtime
+                .plan_blocker_reply("main", None, "the 14th, not the 7th")
+                .await
+                .expect("plans");
+            assert!(
+                matches!(plan, super::super::BlockerReplyPlan::Resolve { .. }),
+                "a blocker raised in the main line is answered there: {plan:?}"
+            );
         }
 
         /// A card parked on a question the agent asked receives the answer.
