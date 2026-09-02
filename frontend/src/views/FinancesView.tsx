@@ -21,16 +21,10 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
+import { formatUsd } from "@/lib/cost";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 
-function usd(n: number, maxFrac = 2): string {
-  return (n === 0 ? 0 : n).toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: maxFrac,
-  });
-}
 
 /* The brand leads slot 1, and the token already themes itself — see the note
    in UsageView on why the hex pair this replaced was a liability. */
@@ -131,13 +125,13 @@ export function FinancesView({ client, company }: Props) {
       <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* KPIs */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Kpi icon={Wallet} label="Wallet balance" value={usd(data.balanceUsd)} hint="Ledger balance" />
-          <Kpi icon={TrendingUp} label="Revenue" value={usd(data.revenueUsd, 0)} hint="This month" />
-          <Kpi icon={Coins} label="Spend" value={usd(data.spentUsd, 0)} hint={budgetUsd === null ? "This month" : `of ${usd(budgetUsd, 0)} budget`} />
+          <Kpi icon={Wallet} label="Wallet balance" value={formatUsd(data.balanceUsd)} hint="Ledger balance" />
+          <Kpi icon={TrendingUp} label="Revenue" value={formatUsd(data.revenueUsd)} hint="This month" />
+          <Kpi icon={Coins} label="Spend" value={formatUsd(data.spentUsd)} hint={budgetUsd === null ? "This month" : `of ${formatUsd(budgetUsd)} budget`} />
           <Kpi
             icon={PiggyBank}
             label="Net"
-            value={`${netSign}${usd(Math.abs(data.netUsd), 0)}`}
+            value={`${netSign}${formatUsd(Math.abs(data.netUsd))}`}
             hint="Revenue − spend"
             valueClass={data.netUsd > 0 ? "text-status-done-text" : data.netUsd < 0 ? "text-status-failed-text" : undefined}
           />
@@ -152,7 +146,7 @@ export function FinancesView({ client, company }: Props) {
                 ? "No monthly budget is set."
                 : budgetUsd === 0
                   ? "Spending is capped at $0.00 this month."
-                  : `${usd(data.spentUsd, 0)} of ${usd(budgetUsd, 0)} used · ${usd(budgetUsd - data.spentUsd, 0)} left`}
+                  : `${formatUsd(data.spentUsd)} of ${formatUsd(budgetUsd)} used · ${formatUsd(budgetUsd - data.spentUsd)} left`}
             </CardDescription>
           </CardHeader>
           {hasBudget && (
@@ -183,9 +177,9 @@ export function FinancesView({ client, company }: Props) {
                   <BarChart data={data.byCategory} layout="vertical" margin={{ left: 8, right: 48 }}>
                     <XAxis type="number" dataKey="amount" hide />
                     <YAxis type="category" dataKey="category" tickLine={false} axisLine={false} width={110} />
-                    <ChartTooltip content={<ChartTooltipContent formatter={(v) => usd(Number(v), 0)} />} />
+                    <ChartTooltip content={<ChartTooltipContent formatter={(v) => formatUsd(Number(v))} />} />
                     <Bar dataKey="amount" fill="var(--color-amount)" radius={4}>
-                      <LabelList dataKey="amount" position="right" className="fill-muted-foreground" formatter={(v) => usd(Number(v ?? 0), 0)} />
+                      <LabelList dataKey="amount" position="right" className="fill-muted-foreground" formatter={(v) => formatUsd(Number(v ?? 0))} />
                     </Bar>
                   </BarChart>
                 </ChartContainer>
@@ -224,7 +218,7 @@ export function FinancesView({ client, company }: Props) {
                         </div>
                         <span className={cn("shrink-0 text-sm font-medium tabular-nums", inflow ? "text-status-done-text" : "text-foreground")}>
                           {inflow ? "+" : "−"}
-                          {usd(t.amountUsd)}
+                          {formatUsd(t.amountUsd)}
                         </span>
                       </li>
                     );

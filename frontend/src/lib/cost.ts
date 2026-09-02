@@ -25,3 +25,60 @@ export function formatUsdCost(
     maximumFractionDigits: digits,
   });
 }
+
+/**
+ * One USD amount, for anywhere the console states a figure an operator will
+ * read as money: a balance, a total, a budget, an approval's amount, a
+ * transaction row.
+ *
+ * # Why this exists (issue B-016)
+ *
+ * Finance told a founder "Spend · US$0 this month" on the same screen that
+ * listed that month's spend transactions — `brand_designer −US$0.08`,
+ * `brand_designer −US$0.06`, `researcher −US$0.02` — and a Wallet balance of
+ * −US$0.16. Nothing was wrong with the numbers. The Spend, Revenue and Net
+ * tiles were formatted to whole dollars while the rows and the balance beside
+ * them were formatted to cents, so every real amount under fifty cents read as
+ * nothing. A founder was told they had spent nothing while they were being
+ * billed.
+ *
+ * The tiles were not individually wrong — the formatter took the precision as
+ * an argument, so "how many decimals does money have here?" was a question each
+ * call site answered for itself, and one of them answered zero. This function
+ * takes no such argument. There is one precision for a money figure in this
+ * console and it is cents, because that is the precision the ledger keeps.
+ *
+ * # Sub-cent amounts
+ *
+ * `$0.00` is reserved for actually nothing. A charge of $0.004 is real money
+ * and rounding it to `$0.00` is the same lie one order of magnitude down, so it
+ * renders `<$0.01` — the convention {@link formatUsdCost} already uses, and for
+ * the same reason.
+ *
+ * # Locale
+ *
+ * The operator's, not `en-US`: the tiles and rows this replaces already
+ * rendered through the browser's locale (`US$0.16` for the founder who filed
+ * this), and changing the currency's presentation is not what the bug asked
+ * for. {@link formatUsdCost} pins `en-US` because a per-turn cost sits inside
+ * English prose; a balance does not.
+ */
+export function formatUsd(amount: number): string {
+  if (!Number.isFinite(amount)) return "—";
+  // `-0` is what `revenue - spend` produces on a company that has neither, and
+  // `Intl` renders it `-$0.00` — a minus sign in front of nothing, on the tile
+  // whose whole job is saying whether the company is up or down. `+ 0`
+  // normalises it; `-0 === 0` is true, so no comparison below can catch it.
+  const value = amount === 0 ? 0 : amount;
+  // `$0.00` is reserved for actually nothing. Half a cent still rounds to it,
+  // which is this bug one order of magnitude down.
+  if (value !== 0 && Math.abs(value) < 0.005) {
+    return value < 0 ? "−<$0.01" : "<$0.01";
+  }
+  return value.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}

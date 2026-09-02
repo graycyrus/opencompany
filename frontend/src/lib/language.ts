@@ -2,6 +2,7 @@
 // never exposes runtime internals ("agent graph", "tier", "dispatch", "cycle",
 // "checkpoint", "A2A"). Everything a person sees goes through this layer.
 
+import { formatUsd } from "@/lib/cost";
 import type { TaskApprovalStatus } from "../api/tasks";
 import type {
   ApprovalSummary,
@@ -870,8 +871,17 @@ function renderValue(value: unknown): string {
   return JSON.stringify(value) ?? String(value);
 }
 
+/**
+ * A USD amount inside a sentence — an approval's amount, a consequence line.
+ *
+ * Delegates to {@link formatUsd} rather than calling `Intl` again (issue
+ * B-016). This was the console's second independent USD formatter, and it
+ * carried the same failure in miniature: `Intl`'s default for USD rounds to
+ * cents, so an approval for $0.004 rendered as `$0.00` — an operator asked to
+ * authorise a payment the card told them was free.
+ */
 export function money(usd: number): string {
-  return usd.toLocaleString(undefined, { style: "currency", currency: "USD" });
+  return formatUsd(usd);
 }
 
 /** Feedback categories, phrased the way an operator would think about them. */
