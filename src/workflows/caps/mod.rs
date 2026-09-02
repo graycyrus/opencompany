@@ -2390,6 +2390,11 @@ impl HarnessAgentRunner {
                         approval_ids: vec![approval_id],
                         unparkable: 0,
                         stranded: 0,
+                        // A question the agent (or this host) raised, not a
+                        // gated call — the empty `tools` above is the same
+                        // fact. Answering it is recorded and does not restart
+                        // the run (issue B-013).
+                        blockers: 1,
                     });
                     // `Blocked`, where #881's sibling says `WaitingApproval`:
                     // both hold the node open for a person, but one is a
@@ -2444,6 +2449,13 @@ impl HarnessAgentRunner {
                 approval_ids: parked.approval_ids.clone(),
                 unparkable: parked.unparkable,
                 stranded: 0,
+                // The split the console needs to word "what does approving do"
+                // correctly (issue B-013). `blocked_diagnosis` right below
+                // branches on this same number for the Observatory's sentence;
+                // shipping it means the run drawer stops having to guess, and
+                // stops guessing "the run continues" for a question that will
+                // not continue it.
+                blockers: parked.blockers,
             });
             let diagnosis = blocked_diagnosis(node_id.as_deref(), agent_ref, &parked);
             // `WaitingApproval`, not `Failed`: a person still has to decide, and
@@ -2666,6 +2678,9 @@ impl HarnessAgentRunner {
                                 approval_ids: vec![approval_id],
                                 unparkable: 0,
                                 stranded: 0,
+                                // A question, not a gated call — same fact the
+                                // empty `tools` above states (issue B-013).
+                                blockers: 1,
                             });
                             self.settle_attempt(
                                 run_sink.as_ref(),
@@ -2706,6 +2721,11 @@ impl HarnessAgentRunner {
                             approval_ids: vec![approval_id],
                             unparkable: 0,
                             stranded: 0,
+                            // A question the agent (or this host) raised, not a
+                            // gated call — the empty `tools` above is the same
+                            // fact. Answering it is recorded and does not restart
+                            // the run (issue B-013).
+                            blockers: 1,
                         });
                         self.settle_attempt(
                             run_sink.as_ref(),
