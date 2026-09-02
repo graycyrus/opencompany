@@ -68,7 +68,13 @@ use crate::ports::types::EffectGroup;
 /// can do.
 ///
 /// * `readonly` denies anything that is not [`Nothing`](Self::Nothing) — that
-///   tier's contract is that nothing changes and nothing is spent.
+///   tier's contract is that no **tool** changes anything and no tool call is
+///   billed. It is not a claim about the company's bill: this enum classifies
+///   effects, and the model turn that answers the operator is not one, so a
+///   `readonly` desk still runs inference and is still metered for it. The
+///   tier's operator-facing text says so (`TIER_TEXT`, `src/server/ops/policy.rs`);
+///   it used to say "spend nothing", which was this same conflation written
+///   where a founder could read it (issue B-023).
 /// * `supervised` parks only [`Consequence`](Self::Consequence).
 ///   [`Money`](Self::Money) is the third bucket `web_search` needed (issue
 ///   #238): it changes nothing but the backend bills per request, and parking

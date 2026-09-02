@@ -119,10 +119,26 @@ pub(crate) struct TierDto {
 /// change. An entry *behind* the runtime is the real error, and
 /// `every_runtime_tier_has_console_text` fails on it.
 const TIER_TEXT: &[TierDto] = &[
+    // "spend nothing" was false, and it was false about the safest setting in
+    // the product (issue B-023). This gate is an *effect* gate: `evaluate`
+    // decides tool calls, and a model turn is not one — `readonly` therefore
+    // refuses every billed tool while the turn that answers the operator runs
+    // and meters exactly as it does under any other tier. A founder selected
+    // Read-only, sent one task, got a full draft, and watched the wallet move
+    // from -$0.16 to -$0.18 with an `Inference -$0.02` row beside it.
+    //
+    // Denying inference here is not the alternative fix: a tier whose agents
+    // cannot answer is not a safer tier, it is a broken one, and `Reach`'s
+    // whole design is that `readonly` still reads and still replies. So the
+    // claim is narrowed to what the gate actually enforces — no tool that
+    // writes, reaches a counterparty, or is billed — and the cost that remains
+    // is named rather than left for the ledger to contradict.
     TierDto {
         value: "readonly",
         label: "Read-only",
-        description: "The agents can look at things but change nothing and spend nothing.",
+        description: "The agents can read and answer, but change nothing and buy nothing: every \
+                      tool that writes, reaches a counterparty or is billed is refused. Answering \
+                      still runs the model, and that inference is billed like any other turn.",
     },
     TierDto {
         value: "supervised",
@@ -866,5 +882,71 @@ mod tests {
         // blank; `every_runtime_tier_has_console_text` is what stops that state
         // reaching a release.
         assert!(tiers_for(&["not_a_tier"]).is_empty());
+    }
+
+    /// Issue B-023: the safest tier in the product told operators it was free,
+    /// and it is not.
+    ///
+    /// This gate decides **effects** — tool calls — and a model turn is not
+    /// one. `evaluate` is never handed the turn that answers the operator, so
+    /// no tier here can stop it running or stop it metering; a founder who
+    /// selected Read-only and sent one task got a full draft and an
+    /// `Inference -$0.02` row against a wallet that moved from -$0.16 to
+    /// -$0.18. The tier's own words were the only thing that claimed otherwise.
+    ///
+    /// Asserted as a **property of the claim**, not as a fixture of the
+    /// wording. A string-equality test would pass any rewrite that reintroduced
+    /// the falsehood in different words, which is exactly how a copy claim
+    /// regresses: nobody edits a sentence intending to lie about billing, they
+    /// tighten it and drop the qualifier. The forbidden phrases are the ones
+    /// this description has actually carried or plausibly would.
+    #[test]
+    fn readonly_never_claims_it_costs_nothing() {
+        let readonly = TIER_TEXT
+            .iter()
+            .find(|t| t.value == "readonly")
+            .expect("the readonly tier has console text");
+        let text = readonly.description.to_lowercase();
+
+        for claim in [
+            "spend nothing",
+            "spends nothing",
+            "cost nothing",
+            "costs nothing",
+            "no cost",
+            "free",
+        ] {
+            assert!(
+                !text.contains(claim),
+                "the read-only tier says `{claim}`, which this runtime cannot honour: the \
+                 gate refuses billed *tools*, and the model turn it never sees is billed \
+                 anyway. Full text: {}",
+                readonly.description
+            );
+        }
+
+        // Removing the false claim is only half of it. An operator picking the
+        // safest tier has to be told what it still costs, or the tier is merely
+        // silent about billing rather than honest about it — and silence is
+        // what the transaction row then contradicts.
+        assert!(
+            text.contains("inference"),
+            "the read-only tier must name the cost that remains, or the ledger is the \
+             first place an operator learns about it. Full text: {}",
+            readonly.description
+        );
+        assert!(
+            text.contains("billed") || text.contains("charged"),
+            "naming inference is not enough — the tier must say it is billed. Full text: {}",
+            readonly.description
+        );
+
+        // And it must still describe the brake it *does* apply, or the fix
+        // would have traded a false claim for no claim at all.
+        assert!(
+            text.contains("change nothing") || text.contains("changes nothing"),
+            "the read-only tier must still state what it prevents. Full text: {}",
+            readonly.description
+        );
     }
 }

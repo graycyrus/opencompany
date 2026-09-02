@@ -28,7 +28,8 @@ const TIERS = [
   {
     value: "readonly",
     label: "Read-only",
-    description: "The agents can look at things but change nothing and spend nothing.",
+    description:
+      "The agents can read and answer, but change nothing and buy nothing: every tool that writes, reaches a counterparty or is billed is refused. Answering still runs the model, and that inference is billed like any other turn.",
   },
   {
     value: "supervised",

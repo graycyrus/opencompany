@@ -9,8 +9,8 @@
 // **The tier is one of four, not two.** `POLICY_MODES` in
 // `src/company/types.rs:96` is `["readonly", "supervised", "auto", "full"]`.
 // Flattening that to "Auto / not Auto" would report `readonly` — agents that
-// change nothing and spend nothing — and `full` — the broadest autonomy this
-// runtime has — as the same thing. The menu therefore lists whatever
+// answer but change nothing and buy nothing — and `full` — the broadest
+// autonomy this runtime has — as the same thing. The menu therefore lists whatever
 // `status.tiers` holds and never a list of four written here.
 //
 // **The label and the sentence are the host's**, taken from the `tiers` list

@@ -56,7 +56,8 @@ const TIERS = [
   {
     value: "readonly",
     label: "Read-only",
-    description: "The agents can look at things but change nothing and spend nothing.",
+    description:
+      "The agents can read and answer, but change nothing and buy nothing: every tool that writes, reaches a counterparty or is billed is refused. Answering still runs the model, and that inference is billed like any other turn.",
   },
   {
     value: "supervised",
@@ -148,9 +149,22 @@ describe("the lead sentence", () => {
   });
 
   it("uses a single-sentence description whole", () => {
-    expect(leadSentence(TIERS[0].description)).toBe(
-      "The agents can look at things but change nothing and spend nothing.",
+    // Stated against a literal rather than against `TIERS[0]`: the read-only
+    // tier's own text became two sentences when it stopped claiming the tier
+    // spends nothing (issue B-023), and this case is about the cut, not about
+    // that tier.
+    expect(leadSentence("Broadest execution autonomy.")).toBe("Broadest execution autonomy.");
+  });
+
+  it("cuts the read-only tier before the sentence that names its billing", () => {
+    // The collapsed pill carries the brake; the menu row below carries the
+    // whole thing, billing included (issue B-023). What matters here is that
+    // the half the pill shows no longer contains a claim about spending.
+    const lead = leadSentence(TIERS[0].description);
+    expect(lead).toBe(
+      "The agents can read and answer, but change nothing and buy nothing: every tool that writes, reaches a counterparty or is billed is refused.",
     );
+    expect(lead).not.toContain("spend nothing");
   });
 
   it("uses a description with no sentence break whole", () => {
