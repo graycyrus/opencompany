@@ -2148,6 +2148,15 @@ impl CompanyRuntime {
         answer: Option<&str>,
     ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
         self.ensure_accepting()?;
+        // `answer` is consumed only by the blocker-resolution arm below, which
+        // is `openhuman`-gated — so the default build sees the parameter go
+        // nowhere and `-D warnings` rejects it. Discarding it explicitly here
+        // keeps the signature identical across both feature sets (this is a
+        // public method; callers must not have to care) and says out loud what
+        // the default build does with an operator's answer: nothing, because
+        // the machinery that would bank it is not linked in.
+        #[cfg(not(feature = "openhuman"))]
+        let _ = answer;
         #[cfg(feature = "openhuman")]
         self.arm_console_blocker_resolution(id, verdict, answer)
             .await?;
