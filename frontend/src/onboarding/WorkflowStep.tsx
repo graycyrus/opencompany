@@ -58,27 +58,32 @@ export function WorkflowStep({
 
   useEffect(() => {
     let live = true;
-    void (async () => {
-      // Settled, not `all`: the run history is the load-bearing half, and a
-      // host that cannot list workflows (or predates the route, which answers
-      // 404) should cost this step its labels, not its answer.
-      const [runs, workflows] = await Promise.allSettled([
-        listWorkflowRuns(client, company, { limit: 5 }),
-        listWorkflows(client, company),
-      ]);
-      if (!live) return;
-      if (runs.status === "fulfilled") {
-        setProgress(gateWorkflowProgress(runs.value.runs));
+    // Independent reads, not `Promise.allSettled` on a shared await (CodeRabbit
+    // review, PR #2046): the run history is the load-bearing half, and a slow
+    // (not merely failed) workflow-name lookup must not hold the founder on
+    // "Checking your runs…" once `listWorkflowRuns` has already answered.
+    // Awaiting both together paid that cost even on the ordinary path, where
+    // neither request fails — only one is slower than the other. Each promise
+    // now publishes to state the moment it settles, so the run's own answer
+    // never waits on a request that only replaces a fallback label.
+    void listWorkflowRuns(client, company, { limit: 5 }).then(
+      (page) => {
+        if (!live) return;
+        setProgress(gateWorkflowProgress(page.runs));
         setFailed(false);
-      } else {
+      },
+      () => {
+        if (!live) return;
         setFailed(true);
-      }
-      if (workflows.status === "fulfilled") {
-        setNames(
-          new Map(workflows.value.map((w: WorkflowSummary) => [w.id, w.name] as const)),
-        );
-      }
-    })();
+      },
+    );
+    // A host that cannot list workflows (or predates the route, which answers
+    // 404) should cost this step its labels, not its answer — so a rejection
+    // here is silently left as the fallback `name()` already renders.
+    void listWorkflows(client, company).then((workflows) => {
+      if (!live) return;
+      setNames(new Map(workflows.map((w: WorkflowSummary) => [w.id, w.name] as const)));
+    }, () => {});
     return () => {
       live = false;
     };
@@ -163,15 +168,34 @@ function ProgressLine({
       // B-004: the sentence that was missing. It says the run happened, why it
       // did not count, and what closes it — rather than leaving the founder to
       // conclude the button did nothing.
-      return shell(
-        <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
-        <>
-          <span className="font-medium text-foreground">{name}</span> ran and stopped to ask
-          you something — it&apos;s waiting on an approval, so it hasn&apos;t finished yet
-          and this step hasn&apos;t ticked. Decide the approval and the run carries on.
-        </>,
-        "gate-workflow-waiting",
-      );
+      //
+      // `blocked` gets its own sentence: `WorkflowRunOutcome.blockedNodes`
+      // (frontend/src/api/workflows.ts) is explicit that an agent node is not
+      // re-enterable, so deciding the card does NOT continue this run — the
+      // operator still has to run the workflow again. Promising "the run
+      // carries on" for that case would be a claim the host never makes;
+      // `awaiting-approval` is the one where deciding really does resume it.
+      return progress.verdict === "blocked"
+        ? shell(
+            <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+            <>
+              <span className="font-medium text-foreground">{name}</span> ran and stopped to
+              ask you something — it&apos;s waiting on an approval, so it hasn&apos;t
+              finished yet and this step hasn&apos;t ticked. Decide the approval, then run
+              it again to finish.
+            </>,
+            "gate-workflow-blocked",
+          )
+        : shell(
+            <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+            <>
+              <span className="font-medium text-foreground">{name}</span> ran and stopped to
+              ask you something — it&apos;s waiting on an approval, so it hasn&apos;t
+              finished yet and this step hasn&apos;t ticked. Decide the approval and the run
+              carries on.
+            </>,
+            "gate-workflow-waiting",
+          );
     case "needs-rerun":
       return shell(
         <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />,

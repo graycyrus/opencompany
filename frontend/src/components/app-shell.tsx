@@ -158,6 +158,7 @@ import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import type { LocalScope } from "@/connections/types";
 
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
@@ -994,11 +995,31 @@ export function AppShell({
   // the company is actually activated; nothing here needs to.
   const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
 
+  // CodeRabbit review, PR #2046: which scope `activationGate.status` actually
+  // describes, read during THIS effect before it is overwritten below.
+  //
+  // `useActivationGate` resets `status` to `null` for the new company only
+  // from its OWN effect, which runs in the same commit as this one but is not
+  // guaranteed to run first, and even when it does the reset does not take
+  // effect until the next render. So the very first commit after switching
+  // companies can still pair the FORMER company's `isActivated: true` with the
+  // NEW `scope` — and without this guard the branch below would read that
+  // combination and wipe the new company's just-loaded waiver before its own
+  // activation read has ever landed. Comparing against the scope this effect
+  // itself saw last time closes that one-render race; a bare
+  // `[activationGate.status?.isActivated, scope]` dependency list cannot, since
+  // both can appear to "agree" on exactly the commit where they do not.
+  const lastGateWaiverScopeRef = useRef<LocalScope | null>(null);
   // PR #1875 review finding, round 4: a skip marker from before the funnel
   // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
   // already stops gating on it either way), but leaving it in `sessionStorage`
   // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
   useEffect(() => {
+    const previous = lastGateWaiverScopeRef.current;
+    const scopeJustChanged =
+      previous === null || previous.connection !== scope.connection || previous.company !== scope.company;
+    lastGateWaiverScopeRef.current = scope;
+    if (scopeJustChanged) return;
     if (!activationGate.status?.isActivated) return;
     clearGateSkipped(scope);
     // Same housekeeping, one step down: a waiver cannot matter once the funnel
