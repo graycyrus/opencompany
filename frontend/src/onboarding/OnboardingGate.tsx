@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react";
-import { Check, Loader2, PartyPopper, Plug, UserCog, Workflow } from "lucide-react";
+import { Check, Loader2, Minus, PartyPopper, Plug, UserCog, Workflow } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -10,7 +10,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { OAuthView } from "@/views/OAuthView";
+import { IntegrationStep } from "@/onboarding/IntegrationStep";
+import type { GateStepId } from "@/onboarding/state";
 
 // Same reason `app-shell.tsx` lazy-loads it: React Flow is heavy, and it
 // should not tax a screen an operator only sees once.
@@ -47,12 +48,23 @@ const WorkflowsView = lazy(() =>
 );
 
 interface GateStep {
-  id: "name" | "integration" | "workflow";
+  id: GateStepId;
   label: string;
   hint: string;
   icon: typeof UserCog;
   done: boolean;
+  /** Answered as far as this build allows, rather than actually complete. */
+  waived: boolean;
 }
+
+/**
+ * Where "Enter a credential in Apps" sends the founder. The hash the console's
+ * own Connections rail uses for its Apps sub-page (`CONNECTION_PAGES`), named
+ * here as a bare string rather than imported so this module stays clear of the
+ * section that pulls `OAuthView` and `McpServersView` in behind it — the same
+ * reason `connection-pages.ts` is a leaf module in the first place.
+ */
+const APPS_ROUTE = "#/connections/apps";
 
 /**
  * The blocking first-run gate (issue #1844): a full-screen replacement for the
@@ -76,19 +88,39 @@ export function OnboardingGate({
   company,
   status,
   currentName,
+  waived = [],
   onRefresh,
   onSkip,
+  onLeave,
+  onWaiveStep,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   status: ActivationStatus;
   /** The company's current display name, to prefill the naming step. */
   currentName: string;
+  /** Steps already answered as far as this build allows (bugs B-001/B-020). */
+  waived?: readonly GateStepId[];
   /** Called after an in-gate action that may have moved the funnel. */
   onRefresh: () => void;
   /** "Skip for now" — de-emphasized, and always available (issue #1844). */
   onSkip: () => void;
+  /**
+   * Stands the gate down and navigates to a console route (bug B-006).
+   *
+   * Every link the gate offers into the rest of the console goes through this
+   * one seam, and that is the whole point of it existing. The gate renders
+   * *instead of* the router outlet, so a plain `<a href="#/...">` inside it
+   * changes `location.hash`, re-renders the same checklist, and looks to the
+   * founder like a link that does nothing — which is exactly what "decide in
+   * Approvals" did from inside the embedded workflow view. A route the gate
+   * does not own is a route the gate has to get out of the way for.
+   */
+  onLeave: (route: string) => void;
+  /** Records a step as answered as far as this build allows. */
+  onWaiveStep: (step: GateStepId) => void;
 }) {
+  const isWaived = (id: GateStepId) => waived.includes(id);
   const steps: GateStep[] = [
     {
       id: "name",
@@ -96,6 +128,7 @@ export function OnboardingGate({
       hint: "A real name beats the placeholder it launched with.",
       icon: UserCog,
       done: status.nameConfirmed,
+      waived: !status.nameConfirmed && isWaived("name"),
     },
     {
       id: "integration",
@@ -103,6 +136,7 @@ export function OnboardingGate({
       hint: "Gmail, Slack, GitHub — wherever your teammates should reach first.",
       icon: Plug,
       done: status.integrationConnected,
+      waived: !status.integrationConnected && isWaived("integration"),
     },
     {
       id: "workflow",
@@ -110,10 +144,14 @@ export function OnboardingGate({
       hint: "One real run — not a test — proves the company actually works.",
       icon: Workflow,
       done: status.workflowRunSucceeded,
+      waived: !status.workflowRunSucceeded && isWaived("workflow"),
     },
   ];
 
-  const firstOpen = steps.find((s) => !s.done)?.id ?? null;
+  // A waived step is settled as far as this founder is concerned, so it must
+  // not be the one the gate opens on — landing them back inside the step they
+  // just answered is the trap in miniature.
+  const firstOpen = steps.find((s) => !s.done && !s.waived)?.id ?? null;
   const [active, setActive] = useState<GateStep["id"] | null>(firstOpen);
 
   return (
@@ -138,9 +176,9 @@ export function OnboardingGate({
               type="button"
               className={cn(
                 "flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left",
-                !step.done && "hover:bg-muted/50",
+                !step.done && !step.waived && "hover:bg-muted/50",
               )}
-              disabled={step.done}
+              disabled={step.done || step.waived}
               aria-expanded={active === step.id}
               onClick={() => setActive((cur) => (cur === step.id ? null : step.id))}
             >
@@ -153,7 +191,13 @@ export function OnboardingGate({
                     : "border-border text-muted-foreground",
                 )}
               >
-                {step.done ? <Check className="size-4" /> : <step.icon className="size-4" />}
+                {step.done ? (
+                  <Check className="size-4" />
+                ) : step.waived ? (
+                  <Minus className="size-4" />
+                ) : (
+                  <step.icon className="size-4" />
+                )}
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium">{step.label}</span>
@@ -162,9 +206,15 @@ export function OnboardingGate({
               {step.done && (
                 <span className="shrink-0 text-xs font-medium text-status-done-text">Done</span>
               )}
+              {step.waived && (
+                // Never "Done" — the step did not complete, the founder
+                // answered it as far as this build allows, and saying otherwise
+                // would be the console lying about the company's own state.
+                <span className="shrink-0 text-xs font-medium text-muted-foreground">Skipped</span>
+              )}
             </button>
 
-            {!step.done && active === step.id && (
+            {!step.done && !step.waived && active === step.id && (
               <div className="border-t px-4 py-4">
                 {step.id === "name" && (
                   <NameStep
@@ -174,7 +224,12 @@ export function OnboardingGate({
                     onDone={onRefresh}
                   />
                 )}
-                {step.id === "integration" && <OAuthView client={client} company={company} />}
+                {step.id === "integration" && (
+                  <IntegrationStep
+                    onOpenApps={() => onLeave(APPS_ROUTE)}
+                    onWaive={() => onWaiveStep("integration")}
+                  />
+                )}
                 {step.id === "workflow" && (
                   <Suspense fallback={<RouteLoading title="Workflows" label="Loading canvas…" />}>
                     <WorkflowsView client={client} company={company} />

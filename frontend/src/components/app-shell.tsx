@@ -39,7 +39,15 @@ import {
 import { TourController } from "@/tour/TourController";
 import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
-import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import {
+  clearGateSkipped,
+  clearGateStepWaivers,
+  type GateStepId,
+  gateSkippedThisSession,
+  markGateSkipped,
+  markGateStepWaived,
+  waivedGateSteps,
+} from "@/onboarding/state";
 import {
   resolveGateAdminCheckError,
   shouldHoldShellPending,
@@ -864,6 +872,45 @@ export function AppShell({
   }, [scope]);
 
   /**
+   * Steps the founder has durably waived (bugs B-001/B-020) — held in state for
+   * the same reason `gateSkipped` is: waiving has to re-render past the gate
+   * without a reload, and `localStorage` alone would need one.
+   */
+  const [gateWaived, setGateWaived] = useState<GateStepId[]>(() => waivedGateSteps(scope));
+  useEffect(() => {
+    setGateWaived(waivedGateSteps(scope));
+  }, [scope]);
+  const waiveGateStep = useCallback(
+    (step: GateStepId) => {
+      markGateStepWaived(scope, step);
+      setGateWaived(waivedGateSteps(scope));
+    },
+    [scope],
+  );
+
+  /**
+   * Leaves the gate for a console route (bug B-006).
+   *
+   * The session skip is what actually stands the gate down — the founder asked
+   * to be somewhere else, and a gate that re-renders over the page they asked
+   * for is the defect. It is deliberately the *session* marker rather than a
+   * durable waiver: following a link is not an answer to the step, so the gate
+   * is still owed on the next fresh tab.
+   *
+   * Order matters. The hash is set first so the router has the destination
+   * before this render swaps the gate out for the shell; setting it afterwards
+   * renders the shell on the old route for a frame and then moves it.
+   */
+  const leaveGateFor = useCallback(
+    (route: string) => {
+      window.location.hash = route;
+      markGateSkipped(scope);
+      setGateSkipped(true);
+    },
+    [scope],
+  );
+
+  /**
    * Whether the signed-in user is this company's admin (PR #1875 review
    * finding) — `null` until the read lands. Mirrors the `admin =
    * (await fetchMe(...)).role === "admin"` pattern every other admin-gated
@@ -952,7 +999,14 @@ export function AppShell({
   // already stops gating on it either way), but leaving it in `sessionStorage`
   // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
   useEffect(() => {
-    if (activationGate.status?.isActivated) clearGateSkipped(scope);
+    if (!activationGate.status?.isActivated) return;
+    clearGateSkipped(scope);
+    // Same housekeeping, one step down: a waiver cannot matter once the funnel
+    // has actually completed, and leaving one behind would let it speak for a
+    // later incomplete funnel the founder never answered (see
+    // `clearGateStepWaivers`).
+    clearGateStepWaivers(scope);
+    setGateWaived([]);
   }, [activationGate.status?.isActivated, scope]);
 
   const refreshTaskStatuses = useCallback(async () => {
@@ -3187,6 +3241,7 @@ export function AppShell({
       skippedThisSession: gateSkipped,
       isAdmin: isGateAdmin,
       retrying: activationGate.retrying,
+      waived: gateWaived,
     })
   ) {
     // A durable read failure must not read as a hang. `stuck` means three
@@ -3253,6 +3308,7 @@ export function AppShell({
       setupOpen,
       skippedThisSession: gateSkipped,
       isAdmin: isGateAdmin,
+      waived: gateWaived,
     }) &&
     // Narrows `status` for the render below — `shouldShowOnboardingGate`
     // already guarantees this is non-null whenever it returns `true`, but
@@ -3267,8 +3323,11 @@ export function AppShell({
           company={company}
           status={activationGate.status}
           currentName={feed.status.name}
+          waived={gateWaived}
           onRefresh={activationGate.refresh}
           onSkip={skipGate}
+          onLeave={leaveGateFor}
+          onWaiveStep={waiveGateStep}
         />
       </ConsoleProvider>
     );
