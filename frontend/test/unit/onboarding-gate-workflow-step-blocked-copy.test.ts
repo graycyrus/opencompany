@@ -10,13 +10,23 @@ import { WorkflowStep } from "@/onboarding/WorkflowStep";
 
 /**
  * Codex review on #2046: `blocked` and `awaiting-approval` both render the
- * gate's "waiting-on-you" kind (same button, same unticked step), but they are
- * NOT the same claim. `WorkflowRunOutcome.blockedNodes` (frontend/src/api/workflows.ts)
- * says a blocked run's agent node is not re-enterable — deciding the card does
- * not continue the run, the operator still has to run the workflow again.
- * `awaiting-approval` is the one case where deciding really does resume it.
+ * gate's "waiting-on-you" kind (same button, same unticked step), but three
+ * distinct things can produce that pairing and only one of them means
+ * deciding actually continues the run:
+ *
+ * - A live gate approval (`pendingApprovals`) — deciding it really does
+ *   resume the run.
+ * - `blocked`: `WorkflowRunOutcome.blockedNodes` (frontend/src/api/workflows.ts)
+ *   says the agent node is not re-enterable — deciding the card does not
+ *   continue the run, the operator still has to run the workflow again.
+ * - `awaiting-approval` purely from a pending DELIVERY (`deliveries[].status
+ *   === "pending"`): a snapshot taken once the run already finished: deciding
+ *   it only sends the report, and the run's own outcome is unaffected —
+ *   `DeliveryReport` carries no id, so there is nothing for Approvals to link
+ *   to either (second Codex finding on #2046).
+ *
  * The copy must not promise automatic continuation for a run it will never be
- * true for.
+ * true for, in either of the last two cases.
  */
 
 const run = (over: Partial<WorkflowRunOutcome> = {}): WorkflowRunOutcome => ({
@@ -94,5 +104,28 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
     expect(text, "a blocked run must render the dedicated blocked testid").toBeTruthy();
     expect(text).not.toContain("the run carries on");
     expect(text).toContain("run it again");
+  });
+
+  it("does NOT promise automatic continuation for a delivery-only approval", async () => {
+    // No `pendingApprovals`, no `blockedNodes` — only a delivery report parked
+    // for send. `gateApprovalTargets` (used both for the Approvals button and
+    // by `WorkflowStep` itself) correctly has nothing to offer here.
+    await render([
+      run({
+        verdict: "awaiting-approval",
+        deliveries: [{ node: "n1", kind: "email", status: "pending", detail: "queued" }],
+      }),
+    ]);
+    const text = container.querySelector(
+      '[data-testid="gate-workflow-awaiting-delivery"]',
+    )?.textContent;
+    expect(
+      text,
+      "a delivery-only awaiting-approval must render its own dedicated testid",
+    ).toBeTruthy();
+    expect(text).not.toContain("the run carries on");
+    expect(text).toContain("run it again");
+    // Nothing decidable via Approvals for this card — the button must not render.
+    expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
   });
 });

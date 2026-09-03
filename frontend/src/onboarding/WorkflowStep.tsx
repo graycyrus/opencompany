@@ -164,7 +164,7 @@ function ProgressLine({
         </>,
         "gate-workflow-running",
       );
-    case "waiting-on-you":
+    case "waiting-on-you": {
       // B-004: the sentence that was missing. It says the run happened, why it
       // did not count, and what closes it — rather than leaving the founder to
       // conclude the button did nothing.
@@ -173,29 +173,52 @@ function ProgressLine({
       // (frontend/src/api/workflows.ts) is explicit that an agent node is not
       // re-enterable, so deciding the card does NOT continue this run — the
       // operator still has to run the workflow again. Promising "the run
-      // carries on" for that case would be a claim the host never makes;
-      // `awaiting-approval` is the one where deciding really does resume it.
-      return progress.verdict === "blocked"
-        ? shell(
-            <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
-            <>
-              <span className="font-medium text-foreground">{name}</span> ran and stopped to
-              ask you something — it&apos;s waiting on an approval, so it hasn&apos;t
-              finished yet and this step hasn&apos;t ticked. Decide the approval, then run
-              it again to finish.
-            </>,
-            "gate-workflow-blocked",
-          )
-        : shell(
-            <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
-            <>
-              <span className="font-medium text-foreground">{name}</span> ran and stopped to
-              ask you something — it&apos;s waiting on an approval, so it hasn&apos;t
-              finished yet and this step hasn&apos;t ticked. Decide the approval and the run
-              carries on.
-            </>,
-            "gate-workflow-waiting",
-          );
+      // carries on" for that case would be a claim the host never makes.
+      if (progress.verdict === "blocked") {
+        return shell(
+          <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+          <>
+            <span className="font-medium text-foreground">{name}</span> ran and stopped to
+            ask you something — it&apos;s waiting on an approval, so it hasn&apos;t
+            finished yet and this step hasn&apos;t ticked. Decide the approval, then run
+            it again to finish.
+          </>,
+          "gate-workflow-blocked",
+        );
+      }
+      // Codex review, PR #2046: `awaiting-approval` is not only a run paused
+      // mid-flight at a gate node — `awaitingCount` (frontend/src/views/
+      // workflows/run-health.ts) also counts a pending DELIVERY, and that is a
+      // different mechanism wearing the same verdict. `DeliveryStatus`'s own
+      // doc says `pending` is a SNAPSHOT taken once the run already finished:
+      // nothing comes back to flip it, deciding it only sends the report, and
+      // the journal keeps scoring that same run as not-`ok` regardless (this
+      // step still needs a clean rerun to tick). `DeliveryReport` carries no
+      // id either, so `gateApprovalTargets` correctly offers nothing to link
+      // Approvals to — used here as the same signal, rather than inventing a
+      // second predicate the two could drift apart on.
+      if (gateApprovalTargets(progress.run).length === 0) {
+        return shell(
+          <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+          <>
+            <span className="font-medium text-foreground">{name}</span> ran, but a report it
+            produced is still waiting on your approval to send — deciding that only sends
+            the report, so this step hasn&apos;t ticked. Open Workflows and run it again if
+            you want this step to tick.
+          </>,
+          "gate-workflow-awaiting-delivery",
+        );
+      }
+      return shell(
+        <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+        <>
+          <span className="font-medium text-foreground">{name}</span> ran and stopped to ask
+          you something — it&apos;s waiting on an approval, so it hasn&apos;t finished yet
+          and this step hasn&apos;t ticked. Decide the approval and the run carries on.
+        </>,
+        "gate-workflow-waiting",
+      );
+    }
     case "needs-rerun":
       return shell(
         <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />,

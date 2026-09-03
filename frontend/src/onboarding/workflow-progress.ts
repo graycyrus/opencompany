@@ -75,10 +75,12 @@ function kindFor(verdict: WorkflowRunVerdict): GateWorkflowProgressKind {
       return "running";
     // Both mean "a person has to act, and the step stays unticked until they
     // do" — the same kind so the button and the unticked checklist agree for
-    // either. They do NOT get the same sentence: `WorkflowRunOutcome.blockedNodes`
-    // says a blocked run's agent node is not re-enterable, so deciding it does
-    // not continue the run the way deciding an `awaiting-approval` one does —
-    // `WorkflowStep` reads `progress.verdict` to pick the honest wording.
+    // either. They do NOT always get the same sentence: `WorkflowRunOutcome
+    // .blockedNodes` says a blocked run's agent node is not re-enterable, and
+    // `awaiting-approval` itself can come from a pending DELIVERY rather than
+    // a live gate — neither of which deciding actually continues the run the
+    // way deciding a genuine gate approval does. `WorkflowStep` reads
+    // `progress.verdict` and `gateApprovalTargets` to pick the honest wording.
     case "awaiting-approval":
     case "blocked":
       return "waiting-on-you";
