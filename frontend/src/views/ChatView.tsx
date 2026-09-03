@@ -866,43 +866,9 @@ export function ChatView({
     });
   }, [client, company]);
 
-  /**
-   * Re-entering Chat with no channel in the hash returns the operator to the
-   * one they were last reading (issue #412).
-   *
-   * Leaving Chat drops the hash's second segment, so coming back used to fall
-   * straight through to `firstChannel` — which is not memory, it is whichever
-   * channel sorts first, and it cost a re-navigation on every trip.
-   *
-   * The remembered id is written into the **hash**, not held here, for three
-   * reasons: the channel on screen stays shareable, it survives a reload, and a
-   * remembered channel that has since been removed then falls through the exact
-   * same stale-id path as a bad deep link — so it raises the unknown-channel
-   * notice from issue #370 rather than needing a second one, and lands on the
-   * fallback visibly rather than silently. The `onChannelViewed` report for
-   * whatever it fell back to re-remembers that instead, so a vanished channel
-   * corrects itself after one visit.
-   *
-   * A hash that already names a channel is a deep link and always outranks
-   * memory; this only runs when there is nothing to override. The ref makes it
-   * one attempt per bare-hash entry, so it can never fight a navigation.
-   */
+  /** One attempt per bare-hash entry; see the effect below `channel`, which
+   * is the single owner of what a bare `#/chat` resolves to. */
   const restoredFor = useRef<string | null | undefined>(undefined);
-  useEffect(() => {
-    if (sub) {
-      // A channel is named, so the next bare `#/chat` is a fresh re-entry.
-      restoredFor.current = undefined;
-      return;
-    }
-    // Scoped like `readLastChannel(scope)`: two connections serving the same
-    // company must each restore their own remembered channel, so a host switch
-    // cannot be mistaken for a re-entry into the previous host's state.
-    const scopeKey = `${scope.connection}::${scope.company ?? "single"}`;
-    if (restoredFor.current === scopeKey) return;
-    restoredFor.current = scopeKey;
-    const remembered = readLastChannel(scope);
-    if (remembered) onNavigate(remembered);
-  }, [company, scope, sub, onNavigate]);
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
@@ -983,6 +949,65 @@ export function ChatView({
       directMessageForId(members, generalSub ?? resolvedSub ?? decodedSub) ??
       firstChannel(sections))
     : null;
+
+  /**
+   * A bare `#/chat` is resolved **into the hash**, so which conversation is open
+   * is routed state rather than derived state (B-096).
+   *
+   * Two facts made a draft escape into somebody else's DM. The first is that a
+   * bare hash never named a channel: the magic-link landing route puts the
+   * console on `#/chat` with no second segment, `useHashView` canonicalises the
+   * *view* and knows nothing about chat's channels, and nothing else wrote one —
+   * so `channel` above stayed the value of an expression over `members`,
+   * `desks`, `transcripts` and `operator`, every one of which lands
+   * asynchronously and can re-order what `firstChannel` answers. The second is
+   * that the composer is deliberately ONE instance shared by every channel, and
+   * its draft deliberately survives a channel change (see `MessageComposer`'s
+   * `suppressed` doc, PR #1984) — so when the derived channel moved, the
+   * half-written message moved with it and `send` addressed whatever `channel`
+   * had become. The founder watched a message they wrote in `#general` post into
+   * a private DM with a teammate.
+   *
+   * Keeping a draft across a switch is right and stays. What is wrong is a
+   * conversation that can change with no navigation behind it, so this closes
+   * the gap at that end: the moment there is a channel to name, its id goes in
+   * the hash, and from then on `decodedSub` pins it. A deep link outranks
+   * everything (`sub` short-circuits), so this can never fight one.
+   *
+   * It also subsumes issue #412's restore, which used to be its own effect
+   * above. That is not a merge of convenience — two effects both writing the
+   * hash for a bare entry raced, and the loser silently won: memory would
+   * navigate to the remembered channel and the normaliser would immediately
+   * replace it with `firstChannel`. One effect, one decision, memory first.
+   *
+   * `restoredFor` keeps this to one attempt per bare-hash entry per scope, so a
+   * remembered channel the operator then navigates away from is not yanked back;
+   * `sub` becoming truthy re-arms it for the next re-entry. The `!channel` guard
+   * sits BEFORE the ref is stamped, so an entry that arrives before `/desks` has
+   * answered waits for a real channel instead of burning its one attempt on
+   * nothing.
+   */
+  useEffect(() => {
+    if (sub) {
+      // A channel is named, so the next bare `#/chat` is a fresh re-entry.
+      restoredFor.current = undefined;
+      return;
+    }
+    // Nothing to normalise *to* yet. `channel` is null until `/desks` answers.
+    if (!channel) return;
+    // Scoped like `readLastChannel(scope)`: two connections serving the same
+    // company must each restore their own remembered channel, so a host switch
+    // cannot be mistaken for a re-entry into the previous host's state.
+    const scopeKey = `${scope.connection}::${scope.company ?? "single"}`;
+    if (restoredFor.current === scopeKey) return;
+    restoredFor.current = scopeKey;
+    // Memory outranks the fallback, and is written into the hash rather than
+    // held here (issue #412): the channel on screen stays shareable, survives a
+    // reload, and a remembered channel that has since been removed falls through
+    // the same stale-id path as a bad deep link — raising issue #370's
+    // unknown-channel notice rather than landing somewhere else in silence.
+    onNavigate(readLastChannel(scope) ?? channel.id);
+  }, [scope, sub, channel, onNavigate]);
   /**
    * The hash named a channel this company doesn't have, and the first-channel
    * fallback answered instead.
