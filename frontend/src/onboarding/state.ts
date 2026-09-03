@@ -82,38 +82,54 @@ export function clearGateSkipped(scope: LocalScope): void {
 // Scoped per company by the same `scopedKey` the skip marker uses, so waiving
 // the step on one company never speaks for another.
 
-const WAIVED_KEY = (scope: LocalScope): string => scopedKey("oc-onboarding-gate-waived", scope);
-
 /** The gate's three step ids, as `OnboardingGate` names them. */
 export type GateStepId = "name" | "integration" | "workflow";
+
+/** Every step id, in the order the gate itself lists them. */
+const GATE_STEP_IDS: readonly GateStepId[] = ["name", "integration", "workflow"];
+
+/**
+ * One `localStorage` key PER STEP, not one key holding all three in a JSON
+ * array (tinysweeper critique, PR #2046).
+ *
+ * The array form was a read-modify-write over a single slot: two tabs waiving
+ * DIFFERENT steps at nearly the same moment (finish the name step in one,
+ * finish the workflow step in the other — an ordinary way to have two tabs
+ * open on the same company) would each read the array before the other's
+ * write landed, and whichever write happened last silently discarded the
+ * other tab's waiver. A step's own key can only ever be written by an action
+ * that waives THAT step, so there is no shared slot left to race over — two
+ * tabs waiving the same step at once just write the same thing twice, and two
+ * tabs waiving different steps never touch each other's key at all. Safe to
+ * change the wire format outright: this waiver feature is new in this PR, so
+ * there is no previously-written array-shaped value anywhere to migrate.
+ */
+const WAIVED_STEP_KEY = (scope: LocalScope, step: GateStepId): string =>
+  scopedKey(`oc-onboarding-gate-waived:${step}`, scope);
 
 /**
  * Reads the durably-waived step ids for this company.
  *
- * Tolerates anything in the slot — a hand-edited value, a half-written entry,
- * a shape from a future version — by returning nothing rather than throwing
- * into a render. The cost of a misread is one extra prompt; the cost of a
- * throw is the blank app this whole gate exists to replace.
+ * Tolerates anything in a slot — a hand-edited value, a half-written entry —
+ * by treating only "present at all" as waived and everything else (including
+ * a read that throws) as not, rather than letting a corrupt slot throw into a
+ * render. The cost of a misread is one extra prompt; the cost of a throw is
+ * the blank app this whole gate exists to replace.
  */
 export function waivedGateSteps(scope: LocalScope): GateStepId[] {
-  try {
-    const raw = localStorage.getItem(WAIVED_KEY(scope));
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (v): v is GateStepId => v === "name" || v === "integration" || v === "workflow",
-    );
-  } catch {
-    return [];
-  }
+  return GATE_STEP_IDS.filter((step) => {
+    try {
+      return localStorage.getItem(WAIVED_STEP_KEY(scope, step)) !== null;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /** Records that the founder answered `step` as far as this build allows. */
 export function markGateStepWaived(scope: LocalScope, step: GateStepId): void {
   try {
-    const next = Array.from(new Set([...waivedGateSteps(scope), step]));
-    localStorage.setItem(WAIVED_KEY(scope), JSON.stringify(next));
+    localStorage.setItem(WAIVED_STEP_KEY(scope, step), String(Date.now()));
   } catch {
     /* private mode / quota — the gate re-offers, same as a failed skip write */
   }
@@ -127,9 +143,11 @@ export function markGateStepWaived(scope: LocalScope, step: GateStepId): void {
  * without the founder ever having answered that one.
  */
 export function clearGateStepWaivers(scope: LocalScope): void {
-  try {
-    localStorage.removeItem(WAIVED_KEY(scope));
-  } catch {
-    /* nothing to clear */
+  for (const step of GATE_STEP_IDS) {
+    try {
+      localStorage.removeItem(WAIVED_STEP_KEY(scope, step));
+    } catch {
+      /* nothing to clear */
+    }
   }
 }

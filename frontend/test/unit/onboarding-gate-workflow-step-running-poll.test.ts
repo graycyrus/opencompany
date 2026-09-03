@@ -8,15 +8,16 @@ import type { OpenCompanyClient } from "@/api/client";
 import { WorkflowStep } from "@/onboarding/WorkflowStep";
 
 /**
- * Codex review, PR #2046: `WorkflowStep`'s mount effect reads run history
- * exactly once per `(client, company)`. If the newest run is `running` when
- * that read lands and later settles (to `blocked`, `failed`, success —
- * anything), nothing re-fetches: `client`/`company` do not change just
- * because a run finished, and the activation poll cannot unmount this step
- * for a run that has not (yet) succeeded. Before the fix the card would say
- * "is still running" forever, until the founder collapsed and reopened the
- * step or reloaded the page — hiding an approval or failure that needed
- * their attention.
+ * Codex review, PR #2046, across several rounds converging on one shape of
+ * finding: `WorkflowStep` needs to keep re-reading run history for as long
+ * as it is mounted, not just once. `client`/`company` never change just
+ * because a run finishes, an approval gets decided elsewhere, or a NEW run
+ * starts from another tab — and the activation poll cannot unmount this step
+ * for a company that has not (yet) activated. The settled design polls
+ * UNCONDITIONALLY (mirroring `useActivationGate`), guarded against overlap by
+ * an in-flight check rather than by which `progress.kind` is currently
+ * showing — narrower "only poll while running/waiting" guards kept missing a
+ * kind one round at a time.
  */
 
 const runningRun = {
@@ -66,7 +67,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("WorkflowStep re-polls a run that was running when it mounted", () => {
+describe("WorkflowStep's continuous run-history poll", () => {
   it("picks up the run settling without an unmount/reload", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let calls = 0;
@@ -108,21 +109,23 @@ describe("WorkflowStep re-polls a run that was running when it mounted", () => {
     expect(container.querySelector('[data-testid="gate-workflow-running"]')).toBeNull();
   });
 
-  it("keeps the newer terminal result when an older poll's response arrives later", async () => {
-    // CodeRabbit review, PR #2046: a tick fires the next `listWorkflowRuns`
-    // read without waiting for the previous one, so two requests can be in
-    // flight at once. If the OLDER one's response lands AFTER a NEWER one
-    // already moved the card to a terminal state, it must not overwrite that
-    // with its own stale "running" reading.
+  it("does not start an overlapping poll while a request is still in flight", async () => {
+    // Codex review, PR #2046: a host consistently slower than the poll
+    // interval used to have EVERY response arrive already stale — each tick
+    // incremented the request counter before the previous one could land, so
+    // nothing was ever "the latest" by the time it resolved, and requests
+    // piled up unboundedly while the card sat frozen. The fix is to never
+    // start a new request while one is still outstanding, which this proves
+    // directly: two poll intervals pass with the first request still
+    // unresolved, and only one request has been issued.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let calls = 0;
-    const deferred: Record<number, (v: { runs: unknown[]; hasMore: boolean }) => void> = {};
+    let resolveSecond!: (v: { runs: unknown[]; hasMore: boolean }) => void;
     const client = fakeClient(() => {
       calls += 1;
-      const thisCall = calls;
-      if (thisCall === 1) return Promise.resolve({ runs: [runningRun], hasMore: false });
+      if (calls === 1) return Promise.resolve({ runs: [runningRun], hasMore: false });
       return new Promise((resolve) => {
-        deferred[thisCall] = resolve;
+        resolveSecond = resolve;
       });
     });
 
@@ -139,37 +142,80 @@ describe("WorkflowStep re-polls a run that was running when it mounted", () => {
     });
     expect(calls).toBe(1);
 
-    // Two poll ticks, each issuing a new request that is left pending.
+    // First poll tick issues the second (slow) request.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(calls).toBe(2);
+
+    // A second poll interval passes with that request still unresolved — no
+    // third request must be issued while it is outstanding.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    expect(calls).toBe(3);
+    expect(calls, "a poll tick must not overlap a still-outstanding request").toBe(2);
 
-    // Resolve them OUT OF ORDER, back to back before anything yields control
-    // to React's effect scheduler: the newer request (#3) lands first with a
-    // terminal result, then the older one (#2) lands with a stale "still
-    // running" — both while the same poll-effect instance that issued them
-    // is still current, so a bare "did the effect unmount" flag would not
-    // catch this; only comparing against the latest ISSUED request does.
+    // Once it finally resolves, the next tick is free to issue another.
     await act(async () => {
-      deferred[3]({ runs: [succeededRun], hasMore: false });
-      deferred[2]({ runs: [runningRun], hasMore: false });
-      await Promise.resolve();
+      resolveSecond({ runs: [succeededRun], hasMore: false });
       await Promise.resolve();
     });
-
     expect(
       container.querySelector('[data-testid="gate-workflow-succeeded"]'),
-      "the newer terminal response must win",
+      "the slow request's own response must still be applied, not discarded",
     ).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(calls, "polling resumes once the outstanding request clears").toBe(3);
+  });
+
+  it("does not fire a poll tick while the initial mount read is still in flight", async () => {
+    // The mount read and the poll share the same in-flight guard, so a slow
+    // initial read (not merely a slow poll response) must also hold off the
+    // very first tick rather than racing it.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    let resolveInitial!: (v: { runs: unknown[]; hasMore: boolean }) => void;
+    const initial = new Promise<{ runs: unknown[]; hasMore: boolean }>((resolve) => {
+      resolveInitial = resolve;
+    });
+    const client = fakeClient(() => {
+      calls += 1;
+      if (calls === 1) return initial;
+      return Promise.resolve({ runs: [succeededRun], hasMore: false });
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(WorkflowStep, {
+          client,
+          company: null,
+          onOpenWorkflows: () => {},
+          onOpenApprovals: () => {},
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(calls).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
     expect(
-      container.querySelector('[data-testid="gate-workflow-running"]'),
-      "the older, later-arriving response must not revert the card to running",
-    ).toBeNull();
+      calls,
+      "a poll tick must not start while the initial read is still outstanding",
+    ).toBe(1);
+
+    await act(async () => {
+      resolveInitial({ runs: [runningRun], hasMore: false });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(calls, "polling resumes once the initial read clears").toBe(2);
   });
 
   it("retries after the initial read fails, instead of staying stuck", async () => {
@@ -258,66 +304,20 @@ describe("WorkflowStep re-polls a run that was running when it mounted", () => {
     ).toBeTruthy();
   });
 
-  it("keeps the newer terminal result when the initial read is slower than a poll tick", async () => {
-    // CodeRabbit + Codex review, PR #2046: the initial mount read and the
-    // poll ticks used to track staleness with SEPARATE counters. If the
-    // initial read is slow enough that a poll tick's response lands first
-    // with a terminal result, the initial read's own (now stale) response
-    // must not be allowed to overwrite it just because it was never checked
-    // against the poll's counter.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    let calls = 0;
-    let resolveInitial!: (v: { runs: unknown[]; hasMore: boolean }) => void;
-    const initial = new Promise<{ runs: unknown[]; hasMore: boolean }>((resolve) => {
-      resolveInitial = resolve;
-    });
-    const client = fakeClient(() => {
-      calls += 1;
-      if (calls === 1) return initial; // held pending — the slow initial read
-      return Promise.resolve({ runs: [succeededRun], hasMore: false });
-    });
-
-    await act(async () => {
-      root.render(
-        createElement(WorkflowStep, {
-          client,
-          company: null,
-          onOpenWorkflows: () => {},
-          onOpenApprovals: () => {},
-        }),
-      );
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(calls).toBe(1);
-
-    // The poll fires while the initial read is still pending (progress is
-    // still `null`, so `shouldPoll` is already true) and resolves with a
-    // terminal result.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000);
-    });
-    expect(calls).toBe(2);
-    expect(container.querySelector('[data-testid="gate-workflow-succeeded"]')).toBeTruthy();
-
-    // Now the slow initial read finally lands, with a stale `running` answer.
-    await act(async () => {
-      resolveInitial({ runs: [runningRun], hasMore: false });
-      await Promise.resolve();
-    });
-
-    expect(
-      container.querySelector('[data-testid="gate-workflow-succeeded"]'),
-      "the newer poll response must not be overwritten by the slower initial read",
-    ).toBeTruthy();
-    expect(container.querySelector('[data-testid="gate-workflow-running"]')).toBeNull();
-  });
-
-  it("does not keep polling once the run has settled", async () => {
+  it("keeps polling a run that has already settled, to catch a newer run starting elsewhere", async () => {
+    // Codex review, PR #2046: a founder can start a fresh run from another
+    // tab while this card is still showing an older run's terminal outcome
+    // (`none`, `did-not-finish`, `needs-rerun`, or even `succeeded`, briefly,
+    // before the parent gate catches up and unmounts this step). Polling
+    // used to stop once `progress.kind` left `running`/`waiting-on-you`;
+    // it now runs unconditionally for as long as the step is mounted.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let calls = 0;
     const client = fakeClient(async () => {
       calls += 1;
-      return { runs: [succeededRun], hasMore: false };
+      // The first read finds nothing; a later poll picks up a run that
+      // started after this card mounted.
+      return { runs: calls === 1 ? [] : [runningRun], hasMore: false };
     });
 
     await act(async () => {
@@ -331,13 +331,17 @@ describe("WorkflowStep re-polls a run that was running when it mounted", () => {
       );
       await vi.advanceTimersByTimeAsync(0);
     });
-
     expect(calls).toBe(1);
+    expect(container.querySelector('[data-testid="gate-workflow-none"]')).toBeTruthy();
+
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(20000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
-    // No `running` progress was ever observed, so the poll effect never
-    // armed — a settled run on the very first read must cost nothing extra.
-    expect(calls, "an already-settled run must not be polled").toBe(1);
+
+    expect(calls, "a settled ('none') card must still be re-polled").toBeGreaterThan(1);
+    expect(
+      container.querySelector('[data-testid="gate-workflow-running"]'),
+      "a run started elsewhere must become visible without an unmount",
+    ).toBeTruthy();
   });
 });

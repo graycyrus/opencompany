@@ -15,13 +15,13 @@ import {
   gateWorkflowProgress,
   type GateWorkflowProgress,
 } from "@/onboarding/workflow-progress";
+import { pendingCount } from "@/views/workflows/run-health";
 
 /**
- * How often the step re-reads run history while the run it is showing is
- * still `running` (Codex review, PR #2046). Mirrors `useActivationGate`'s
- * `POLL_MS` — the same cadence the rest of the gate already re-checks itself
- * on, so a run finishing does not read as more or less responsive than the
- * funnel step beside it.
+ * How often the step re-reads run history (Codex review, PR #2046). Mirrors
+ * `useActivationGate`'s `POLL_MS` — the same cadence the rest of the gate
+ * already re-checks itself on, so a run finishing does not read as more or
+ * less responsive than the funnel step beside it.
  */
 const RUNNING_POLL_MS = 5000;
 
@@ -76,23 +76,46 @@ export function WorkflowStep({
   // `generation` ref, makes "is this still the latest request" a single
   // question with a single answer no matter which effect asked it.
   const latestRunsRequest = useRef(0);
+  // Codex review, PR #2046: guards against a HOST that consistently answers
+  // slower than `RUNNING_POLL_MS`. Without it, every tick still increments
+  // `latestRunsRequest` before the PREVIOUS tick's request lands, so every
+  // single response arrives already stale by the "latest issued" check above
+  // and gets discarded forever — the card would sit on its first spinner
+  // permanently while requests piled up unboundedly underneath it. Mirrors
+  // `useActivationGate`'s own `inFlight` ref for the identical shape of
+  // problem: skip starting a new request while one is still outstanding,
+  // rather than trying to out-race it.
+  const runsInFlight = useRef(false);
   const fetchRuns = useCallback(() => {
+    if (runsInFlight.current) return;
+    runsInFlight.current = true;
     const requestId = ++latestRunsRequest.current;
-    void listWorkflowRuns(client, company, { limit: 5 }).then(
-      (page) => {
-        if (requestId !== latestRunsRequest.current) return;
-        setProgress(gateWorkflowProgress(page.runs));
-        setFailed(false);
-      },
-      () => {
-        if (requestId !== latestRunsRequest.current) return;
-        setFailed(true);
-      },
-    );
+    void listWorkflowRuns(client, company, { limit: 5 })
+      .then(
+        (page) => {
+          if (requestId !== latestRunsRequest.current) return;
+          setProgress(gateWorkflowProgress(page.runs));
+          setFailed(false);
+        },
+        () => {
+          if (requestId !== latestRunsRequest.current) return;
+          setFailed(true);
+        },
+      )
+      .finally(() => {
+        // Guarded the same way: a stale request finishing late must not clear
+        // the flag out from under whichever request is now current.
+        if (requestId === latestRunsRequest.current) runsInFlight.current = false;
+      });
   }, [client, company]);
 
   useEffect(() => {
     let live = true;
+    // A fresh (client, company) starts its own request regardless of whether
+    // a now-irrelevant one from the PREVIOUS company is still outstanding —
+    // `fetchRuns`' own `requestId` check keeps that old response from ever
+    // being applied once it does land.
+    runsInFlight.current = false;
     fetchRuns();
     // A host that cannot list workflows (or predates the route, which answers
     // 404) should cost this step its labels, not its answer — so a rejection
@@ -110,41 +133,28 @@ export function WorkflowStep({
     };
   }, [client, company, fetchRuns]);
 
-  // Codex review, PR #2046: a run in flight (`running`) or waiting on a
-  // person (`waiting-on-you` — a live gate approval, a blocked node, or a
-  // pending delivery) can all still change from OUTSIDE this mount: the run
-  // finishes, another tab/operator decides the approval, or the queue strands
-  // it. Nothing here re-fetches on its own, and the activation poll cannot
-  // unmount this step for a run that has not (yet) succeeded — so without
-  // this, the card could keep telling the founder to decide something that no
-  // longer applies, indefinitely.
-  //
-  // tinysweeper critique, PR #2046: the same reasoning covers a transient
-  // FAILURE on the first read — it used to arm only on `"running"`, but a
-  // failed read leaves `progress` at `null` forever, so nothing ever retried
-  // and the "Couldn't read this company's run history" message was exactly as
-  // stuck. `progress === null` (the read still in flight, or one that already
-  // failed) covers that too.
-  //
-  // `needs-rerun`, `did-not-finish`, `succeeded` and `none` are deliberately
-  // left out: the first three are terminal answers this run will not revise
-  // on its own, and `none` has nothing yet to watch.
-  //
-  // Depends on that one boolean, not `progress` itself: `progress` is a fresh
-  // object every fetch, and every poll tick would otherwise tear the interval
-  // down and rebuild it — `shouldPoll` only flips at the transitions that
-  // actually matter.
-  const shouldPoll =
-    progress === null || progress.kind === "running" || progress.kind === "waiting-on-you";
+  // Codex review, PR #2046 (three rounds of the same shape of finding): a run
+  // can change from OUTSIDE this mount at any point before it reaches an
+  // outcome this card will never revise on its own — a run finishes, another
+  // tab/operator decides an approval or strands it, or the founder starts a
+  // NEW run entirely while this card is still showing "No run yet" or an
+  // older one's outcome. Nothing here re-fetches by itself, and the
+  // activation poll cannot unmount this step for a company that has not (yet)
+  // activated — so a step that only polled some kinds and not others kept
+  // reappearing as a fresh finding, one kind at a time. Simplest fix that
+  // actually closes the class: poll unconditionally for as long as this step
+  // is mounted, the same way `useActivationGate` does — `fetchRuns`'s own
+  // in-flight guard above is what keeps that cheap on a slow host, and this
+  // step un-mounts on its own once the founder moves past it.
   useEffect(() => {
-    if (!shouldPoll) return;
     // CodeRabbit review, PR #2046: a tick fires the next read without waiting
-    // for the previous one, so two requests can be in flight together — the
-    // shared `latestRunsRequest` ref above (not a counter local to this
-    // effect) is what stops an OLDER one that resolves LATER from overwriting
-    // a NEWER response, from this effect or the mount effect alike.
+    // for the previous one to have committed its state update, so two
+    // requests could be in flight together — the shared `latestRunsRequest`
+    // ref above (not a counter local to this effect) is what stops an OLDER
+    // one that resolves LATER from overwriting a NEWER response, from this
+    // effect or the mount effect alike.
     return startVisiblePolling(fetchRuns, RUNNING_POLL_MS);
-  }, [shouldPoll, fetchRuns]);
+  }, [fetchRuns]);
 
   const label = (run: WorkflowRunOutcome | undefined) =>
     (run && names.get(run.workflowId)) ?? run?.workflowId ?? "your workflow";
@@ -273,27 +283,54 @@ function ProgressLine({
       // id either, so `gateApprovalTargets` correctly offers nothing to link
       // Approvals to — used here as the same signal, rather than inventing a
       // second predicate the two could drift apart on.
-      if (gateApprovalTargets(progress.run).length === 0) {
+      {
+        const hasTarget = gateApprovalTargets(progress.run).length > 0;
+        const hasPendingDelivery = pendingCount(progress.run?.deliveries ?? []) > 0;
+        if (!hasTarget) {
+          return shell(
+            <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+            <>
+              <span className="font-medium text-foreground">{name}</span> ran, but a report
+              it produced is still waiting on your approval to send — deciding that only
+              sends the report, so this step hasn&apos;t ticked. Open Workflows and run it
+              again if you want this step to tick.
+            </>,
+            "gate-workflow-awaiting-delivery",
+          );
+        }
+        // Codex review, PR #2046: a run CAN carry both a live gate approval
+        // and a pending delivery at once — a parallel branch that already
+        // reached an output node while another is still paused at a gate.
+        // `hasTarget` alone used to pick this sentence and its unqualified
+        // "the run carries on" — true of the gate approval Approvals links
+        // to, but the SAME sentence would be read as covering the delivery
+        // too, and deciding that one does not continue anything (same reason
+        // as the delivery-only case above). Naming both keeps the promise
+        // scoped to the part of it that is actually true.
+        if (hasPendingDelivery) {
+          return shell(
+            <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+            <>
+              <span className="font-medium text-foreground">{name}</span> ran and stopped to
+              ask you something — deciding the approval in Approvals carries that part of
+              the run on. It also produced a report still waiting on a separate approval to
+              send; deciding that one only sends the report and won&apos;t finish this step
+              on its own.
+            </>,
+            "gate-workflow-waiting-mixed",
+          );
+        }
         return shell(
           <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
           <>
-            <span className="font-medium text-foreground">{name}</span> ran, but a report it
-            produced is still waiting on your approval to send — deciding that only sends
-            the report, so this step hasn&apos;t ticked. Open Workflows and run it again if
-            you want this step to tick.
+            <span className="font-medium text-foreground">{name}</span> ran and stopped to
+            ask you something — it&apos;s waiting on an approval, so it hasn&apos;t
+            finished yet and this step hasn&apos;t ticked. Decide the approval and the run
+            carries on.
           </>,
-          "gate-workflow-awaiting-delivery",
+          "gate-workflow-waiting",
         );
       }
-      return shell(
-        <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
-        <>
-          <span className="font-medium text-foreground">{name}</span> ran and stopped to ask
-          you something — it&apos;s waiting on an approval, so it hasn&apos;t finished yet
-          and this step hasn&apos;t ticked. Decide the approval and the run carries on.
-        </>,
-        "gate-workflow-waiting",
-      );
     }
     case "needs-rerun":
       return shell(

@@ -73,18 +73,31 @@ describe("waiver storage", () => {
     expect(waivedGateSteps(scope)).toEqual(["integration"]);
   });
 
-  it("returns nothing rather than throwing on a corrupt slot", () => {
-    localStorage.setItem("oc-onboarding-gate-waived:local::acme", "{not json");
+  it("does not let a garbage value in an unrelated key count as a waiver", () => {
+    // tinysweeper critique, PR #2046: one key PER STEP, not one shared array —
+    // `waivedGateSteps` only asks "does this step's own key exist at all", so
+    // there is no shape to corrupt the way a JSON blob could be.
+    localStorage.setItem("some-other-key:local::acme", "{not json");
     expect(() => waivedGateSteps(scope)).not.toThrow();
     expect(waivedGateSteps(scope)).toEqual([]);
   });
 
-  it("drops values that are not step ids", () => {
-    localStorage.setItem(
-      "oc-onboarding-gate-waived:local::acme",
-      JSON.stringify(["integration", "not-a-step", 7]),
-    );
+  it("reads only the steps that were actually waived, one key each", () => {
+    localStorage.setItem("oc-onboarding-gate-waived:integration:local::acme", String(Date.now()));
     expect(waivedGateSteps(scope)).toEqual(["integration"]);
+  });
+
+  it("does not race two tabs waiving different steps at once", () => {
+    // The bug the per-step key scheme exists to close: a read-modify-write
+    // over one shared array let two near-simultaneous writes for DIFFERENT
+    // steps clobber each other, because each write's `Set` was built from a
+    // read that happened before the other tab's write landed. A per-step key
+    // makes that impossible to reproduce even with real concurrency — this
+    // asserts the shape holds when both calls have already landed, in either
+    // order, which is what any interleaving of two real tabs converges to.
+    markGateStepWaived(scope, "name");
+    markGateStepWaived(scope, "workflow");
+    expect(waivedGateSteps(scope).sort()).toEqual(["name", "workflow"]);
   });
 
   it("clears every waiver once the funnel completes", () => {

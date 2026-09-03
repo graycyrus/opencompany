@@ -151,4 +151,28 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
     expect(text).toContain("run it again");
     expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
   });
+
+  it("does NOT claim a pending delivery carries the run on, even alongside a live gate approval", async () => {
+    // Codex review on #2046: a run can carry BOTH a live gate approval and a
+    // pending delivery at once (a parallel branch already reached an output
+    // node while another is still paused at a gate). `gateApprovalTargets`
+    // alone can't see this — it only reads `pendingApprovals` and
+    // `blockedNodes`, never `deliveries` — so the plain "the run carries on"
+    // sentence would be read as covering the delivery too.
+    await render([
+      run({
+        verdict: "awaiting-approval",
+        pendingApprovals: ["ap-1"],
+        deliveries: [{ node: "n1", kind: "email", status: "pending", detail: "queued" }],
+      }),
+    ]);
+    const text = container.querySelector(
+      '[data-testid="gate-workflow-waiting-mixed"]',
+    )?.textContent;
+    expect(text, "a mixed gate+delivery run must render its own testid").toBeTruthy();
+    expect(text).not.toContain("Decide the approval and the run carries on");
+    expect(text).toContain("carries that part of the run on");
+    // The gate approval itself IS decidable, so the button must still show.
+    expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeTruthy();
+  });
 });
