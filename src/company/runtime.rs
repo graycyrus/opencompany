@@ -11541,7 +11541,7 @@ mod tests {
                 .expect("parks");
 
             let mut retitled = stored(&runtime, "t-1").await;
-            retitled.title = "Draft the launch note (v2)".to_string();
+            retitled.title = TaskTitle::authored("Draft the launch note (v2)");
             runtime.upsert_task(&retitled).await.expect("an edit lands");
 
             let mut filed = stored(&runtime, "t-1").await;

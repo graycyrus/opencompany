@@ -10,7 +10,6 @@ import type {
 } from "@/api/workflows";
 // Issue #981: the one definition of "this report did not go out", shared with
 // the run drawer, the history rows and the host itself.
-import { usd } from "@/lib/money";
 import { undeliveredCount } from "@/views/workflows/run-health";
 import { formatUsd } from "@/lib/cost";
 
