@@ -40,6 +40,7 @@ import {
   fromHistory,
   isGeneralChannel,
   makeMessage,
+  markSendFailed,
   reconcileIds,
   toHostMessageId,
   type ChatMessage,
@@ -1008,6 +1009,7 @@ export function ChatView({
     // unknown-channel notice rather than landing somewhere else in silence.
     onNavigate(readLastChannel(scope) ?? channel.id);
   }, [scope, sub, channel, onNavigate]);
+
   /**
    * The hash named a channel this company doesn't have, and the first-channel
    * fallback answered instead.
@@ -1580,6 +1582,61 @@ export function ChatView({
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
 
   /**
+   * What a failed send needs to be sent again (B-099), by the optimistic id of
+   * the row it failed on.
+   *
+   * A ref, not state: nothing rendered depends on it — `message.sendFailed` is
+   * what draws the row — and a re-render per failed send would be a re-render
+   * for a value only a click ever reads.
+   *
+   * It is deliberately not stored on the `ChatMessage`. Two of these five
+   * fields are not on the bubble and cannot be recovered from it: the wire
+   * `mentions` carry a target the rendered chip does not, and an `attachment`
+   * is a workspace node reference rather than the projection the row shows. A
+   * Retry rebuilt from the rendered message would quietly send a *different*
+   * message — chip-less, or without its file — which is a worse failure than
+   * the one being fixed.
+   */
+  const failedSends = useRef<
+    Map<
+      string,
+      {
+        target: string;
+        text: string;
+        intent?: MessageIntent;
+        parentId?: string;
+        attachments?: AttachmentDto[];
+        mentions?: Mention[];
+      }
+    >
+  >(new Map());
+
+  /**
+   * Send a failed line again (B-099).
+   *
+   * The failed row is dropped first, because `send` appends its own optimistic
+   * bubble: keeping both would show the operator their message twice, one of
+   * them a corpse. Its retry payload goes with it, so a Retry cannot be
+   * replayed twice from one click; a second failure re-registers a fresh one
+   * under the new row's id.
+   *
+   * Nothing is retried automatically. A throw is ambiguous — the host may have
+   * journaled the message before the request died (see `send`'s doc) — so an
+   * automatic resend would risk posting the same instruction twice. Whether
+   * that is worth it is the operator's call, which is exactly what a button is.
+   */
+  const retrySend = (messageId: string) => {
+    const payload = failedSends.current.get(messageId);
+    if (!payload) return;
+    failedSends.current.delete(messageId);
+    setTranscripts((t) => ({
+      ...t,
+      [payload.target]: (t[payload.target] ?? []).filter((m) => m.id !== messageId),
+    }));
+    void send(payload.text, payload.intent, payload.parentId, payload.attachments, payload.mentions);
+  };
+
+  /**
    * Post a line and thread the company's answer back into the same place.
    * `parentId` set means the exchange stays inside the thread panel.
    *
@@ -1837,10 +1894,34 @@ export function ChatView({
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
       // whether their message was taken at all. The two facts are not in
-      // competition — this line reports the request, the shell renders whatever
-      // the turn goes on to produce.
+      // competition — this marks the request, the shell renders whatever the
+      // turn goes on to produce.
+      //
+      // Marked ON the message rather than appended beside it (B-099). The old
+      // sibling `system` line left the bubble itself indistinguishable from a
+      // delivered one — same avatar, same timestamp, no warning of any kind —
+      // so scrolling away, or a message long enough to push the note off
+      // screen, left something that reads as sent and was not. `sendFailed` is
+      // a field of the row, so no renderer can draw the bubble without it, and
+      // the row can carry its own Retry.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
-      append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
+      setTranscripts((t) => ({
+        ...t,
+        [target]: markSendFailed(t[target] ?? [], local.id, msg),
+      }));
+      // What Retry needs to send this line again, kept off the message: the
+      // wire `mentions` carry targets the rendered chips do not, and an
+      // attachment is a node reference rather than the projection on the
+      // bubble. Keyed by the optimistic id, which is the id the failed row
+      // still has — a throw never reaches the `reconcileIds` above it.
+      failedSends.current.set(local.id, {
+        target,
+        text,
+        intent,
+        parentId,
+        attachments,
+        mentions,
+      });
       // Ambiguous, not a confirmed non-send — see this function's doc comment.
       return undefined;
     } finally {
@@ -2312,6 +2393,7 @@ export function ChatView({
               reviewingCardIds={reviewingCardIds}
               resolveAttachmentUrl={resolveAttachmentUrl}
               taskStatusByTaskId={taskStatusByTaskId}
+              onRetrySend={retrySend}
               onStartBrief={() =>
                 setComposerPrefill((current) => ({
                   text: FIRST_TEAM_BRIEF,

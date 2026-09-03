@@ -81,6 +81,8 @@ interface Props {
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /** Sends a line whose POST never completed again (B-099), by its id. */
+  onRetrySend?: (messageId: string) => void;
   /**
    * Places a first brief into the composer on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
@@ -177,6 +179,7 @@ export function MessageTimeline({
   reviewingCardIds,
   resolveAttachmentUrl,
   taskStatusByTaskId,
+  onRetrySend,
   onStartBrief,
   onAddPeople,
   now,
@@ -393,6 +396,7 @@ export function MessageTimeline({
                 reviewingCardIds={reviewingCardIds}
                 resolveAttachmentUrl={resolveAttachmentUrl}
                 taskStatusByTaskId={taskStatusByTaskId}
+                onRetrySend={onRetrySend}
                 now={now ?? Date.now()}
                 cognition={cognition}
                 onRedeemBudgetPause={onRedeemBudgetPause}
