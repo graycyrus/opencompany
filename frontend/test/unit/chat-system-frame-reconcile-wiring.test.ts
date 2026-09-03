@@ -25,6 +25,15 @@ import { describe, expect, it } from "vitest";
  * client, routing — see `chat-receipt-scope-reset.test.ts`'s own doc for the
  * precedent this file follows: read the source, assert the wiring is real
  * rather than merely present somewhere in the file).
+ *
+ * `onSendEnd`'s call site also pins an ordering fix (Codex review round 2,
+ * PR #2052): it fires from the try block, before `append` renders the
+ * settled response's own replies — not from `finally`, which used to run it
+ * strictly after. B-101's mention-ambiguity note is always journaled on the
+ * host *before* the reply it is about; releasing the held note after
+ * `append` rendered the reply first put them on screen in the reverse of
+ * `chat/history`'s own order, so the note visibly jumped backward past the
+ * answer on the very next reload.
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,14 +41,25 @@ const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "ut
 const appShell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
 
 describe("ChatView computes and forwards the settled response's own texts", () => {
-  it("captures every response line's text before the finally block can see it", () => {
+  it("captures every response line's text before onSendEnd can see it", () => {
     expect(chatView).toMatch(/responseTexts = reply\.responses\.map\(\(r\) => r\.text\);/);
   });
 
-  it("passes responseTexts to onSendEnd on the resolved outcome", () => {
-    expect(chatView).toMatch(
-      /if \(outcome === "resolved"\) onSendEnd\?\.\(stateKey, gen, responseTexts\);/,
-    );
+  it("fires onSendEnd before append renders the response's own replies", () => {
+    const marker = "if (stateKey) onSendEnd?.(stateKey, gen, responseTexts);";
+    const onSendEndAt = chatView.indexOf(marker);
+    expect(onSendEndAt, "the responseTexts-carrying onSendEnd call").toBeGreaterThan(-1);
+    const appendAt = chatView.indexOf("append(target, ...replies);", onSendEndAt);
+    expect(appendAt, "append(target, ...replies) after that call").toBeGreaterThan(onSendEndAt);
+  });
+
+  it("no longer fires onSendEnd a second time for the resolved outcome, from finally", () => {
+    // The bug this pins: firing it twice would release (and render) the same
+    // held frame twice, on top of getting the order wrong either way.
+    const finallyAt = chatView.indexOf("} finally {");
+    expect(finallyAt, "the send() finally block").toBeGreaterThan(-1);
+    const finallyBody = chatView.slice(finallyAt, chatView.indexOf("\n  }\n", finallyAt));
+    expect(finallyBody).not.toMatch(/onSendEnd\?\.\(stateKey, gen, responseTexts\)/);
   });
 });
 

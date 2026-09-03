@@ -1865,11 +1865,22 @@ export function ChatView({
         return true;
       }
       const reply = answer;
-      // What `onSendEnd` hands `PendingSyncPosts.ended` below, unconditionally
-      // — even the `(no reply)` / review-feedback branches count as "this
+      // What `onSendEnd` hands `PendingSyncPosts.ended`, unconditionally —
+      // even the `(no reply)` / review-feedback branches count as "this
       // response carried nothing", which is exactly what an empty array
       // already says correctly.
       responseTexts = reply.responses.map((r) => r.text);
+      // Fired here, BEFORE `append` below, and not from the `finally` block
+      // this used to run from (Codex review, PR #2052). `onSendEnd` releases
+      // any held system frame the response above didn't carry — B-101's
+      // mention-ambiguity note, always journaled on the host *before* the
+      // reply it is about. Releasing it after `append` would render the
+      // reply first and the note second, the reverse of `chat/history`'s own
+      // order, so the note visibly jumps backward past the answer on the
+      // very next reload. Firing it here instead keeps the live order and
+      // the durable order the same. `finally` below no longer fires it for
+      // the `"resolved"` case this is the only path that reaches.
+      if (stateKey) onSendEnd?.(stateKey, gen, responseTexts);
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             makeMessage("company", r.text, {
@@ -1988,10 +1999,12 @@ export function ChatView({
       // carries on regardless, so the frame it holds is the only copy of the
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
-      if (stateKey) {
-        if (outcome === "resolved") onSendEnd?.(stateKey, gen, responseTexts);
-        else if (outcome === "failed") onSendFailed?.(stateKey, gen);
-      }
+      //
+      // The `"resolved"` case no longer fires `onSendEnd` from here (issue
+      // #101 review, PR #2052) — it fires earlier, in the try block, before
+      // `append` renders the response's own replies. See that call site's
+      // comment for why the order matters. This block still owns `"failed"`.
+      if (stateKey && outcome === "failed") onSendFailed?.(stateKey, gen);
       setSending(false);
     }
   }
