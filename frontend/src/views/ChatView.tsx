@@ -871,6 +871,43 @@ export function ChatView({
    * is the single owner of what a bare `#/chat` resolves to. */
   const restoredFor = useRef<string | null | undefined>(undefined);
 
+  /**
+   * What a failed send needs to be sent again (B-099), by the optimistic id of
+   * the row it failed on.
+   *
+   * A ref, not state: nothing rendered depends on it — `message.sendFailed` is
+   * what draws the row — and a re-render per failed send would be a re-render
+   * for a value only a click ever reads.
+   *
+   * It is deliberately not stored on the `ChatMessage`. Two of these five
+   * fields are not on the bubble and cannot be recovered from it: the wire
+   * `mentions` carry a target the rendered chip does not, and an `attachment`
+   * is a workspace node reference rather than the projection the row shows. A
+   * Retry rebuilt from the rendered message would quietly send a *different*
+   * message — chip-less, or without its file — which is a worse failure than
+   * the one being fixed.
+   *
+   * Declared **here**, beside the other long-lived refs, rather than beside
+   * `retrySend` where it is read: three early returns sit between the two
+   * (`desksError`, `!desks`, `!channel`), and a hook below them runs on some
+   * renders and not others. That is React error 310 — a blank console with no
+   * composer at all, on exactly the first paint, where `desks` is still `null`.
+   * Every hook in this component belongs above those returns.
+   */
+  const failedSends = useRef<
+    Map<
+      string,
+      {
+        target: string;
+        text: string;
+        intent?: MessageIntent;
+        parentId?: string;
+        attachments?: AttachmentDto[];
+        mentions?: Mention[];
+      }
+    >
+  >(new Map());
+
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
   //
@@ -1581,35 +1618,6 @@ export function ChatView({
   const append = (channelId: string, ...added: ChatMessage[]) =>
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
 
-  /**
-   * What a failed send needs to be sent again (B-099), by the optimistic id of
-   * the row it failed on.
-   *
-   * A ref, not state: nothing rendered depends on it — `message.sendFailed` is
-   * what draws the row — and a re-render per failed send would be a re-render
-   * for a value only a click ever reads.
-   *
-   * It is deliberately not stored on the `ChatMessage`. Two of these five
-   * fields are not on the bubble and cannot be recovered from it: the wire
-   * `mentions` carry a target the rendered chip does not, and an `attachment`
-   * is a workspace node reference rather than the projection the row shows. A
-   * Retry rebuilt from the rendered message would quietly send a *different*
-   * message — chip-less, or without its file — which is a worse failure than
-   * the one being fixed.
-   */
-  const failedSends = useRef<
-    Map<
-      string,
-      {
-        target: string;
-        text: string;
-        intent?: MessageIntent;
-        parentId?: string;
-        attachments?: AttachmentDto[];
-        mentions?: Mention[];
-      }
-    >
-  >(new Map());
 
   /**
    * Send a failed line again (B-099).
