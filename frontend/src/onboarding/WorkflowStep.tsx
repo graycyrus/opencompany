@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, ArrowRight, Clock, Loader2, UserCheck } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -66,30 +66,41 @@ export function WorkflowStep({
   const [names, setNames] = useState<Map<string, string>>(new Map());
   const [failed, setFailed] = useState(false);
 
-  useEffect(() => {
-    let live = true;
-    // Independent reads, not `Promise.allSettled` on a shared await (CodeRabbit
-    // review, PR #2046): the run history is the load-bearing half, and a slow
-    // (not merely failed) workflow-name lookup must not hold the founder on
-    // "Checking your runs…" once `listWorkflowRuns` has already answered.
-    // Awaiting both together paid that cost even on the ordinary path, where
-    // neither request fails — only one is slower than the other. Each promise
-    // now publishes to state the moment it settles, so the run's own answer
-    // never waits on a request that only replaces a fallback label.
+  // Codex + CodeRabbit review, PR #2046: shared by EVERY run-history read
+  // this component issues — the initial mount read and every poll tick alike
+  // — not a counter local to the poll's own loop. Without that, an older
+  // response from one path (say, the initial read, if it happens to be
+  // slower than a poll tick that started after it) could still overwrite a
+  // newer response from the other path, because each path only checked
+  // itself for staleness. One `useRef`, mirroring `useActivationGate`'s own
+  // `generation` ref, makes "is this still the latest request" a single
+  // question with a single answer no matter which effect asked it.
+  const latestRunsRequest = useRef(0);
+  const fetchRuns = useCallback(() => {
+    const requestId = ++latestRunsRequest.current;
     void listWorkflowRuns(client, company, { limit: 5 }).then(
       (page) => {
-        if (!live) return;
+        if (requestId !== latestRunsRequest.current) return;
         setProgress(gateWorkflowProgress(page.runs));
         setFailed(false);
       },
       () => {
-        if (!live) return;
+        if (requestId !== latestRunsRequest.current) return;
         setFailed(true);
       },
     );
+  }, [client, company]);
+
+  useEffect(() => {
+    let live = true;
+    fetchRuns();
     // A host that cannot list workflows (or predates the route, which answers
     // 404) should cost this step its labels, not its answer — so a rejection
-    // here is silently left as the fallback `name()` already renders.
+    // here is silently left as the fallback `name()` already renders. Kept as
+    // its own independent read, not `Promise.allSettled` on a shared await
+    // (CodeRabbit review, PR #2046): the run history is the load-bearing
+    // half, and a slow (not merely failed) workflow-name lookup must not hold
+    // the founder on "Checking your runs…" once run history has answered.
     void listWorkflows(client, company).then((workflows) => {
       if (!live) return;
       setNames(new Map(workflows.map((w: WorkflowSummary) => [w.id, w.name] as const)));
@@ -97,65 +108,43 @@ export function WorkflowStep({
     return () => {
       live = false;
     };
-  }, [client, company]);
+  }, [client, company, fetchRuns]);
 
-  // Codex review, PR #2046: the effect above reads run history exactly once
-  // per (client, company) mount. If the newest run is still `running` when
-  // that read lands and later settles to `blocked`/`failed`/whatever, nothing
-  // re-fetches — the activation poll cannot unmount this step for a run that
-  // has not (yet) succeeded, and neither `client` nor `company` change just
-  // because a run finished — so the card would say "is still running"
-  // indefinitely until the founder collapses and reopens the step or reloads.
+  // Codex review, PR #2046: a run in flight (`running`) or waiting on a
+  // person (`waiting-on-you` — a live gate approval, a blocked node, or a
+  // pending delivery) can all still change from OUTSIDE this mount: the run
+  // finishes, another tab/operator decides the approval, or the queue strands
+  // it. Nothing here re-fetches on its own, and the activation poll cannot
+  // unmount this step for a run that has not (yet) succeeded — so without
+  // this, the card could keep telling the founder to decide something that no
+  // longer applies, indefinitely.
   //
   // tinysweeper critique, PR #2046: the same reasoning covers a transient
-  // FAILURE on that first read, and the original version of this effect
-  // missed it — it armed only on `progress.kind === "running"`, but a failed
-  // read leaves `progress` at `null` forever, so nothing ever retried and the
-  // "Couldn't read this company's run history" message was as permanently
-  // stuck as the "still running" card was. `shouldPoll` below covers both: no
-  // confirmed non-running answer yet (`progress === null`, whether that is
-  // the read still in flight or one that already failed) or a confirmed
-  // `running` one.
+  // FAILURE on the first read — it used to arm only on `"running"`, but a
+  // failed read leaves `progress` at `null` forever, so nothing ever retried
+  // and the "Couldn't read this company's run history" message was exactly as
+  // stuck. `progress === null` (the read still in flight, or one that already
+  // failed) covers that too.
+  //
+  // `needs-rerun`, `did-not-finish`, `succeeded` and `none` are deliberately
+  // left out: the first three are terminal answers this run will not revise
+  // on its own, and `none` has nothing yet to watch.
   //
   // Depends on that one boolean, not `progress` itself: `progress` is a fresh
   // object every fetch, and every poll tick would otherwise tear the interval
   // down and rebuild it — `shouldPoll` only flips at the transitions that
-  // actually matter (armed → answered, or answered → running again).
-  const shouldPoll = progress === null || progress.kind === "running";
+  // actually matter.
+  const shouldPoll =
+    progress === null || progress.kind === "running" || progress.kind === "waiting-on-you";
   useEffect(() => {
     if (!shouldPoll) return;
-    let live = true;
     // CodeRabbit review, PR #2046: a tick fires the next read without waiting
-    // for the previous one, so two requests can be in flight together, and
-    // nothing otherwise stops an OLDER one that resolves LATER (still
-    // `running`) from overwriting a NEWER response that already moved the
-    // card past it. Mirrors `useActivationGate`'s own `generation` ref for
-    // the identical shape of race: only the response to the most recently
-    // ISSUED request is ever applied.
-    let latestRequest = 0;
-    const stopPolling = startVisiblePolling(() => {
-      const requestId = ++latestRequest;
-      void listWorkflowRuns(client, company, { limit: 5 }).then(
-        (page) => {
-          if (!live || requestId !== latestRequest) return;
-          setProgress(gateWorkflowProgress(page.runs));
-          setFailed(false);
-        },
-        () => {
-          if (!live || requestId !== latestRequest) return;
-          // Still no good answer — keep the failure message up (it may
-          // already be true; explicit for the case this is itself the retry
-          // that follows the FIRST read's own failure) and stay armed:
-          // `shouldPoll` is still true because `progress` is still `null`.
-          setFailed(true);
-        },
-      );
-    }, RUNNING_POLL_MS);
-    return () => {
-      live = false;
-      stopPolling();
-    };
-  }, [client, company, shouldPoll]);
+    // for the previous one, so two requests can be in flight together — the
+    // shared `latestRunsRequest` ref above (not a counter local to this
+    // effect) is what stops an OLDER one that resolves LATER from overwriting
+    // a NEWER response, from this effect or the mount effect alike.
+    return startVisiblePolling(fetchRuns, RUNNING_POLL_MS);
+  }, [shouldPoll, fetchRuns]);
 
   const label = (run: WorkflowRunOutcome | undefined) =>
     (run && names.get(run.workflowId)) ?? run?.workflowId ?? "your workflow";
@@ -243,6 +232,25 @@ function ProgressLine({
       // operator still has to run the workflow again. Promising "the run
       // carries on" for that case would be a claim the host never makes.
       if (progress.verdict === "blocked") {
+        // Codex review, PR #2046: a blocked node's `approvalIds` is absent
+        // entirely when every one of its gated calls failed to park
+        // (`parkFailed`/discarded) — the same "unparkable" shape
+        // `RunHistoryPanel` already special-cases — not merely present-but-
+        // stranded. `gateApprovalTargets` already reads `[]` for that; when
+        // it does, there is nothing to "decide" at all, so the sentence must
+        // not invite the founder to decide a card that was never queued.
+        if (gateApprovalTargets(progress.run).length === 0) {
+          return shell(
+            <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />,
+            <>
+              <span className="font-medium text-foreground">{name}</span> stopped on a step
+              that couldn&apos;t be queued for approval at all, so this step hasn&apos;t
+              ticked and there&apos;s nothing here to decide. Open Workflows to see why,
+              then run it again.
+            </>,
+            "gate-workflow-blocked-unparkable",
+          );
+        }
         return shell(
           <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
           <>

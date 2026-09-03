@@ -32,6 +32,13 @@ const runningRun = {
 
 const succeededRun = { ...runningRun, verdict: "ok" as const, running: false };
 
+const awaitingApprovalRun = {
+  ...runningRun,
+  running: false,
+  verdict: "awaiting-approval" as const,
+  pendingApprovals: ["ap-1"],
+};
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -211,6 +218,98 @@ describe("WorkflowStep re-polls a run that was running when it mounted", () => {
       container.querySelector('[data-testid="gate-workflow-succeeded"]'),
       "the retry's success must render normally",
     ).toBeTruthy();
+  });
+
+  it("re-polls a run that is waiting on an approval, not only a running one", async () => {
+    // Codex review, PR #2046: an approval can be decided (or the queue can
+    // strand it) from another tab entirely, so a card showing
+    // "waiting-on-you" needs the same self-healing poll a "running" card
+    // does, not just the narrower "running" case the first fix covered.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    const client = fakeClient(async () => {
+      calls += 1;
+      return { runs: [calls === 1 ? awaitingApprovalRun : succeededRun], hasMore: false };
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(WorkflowStep, {
+          client,
+          company: null,
+          onOpenWorkflows: () => {},
+          onOpenApprovals: () => {},
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(calls).toBe(1);
+    expect(container.querySelector('[data-testid="gate-workflow-waiting"]')).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(calls, "a waiting-on-you card must also be re-polled").toBeGreaterThan(1);
+    expect(
+      container.querySelector('[data-testid="gate-workflow-succeeded"]'),
+      "the card must pick up the approval having been decided elsewhere",
+    ).toBeTruthy();
+  });
+
+  it("keeps the newer terminal result when the initial read is slower than a poll tick", async () => {
+    // CodeRabbit + Codex review, PR #2046: the initial mount read and the
+    // poll ticks used to track staleness with SEPARATE counters. If the
+    // initial read is slow enough that a poll tick's response lands first
+    // with a terminal result, the initial read's own (now stale) response
+    // must not be allowed to overwrite it just because it was never checked
+    // against the poll's counter.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    let resolveInitial!: (v: { runs: unknown[]; hasMore: boolean }) => void;
+    const initial = new Promise<{ runs: unknown[]; hasMore: boolean }>((resolve) => {
+      resolveInitial = resolve;
+    });
+    const client = fakeClient(() => {
+      calls += 1;
+      if (calls === 1) return initial; // held pending — the slow initial read
+      return Promise.resolve({ runs: [succeededRun], hasMore: false });
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(WorkflowStep, {
+          client,
+          company: null,
+          onOpenWorkflows: () => {},
+          onOpenApprovals: () => {},
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(calls).toBe(1);
+
+    // The poll fires while the initial read is still pending (progress is
+    // still `null`, so `shouldPoll` is already true) and resolves with a
+    // terminal result.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(calls).toBe(2);
+    expect(container.querySelector('[data-testid="gate-workflow-succeeded"]')).toBeTruthy();
+
+    // Now the slow initial read finally lands, with a stale `running` answer.
+    await act(async () => {
+      resolveInitial({ runs: [runningRun], hasMore: false });
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="gate-workflow-succeeded"]'),
+      "the newer poll response must not be overwritten by the slower initial read",
+    ).toBeTruthy();
+    expect(container.querySelector('[data-testid="gate-workflow-running"]')).toBeNull();
   });
 
   it("does not keep polling once the run has settled", async () => {

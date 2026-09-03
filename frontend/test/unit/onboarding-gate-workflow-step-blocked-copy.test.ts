@@ -128,4 +128,27 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
     // Nothing decidable via Approvals for this card — the button must not render.
     expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
   });
+
+  it("does NOT invite deciding a blocked run whose gated calls never queued at all", async () => {
+    // Codex review on #2046: `blockedNodes[].approvalIds` is ABSENT (not just
+    // stranded) when every one of a node's gated calls failed to park — the
+    // "unparkable" shape `RunHistoryPanel` already special-cases. There is
+    // nothing to decide, so the copy must not say "decide the approval".
+    await render([
+      run({
+        verdict: "blocked",
+        blockedNodes: [{ nodeId: "escalate_to_human", tools: ["ask"] }],
+      }),
+    ]);
+    const text = container.querySelector(
+      '[data-testid="gate-workflow-blocked-unparkable"]',
+    )?.textContent;
+    expect(
+      text,
+      "an unparkable blocked run must render its own dedicated testid",
+    ).toBeTruthy();
+    expect(text).not.toContain("Decide the approval");
+    expect(text).toContain("run it again");
+    expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
+  });
 });
