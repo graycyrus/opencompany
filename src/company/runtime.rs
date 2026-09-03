@@ -1024,6 +1024,38 @@ impl CompanyRuntime {
         &self.ops.ledgers
     }
 
+    /// Every approval still awaiting a decision that was parked **for this
+    /// card** (defect B-109), oldest first.
+    ///
+    /// Read off the journal's own park stamp rather than off the console
+    /// projection, and that difference matters: `pending_approvals_resolved`
+    /// re-derives a park's card from its attempt row and rewrites the stamped
+    /// link to [`Unlinked`](crate::runtime::journal::TaskLink::Unlinked) when
+    /// the run store cannot name one
+    /// ([`approval_ownership::resolve_owners`](crate::runtime::approval_ownership::resolve_owners)).
+    /// That is a deliberate choice for a *display* — better to show no card
+    /// than the wrong one — but a guard that inherited it would let exactly the
+    /// cards whose link was dropped through, which is the shape of the console
+    /// half of this defect.
+    ///
+    /// [`TaskLink::Unlinked`] and `None` both answer "not this card": the first
+    /// is a park with no card behind it, the second a line written before the
+    /// link existed, and neither is evidence that *this* card is blocked.
+    pub fn undecided_approvals_for_task(&self, task_id: &str) -> Vec<ApprovalId> {
+        self.journal
+            .pending()
+            .into_iter()
+            .filter(|parked| {
+                parked
+                    .task
+                    .as_ref()
+                    .and_then(|link| link.task_id())
+                    .is_some_and(|id| id == task_id)
+            })
+            .map(|parked| parked.id)
+            .collect()
+    }
+
     /// Upserts a board task and edge-fires the board's two automatic entries:
     /// a **dispatch** when the write moves the card into `in_progress`, and a
     /// **planning pass** when it moves the card into `planning` (issue #337).
@@ -1062,7 +1094,45 @@ impl CompanyRuntime {
             .map(|t| t.column);
         let dispatch = task_enters_in_progress(prev_column.as_deref(), &task.column);
         let plan = task_enters_planning(prev_column.as_deref(), &task.column);
-
+        // Defect B-109: a card does not re-enter work while it is still waiting
+        // on a decision it already asked for.
+        //
+        // The console has said this for a while — `TaskCard`'s Resume is
+        // `disabled` while the card's approvals are undecided, with the reason
+        // in its `title` — but saying it was all it did. `PATCH /tasks/{id}`
+        // took `{"column":"working"}` from anyone and this edge fired
+        // `dispatch_task` with no idea a question was outstanding, so pressing
+        // Resume on a card parked on an unanswered question re-ran the turn from
+        // an unchanged note, the teammate reached the same gap and asked again,
+        // and the queue grew a **second** copy of the same card. One click, a
+        // billed turn, nothing produced, and the duplicate that then made the
+        // channel's disambiguation prompt unanswerable (defects B-111, B-113).
+        //
+        // The guard is here, at the write that carries the edge, for the reason
+        // #1865's clear and #337's pass are here: it is the one seam every REST
+        // mutation and every internal settle mints through, so a second caller
+        // — a drag, a curl, an ACP session, a stale tab — cannot acquire the
+        // bypass a disabled button never covered. It refuses the *write*, so
+        // the card does not silently land in In Progress with nothing running
+        // behind it, and the operator is told what to decide instead.
+        //
+        // Only the dispatch edge. Re-saving a blocked card, editing its title,
+        // moving it to In Review or Done, or parking it are all still writable:
+        // this is not a lock on the card, it is a refusal to start work twice.
+        if dispatch {
+            let undecided = self.undecided_approvals_for_task(&task.id);
+            if !undecided.is_empty() {
+                return Err(OpenCompanyError::Conflict(format!(
+                    "\"{}\" is still waiting on {} decision{} you have not made — \
+                     decide {} in Approvals and the card carries on from there. \
+                     Resuming now would re-run the work from the start and ask again.",
+                    task.title,
+                    undecided.len(),
+                    if undecided.len() == 1 { "" } else { "s" },
+                    if undecided.len() == 1 { "it" } else { "them" },
+                )));
+            }
+        }
         // Issue #1865: a card re-entering In Progress **or** Planning is a
         // fresh attempt, so any bounce chip left over from a *previous* failed
         // attempt is stale the moment this one starts — a card mid-retry must
@@ -2645,7 +2715,41 @@ impl CompanyRuntime {
             // Someone has already moved it on; a resume must not yank it back.
             return Ok(());
         }
-
+        // The card may have parked on more than one question. This decision has
+        // already left the pending set by the time the follow-up runs, so
+        // anything still there is something else the same card is waiting on —
+        // and re-entering now would reach the same gap and park again, which is
+        // precisely what the dispatch edge refuses (defect B-109). Answering
+        // *this* one is still worth recording, so the note is written and the
+        // move is not attempted; the last decision on the card is the one that
+        // restarts it.
+        let outstanding = self.undecided_approvals_for_task(task_id).len();
+        if outstanding > 0 {
+            if resolution.verdict == BlockerVerdict::Amend && !resolution.answer.trim().is_empty() {
+                card.note = Some(crate::runtime::advance::append_result(
+                    card.note.as_deref(),
+                    "operator",
+                    &resolution.answer,
+                ));
+                card.updated_at_millis = now_millis();
+                self.ops.tasks.upsert(&self.id, &card).await?;
+            }
+            return self
+                .post_blocker_resume_note(
+                    thread,
+                    &format!(
+                        "Thanks — that's recorded. This card is still waiting on {outstanding} \
+                         other decision{}, so it stays where it is until {} decided.",
+                        if outstanding == 1 { "" } else { "s" },
+                        if outstanding == 1 {
+                            "that is"
+                        } else {
+                            "those are"
+                        },
+                    ),
+                )
+                .await;
+        }
         if resolution.verdict == BlockerVerdict::Amend && !resolution.answer.trim().is_empty() {
             card.note = Some(crate::runtime::advance::append_result(
                 card.note.as_deref(),
@@ -10229,6 +10333,148 @@ mod tests {
                 .into_iter()
                 .find(|t| t.id == id)
                 .expect("card exists")
+        }
+
+        /// Defect B-109: a card parked on a question it has not been given an
+        /// answer to does not re-enter work because somebody moved it.
+        ///
+        /// The board's Resume button is `PATCH /tasks/{id}
+        /// {"column":"working"}`. It re-ran the turn from an unchanged note,
+        /// the teammate reached the same gap and asked again, and the queue
+        /// gained a **second** copy of the same question — the duplicate that
+        /// then made the channel's disambiguation prompt unanswerable.
+        #[tokio::test]
+        async fn a_card_waiting_on_a_question_refuses_to_re_enter_work() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            let parked = runtime
+                .park_blocker(&question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            assert_eq!(
+                runtime.undecided_approvals_for_task("t-1"),
+                vec![parked],
+                "the card really is the one the question was asked for",
+            );
+
+            let mut resumed = stored(&runtime, "t-1").await;
+            resumed.column = COLUMN_IN_PROGRESS.to_string();
+            let err = runtime
+                .upsert_task(&resumed)
+                .await
+                .expect_err("re-entering a card with an undecided question is refused");
+            assert!(
+                matches!(err, crate::error::OpenCompanyError::Conflict(_)),
+                "an operator can fix this, so it is a conflict rather than a fault: {err:?}",
+            );
+            let said = err.to_string();
+            assert!(
+                said.contains("waiting on 1 decision"),
+                "the refusal says what is outstanding: {said}",
+            );
+            assert!(said.contains("Approvals"), "and where to decide it: {said}",);
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_PAUSED,
+                "the write is refused whole — the card must not land in In Progress \
+                 with nothing running behind it",
+            );
+            assert_eq!(
+                runtime.pending_approvals().len(),
+                1,
+                "and no second copy of the question was filed",
+            );
+        }
+
+        /// The guard is a gate on **starting work twice**, not a lock on the
+        /// card: every other write a blocked card can take still lands, and an
+        /// unblocked card takes the very same move.
+        #[tokio::test]
+        async fn a_blocked_card_is_still_writable_everywhere_else() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            seed(&runtime, &card("t-2", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+
+            let mut retitled = stored(&runtime, "t-1").await;
+            retitled.title = "Draft the launch note (v2)".to_string();
+            runtime.upsert_task(&retitled).await.expect("an edit lands");
+
+            let mut filed = stored(&runtime, "t-1").await;
+            filed.column = COLUMN_TODO.to_string();
+            runtime
+                .upsert_task(&filed)
+                .await
+                .expect("moving a blocked card off the board is not a dispatch");
+
+            let mut unblocked = stored(&runtime, "t-2").await;
+            unblocked.column = COLUMN_IN_PROGRESS.to_string();
+            runtime
+                .upsert_task(&unblocked)
+                .await
+                .expect("a card nothing is waiting on takes the same move");
+            assert_eq!(stored(&runtime, "t-2").await.column, COLUMN_IN_PROGRESS);
+        }
+
+        /// A park with no card behind it — a chat question, a workflow
+        /// delivery — blocks no card. The guard reads the park's own stamp, so
+        /// an `Unlinked` one must not freeze an unrelated board.
+        #[tokio::test]
+        async fn an_unlinked_park_blocks_no_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            park_unlinked(&runtime).await;
+            assert!(runtime.undecided_approvals_for_task("t-1").is_empty());
+
+            let mut resumed = stored(&runtime, "t-1").await;
+            resumed.column = COLUMN_IN_PROGRESS.to_string();
+            runtime
+                .upsert_task(&resumed)
+                .await
+                .expect("a park that names no card stops none");
+        }
+
+        /// Parks a blocker recorded as belonging to **no** card, the way a
+        /// question raised mid-conversation is.
+        async fn park_unlinked(runtime: &Arc<CompanyRuntime>) {
+            use crate::ports::types::{Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let payload = question();
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            let id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("parks");
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation {
+                        thread: Some("dm:eng".to_string()),
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("journals");
         }
 
         /// The headline of the tier: an operator's "retry" moves the paused card
