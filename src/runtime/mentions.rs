@@ -1547,11 +1547,10 @@ members = ["engineer", "ceo"]
     }
 
     /// A caller that ran a picker has already disambiguated — its two rows are
-    /// the two colliding targets, and the click said which. Reporting a
-    /// collision there would tell the console it failed at the one thing it
-    /// A span the picker resolved is not reported: the operator was shown the
-    /// two colliding rows and clicked one, so telling them it reached nobody
-    /// would contradict what they just did.
+    /// the two colliding targets, and the click said which. A span the picker
+    /// resolved is not reported: the operator was shown the two colliding rows
+    /// and clicked one, so telling them it reached nobody would contradict what
+    /// they just did.
     #[test]
     fn a_span_the_picker_resolved_is_not_reported() {
         let record = record(

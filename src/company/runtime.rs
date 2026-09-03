@@ -6023,20 +6023,29 @@ impl CompanyRuntime {
     /// Never fatal: a message whose advisory line could not be appended is still
     /// a delivered message, so a failure is logged and swallowed on exactly the
     /// terms `resolve_mentions` already refuses to fail a send.
+    ///
+    /// Threaded the same way every real reply is: `parent` is the root the
+    /// caller resolved for the message this note is about, re-resolved here
+    /// through [`resolvable_parent`](Self::resolvable_parent) so a note about a
+    /// threaded reply lands in that thread rather than falling to the channel
+    /// timeline — the doc comment above promises "in the conversation itself",
+    /// and a thread is part of that conversation.
     pub async fn post_mention_ambiguity_note(
         &self,
         desk: &str,
+        parent: Option<EventSeq>,
         refused: &[crate::runtime::mentions::AmbiguousMention],
     ) {
         let Some(text) = crate::runtime::mentions::ambiguity_note(refused) else {
             return;
         };
+        let parent = self.resolvable_parent(parent, desk).await;
         if let Err(err) = self
             .events
             .append(
                 &self.id,
                 CompanyEvent::AgentReply {
-                    parent: None,
+                    parent,
                     chat_id: desk.to_string(),
                     agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
                     text,
@@ -10183,7 +10192,7 @@ mod tests {
             assert_eq!(resolved.ambiguous.len(), 1, "and reported once");
 
             runtime
-                .post_mention_ambiguity_note("main", &resolved.ambiguous)
+                .post_mention_ambiguity_note("main", None, &resolved.ambiguous)
                 .await;
 
             let posted = replies(&runtime).await;
@@ -10198,6 +10207,68 @@ mod tests {
             );
         }
 
+        /// The threaded case: an ambiguous `@name` sent as a reply inside a
+        /// thread must get its explanatory note posted into that same thread,
+        /// not top-level in the channel — otherwise the note contradicts its own
+        /// doc comment's promise to speak "in the conversation itself" the
+        /// moment the operator is looking at a thread rather than the main
+        /// timeline.
+        #[tokio::test]
+        async fn an_ambiguous_name_in_a_thread_is_reported_into_that_thread() {
+            let (runtime, _home) = runtime().await;
+
+            // Seed a root message to thread off of, the same way a real
+            // threaded reply would name an existing event as its parent.
+            let root = runtime
+                .events
+                .append(
+                    runtime.id(),
+                    CompanyEvent::OperatorMessage {
+                        text: "kicking off a thread".to_string(),
+                        by: None,
+                        chat: Some("main".to_string()),
+                        parent: None,
+                        deliverable: None,
+                        mentions: Vec::new(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .await
+                .expect("root event");
+
+            let resolved = runtime
+                .resolve_mentions_reporting("@writer can you draft the autumn brief?", None, None)
+                .await;
+            assert_eq!(resolved.ambiguous.len(), 1, "reported once");
+
+            runtime
+                .post_mention_ambiguity_note("main", Some(root), &resolved.ambiguous)
+                .await;
+
+            let threaded = runtime
+                .events
+                .read_from(runtime.id(), EventSeq::new(0), 500)
+                .await
+                .expect("events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    CompanyEvent::AgentReply {
+                        parent, chat_id, ..
+                    } => Some((parent, chat_id)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(threaded.len(), 1, "exactly one reply: {threaded:?}");
+            let (parent, chat) = &threaded[0];
+            assert_eq!(chat, "main");
+            assert_eq!(
+                *parent,
+                Some(root),
+                "the note lands in the thread the ambiguous ping was sent in, \
+                 not top-level in the channel"
+            );
+        }
+
         /// The negative half, and the one that keeps the notice worth reading: a
         /// message whose names all resolve says nothing at all.
         #[tokio::test]
@@ -10208,7 +10279,7 @@ mod tests {
                 .await;
             assert_eq!(resolved.mentions.len(), 1, "the ping resolves");
             runtime
-                .post_mention_ambiguity_note("main", &resolved.ambiguous)
+                .post_mention_ambiguity_note("main", None, &resolved.ambiguous)
                 .await;
             assert!(
                 replies(&runtime).await.is_empty(),

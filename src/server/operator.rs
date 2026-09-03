@@ -2762,7 +2762,7 @@ async fn accept_chat_turn(
     // the same not-fatal terms as the notifications above — a message whose
     // advisory could not be written is still a delivered message.
     runtime
-        .post_mention_ambiguity_note(desk, &resolved.ambiguous)
+        .post_mention_ambiguity_note(desk, parent, &resolved.ambiguous)
         .await;
 
     let turn_id = crate::ports::generate_id();
