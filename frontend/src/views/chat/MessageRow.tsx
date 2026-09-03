@@ -438,8 +438,13 @@ export function MessageRow({
  * request died, so a resend can post the same instruction twice. That is the
  * operator's trade to make, and it is the reason this is a button rather than a
  * background retry loop.
+ *
+ * Exported so `ThreadPanel`'s own `Line` can render the identical notice for a
+ * failed threaded reply (Codex review, PR #2052) instead of growing a second
+ * copy of this markup the way `senderOf` already warns against for sender
+ * resolution.
  */
-function FailedSendNotice({ reason, onRetry }: { reason: string; onRetry?: () => void }) {
+export function FailedSendNotice({ reason, onRetry }: { reason: string; onRetry?: () => void }) {
   return (
     <div
       role="status"

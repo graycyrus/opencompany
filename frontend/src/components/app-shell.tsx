@@ -59,6 +59,7 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
 import {
   hasOtherOpenTurns,
+  liveReplyAttribution,
   mergeOpenTurns,
   openTurnsFromRuns,
   PendingSyncPosts,
@@ -2236,7 +2237,10 @@ export function AppShell({
       // pill `fromHistory` already gives it on reload — never as a named
       // teammate's bubble with an avatar and reply/reaction controls, which is
       // what unconditionally passing `"company"` here produced (Codex review).
-      const from = event.agentId === "system" ? "system" : "company";
+      // See `liveReplyAttribution`'s own doc for why this is a named,
+      // separately-tested rule rather than an inline ternary (tinysweeper
+      // review).
+      const from = liveReplyAttribution(event.agentId);
       setThreads((ts) =>
         ts.map((t) => {
           if (t.id !== event.chatId) return t;

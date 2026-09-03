@@ -2693,6 +2693,7 @@ export function ChatView({
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
               openTurn={threadTurn}
               onTyping={() => onTyping?.(active.id, parent.id)}
+              onRetrySend={retrySend}
               // A thread is not a lesser transcript (issue #1734): an echoed
               // reply read here is the same false attribution as one read in
               // the channel, so the panel marks its rows from the same state.

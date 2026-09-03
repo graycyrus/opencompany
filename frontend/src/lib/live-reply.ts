@@ -19,6 +19,30 @@ export interface LiveReplyFrame {
 }
 
 /**
+ * Whose voice a live `agent_reply` frame renders as: the runtime's own
+ * centred system pill, or a named teammate's bubble (issue #101 / B-101
+ * review, PR #2052).
+ *
+ * `SYSTEM_AUTHOR` on the Rust side (`crate::ports::SYSTEM_AUTHOR`, the string
+ * `"system"`) is the one `agentId` that names the runtime itself rather than
+ * a roster agent — a mention-ambiguity notice is journaled under it precisely
+ * so a reader can tell "the runtime is reporting its own refusal" from "a
+ * teammate replied". `fromHistory` (`lib/chat.ts`) already makes this same
+ * distinction for a rehydrated row (`entry.author === "system"`); this is the
+ * **live**-path twin of that rule.
+ *
+ * Extracted for the same reason every rule in this module is (see the file
+ * doc above): inlined as a closure inside `renderAgentReply`, a regression to
+ * a hard-coded `"company"` shows up nowhere but a live screenshot taken
+ * during a detached send, between the SSE frame landing and the next history
+ * reload silently correcting it — and no test would ever see it (tinysweeper
+ * review). Named, it can be asserted directly.
+ */
+export function liveReplyAttribution(agentId: string): "system" | "company" {
+  return agentId === "system" ? "system" : "company";
+}
+
+/**
  * The threads with a **synchronous** chat POST in flight.
  *
  * ## The rule, and why it is not "a turn is running"
