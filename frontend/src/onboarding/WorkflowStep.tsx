@@ -9,11 +9,21 @@ import {
   type WorkflowSummary,
 } from "@/api/workflows";
 import { Button } from "@/components/ui/button";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import {
   gateApprovalTargets,
   gateWorkflowProgress,
   type GateWorkflowProgress,
 } from "@/onboarding/workflow-progress";
+
+/**
+ * How often the step re-reads run history while the run it is showing is
+ * still `running` (Codex review, PR #2046). Mirrors `useActivationGate`'s
+ * `POLL_MS` — the same cadence the rest of the gate already re-checks itself
+ * on, so a run finishing does not read as more or less responsive than the
+ * funnel step beside it.
+ */
+const RUNNING_POLL_MS = 5000;
 
 /**
  * Step 3 of the first-run gate, built for the card it is drawn in (bugs
@@ -88,6 +98,39 @@ export function WorkflowStep({
       live = false;
     };
   }, [client, company]);
+
+  // Codex review, PR #2046: the effect above reads run history exactly once
+  // per (client, company) mount. If the newest run is still `running` when
+  // that read lands and later settles to `blocked`/`failed`/whatever, nothing
+  // re-fetches — the activation poll cannot unmount this step for a run that
+  // has not (yet) succeeded, and neither `client` nor `company` change just
+  // because a run finished — so the card would say "is still running"
+  // indefinitely until the founder collapses and reopens the step or reloads.
+  //
+  // A second, narrower effect rather than folding this into the one above: it
+  // only arms once `progress.kind` is actually `"running"`, and its own
+  // cleanup disarms the poll the moment a fresh read moves it to anything
+  // else — so a settled run costs nothing beyond the one poll that noticed.
+  useEffect(() => {
+    if (progress?.kind !== "running") return;
+    let live = true;
+    const stopPolling = startVisiblePolling(() => {
+      void listWorkflowRuns(client, company, { limit: 5 }).then(
+        (page) => {
+          if (!live) return;
+          setProgress(gateWorkflowProgress(page.runs));
+        },
+        () => {
+          /* a transient poll failure just tries again next tick — the initial
+           * read's own `failed` state already covers a durable one */
+        },
+      );
+    }, RUNNING_POLL_MS);
+    return () => {
+      live = false;
+      stopPolling();
+    };
+  }, [client, company, progress?.kind]);
 
   const label = (run: WorkflowRunOutcome | undefined) =>
     (run && names.get(run.workflowId)) ?? run?.workflowId ?? "your workflow";
