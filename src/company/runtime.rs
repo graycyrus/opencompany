@@ -1062,6 +1062,7 @@ impl CompanyRuntime {
             .map(|t| t.column);
         let dispatch = task_enters_in_progress(prev_column.as_deref(), &task.column);
         let plan = task_enters_planning(prev_column.as_deref(), &task.column);
+
         // Issue #1865: a card re-entering In Progress **or** Planning is a
         // fresh attempt, so any bounce chip left over from a *previous* failed
         // attempt is stale the moment this one starts — a card mid-retry must
@@ -2644,6 +2645,7 @@ impl CompanyRuntime {
             // Someone has already moved it on; a resume must not yank it back.
             return Ok(());
         }
+
         if resolution.verdict == BlockerVerdict::Amend && !resolution.answer.trim().is_empty() {
             card.note = Some(crate::runtime::advance::append_result(
                 card.note.as_deref(),
@@ -5557,7 +5559,6 @@ impl CompanyRuntime {
             None => vec![id.clone()],
         }
     }
-
     /// The parked blockers pending in one DM, folded into root-cause groups
     /// (issue #1862). Oldest-first, the order `pending` already returns.
     #[cfg(feature = "openhuman")]
@@ -5648,6 +5649,24 @@ impl CompanyRuntime {
         }
     }
 
+    /// Whether `desk` is a two-party line with one teammate rather than a room
+    /// (defect B-113), read off the live roster.
+    ///
+    /// A store that cannot be read answers `false`, which is the safe
+    /// direction here and the same one
+    /// [`resolve_blocker_sender`](Self::resolve_blocker_sender) takes: an
+    /// unreadable roster makes a reply run as an ordinary turn, which asks
+    /// somebody, rather than silently settling a decision it could not place.
+    #[cfg(feature = "openhuman")]
+    async fn desk_is_a_direct_message(&self, desk: &str) -> bool {
+        match self.store().load(&self.id).await {
+            Ok(Some(record)) => {
+                crate::runtime::assignee::direct_message_teammate(&record, desk).is_some()
+            }
+            _ => false,
+        }
+    }
+
     /// Decides what an operator's reply in `desk` does to the blockers pending
     /// there (issue #1862) — the read-only half, so the caller journals the
     /// reply before anything settles.
@@ -5659,6 +5678,36 @@ impl CompanyRuntime {
     /// verdict — or a DM with no pending blocker — is
     /// [`NotBlocker`](BlockerReplyPlan::NotBlocker), and the caller runs it as an
     /// ordinary turn.
+    ///
+    /// # The unparented tier is a **direct message** tier (defect B-113)
+    ///
+    /// Reading free text as a verdict is a claim about the conversation, not
+    /// about the words: [`classify_blocker_reply`]'s catch-all says so in its
+    /// own doc — "a substantive line in a **blocked teammate's DM** is taken as
+    /// answering the question". The filter never implemented that. It was
+    /// [`pending_blocker_groups`](Self::pending_blocker_groups), which matches
+    /// on the desk alone, so `#general` — where all twelve teammates live and
+    /// where the channel blurb tells a founder to work — qualified exactly as a
+    /// two-party line does.
+    ///
+    /// With two things parked there the whole channel stopped working. Five
+    /// consecutive messages, two of them about a different subject to a
+    /// different teammate ("what do we tell people they save if they buy the
+    /// set of four?"), were each classified as an amend, found ambiguous, and
+    /// answered with a byte-identical "which one do you mean?". None of them
+    /// started a turn, so nobody was asked anything and the prompt could not be
+    /// satisfied (defect B-111). The identical message sent as a DM went
+    /// through, which is the shape of the bug stated as evidence: the desk was
+    /// the only difference.
+    ///
+    /// So the tier now asks
+    /// [`direct_message_teammate`](crate::runtime::assignee::direct_message_teammate)
+    /// what kind of conversation this is, and a room answers `None`. A blocker
+    /// raised in a channel is not stranded by that — it keeps both surfaces
+    /// that name their target explicitly: the reply-to-card tier above (its
+    /// card renders in the transcript) and the answer box on the approval
+    /// itself. What it loses is the tier that had to *guess*, in the one place
+    /// where guessing was never safe.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn plan_blocker_reply(
         &self,
@@ -5675,7 +5724,15 @@ impl CompanyRuntime {
                 .map(|id| self.blocker_group_of(&id)),
             None => None,
         };
-        let groups = self.pending_blocker_groups(desk);
+        // Only a one-to-one line lets an unnamed reply mean the thing pending
+        // in it. In a room the reply has to name what it answers, and the two
+        // tiers that do — a reply to the card, and the card's own answer box —
+        // are unaffected by this being empty.
+        let groups = if self.desk_is_a_direct_message(desk).await {
+            self.pending_blocker_groups(desk)
+        } else {
+            Vec::new()
+        };
         if explicit.is_none() && groups.is_empty() {
             return Ok(BlockerReplyPlan::NotBlocker);
         }
@@ -9877,6 +9934,177 @@ mod tests {
                 "the same verdict from another conversation settles nothing"
             );
         }
+
+        /// Parks a blocker into an arbitrary conversation.
+        ///
+        /// [`park_blocker`](CompanyRuntime::park_blocker) always stamps the
+        /// attributed teammate's DM, which is why every test above works in
+        /// one. A question an agent raises mid-turn with `escalate_to_human`
+        /// records the conversation it was raised *in* instead
+        /// (`CycleHostImpl::park` stamps the cycle's thread), which is how two
+        /// of them came to pend in `#general` and wedge it. This mints that
+        /// shape by the same two writes `park_blocker` makes.
+        async fn park_into(
+            runtime: &Arc<CompanyRuntime>,
+            thread: &str,
+            task_id: &str,
+        ) -> crate::ports::types::ApprovalId {
+            use crate::ports::types::{Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let payload = blocker(task_id, None);
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            let id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("parks");
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::from_task_id(Some(task_id)),
+                    ApprovalConversation {
+                        thread: Some(thread.to_string()),
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("journals");
+            id
+        }
+
+        /// Defect B-113: a room is not a blocked teammate's DM.
+        ///
+        /// Two blockers pending in `#general` made the whole channel unusable.
+        /// Every message sent there — including a newsletter question to a
+        /// different teammate about a different subject — was classified as an
+        /// amend, found ambiguous between the two, and answered with a
+        /// byte-identical "which one do you mean?" that started no turn. Five in
+        /// a row, and the prompt could not be satisfied (defect B-111).
+        ///
+        /// The unparented tier reads unnamed words as a verdict on whatever is
+        /// pending there, which is a claim only a two-party line supports.
+        #[tokio::test]
+        async fn a_room_does_not_read_an_unnamed_message_as_a_verdict() {
+            let (runtime, _home) = runtime().await;
+            let general = crate::server::ops::language::DEFAULT_DESK;
+            park_into(&runtime, general, "t-1").await;
+            park_into(&runtime, general, "t-2").await;
+            assert_eq!(
+                runtime.pending_blocker_groups(general).len(),
+                2,
+                "both parks really are pending in this channel",
+            );
+
+            // The message from the report: a different subject, to a different
+            // teammate, in the channel two other things happen to be parked in.
+            let unrelated = runtime
+                .plan_blocker_reply(
+                    "main",
+                    None,
+                    "@Brand Designer quick one for the newsletter - what do we tell people they \
+                     save if they buy the set of four? and where's that number from",
+                )
+                .await
+                .expect("plan");
+            assert!(
+                matches!(unrelated, BlockerReplyPlan::NotBlocker),
+                "a message in a room runs as an ordinary turn: {unrelated:?}",
+            );
+
+            // And this is not merely "the text was unrelated": a line that
+            // *would* read as a verdict is still not one here.
+            let verdict = runtime
+                .plan_blocker_reply("main", None, "go ahead and retry")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(verdict, BlockerReplyPlan::NotBlocker),
+                "not even a bare verdict settles an unnamed card in a room: {verdict:?}",
+            );
+        }
+
+        /// The same words in the teammate's own line still settle, so the tier
+        /// was narrowed rather than removed.
+        #[tokio::test]
+        async fn the_same_words_still_settle_in_the_teammates_own_line() {
+            let (runtime, _home) = runtime().await;
+            park_into(&runtime, "dm:eng", "t-1").await;
+            let plan = runtime
+                .plan_blocker_reply("dm:eng", None, "go ahead and retry")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(plan, BlockerReplyPlan::Resolve { .. }),
+                "a DM is exactly the conversation this tier is for: {plan:?}",
+            );
+        }
+
+        /// A card raised in a room is still answerable — by naming it. The
+        /// reply-to-the-card tier settles it wherever it was raised, which is
+        /// what keeps the narrowing above from being a dead end for a
+        /// channel-raised question.
+        #[tokio::test]
+        async fn a_room_still_settles_a_reply_that_names_its_card() {
+            let (runtime, _home) = runtime().await;
+            let general = crate::server::ops::language::DEFAULT_DESK;
+            let id = park_into(&runtime, general, "t-1").await;
+            runtime
+                .events
+                .append(
+                    runtime.id(),
+                    crate::ports::types::CompanyEvent::ApprovalParked {
+                        approval_id: id.clone(),
+                        effect_kind: format!(
+                            "{}.infrastructure",
+                            crate::ports::blockers::BLOCKER_EFFECT_PREFIX
+                        ),
+                        thread: Some(general.to_string()),
+                    },
+                )
+                .await
+                .expect("event");
+            let parent = runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read")
+                .into_iter()
+                .find(|stored| {
+                    matches!(
+                        stored.event,
+                        crate::ports::types::CompanyEvent::ApprovalParked { .. }
+                    )
+                })
+                .expect("the park is on the log")
+                .seq;
+
+            let plan = runtime
+                .plan_blocker_reply("main", Some(parent), "go ahead and retry")
+                .await
+                .expect("plan");
+            match plan {
+                BlockerReplyPlan::Resolve { ids, .. } => assert_eq!(ids, vec![id]),
+                other => panic!("a reply to the card settles it in a room too: {other:?}"),
+            }
+        }
     }
 
     /// Resuming a parked blocker (issue #1863): an operator's answer re-enters
@@ -10303,6 +10531,21 @@ mod tests {
         /// The other side of the same line: a blocker that *was* raised in the
         /// main line is still answerable there. Without this the fix above
         /// could be "never match anything" and pass.
+        ///
+        /// **How it is answered changed with defect B-113.** This used to
+        /// assert that any substantive sentence typed into the channel settled
+        /// it, and that is what made `#general` unusable: with things parked
+        /// there, five consecutive messages — including a newsletter question
+        /// to a different teammate — were each read as a verdict on one of
+        /// them. It is also the very fault the test above this one exists for,
+        /// one step over: an ordinary message about something else settling an
+        /// approval nobody decided. A room cannot tell an answer from a passing
+        /// remark, and it must not guess.
+        ///
+        /// So the channel keeps the tier that *names* what it answers — a reply
+        /// to the blocker's own card, which the transcript renders with its own
+        /// answer box — and loses only the tier that had to infer. Both halves
+        /// are asserted here, so this still fails a fix that matched nothing.
         #[tokio::test]
         async fn a_blocker_raised_in_the_main_line_is_still_answerable_there() {
             use crate::runtime::journal::TaskLink;
@@ -10337,14 +10580,58 @@ mod tests {
                 .expect("parks");
 
             // Addressed as `main`, the console's own spelling of the same desk.
-            let plan = runtime
+            // Unnamed words in a room settle nothing, however answer-shaped.
+            let guessed = runtime
                 .plan_blocker_reply("main", None, "the 14th, not the 7th")
                 .await
                 .expect("plans");
             assert!(
-                matches!(plan, super::super::BlockerReplyPlan::Resolve { .. }),
-                "a blocker raised in the main line is answered there: {plan:?}"
+                matches!(guessed, super::super::BlockerReplyPlan::NotBlocker),
+                "a room must not read an unnamed sentence as a verdict (B-113): {guessed:?}"
             );
+
+            // Naming it does settle it, which is what keeps the channel a place
+            // a parked question can be answered.
+            runtime
+                .events
+                .append(
+                    runtime.id(),
+                    crate::ports::types::CompanyEvent::ApprovalParked {
+                        approval_id: id.clone(),
+                        effect_kind: effect.kind.clone(),
+                        thread: Some("General".to_string()),
+                    },
+                )
+                .await
+                .expect("event");
+            let parent = runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read")
+                .into_iter()
+                .find(|stored| {
+                    matches!(
+                        stored.event,
+                        crate::ports::types::CompanyEvent::ApprovalParked { .. }
+                    )
+                })
+                .expect("the park is on the log")
+                .seq;
+            let named = runtime
+                .plan_blocker_reply("main", Some(parent), "the 14th, not the 7th")
+                .await
+                .expect("plans");
+            match named {
+                super::super::BlockerReplyPlan::Resolve { ids, .. } => {
+                    assert_eq!(ids, vec![id], "and it answers the card it was written on")
+                }
+                other => panic!("a blocker raised in the main line is answered there: {other:?}"),
+            }
         }
 
         /// A card parked on a question the agent asked receives the answer.

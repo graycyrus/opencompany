@@ -163,6 +163,46 @@ pub fn dm_key(chat: &str) -> Option<&str> {
     (!key.is_empty()).then_some(key)
 }
 
+/// The one teammate a chat id addresses **privately**, or `None` when the id
+/// names a room rather than a person (defect B-113).
+///
+/// The distinction a shared channel makes and a direct message does not: in
+/// `dm:tomas` there is exactly one teammate, one subject at a time, and every
+/// line the operator types is plausibly to him. In `#general` there are as
+/// many teammates as the company has, and a line typed there may be addressed
+/// to any of them about anything. Code that reads free text as an answer to
+/// something pending in the conversation is sound in the first place and
+/// unsound in the second, and until this existed nothing could tell them
+/// apart — `pending_blocker_groups` filtered by desk alone, so a newsletter
+/// question to one teammate was read as a verdict on another's parked card.
+///
+/// The rungs mirror [`chat_responder`](crate::runtime::delegation_tools::chat_responder)'s
+/// own precedence rather than inventing a second reading of the same key, and
+/// both rooms arms answer `None`:
+///
+/// 1. **Every spelling of General is a room.** `None`, `""`, `main` and
+///    `General` are one company-wide channel
+///    ([`is_general_chat`](crate::server::chat_history::is_general_chat)), and
+///    a company may also *declare* a desk on one of those spellings — which
+///    the next rung catches.
+/// 2. **A declared desk is a room**, whoever leads it. A desk's lead answers
+///    for it, so the id resolves to a teammate through
+///    [`desk_default_responder`]; that makes it a routing answer, not a
+///    two-party line, and reading it as one is the whole defect.
+/// 3. Otherwise the key — `dm:`-unwrapped only if the raw form names nobody,
+///    on [`dm_key`]'s own terms — is a teammate id or display name.
+pub fn direct_message_teammate(record: &CompanyRecord, chat: &str) -> Option<String> {
+    if crate::server::chat_history::is_general_chat(Some(chat)) {
+        return None;
+    }
+    if desk_default_responder(record, chat).is_some() {
+        return None;
+    }
+    record
+        .resolve_roster_agent_id(chat)
+        .or_else(|| record.resolve_roster_agent_id(dm_key(chat)?))
+}
+
 /// Resolves `assignee` against `record`'s full roster.
 ///
 /// Resolution order, and the order matters: **desks first**, mirroring
@@ -584,5 +624,112 @@ members = ["ceo"]
             AssigneeResolution::Agent("engineer".into()).links_working_agent(),
             "a teammate assignment is already canonical and stays linked"
         );
+    }
+
+    /// Defect B-113: which conversations are two-party lines and which are
+    /// rooms.
+    ///
+    /// The predicate exists because reading an unaddressed line as an answer to
+    /// whatever is pending is sound in a DM and unsound in a channel, and until
+    /// it existed the blocker reply path could not tell them apart.
+    mod direct_message_teammate {
+        use super::super::direct_message_teammate as dm;
+        use super::record;
+        use crate::ports::types::CompanyRecord;
+
+        /// A roster whose every collision is real, so that each rung of the
+        /// predicate is the *only* thing standing between an id and a wrong
+        /// answer:
+        ///
+        /// * `main` is a **teammate id that is also a spelling of General**.
+        ///   Without the General rung the company's own channel resolves to
+        ///   that person, which is the exact channel B-113 wedged.
+        /// * `eng` is a **desk id that is also a teammate id** — the collision
+        ///   `chat_responder`'s own doc says the manifest does not forbid.
+        ///   Without the desk rung a whole desk reads as a private line.
+        ///
+        /// A fixture without those collisions passes whichever rung is deleted,
+        /// which is how a test proves nothing.
+        fn colliding() -> CompanyRecord {
+            record(
+                r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "main"
+role = "Main Character"
+
+[[agent]]
+id = "eng"
+role = "Engineer"
+
+[[group_chat]]
+id = "eng"
+name = "Engineering desk"
+members = ["eng"]
+"#,
+            )
+        }
+
+        /// A teammate's DM is the case the whole tier is written for, in both
+        /// the prefixed spelling the console mints and the bare one the chat
+        /// route also answers.
+        #[test]
+        fn a_teammates_line_is_a_direct_message() {
+            let record = colliding();
+            assert_eq!(dm(&record, "dm:ceo").as_deref(), Some("ceo"));
+            assert_eq!(dm(&record, "ceo").as_deref(), Some("ceo"));
+            assert_eq!(
+                dm(&record, "dm:CEO").as_deref(),
+                Some("ceo"),
+                "a typed capital addresses the same person"
+            );
+        }
+
+        /// Every spelling of the company-wide channel is a room — even when a
+        /// teammate is *named* one of those spellings.
+        #[test]
+        fn general_is_a_room_even_when_a_teammate_is_named_after_it() {
+            let record = colliding();
+            assert!(
+                record.is_roster_agent("main"),
+                "the fixture's collision is real: `main` is a teammate id",
+            );
+            for spelling in ["main", "General", "general", ""] {
+                assert_eq!(
+                    dm(&record, spelling),
+                    None,
+                    "{spelling:?} is the company's channel, not a private line"
+                );
+            }
+        }
+
+        /// A declared desk is a room even when its id is also a teammate id and
+        /// a bare roster lookup would happily answer with that person.
+        #[test]
+        fn a_declared_desk_is_a_room_even_when_a_teammate_shares_its_id() {
+            let record = colliding();
+            assert_eq!(
+                record.resolve_roster_agent_id("eng").as_deref(),
+                Some("eng"),
+                "the fixture's collision is real: the roster answers `eng` too",
+            );
+            assert_eq!(dm(&record, "eng"), None, "but it is still a desk");
+        }
+
+        /// Something the roster does not know is not a private line either — an
+        /// id that names nobody must not be treated as somebody.
+        #[test]
+        fn an_unknown_key_is_not_a_direct_message() {
+            let record = colliding();
+            assert_eq!(dm(&record, "nobody"), None);
+            assert_eq!(dm(&record, "dm:nobody"), None);
+            assert_eq!(dm(&record, "dm:"), None);
+        }
     }
 }
