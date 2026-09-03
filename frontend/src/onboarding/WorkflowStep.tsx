@@ -114,10 +114,19 @@ export function WorkflowStep({
   useEffect(() => {
     if (progress?.kind !== "running") return;
     let live = true;
+    // CodeRabbit review, PR #2046: a tick fires the next read without waiting
+    // for the previous one, so two requests can be in flight together, and
+    // nothing otherwise stops an OLDER one that resolves LATER (still
+    // `running`) from overwriting a NEWER response that already moved the
+    // card past it. Mirrors `useActivationGate`'s own `generation` ref for
+    // the identical shape of race: only the response to the most recently
+    // ISSUED request is ever applied.
+    let latestRequest = 0;
     const stopPolling = startVisiblePolling(() => {
+      const requestId = ++latestRequest;
       void listWorkflowRuns(client, company, { limit: 5 }).then(
         (page) => {
-          if (!live) return;
+          if (!live || requestId !== latestRequest) return;
           setProgress(gateWorkflowProgress(page.runs));
         },
         () => {
