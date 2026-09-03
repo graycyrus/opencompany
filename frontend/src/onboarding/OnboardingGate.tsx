@@ -1,17 +1,17 @@
-import { lazy, Suspense, useState } from "react";
+import { type MouseEvent, useState } from "react";
 import { Check, Loader2, Minus, PartyPopper, Plug, UserCog, Workflow } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { type ActivationStatus, confirmCompanyName } from "@/api/activation";
 import { ApiError } from "@/api/types";
-import { RouteLoading } from "@/components/route-loading";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { IntegrationStep } from "@/onboarding/IntegrationStep";
 import type { GateStepId } from "@/onboarding/state";
+import { WorkflowStep } from "@/onboarding/WorkflowStep";
 
 // Same reason `app-shell.tsx` lazy-loads it: React Flow is heavy, and it
 // should not tax a screen an operator only sees once.
@@ -43,10 +43,6 @@ export function clampToCompanyNameLimit(value: string): string {
   return points.length <= COMPANY_NAME_MAX_CHARS ? value : points.slice(0, COMPANY_NAME_MAX_CHARS).join("");
 }
 
-const WorkflowsView = lazy(() =>
-  import("@/views/WorkflowsView").then((m) => ({ default: m.WorkflowsView })),
-);
-
 interface GateStep {
   id: GateStepId;
   label: string;
@@ -65,6 +61,8 @@ interface GateStep {
  * reason `connection-pages.ts` is a leaf module in the first place.
  */
 const APPS_ROUTE = "#/connections/apps";
+const WORKFLOWS_ROUTE = "#/workflows";
+const APPROVALS_ROUTE = "#/approvals";
 
 /**
  * The blocking first-run gate (issue #1844): a full-screen replacement for the
@@ -155,7 +153,37 @@ export function OnboardingGate({
   const [active, setActive] = useState<GateStep["id"] | null>(firstOpen);
 
   return (
-    <div className="flex min-h-screen flex-col bg-background">
+    <div
+      className="flex min-h-screen flex-col bg-background"
+      // The structural half of B-006, and the reason it is a class of bug
+      // rather than one broken link.
+      //
+      // The gate renders *instead of* the router outlet, so an `<a href="#/…">`
+      // anywhere inside it changes `location.hash`, re-renders this same
+      // checklist, and reads to the founder as a link that does nothing — no
+      // error, no toast, nothing. That is what "decide in Approvals" did.
+      // Rewriting the one anchor that happened to be reachable would leave the
+      // next one to be discovered the same way, by a founder.
+      //
+      // So the gate refuses to swallow *any* in-app hash link, wherever it came
+      // from: a capture-phase click here intercepts the anchor before it can
+      // navigate and sends it out through `onLeave`, which stands the gate down
+      // first. External links, new-tab clicks and anything already handled are
+      // left alone.
+      onClickCapture={(event: MouseEvent<HTMLDivElement>) => {
+        // A modified click is the operator asking for a new tab or window,
+        // where the gate is not in the way and the browser's own behaviour is
+        // correct. Never hijack those.
+        if (event.defaultPrevented || event.button !== 0) return;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const anchor = (event.target as Element | null)?.closest?.("a");
+        const href = anchor?.getAttribute("href");
+        if (!anchor || !href?.startsWith("#")) return;
+        if (anchor.target && anchor.target !== "_self") return;
+        event.preventDefault();
+        onLeave(href);
+      }}
+    >
       <header className="border-b px-6 py-5 sm:px-10">
         <div className="mx-auto max-w-4xl">
           <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
@@ -231,9 +259,12 @@ export function OnboardingGate({
                   />
                 )}
                 {step.id === "workflow" && (
-                  <Suspense fallback={<RouteLoading title="Workflows" label="Loading canvas…" />}>
-                    <WorkflowsView client={client} company={company} />
-                  </Suspense>
+                  <WorkflowStep
+                    client={client}
+                    company={company}
+                    onOpenWorkflows={() => onLeave(WORKFLOWS_ROUTE)}
+                    onOpenApprovals={() => onLeave(APPROVALS_ROUTE)}
+                  />
                 )}
               </div>
             )}
