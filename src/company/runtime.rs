@@ -2367,42 +2367,52 @@ impl CompanyRuntime {
         Ok(())
     }
 
-    /// Pushes a parked approval's deadline out to a fresh full TTL window,
-    /// giving the operator more time before it default-denies (issue #1805).
+    /// Gives a parked approval another full TTL window, so the operator has
+    /// more time before it default-denies (issue #1805).
     ///
-    /// Returns the approval's **new** deadline (epoch-millis: the extension
-    /// instant plus the gate's current TTL), the same number the card's
-    /// countdown will now project. Errors with
+    /// Returns the approval's **new** deadline (epoch-millis), the same number
+    /// the card's countdown will now project. Errors with
     /// [`OpenCompanyError::NotFound`] when no such approval is parked — an
     /// unknown id, or one already resolved or expired — so a caller answers 404
     /// rather than reporting an extension of nothing.
     ///
-    /// # Why a full window rather than "+N hours"
+    /// # It adds a window; it does not re-anchor to now (defect B-069)
     ///
-    /// Re-anchoring the TTL to now reuses the single deadline the sweeper and
-    /// the console already agree on (`parked_at + ttl`), so there is no second
-    /// stored offset for a projection to compute differently. Extend is the
-    /// mirror of the shortening path that made this issue matter: an approval
-    /// that vanishes on a deadline is only acceptable if the operator can also
-    /// keep it alive.
+    /// Re-anchoring moved the deadline by the time that had passed since the
+    /// park and nothing else — a no-op on a fresh approval — while the route
+    /// answered `200 {"extended":true}` and the countdown read the same "23h"
+    /// before and after. The whole argument is in
+    /// [`ApprovalGate::extend`](crate::policy::gate::ApprovalGate::extend),
+    /// including why an additive extension needs no second knob.
+    ///
+    /// Extend is the mirror of the shortening path that made this issue matter:
+    /// an approval that vanishes on a deadline is only acceptable if the
+    /// operator can also keep it alive — and only actually acceptable if
+    /// pressing the button keeps it alive for a length of time the operator can
+    /// see.
     ///
     /// The move is made durable in two places kept in step exactly as the park
     /// instant already is: the live gate the sweeper reads, and the journal the
     /// projection reads and the next boot rehydrates the gate from — so an
-    /// extension survives a redeploy instead of reverting.
+    /// extension survives a redeploy instead of reverting. Both are given the
+    /// gate's own new anchor rather than each deriving one, which is what stops
+    /// the sweeper and the card disagreeing about the same deadline.
     pub async fn extend_approval(&self, id: &ApprovalId, by: Actor) -> Result<u64> {
         self.ensure_accepting()?;
         let now = now_millis();
-        // The gate is the existence check: `false` means nothing is parked under
+        // The gate is the existence check: `None` means nothing is parked under
         // this id, so nothing is extended and the caller owes a 404.
-        if !self.approval_gate.extend(id, now) {
+        let Some(anchor) = self.approval_gate.extend(id, now) else {
             return Err(OpenCompanyError::NotFound(format!(
                 "no parked approval {id} to extend"
             )));
-        }
+        };
         // Durable half: the journal both projects the new deadline (its in-memory
-        // queue moved here) and replays it on the next boot.
-        self.journal.record_extended(id, now, by.clone()).await?;
+        // queue moved here) and replays it on the next boot. Given the gate's
+        // anchor, not `now` — the record's own doc says it "carries the new
+        // anchor rather than an offset", and computing a second one here is
+        // precisely how the sweeper and the card would come to disagree.
+        self.journal.record_extended(id, anchor, by.clone()).await?;
         // Audit half: who kept this alive, and when.
         self.events
             .append(
@@ -2413,7 +2423,7 @@ impl CompanyRuntime {
                 },
             )
             .await?;
-        Ok(now.saturating_add(self.approval_gate.ttl_millis()))
+        Ok(anchor.saturating_add(self.approval_gate.ttl_millis()))
     }
 
     /// How many **other** decisions the turn behind `id` is still blocked on
