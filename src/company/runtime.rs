@@ -2581,10 +2581,15 @@ impl CompanyRuntime {
             }
             // An agent question with no step behind it — there is nothing to
             // re-dispatch, so carrying the answer back into its DM is the whole
-            // of the resume.
+            // of the resume. Defect B-070: and the note has to *say* that. It
+            // used to claim "picking that back up now" here, over a card it
+            // had just consumed and a question nothing was going to re-ask.
             None => {
-                self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
-                    .await
+                self.post_blocker_resume_note(
+                    thread,
+                    &blocker_resume_note(resolution, BlockerResumeOutcome::RecordedOnly),
+                )
+                .await
             }
         }
     }
@@ -2653,8 +2658,13 @@ impl CompanyRuntime {
         card.column = IN_PROGRESS.to_string();
         card.updated_at_millis = now_millis();
         self.upsert_task(&card).await?;
-        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
-            .await
+        // The one path that may promise a resume: `upsert_task` is the write
+        // that carries the dispatch edge, so the card really does start again.
+        self.post_blocker_resume_note(
+            thread,
+            &blocker_resume_note(resolution, BlockerResumeOutcome::Reentered),
+        )
+        .await
     }
 
     /// Settles a blocked card the operator cancelled, moving it back to To-do
@@ -2730,8 +2740,15 @@ impl CompanyRuntime {
                 .post_blocker_resume_note(thread, "Okay — I've cancelled that workflow step.")
                 .await;
         }
-        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
-            .await
+        // Defect B-070: this hands the answer across and re-executes nothing —
+        // node-level restart is #1864, as the doc above says — so the note must
+        // not promise the run continues. Same claim `workflows::resume_claim`
+        // makes on the run panel, in the same words.
+        self.post_blocker_resume_note(
+            thread,
+            &blocker_resume_note(resolution, BlockerResumeOutcome::RunNotRestarted),
+        )
+        .await
     }
 
     /// Posts a resume acknowledgement into the DM the blocker was asked in
@@ -6367,18 +6384,86 @@ const BLOCKER_CANCELLED: &str =
 /// stopped step (issue #1863), phrased per verdict so the operator sees what
 /// their answer did.
 #[cfg(feature = "openhuman")]
-fn blocker_resume_note(resolution: &crate::ports::blockers::BlockerResolution) -> String {
-    use crate::ports::blockers::BlockerVerdict;
-    match resolution.verdict {
-        BlockerVerdict::Retry => "Got it — picking that back up now.".to_string(),
-        BlockerVerdict::Amend => {
-            "Thanks — using that and carrying on from where it stopped.".to_string()
+/// What deciding a blocker actually did to the work it stopped (defect B-070).
+///
+/// # Why the note has to be told
+///
+/// A resolved blocker's DM note used to be composed from the verdict alone, so
+/// it said "picking that back up now" for **every** resuming verdict. Only one
+/// of its three callers re-enters anything:
+///
+/// * [`resume_task_card`](CompanyRuntime::resume_task_card) really does — it
+///   moves the paused card back to In Progress through `upsert_task`, the write
+///   that carries the dispatch edge.
+/// * [`resume_node_blocker`](CompanyRuntime::resume_node_blocker) does not, and
+///   says so in its own doc: re-executing the node is the workflow engine's
+///   resume seam and node-level restart is issue #1864, still open. It hands
+///   the answer across and starts nothing.
+/// * The no-step arm of [`drive_blocker_resume`](CompanyRuntime::drive_blocker_resume)
+///   does not either. A question asked mid-conversation parks `Unlinked` with
+///   no continuation, and the design says a note is the whole answer.
+///
+/// So two of the three told the operator their work was proceeding while
+/// nothing was, and a founder who answered a genuine either/or watched twenty-
+/// five minutes pass with the card consumed and no way to re-decide it.
+///
+/// This is the same fault B-013 and B-072 were about — a park with no
+/// continuation described as one that continues by itself — a third time, in
+/// the DM prose rather than in a run panel. The `RunNotRestarted` wording is
+/// deliberately `workflows::resume_claim`'s, so the sentence in the chat and
+/// the sentence on the run panel about one card cannot disagree.
+///
+/// Passing the fact in, rather than deriving it, is what stops a fourth caller
+/// inheriting the claim: there is no default.
+#[cfg(feature = "openhuman")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BlockerResumeOutcome {
+    /// The stopped work was re-dispatched and really does carry on by itself.
+    Reentered,
+    /// A question asked mid-conversation: recorded, with nothing behind it to
+    /// restart.
+    RecordedOnly,
+    /// A workflow node's question: recorded, and the run did not restart.
+    RunNotRestarted,
+}
+
+#[cfg(feature = "openhuman")]
+impl BlockerResumeOutcome {
+    /// The clause naming what happened, joined to the verdict's acknowledgement.
+    fn consequence(self) -> &'static str {
+        match self {
+            Self::Reentered => " Picking that back up now.",
+            Self::RecordedOnly => {
+                " It's recorded against the card. That was a question I asked in this \
+                 conversation, so there's no step waiting behind it and nothing starts again on \
+                 its own — tell me here when you'd like it acted on."
+            }
+            Self::RunNotRestarted => {
+                " It's recorded against the card, but it does not restart this run — re-run the \
+                 workflow once the answer is in hand."
+            }
         }
-        BlockerVerdict::Skip => "Okay — skipping that and moving on.".to_string(),
+    }
+}
+
+#[cfg(feature = "openhuman")]
+fn blocker_resume_note(
+    resolution: &crate::ports::blockers::BlockerResolution,
+    outcome: BlockerResumeOutcome,
+) -> String {
+    use crate::ports::blockers::BlockerVerdict;
+    // What the operator's decision was, which is true whatever came of it.
+    let acknowledgement = match resolution.verdict {
+        BlockerVerdict::Retry => "Got it.",
+        BlockerVerdict::Amend => "Thanks — I've got your answer.",
+        BlockerVerdict::Skip => "Okay — skipping that.",
         // Cancel never reaches here: it does not resume, and its callers post
         // their own settle notice.
-        BlockerVerdict::Cancel => "Okay — cancelled.".to_string(),
-    }
+        BlockerVerdict::Cancel => return "Okay — cancelled.".to_string(),
+    };
+    // And what actually happened, from the caller that did it — never assumed.
+    // This is the half that was a standing claim (defect B-070).
+    format!("{acknowledgement}{}", outcome.consequence())
 }
 
 /// The line asked back when a DM holds several distinct blocked things and the
@@ -6461,6 +6546,124 @@ impl std::fmt::Debug for CompanyRuntime {
 
 #[cfg(test)]
 mod tests {
+    /// Defect B-070: the DM note told an operator their work was proceeding
+    /// when nothing was proceeding.
+    ///
+    /// A founder answered a genuine either/or an agent had asked
+    /// (`escalate_to_human`, parked `Unlinked` with no step). Approving consumed
+    /// the card, posted "Got it — picking that back up now.", and twenty-five
+    /// minutes later nothing had been routed, created or said. The card was gone
+    /// from the queue, so the question could not be re-decided.
+    ///
+    /// Nothing was going to happen, and the host knew it: the arm that posted
+    /// that sentence is the arm reached precisely because there is no step to
+    /// re-enter. The note was composed from the verdict alone, so it made the
+    /// same promise for all three callers — two of which restart nothing.
+    ///
+    /// This is B-013 and B-072's fault a third time (a park with no continuation
+    /// described as one that continues by itself), which is why the workflow
+    /// wording below is asserted to be `workflows::resume_claim`'s own.
+    #[cfg(feature = "openhuman")]
+    mod blocker_resume_note {
+        use super::super::{BlockerResumeOutcome, blocker_resume_note};
+        use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
+
+        fn resolution(verdict: BlockerVerdict) -> BlockerResolution {
+            BlockerResolution {
+                verdict,
+                answer: String::new(),
+                step: None,
+            }
+        }
+
+        /// The promise, as the fragment a reader would pick out of the sentence.
+        const RESUMES: &str = "Picking that back up now";
+
+        /// The whole defect: only the caller that re-dispatches may say so.
+        #[test]
+        fn only_a_re_entered_card_is_promised_a_resume() {
+            for verdict in [
+                BlockerVerdict::Retry,
+                BlockerVerdict::Amend,
+                BlockerVerdict::Skip,
+            ] {
+                let r = resolution(verdict);
+                assert!(
+                    blocker_resume_note(&r, BlockerResumeOutcome::Reentered).contains(RESUMES),
+                    "a re-dispatched card really does carry on: {verdict:?}",
+                );
+                for silent in [
+                    BlockerResumeOutcome::RecordedOnly,
+                    BlockerResumeOutcome::RunNotRestarted,
+                ] {
+                    let note = blocker_resume_note(&r, silent);
+                    assert!(
+                        !note.contains(RESUMES),
+                        "{silent:?} restarts nothing and must not promise it: {note}",
+                    );
+                }
+            }
+        }
+
+        /// B-070's own sentence, asserted gone from the path that produced it.
+        #[test]
+        fn a_chat_question_is_not_told_it_is_being_picked_back_up() {
+            let note = blocker_resume_note(
+                &resolution(BlockerVerdict::Retry),
+                BlockerResumeOutcome::RecordedOnly,
+            );
+            assert!(
+                !note.contains("picking that back up"),
+                "the pre-B-070 claim is still shipped: {note}",
+            );
+            assert!(note.contains("recorded against the card"), "{note}");
+            assert!(note.contains("nothing starts again on its own"), "{note}");
+        }
+
+        /// An answered question says the answer landed, so an operator who typed
+        /// one (B-046's control) is not left wondering whether it was read.
+        #[test]
+        fn an_answer_is_acknowledged_as_received() {
+            let note = blocker_resume_note(
+                &resolution(BlockerVerdict::Amend),
+                BlockerResumeOutcome::RecordedOnly,
+            );
+            assert!(note.contains("I've got your answer"), "{note}");
+        }
+
+        /// The chat note and the run panel are one host talking about one card,
+        /// so they use one sentence — the same parity B-072 established between
+        /// the host's two run composers, across one more surface.
+        #[test]
+        fn a_workflow_node_says_what_the_run_panel_says() {
+            let note = blocker_resume_note(
+                &resolution(BlockerVerdict::Amend),
+                BlockerResumeOutcome::RunNotRestarted,
+            );
+            let panel =
+                crate::workflows::resume_claim::resume_claim(1, 1).expect("a blocker's claim");
+            let shared =
+                "does not restart this run — re-run the workflow once the answer is in hand";
+            assert!(note.contains(shared), "the chat note drifted: {note}");
+            assert!(panel.contains(shared), "the run panel drifted: {panel}");
+        }
+
+        /// A cancel is settled by its own callers and keeps its own words.
+        #[test]
+        fn a_cancel_keeps_its_own_settle_notice() {
+            for outcome in [
+                BlockerResumeOutcome::Reentered,
+                BlockerResumeOutcome::RecordedOnly,
+                BlockerResumeOutcome::RunNotRestarted,
+            ] {
+                assert_eq!(
+                    blocker_resume_note(&resolution(BlockerVerdict::Cancel), outcome),
+                    "Okay — cancelled.",
+                );
+            }
+        }
+    }
+
     /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
     /// every append once armed — a full or read-only data volume, which is the
     /// failure mode `park_blocker`'s rollback exists for.

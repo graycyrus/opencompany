@@ -47,7 +47,12 @@
 ///
 /// Returned without a leading space: a caller joins it to its own prose, and
 /// the two callers punctuate differently.
-pub(super) fn resume_claim(waiting: usize, blockers: usize) -> Option<String> {
+///
+/// `pub(crate)` rather than `pub(super)` because the claim outgrew this module
+/// with defect B-070: the chat note a resolved workflow blocker posts is the
+/// same statement about the same card, so `company::runtime` asserts its own
+/// wording against this one rather than keeping a fourth copy of it.
+pub(crate) fn resume_claim(waiting: usize, blockers: usize) -> Option<String> {
     if waiting == 0 {
         // Nothing was parked, so there is no card to decide and no promise to
         // make about deciding one. The `unparkable` case lands here too, and

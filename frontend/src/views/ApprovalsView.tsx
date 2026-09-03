@@ -20,6 +20,7 @@ import {
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
+  isAnswerOnlyBlocker,
   useAskerNames,
   useApprovalThreadLinks,
 } from "@/components/approval-card";
@@ -30,6 +31,7 @@ import { useApprovalDeadline } from "@/hooks/use-approval-deadline";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { useStableList } from "@/hooks/use-stable-list";
 import {
+  answerRecordedLine,
   approvedByRuntimeLine,
   approvedLine,
   batchPositions,
@@ -348,9 +350,14 @@ export function ApprovalsView({
           ? `Declined: ${approvalSummary(a)}`
           : scope.kind === "tool"
             ? `Approved — ${toolAction(a.kind).toLowerCase()} won't ask again until this permission expires. Take it back under Standing permissions.`
-            : a.agent
-              ? approvedLine(stillAwaiting, approvalSummary(a))
-              : approvedByRuntimeLine(stillAwaiting, approvalSummary(a));
+            : // Defect B-070: a question with nothing behind it is recorded,
+              // not carried out — and it is checked before the two lines that
+              // would otherwise promise a resume.
+              isAnswerOnlyBlocker(a)
+              ? answerRecordedLine(approvalSummary(a))
+              : a.agent
+                ? approvedLine(stillAwaiting, approvalSummary(a))
+                : approvedByRuntimeLine(stillAwaiting, approvalSummary(a));
       onResolved(line);
       toast.success(line);
       // The agent's reply arrives as a journaled `AgentReply` on its own thread,
