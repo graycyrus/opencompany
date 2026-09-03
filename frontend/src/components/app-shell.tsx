@@ -465,9 +465,14 @@ export function decideApprovalToastLine(
   approval: Pick<ApprovalSummary, "kind" | "task" | "workflow_run_id">,
   verdict: Verdict,
   stillAwaiting: StillAwaiting,
+  /** The operator's reply, if any (B-046) — see `answerRecordedLine`'s own
+   * doc for why a non-blank one changes what this toast can honestly say. */
+  answer?: string,
 ): string {
   if (verdict !== "approve") return "Declined — recorded.";
-  return isAnswerOnlyBlocker(approval) ? answerRecordedLine() : approvedLine(stillAwaiting);
+  return isAnswerOnlyBlocker(approval)
+    ? answerRecordedLine(Boolean(answer?.trim()))
+    : approvedLine(stillAwaiting);
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
@@ -3122,7 +3127,7 @@ export function AppShell({
         return;
       }
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
-      toast.success(decideApprovalToastLine(approval, verdict, receipt.stillAwaiting));
+      toast.success(decideApprovalToastLine(approval, verdict, receipt.stillAwaiting, answer));
       // A decline ends the thread's story, and silence would read as a stall.
       // An approve needs no line: the continuation lands as a real reply, which
       // is the whole point of deciding here.

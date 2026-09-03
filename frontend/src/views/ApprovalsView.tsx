@@ -354,7 +354,7 @@ export function ApprovalsView({
               // not carried out — and it is checked before the two lines that
               // would otherwise promise a resume.
               isAnswerOnlyBlocker(a)
-              ? answerRecordedLine(approvalSummary(a))
+              ? answerRecordedLine(Boolean(answer?.trim()), approvalSummary(a))
               : a.agent
                 ? approvedLine(stillAwaiting, approvalSummary(a))
                 : approvedByRuntimeLine(stillAwaiting, approvalSummary(a));
@@ -456,6 +456,18 @@ export function ApprovalsView({
   // terminal and lighter.
   const [bulkInFlight, setBulkInFlight] = useState(false);
 
+  /**
+   * The latest text typed into each row's blocker-answer box, mirrored here
+   * from `ApprovalCard.onAnswerChange` on every keystroke.
+   *
+   * A ref, not state: nothing on this page ever redraws from it, it is only
+   * read once a bulk decision actually fires below. Without this map,
+   * `decideAll` had no way to reach an answer that lives entirely inside a
+   * card's own `useState` — see `ApprovalCard`'s `onAnswerChange` doc for the
+   * re-ask-and-re-bill bug that gap left open.
+   */
+  const bulkAnswersRef = useRef<Map<string, string>>(new Map());
+
   async function decideAll(verdict: Verdict) {
     if (bulkInFlight || rows.length === 0) return;
     const n = rows.length;
@@ -468,7 +480,11 @@ export function ApprovalsView({
     try {
       for (const a of [...rows]) {
         if (inFlight.has(a.id)) continue;
-        await decide(a, verdict, { kind: "once" });
+        // Only on approve: a decline's words are a reason, not an answer, and
+        // the single-row path (`ApprovalCard`'s own Approve button) makes the
+        // same choice.
+        const answer = verdict === "approve" ? bulkAnswersRef.current.get(a.id) : undefined;
+        await decide(a, verdict, { kind: "once" }, answer);
       }
     } finally {
       setBulkInFlight(false);
@@ -620,6 +636,7 @@ export function ApprovalsView({
                     }
                     extending={extending.has(a.id)}
                     onExtend={() => void extendDeadline(a)}
+                    onAnswerChange={(value) => bulkAnswersRef.current.set(a.id, value)}
                   />
                 ))}
               </div>
@@ -917,6 +934,7 @@ export function ApprovalCard({
   onDecide,
   extending = false,
   onExtend,
+  onAnswerChange,
 }: {
   approval: ApprovalSummary;
   now: number;
@@ -947,6 +965,20 @@ export function ApprovalCard({
   /** Push this approval's deadline out to a fresh window (#1805). Absent in
    * read-only render contexts (some tests), where the button is inert. */
   onExtend?: () => void;
+  /**
+   * Mirrors this card's own answer box up to whoever rendered the card, on
+   * every keystroke. Optional and additive — the card stays the source of
+   * truth for its own state either way.
+   *
+   * `decideAll` below is the reason this exists: the answer typed here lives
+   * only in this component's own `useState`, and a page-level bulk action has
+   * no card to read it off. Without this mirror, "Approve all" sent every
+   * blocker in the batch as a wordless retry regardless of what was typed —
+   * the host re-ran the stopped step unchanged and could re-ask and re-bill
+   * for a question the operator had just answered, silently, because nothing
+   * on screen said the box's contents were about to be dropped.
+   */
+  onAnswerChange?: (value: string) => void;
 }) {
   // Per-card, like the in-flight verdict and for the same reason: two cards can
   // be open at once and each carries its own decision. Defaults to `once`, so a
@@ -1032,7 +1064,10 @@ export function ApprovalCard({
         <BlockerAnswerControl
           approval={a}
           value={answer}
-          onChange={setAnswer}
+          onChange={(value) => {
+            setAnswer(value);
+            onAnswerChange?.(value);
+          }}
           disabled={deciding !== null}
         />
 

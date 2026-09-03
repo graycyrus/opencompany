@@ -315,16 +315,34 @@ export function BlockerAnswerControl({
           teammate on it; a workflow node's question has no card at all, but
           the node it stopped is re-dispatched from the run's own trigger
           input (issues #1863, #2005); a question asked mid-conversation has
-          neither, and promising a resume there is the same claim B-013 and
-          B-072 were filed about. `isAnswerOnlyBlocker` is the one place that
-          tells the last apart from the middle — see its own doc. */}
+          neither. `isAnswerOnlyBlocker` is the one place that tells the last
+          apart from the middle — see its own doc.
+          Defect B-124 gave the conversational case a real resume: `Approve`
+          with a non-blank box now runs `deliverable_answer` on the host,
+          which carries the words straight into the parked thread as an
+          `OperatorMessage` rather than just banking them — the same route a
+          typed reply already takes. This paragraph used to say "nothing
+          restarts on its own" unconditionally, which was true right up until
+          B-124 landed in the same pull request and made it false for every
+          non-blank answer, the one case this box exists for. It now mirrors
+          `deliverable_answer`'s own gate (a trimmed, non-empty `value`) so the
+          two cannot say opposite things about one press again. */}
       {!compact &&
         (isAnswerOnlyBlocker(a) ? (
           <p className="text-xs text-muted-foreground">
-            Approve records your answer against this card. It was asked in the
-            conversation rather than from a task, so nothing restarts on its
-            own — tell the teammate in chat when you want it acted on. Decline
-            doesn't send it.
+            {value.trim() ? (
+              <>
+                Approve carries your answer into that conversation and the
+                teammate replies to it there — same as typing it yourself.
+              </>
+            ) : (
+              <>
+                Approve with nothing typed just records that you saw it;
+                nothing restarts on its own — tell the teammate in chat when
+                you want it acted on.
+              </>
+            )}{" "}
+            Decline doesn&apos;t send it.
           </p>
         ) : isBlockerKind(a.kind) && a.task?.link === "unlinked" ? (
           <p className="text-xs text-muted-foreground">

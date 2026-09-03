@@ -355,6 +355,37 @@ describe("the Approvals page card", () => {
     expect(decisions).toEqual([{ id: "b2", verdict: "deny", answer: undefined }]);
   });
 
+  /**
+   * A typed answer lives only in this card's own `useState` — the single-row
+   * Approve button above reads it fine, but a page-level bulk action
+   * ("Approve all" in `ApprovalsView.decideAll`) has no card to read it off.
+   * Before `onAnswerChange`, a batch containing an answered blocker sent that
+   * row as a wordless retry regardless of what was typed: the host re-ran the
+   * stopped step unchanged and could re-ask and re-bill for a question the
+   * operator had just answered, with nothing on screen saying the box's
+   * contents were about to be dropped. This is the mirror `decideAll` reads
+   * from — see its own doc in `ApprovalsView.tsx`.
+   */
+  it("mirrors every keystroke to onAnswerChange, for a bulk decision with no card to ask", async () => {
+    const seen: string[] = [];
+    await act(async () => {
+      root.render(
+        createElement(ApprovalCard, {
+          approval: blocker("b3"),
+          now: T0 + 60_000,
+          askerNames: new Map([["ceo", "Founder"]]),
+          deciding: null,
+          batchIndex: 1,
+          batchTotal: 1,
+          onDecide: () => {},
+          onAnswerChange: (value: string) => seen.push(value),
+        }),
+      );
+    });
+    await type(box()!, "Route it to ops.");
+    expect(seen).toContain("Route it to ops.");
+  });
+
   it("puts the box above the decide footer, not below it", async () => {
     // #1406's rule, applied to the newest thing Approve carries: a card is read
     // top to bottom and commits at the bottom, so a control that changes what
@@ -436,6 +467,20 @@ describe("the Approvals page card", () => {
       expect(text).not.toContain("the teammate picks the card up with it");
     });
 
+    // Defect B-124: once the host actually delivers a non-blank answer
+    // (`deliver_blocker_answer`, `src/company/runtime.rs`), the unconditional
+    // "nothing restarts on its own" claim above is wrong for the case this
+    // box exists for. The footnote now tracks the box's own live value rather
+    // than a static claim, so typing into it changes what the card says
+    // before Approve is ever clicked.
+    it("says the answer will be carried once something is typed (B-124)", async () => {
+      await renderCard(unlinkedQuestion("b1"));
+      await type(box()!, "Route it to operations.");
+      const text = container.textContent ?? "";
+      expect(text).toContain("carries your answer into that conversation");
+      expect(text).not.toContain("nothing restarts on its own");
+    });
+
     it("still promises the resume where a card really is picked up", async () => {
       // The other half of the property: this is not "delete the sentence". A
       // question raised from a card is re-dispatched, and saying so is correct.
@@ -468,11 +513,23 @@ describe("the Approvals page card", () => {
  */
 describe("the approve confirmation for an answer-only question (B-070)", () => {
   it("says what happened, not that the work is starting", () => {
-    expect(answerRecordedLine("Do something that needs your sign-off")).toBe(
+    expect(answerRecordedLine(false, "Do something that needs your sign-off")).toBe(
       "Answer recorded — this doesn't restart anything on its own: Do something that needs your sign-off",
     );
     // The literal sentence from the founder's screen.
-    expect(answerRecordedLine()).not.toContain("carrying it out now");
+    expect(answerRecordedLine(false)).not.toContain("carrying it out now");
+  });
+
+  // Defect B-124: a non-blank answer is no longer just banked — the host
+  // carries it into the conversation, so the same unconditional "doesn't
+  // restart anything" claim would now be false for the one case this box
+  // exists for. `carried` is the caller's job to compute (a trimmed,
+  // non-empty answer on an approve), not this function's.
+  it("says the answer was carried once the host actually delivers it (B-124)", () => {
+    const line = answerRecordedLine(true, "route it to operations");
+    expect(line).not.toContain("doesn't restart anything on its own");
+    expect(line).toContain("Answer sent");
+    expect(line).toContain("route it to operations");
   });
 
   it("is chosen for exactly the cards that restart nothing", () => {
