@@ -85,7 +85,17 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     // The three callbacks that still clear the receipt keep the #1935 guard:
     // they take the generation their own `onSendStart` returned and hand it to
     // `clearReceipt`, so a stale cross-company clear is a no-op.
-    expect(appShell).toMatch(/const onSendEnd = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
+    //
+    // `onSendEnd` also gained a third, unrelated parameter (issue #101 review,
+    // PR #2052) — the settled response's own reply text(s), which `ended`
+    // needs to tell a held system frame the response duplicates from one it
+    // never will. The regex tolerates it (`(?:, responseTexts\?: readonly
+    // string\[\])?`) rather than pinning its exact name: this test's whole
+    // job is the generation guard, and a future rename of that third param
+    // should not have to touch this file.
+    expect(appShell).toMatch(
+      /const onSendEnd = useCallback\(\s*\n\s*\(threadId: string, gen\?: number(?:, responseTexts\?: readonly string\[\])?\) =>/,
+    );
     expect(appShell).toMatch(/const onSendStale = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
     expect(appShell).toMatch(/const onSendFailed = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
   });

@@ -2486,8 +2486,15 @@ export function AppShell({
     return gen;
   }, []);
   const onSendEnd = useCallback(
-    (threadId: string, gen?: number) => {
-      pendingPostThreadsRef.current.ended(threadId);
+    (threadId: string, gen?: number, responseTexts?: readonly string[]) => {
+      // `ended` hands back any held system-attributed frame the settled
+      // response did NOT already carry (issue #101 review, PR #2052) — B-101's
+      // mention-ambiguity note, never returned in the response body by design.
+      // Rendered here rather than discarded: see `ended`'s own doc for why the
+      // response's own text, only available at this call site, is what makes
+      // this safe without double-rendering the frames the response DOES carry.
+      const released = pendingPostThreadsRef.current.ended(threadId, responseTexts);
+      released.forEach((frame) => renderAgentReply(frame));
       if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
       setLiveStepsByThread((prev) => {
         if (!prev[threadId]?.length) return prev;
@@ -2495,7 +2502,7 @@ export function AppShell({
       });
       clearReceipt(threadId, gen);
     },
-    [clearReceipt],
+    [clearReceipt, renderAgentReply],
   );
   /**
    * A chat POST that resolved for a company the operator has since left

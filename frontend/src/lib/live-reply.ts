@@ -18,10 +18,19 @@ export interface LiveReplyFrame {
   chatId: string;
   /**
    * The frame's `agentId`, when its type carries one (`AgentReplyEvent`
-   * always does). Read only by {@link PendingSyncPosts.capture} to exempt a
-   * system-attributed frame from suppression — see that method's doc for why.
+   * always does). Read only by {@link PendingSyncPosts.ended}, to tell a held
+   * system-attributed frame the settled response duplicates from one it
+   * never will — see that method's doc for why the distinction only matters
+   * for this one attribution.
    */
   agentId?: string;
+  /**
+   * The frame's own reply text, when its type carries one (`AgentReplyEvent`
+   * always does). Read only by {@link PendingSyncPosts.ended}, compared
+   * against the settled response's own reply text(s) for the same reason
+   * `agentId` is.
+   */
+  text?: string;
 }
 
 /**
@@ -185,19 +194,43 @@ export class PendingSyncPosts<F extends LiveReplyFrame = LiveReplyFrame> {
   }
 
   /**
-   * The synchronous POST resolved with a body; its reply is already rendered.
+   * The synchronous POST resolved with a body; `responseTexts` is every reply
+   * line that body itself carried.
    *
-   * Whatever {@link capture} held for this thread was, by the same reasoning,
-   * a live echo of that same reply — the awaited response is authoritative, so
-   * the held frames are discarded rather than replayed.
+   * A held frame attributed to the operator's own turn (any `agentId` other
+   * than `SYSTEM_AUTHOR`) is discarded unconditionally, as it always was: it
+   * is, by the same reasoning as the class doc, a live echo of that same
+   * reply, and the awaited response is authoritative for it.
+   *
+   * **A held *system*-attributed frame needs `responseTexts` to answer the
+   * same question, because the blanket assumption is false for it** (Codex
+   * review, PR #2052). Some system-authored lines ARE folded into
+   * `channel_responses` the same way any reply is — `system_notice`'s
+   * approval-overflow and `"Acknowledged."` fallback among them — and for
+   * those the assumption above still holds. Others never are: B-101's
+   * mention-ambiguity note is deliberately journaled outside that pipeline
+   * (`post_mention_ambiguity_note`'s own doc: "Journaled, not returned in the
+   * POST response"), specifically so it reaches an API poster who renders no
+   * chip at all. Discarding every held system frame here would silently
+   * swallow that note on a synchronous send; rendering every one instead
+   * would double-render whichever ones the response DOES carry, next to the
+   * identical `"company"` bubble `ChatView` appends from `responseTexts`
+   * itself. So a held system frame is discarded only when its text is
+   * present in `responseTexts` — the response already carries it — and
+   * released, for the caller to render, when it is not — the response never
+   * will.
    *
    * Scoped to a POST that *resolved*. A POST that threw resolved nothing and
    * belongs in {@link failed}; sending it here discards a reply the console is
    * never going to be handed again.
    */
-  ended(threadId: string): void {
+  ended(threadId: string, responseTexts: readonly string[] = []): F[] {
     this.threads.delete(threadId);
+    const held = this.held.get(threadId) ?? [];
     this.held.delete(threadId);
+    return held.filter(
+      (frame) => frame.agentId === "system" && !responseTexts.includes(frame.text ?? ""),
+    );
   }
 
   /**
@@ -237,23 +270,17 @@ export class PendingSyncPosts<F extends LiveReplyFrame = LiveReplyFrame> {
    * has been unresolved. See {@link detached} for why that distinction is the
    * whole fix.
    *
-   * **A system-attributed frame is never held, regardless of the thread's
-   * state** (Codex review, PR #2052). Suppression exists because the
-   * operator's own synchronous reply arrives twice — once in the awaited
-   * response, once over SSE — and {@link ended} discards whatever was held on
-   * the assumption it duplicates that response. A frame attributed to
-   * `SYSTEM_AUTHOR` (`liveReplyAttribution(frame.agentId) === "system"`, B-101's
-   * mention-ambiguity notice) is never part of that response body — see
-   * `post_mention_ambiguity_note`'s own doc comment: "Journaled, not returned
-   * in the POST response" — so `ended`'s assumption does not hold for it.
-   * Holding it anyway let a legitimate operator turn resolve out from under
-   * it and silently swallow the notice until the next history reload, for
-   * every synchronous (non-detached) send. Rendering it immediately instead
-   * is always correct: `renderAgentReply`'s own recent-tail content dedupe
-   * still guards a genuine duplicate of the same system frame.
+   * Holds a system-attributed frame exactly like any other while a POST is in
+   * flight — earlier code exempted it here instead (Codex review, PR #2052),
+   * which fixed the case that motivated it (the ambiguity note lost to
+   * `ended`'s blanket discard) but broke a different one: a `system_notice`
+   * fallback the response body DOES carry then rendered twice, once from this
+   * bypass and once from `ChatView`'s own append of `responseTexts`. See
+   * {@link ended}'s doc for why the fix belongs on release, where the
+   * response's own text is available to reconcile against, not on capture,
+   * where it never was.
    */
   capture(frame: F): boolean {
-    if (liveReplyAttribution(frame.agentId ?? "") === "system") return false;
     if (!this.suppressesLiveReply(frame.chatId)) return false;
     const queue = this.held.get(frame.chatId);
     if (queue) queue.push(frame);

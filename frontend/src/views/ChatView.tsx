@@ -190,7 +190,18 @@ interface Props {
   resolveTypingNames?: (chatId: string, parentId?: string) => string[];
   /** Called as a composer is typed in; the caller throttles. */
   onTyping?: (chatId: string, parentId?: string) => void;
-  onSendEnd?: (threadId: string, gen?: number) => void;
+  /**
+   * `responseTexts` is every reply line this settled POST's own body carried
+   * (issue #101 review, PR #2052) — what `PendingSyncPosts.ended` needs to
+   * tell a held **system**-attributed live frame (never the operator's own
+   * reply, which is always in the response) apart from one the response never
+   * carried: a `system_notice` fallback (approval overflow, "Acknowledged.")
+   * is folded into this same response body, but B-101's mention-ambiguity
+   * note deliberately never is. Without it, either every held system frame
+   * had to be discarded (silently losing the ambiguity note) or none did
+   * (double-rendering the ones the response does carry).
+   */
+  onSendEnd?: (threadId: string, gen?: number, responseTexts?: readonly string[]) => void;
   /**
    * The host accepted the turn and answered `202` instead of the reply
    * (issue #983). Distinct from `onSendEnd`, which says the turn is *over*:
@@ -1786,6 +1797,11 @@ export function ChatView({
     // working row down mid-turn (detached) or throw away the reply it was
     // holding (failed). See `PendingSyncPosts` for the table.
     let outcome: "resolved" | "detached" | "failed" | "stale" = "resolved";
+    // Every reply line a settled response actually carries, read by
+    // `onSendEnd` (issue #101 review) to tell a held system frame the
+    // response duplicates from one it never will. Declared here, not inside
+    // the `try` block that fills it in, so `finally` below can still see it.
+    let responseTexts: string[] = [];
     try {
       const answer = await client.chat(
         text,
@@ -1849,6 +1865,11 @@ export function ChatView({
         return true;
       }
       const reply = answer;
+      // What `onSendEnd` hands `PendingSyncPosts.ended` below, unconditionally
+      // — even the `(no reply)` / review-feedback branches count as "this
+      // response carried nothing", which is exactly what an empty array
+      // already says correctly.
+      responseTexts = reply.responses.map((r) => r.text);
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             makeMessage("company", r.text, {
@@ -1968,7 +1989,7 @@ export function ChatView({
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
       if (stateKey) {
-        if (outcome === "resolved") onSendEnd?.(stateKey, gen);
+        if (outcome === "resolved") onSendEnd?.(stateKey, gen, responseTexts);
         else if (outcome === "failed") onSendFailed?.(stateKey, gen);
       }
       setSending(false);
