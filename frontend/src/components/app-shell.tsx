@@ -620,6 +620,28 @@ export function AppShell({
   // Resolved by the desks/roster effect below, which already works the pairing
   // out to hydrate each channel and used to throw it away — leaving the shell
   // unable to say which channel an incoming event belongs to (issue #367).
+  /**
+   * The company's roster as the shell last saw it, as a `rosterIdentity`
+   * fingerprint (defect B-071).
+   *
+   * **The console's one "the roster moved" signal.** The desks/roster effect
+   * below already polls `GET …/team` every five seconds and already computes
+   * this fingerprint, because B-030 needed it to decide whether to re-derive
+   * the chat poll targets. It kept the answer to itself, and every OTHER
+   * structure derived from the roster went on being a mount snapshot: this
+   * shell's `companyPeople` label map, and — the one a founder actually hit —
+   * `ChatView`'s teammate list and its `@`-mention directory. A teammate hired
+   * in a second tab was therefore readable and unaddressable at the same time:
+   * their reply rendered live, and typing `@Rafi` matched nothing, fell
+   * through to the channel's catch-all agent, and came back as "Rafi's
+   * answer: …" from somebody else.
+   *
+   * Published as state so those reads can simply depend on it. A fingerprint
+   * rather than a counter for the reason `rosterIdentity` exists: it changes
+   * when the roster changes and at no other time, so an effect keyed on it
+   * re-runs exactly as often as it must.
+   */
+  const [rosterEpoch, setRosterEpoch] = useState("");
   const [chatChannelByThread, setChatChannelByThread] = useState<Record<string, string>>({});
   // This company's first desk channel — the same channel `ChatView` lands on
   // when the hash names none, and so where a line with nowhere else to go is
@@ -1332,6 +1354,24 @@ export function AppShell({
         let rosterKey = "";
 
         const applyRoster = (members: TeamMemberDto[]) => {
+          // Defect B-071: publish the identity, not just consume it.
+          //
+          // B-030's fix made THIS effect re-derive, and stopped there — so a
+          // teammate hired in another tab became readable (their reply
+          // rendered live) and stayed unaddressable: the `@`-mention picker
+          // never listed them, and `@Rafi` fell through to the channel's
+          // catch-all, which answered "Rafi's answer: …" as though it were
+          // them. The picker's directory, this shell's own people map, and
+          // `ChatView`'s roster are three more structures derived from the
+          // roster once and never again, and nothing told them the roster had
+          // moved.
+          //
+          // This is that signal. It is the identity string rather than a
+          // counter so it is a *fact* about the roster rather than a count of
+          // how often we noticed, which makes it safe to use as an effect
+          // dependency: re-running is exactly as frequent as the roster
+          // actually changing.
+          setRosterEpoch(rosterIdentity(members));
           // Issue #151 §3.3: desks first, then one DM thread per roster
           // teammate.
           const resolved = [
@@ -2764,7 +2804,12 @@ export function AppShell({
     return () => {
       live = false;
     };
-  }, [client, company]);
+    // Defect B-071: `rosterEpoch`, so a teammate hired in another tab gets a
+    // label here too. Without it this map is a mount snapshot, and a person
+    // the directory did not name when the tab loaded is dropped from every
+    // typing line and the People section forever — the same one-shot shape
+    // B-030 fixed one structure over.
+  }, [client, company, rosterEpoch]);
 
   /**
    * Who to name in the typing line for a given channel (and, when a thread
@@ -3609,6 +3654,12 @@ export function AppShell({
               mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
+              // Defect B-071: the shell is the only thing here that polls the
+              // roster, so it is the only thing that can tell this view the
+              // roster moved in another tab. Without this the view's teammate
+              // list and `@`-mention directory stay the snapshot they took at
+              // mount.
+              rosterEpoch={rosterEpoch}
               taskStatusByTaskId={taskStatusByTaskId}
               now={feed.now}
               onDecideApproval={(approval, verdict, scope, answer) =>
