@@ -62,6 +62,8 @@ import { approvedLine } from "@/lib/approval-wording";
 import {
   approvalAction,
   approvalDeadline,
+  approvalHeadline,
+  HIDDEN_BY_ROLE,
   money,
   payloadAge,
   payloadLeadLabel,
@@ -170,7 +172,7 @@ function failureLabel(failedCount: number, total: number): string {
  * so a row never lets the leading argument speak for an effect it does not have.
  */
 function itemLabel(a: ApprovalSummary): string {
-  if (a.contents_hidden) return `${approvalAction(a)} — details hidden by your role`;
+  if (a.contents_hidden) return `${approvalAction(a)} — ${HIDDEN_BY_ROLE}`;
   return payloadLeadLabel(a) ?? approvalAction(a);
 }
 
@@ -878,12 +880,12 @@ function BoardLabel({ approvals }: { approvals: ApprovalSummary[] }) {
  */
 function compactLabel(approvals: ApprovalSummary[]): { text: string; amounts: string } {
   const lead = approvals[0];
-  const action = approvalAction(lead);
-  const detail = itemLabel(lead);
-  // `itemLabel` already names the action for a role-hidden payload (#618);
-  // restating it here would print the action twice.
-  const prefix =
-    lead.contents_hidden || detail === action ? detail : `${action} — ${detail}`;
+  // Composed by `approvalHeadline`, not here (defect B-068). This row's
+  // composition was the *correct* one — it reads the request's own title, which
+  // the Approvals page never did — and keeping it local is exactly what let two
+  // surfaces describe one card in two ways. The hidden-payload wording is
+  // passed in because this row has no payload block beneath it to say so.
+  const prefix = approvalHeadline(lead, HIDDEN_BY_ROLE);
   // A monetary effect shows its value beside whatever else it is doing — an
   // operator approving a payment must see its amount, whether or not the host
   // also sent a payload line to describe it.
@@ -1010,7 +1012,12 @@ function BatchHeadline({
   // deploys a website would be the icon quietly making a claim.
   const Icon = sameKind ? approvalIcon(lead.kind) : ShieldCheck;
   const asker = lead.agent ? (askerNames.get(lead.agent) ?? lead.agent) : null;
-  const title = sameKind ? approvalAction(lead) : `${approvals.length} actions need your sign-off`;
+  // Defect B-068: a same-kind batch is named by what it is *about*, not only by
+  // its category — the `full` variant renders the payload block beneath, so the
+  // hidden case needs no wording here.
+  const title = sameKind
+    ? approvalHeadline(lead)
+    : `${approvals.length} actions need your sign-off`;
 
   // Consolidating the asking must not consolidate away the warning (#1426).
   // Batching is the common case for exactly the calls that carry one — a

@@ -50,6 +50,7 @@ import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
+  approvalHeadline,
   type DeadlineTone,
   money,
   payloadAge,
@@ -392,7 +393,13 @@ export function ApprovalHeadline({
           overflow the card there instead of wrapping. */}
       <div className="min-w-[min(12rem,100%)] flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <p className="font-medium">{approvalAction(a)}</p>
+          {/* Defect B-068: what is being decided, not only what kind of thing
+              it is. `approvalHeadline` is the chat card's own composition,
+              shared rather than copied — this queue used to print "Use one of
+              its tools" over a request whose title was sitting in the payload
+              block directly below it. No hidden-detail argument: that block
+              renders beneath and says it in full (#618). */}
+          <p className="font-medium">{approvalHeadline(a)}</p>
           {consequence && (
             <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground">
               {consequence.label}
