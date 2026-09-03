@@ -180,6 +180,34 @@ export function isBlockerKind(kind: string): boolean {
 }
 
 /**
+ * Whether deciding this card records an answer and restarts nothing
+ * (defect B-070).
+ *
+ * A blocker parks two quite different things on one queue. One is a question an
+ * agent raised *from a card*, and the approval's task link names it: approving
+ * moves that card back into In Progress, where its dispatch edge fires, and the
+ * work really does carry on. The other is a question asked mid-conversation,
+ * which parks `unlinked` with no continuation at all — the host says so on the
+ * wire — and deciding it banks the answer and starts nothing.
+ *
+ * The console told both the same story. A founder answered a genuine either/or,
+ * watched the card vanish under "Approved — carrying it out now", and
+ * twenty-five minutes later nothing had been routed, created or said; the card
+ * was gone from the queue, so the question could not even be re-decided. This
+ * is the predicate that keeps the two apart, and it is exported so the card's
+ * own footnote and the confirmation banner cannot claim different things about
+ * one press.
+ *
+ * A `task` the host did not send at all is deliberately NOT treated as
+ * answer-only: that is "we do not know", and guessing either way is what the
+ * `stillAwaiting === undefined` arm of {@link approvedLine} already refuses to
+ * do.
+ */
+export function isAnswerOnlyBlocker(a: Pick<ApprovalSummary, "kind" | "task">): boolean {
+  return isBlockerKind(a.kind) && a.task?.link === "unlinked";
+}
+
+/**
  * The operator-readable fields a blocker card renders (#1862): what stopped,
  * what would unblock it, and the connection it is about when one groups it.
  *
@@ -271,14 +299,27 @@ export function BlockerAnswerControl({
           back and the teammate picks the card up with them on it; Approve with
           the box empty is the pre-B-046 request unchanged, which is still the
           right move when "go ahead" is the whole answer; Decline never sends
-          it, because a refusal ends the step rather than re-entering it. */}
-      {!compact && (
-        <p className="text-xs text-muted-foreground">
-          Approve sends this back and the teammate picks the card up with it.
-          Approve with the box empty and it starts again with nothing new.
-          Decline doesn't send it.
-        </p>
-      )}
+          it, because a refusal ends the step rather than re-entering it.
+
+          Defect B-070: and only where there IS a card to pick up. A question
+          asked mid-conversation parks with nothing behind it, and promising
+          that a teammate resumes it is the same claim B-013 and B-072 were
+          filed about — made here over a card the press is about to consume. */}
+      {!compact &&
+        (isAnswerOnlyBlocker(a) ? (
+          <p className="text-xs text-muted-foreground">
+            Approve records your answer against this card. It was asked in the
+            conversation rather than from a task, so nothing restarts on its
+            own — tell the teammate in chat when you want it acted on. Decline
+            doesn't send it.
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Approve sends this back and the teammate picks the card up with it.
+            Approve with the box empty and it starts again with nothing new.
+            Decline doesn't send it.
+          </p>
+        ))}
     </div>
   );
 }

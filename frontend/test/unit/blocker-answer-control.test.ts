@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { OpenCompanyClient } from "@/api/client";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import { isAnswerOnlyBlocker } from "@/components/approval-card";
+import { answerRecordedLine } from "@/lib/approval-wording";
 import { ApprovalCard } from "@/views/ApprovalsView";
 import { ApprovalRow, type ApprovalRowVariant } from "@/views/chat/ApprovalRow";
 
@@ -365,5 +367,103 @@ describe("the Approvals page card", () => {
     expect(
       answerBox.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  /**
+   * Defect B-070: the console said the work was starting when nothing was.
+   *
+   * B-046 gave this card a field to answer in, which is half of what a founder
+   * needs. The other half is being told the truth about what pressing Approve
+   * did. A blocker parks two different things on one queue — a question raised
+   * *from a card*, whose task link names it and whose approval really does move
+   * that card back into In Progress, and a question asked mid-conversation, which
+   * parks `unlinked` with no continuation at all. The console read the same
+   * story off both.
+   *
+   * So a founder answered a genuine either/or ("route it to operations, or add
+   * Marcus as a teammate?"), read "Approved — carrying it out now", watched the
+   * card leave the queue, and twenty-five minutes later had no task, no teammate
+   * and no reply — and no way to re-decide the question, because approving had
+   * consumed it.
+   *
+   * This is B-013 and B-072's fault a third time: a park with no continuation
+   * described as one that continues by itself. The host half is
+   * `company::runtime::tests::blocker_resume_note`; these are the two places the
+   * console says it.
+   */
+  describe("a question with nothing behind it is recorded, not carried out (B-070)", () => {
+    /** B-070's card: an `escalate_to_human` question, parked unlinked. */
+    function unlinkedQuestion(id: string): ApprovalSummary {
+      return {
+        ...blocker(id),
+        // `escalate_to_human` stamps no teammate, which is why the banner fell to
+        // the runtime wording rather than the teammate wording.
+        agent: null,
+        task: { link: "unlinked" },
+        payload: {
+          reason:
+            "There's no teammate called Marcus. Should I route it to operations, or add Marcus as a new teammate?",
+          needed: "an answer to the question on this card",
+        },
+      };
+    }
+
+    /** The same question, but raised from a card that really does resume. */
+    function cardQuestion(id: string): ApprovalSummary {
+      return { ...blocker(id), task: { link: "task", id: "t-1" } };
+    }
+
+    it("tells the operator nothing restarts, on a question with no card behind it", async () => {
+      await renderCard(unlinkedQuestion("b1"));
+      const text = container.textContent ?? "";
+      expect(text).toContain("nothing restarts on its own");
+      // The claim B-070 was filed about must not be made here.
+      expect(text).not.toContain("the teammate picks the card up with it");
+    });
+
+    it("still promises the resume where a card really is picked up", async () => {
+      // The other half of the property: this is not "delete the sentence". A
+      // question raised from a card is re-dispatched, and saying so is correct.
+      await renderCard(cardQuestion("b2"));
+      const text = container.textContent ?? "";
+      expect(text).toContain("the teammate picks the card up with it");
+      expect(text).not.toContain("nothing restarts on its own");
+    });
+
+    it("keeps the answer box on both — the distinction is the claim, not the field", async () => {
+      await renderCard(unlinkedQuestion("b3"));
+      expect(box()).toBeTruthy();
+    });
+  });
+});
+
+
+/**
+ * The confirmation banner, which is where B-070's founder read the promise.
+ */
+describe("the approve confirmation for an answer-only question (B-070)", () => {
+  it("says what happened, not that the work is starting", () => {
+    expect(answerRecordedLine("Do something that needs your sign-off")).toBe(
+      "Answer recorded — this doesn't restart anything on its own: Do something that needs your sign-off",
+    );
+    // The literal sentence from the founder's screen.
+    expect(answerRecordedLine()).not.toContain("carrying it out now");
+  });
+
+  it("is chosen for exactly the cards that restart nothing", () => {
+    const unlinked = { kind: "blocker.information", task: { link: "unlinked" } } as const;
+    const fromCard = { kind: "blocker.information", task: { link: "task", id: "t-1" } } as const;
+    const gatedCall = { kind: "payment.send", task: { link: "unlinked" } } as const;
+
+    expect(isAnswerOnlyBlocker(unlinked)).toBe(true);
+    // A blocker the host says has a card behind it resumes, and must not be
+    // demoted to "recorded".
+    expect(isAnswerOnlyBlocker(fromCard)).toBe(false);
+    // A gated tool call is not a question at all; approving it really does
+    // continue the turn.
+    expect(isAnswerOnlyBlocker(gatedCall)).toBe(false);
+    // A host that never sent the field is "we do not know", and guessing is
+    // the failure this whole family of fixes is about.
+    expect(isAnswerOnlyBlocker({ kind: "blocker.information" })).toBe(false);
   });
 });

@@ -57,6 +57,27 @@ export function approvedByRuntimeLine(stillAwaiting: StillAwaiting, detail?: str
   } before it runs${suffix}`;
 }
 
+/**
+ * The confirmation for approving a question that has no work behind it
+ * (defect B-070).
+ *
+ * `approvedLine` and `approvedByRuntimeLine` both answer "is anything still
+ * owed before this moves?" — and when nothing is, they say the work is
+ * starting. For a blocker parked `unlinked` that is false however few sign-offs
+ * remain: there is no step to re-enter, so the answer is banked and nothing
+ * runs. A founder read "Approved — carrying it out now", watched the card leave
+ * the queue, and waited twenty-five minutes for work that was never going to
+ * begin.
+ *
+ * Deliberately says what DID happen and what did not, in the host's own words
+ * for the same event, so the banner here and the note that lands in the
+ * conversation cannot contradict each other about one press.
+ */
+export function answerRecordedLine(detail?: string): string {
+  const suffix = detail ? `: ${detail}` : "";
+  return `Answer recorded — this doesn't restart anything on its own${suffix}`;
+}
+
 /** This card's place in its turn's batch: 1-based `index` of `total` (#1289). */
 export interface BatchPosition {
   index: number;
