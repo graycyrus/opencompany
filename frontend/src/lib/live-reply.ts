@@ -16,6 +16,12 @@
  */
 export interface LiveReplyFrame {
   chatId: string;
+  /**
+   * The frame's `agentId`, when its type carries one (`AgentReplyEvent`
+   * always does). Read only by {@link PendingSyncPosts.capture} to exempt a
+   * system-attributed frame from suppression — see that method's doc for why.
+   */
+  agentId?: string;
 }
 
 /**
@@ -230,8 +236,24 @@ export class PendingSyncPosts<F extends LiveReplyFrame = LiveReplyFrame> {
    * identity — is this thread's POST still unresolved — never by how long it
    * has been unresolved. See {@link detached} for why that distinction is the
    * whole fix.
+   *
+   * **A system-attributed frame is never held, regardless of the thread's
+   * state** (Codex review, PR #2052). Suppression exists because the
+   * operator's own synchronous reply arrives twice — once in the awaited
+   * response, once over SSE — and {@link ended} discards whatever was held on
+   * the assumption it duplicates that response. A frame attributed to
+   * `SYSTEM_AUTHOR` (`liveReplyAttribution(frame.agentId) === "system"`, B-101's
+   * mention-ambiguity notice) is never part of that response body — see
+   * `post_mention_ambiguity_note`'s own doc comment: "Journaled, not returned
+   * in the POST response" — so `ended`'s assumption does not hold for it.
+   * Holding it anyway let a legitimate operator turn resolve out from under
+   * it and silently swallow the notice until the next history reload, for
+   * every synchronous (non-detached) send. Rendering it immediately instead
+   * is always correct: `renderAgentReply`'s own recent-tail content dedupe
+   * still guards a genuine duplicate of the same system frame.
    */
   capture(frame: F): boolean {
+    if (liveReplyAttribution(frame.agentId ?? "") === "system") return false;
     if (!this.suppressesLiveReply(frame.chatId)) return false;
     const queue = this.held.get(frame.chatId);
     if (queue) queue.push(frame);
