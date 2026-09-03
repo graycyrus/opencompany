@@ -3074,7 +3074,11 @@ fn transcript_from_steps(steps: &[crate::ports::types::TurnStep]) -> Vec<Transcr
 ///
 /// Composed from the structural summary, never from a store's error text or the
 /// model's prose — this string reaches host logs.
-fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCalls) -> String {
+pub(crate) fn blocked_diagnosis(
+    node_id: Option<&str>,
+    agent_ref: &str,
+    parked: &ParkedCalls,
+) -> String {
     let node = node_id.unwrap_or(agent_ref);
     let tools = if parked.tools.is_empty() {
         "a tool call".to_string()
@@ -3111,29 +3115,13 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
     // answering a question is not authorising a call — so deciding it resumes
     // nothing until #1863/#1864. Promising an auto-resume for those is how an
     // operator ends up approving a card and watching a run that never moves.
-    let resume = if waiting == 0 {
-        String::new()
-    } else if parked.blockers == 0 {
-        " Approving the card continues this run automatically; because approving re-runs the \
-         agent's turn, a changed decision may ask again."
-            .to_string()
-    } else if parked.blockers == waiting {
-        format!(
-            " {} a question the agent raised, not a call waiting to be authorised: answering it \
-             is recorded against the card, but it does not restart this run — re-run the \
-             workflow once the answer is in hand.",
-            if waiting == 1 {
-                "The card is"
-            } else {
-                "The cards are"
-            }
-        )
-    } else {
-        " Some of these are gated tool calls, which continue this run when approved; the rest \
-         are questions the agent raised, which are recorded but do not restart it — re-run the \
-         workflow once those are answered."
-            .to_string()
-    };
+    // Defect B-072: the branch itself moved to `workflows::resume_claim`, which
+    // `runner::blocked_notice` now reads too. It used to live here alone, and
+    // the notice — composed from the same counts, rendered in the same panel —
+    // went on making the gated-call promise for every kind of park.
+    let resume = super::resume_claim::resume_claim(waiting, parked.blockers)
+        .map(|claim| format!(" {claim}"))
+        .unwrap_or_default();
     format!(
         "workflow node '{node}' is blocked: {tools} needed approval before {agent_ref} could \
          finish, so the node produced no deliverable and nothing after it ran. {}.{resume}",
