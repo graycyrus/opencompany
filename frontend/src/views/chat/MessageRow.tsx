@@ -328,14 +328,22 @@ export function MessageRow({
             // only in a note under it (B-099). Muted rather than struck
             // through: the words are still the operator's own draft, and Retry
             // means they may yet be delivered.
-            message.sendFailed && "text-muted-foreground",
+            //
+            // `!== undefined` rather than truthy: an `ApiError` can carry an
+            // empty `message` when the host's envelope sends `error: ""`
+            // (`httpError`'s `envelope?.error ?? statusMessage(res)` keeps an
+            // empty string as-is, since `??` only falls back on nullish). A
+            // truthy check would silently hide the failed styling, the notice,
+            // and the Retry control for exactly that response (CodeRabbit
+            // review).
+            message.sendFailed !== undefined && "text-muted-foreground",
           )}
         >
           {message.text}
         </Markdown>
-        {message.sendFailed && (
+        {message.sendFailed !== undefined && (
           <FailedSendNotice
-            reason={message.sendFailed}
+            reason={message.sendFailed || "something went wrong"}
             onRetry={onRetrySend ? () => onRetrySend(message.id) : undefined}
           />
         )}

@@ -1649,6 +1649,12 @@ export function ChatView({
    * that is worth it is the operator's call, which is exactly what a button is.
    */
   const retrySend = (messageId: string) => {
+    // `send` itself no-ops while a POST is already in flight (`if (sending)
+    // return false`). Checked here too, before the payload and failed row are
+    // consumed, because otherwise a Retry clicked mid-send would drop both —
+    // silently losing the only copy of the retry (CodeRabbit review) — and
+    // `send`'s own guard would have nothing left to return `false` about.
+    if (sending) return;
     const payload = failedSends.current.get(messageId);
     if (!payload) return;
     failedSends.current.delete(messageId);

@@ -2231,18 +2231,24 @@ export function AppShell({
   // resolves, instead of the shell needing a second copy of this logic.
   const renderAgentReply = useCallback(
     (event: AgentReplyEvent) => {
+      // A live frame attributed to the runtime itself (issue #101's ambiguity
+      // note, `SYSTEM_AUTHOR` on the Rust side) renders as the centred system
+      // pill `fromHistory` already gives it on reload — never as a named
+      // teammate's bubble with an avatar and reply/reaction controls, which is
+      // what unconditionally passing `"company"` here produced (Codex review).
+      const from = event.agentId === "system" ? "system" : "company";
       setThreads((ts) =>
         ts.map((t) => {
           if (t.id !== event.chatId) return t;
           const dup = t.messages
             .slice(-8)
-            .some((m) => m.from === "company" && m.text === event.text);
+            .some((m) => m.from === from && m.text === event.text);
           if (dup) return t;
           return {
             ...t,
             messages: [
               ...t.messages,
-              makeMessage("company", event.text, {
+              makeMessage(from, event.text, {
                 channel: event.agentId,
                 taskId: event.taskId,
                 mentions: event.mentions,
@@ -2286,13 +2292,13 @@ export function AppShell({
         // and it doubled every reply that arrived while its channel was closed.
         const dup = existing
           .slice(-8)
-          .some((m) => m.from === "company" && m.text === event.text);
+          .some((m) => m.from === from && m.text === event.text);
         if (dup) return t;
         return {
           ...t,
           [channelId]: [
             ...existing,
-            makeMessage("company", event.text, {
+            makeMessage(from, event.text, {
               channel: event.agentId,
               taskId: event.taskId,
               mentions: event.mentions,
