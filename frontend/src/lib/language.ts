@@ -493,6 +493,38 @@ function payloadLead(a: ApprovalSummary): string | null {
 }
 
 /**
+ * The accessible name of a decide button: the verb, then what pressing it
+ * would settle (defect B-076).
+ *
+ * #1411 composed this for the Approvals page and left the chat card's buttons
+ * with no `aria-label` at all, so the two surfaces were wrong in opposite
+ * directions over the same request — one announcing four hundred characters,
+ * the other announcing "Approve" with no way to know what. Same card, same
+ * decision, two answers to "what does this button do".
+ *
+ * A batch names every request rather than counting them, on the same grounds
+ * `compactLabel` does: a second call can be the consequential one, and "and 2
+ * more" hides it behind the first. Each is a headline rather than a full
+ * {@link decisionLabel}, because the discriminators a label adds are for
+ * telling two *buttons* apart, and a batch has one.
+ */
+export function decideButtonLabel(
+  verb: string,
+  approvals: readonly ApprovalSummary[],
+  askerNames: Map<string, string>,
+  now: number,
+): string {
+  const lead = approvals[0];
+  if (lead == null) return verb;
+  if (approvals.length === 1)
+    return `${verb}: ${decisionLabel(lead, askerNames, now)}`;
+  const each = approvals
+    .map((a) => approvalHeadline(a, HIDDEN_BY_ROLE))
+    .join("; ");
+  return `${verb} all ${approvals.length} requests: ${each}`;
+}
+
+/**
  * The category and the amount — {@link decisionLabel}'s own opening, kept
  * separate from {@link approvalSummary} on purpose.
  *

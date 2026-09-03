@@ -63,6 +63,7 @@ import {
   approvalAction,
   approvalDeadline,
   approvalHeadline,
+  decideButtonLabel,
   HIDDEN_BY_ROLE,
   money,
   payloadAge,
@@ -403,6 +404,15 @@ export function ApprovalRow({
         variant={declineVariant}
         size="sm"
         className={actionClass}
+        /* Defect B-076: these buttons carried no accessible name at all, so a
+           screen-reader user heard "Decline" with nothing to say what — while
+           the Approvals page's button over the same request announced four
+           hundred characters. Two surfaces, one decision, wrong in opposite
+           directions. Composed by the same helper the page uses, over the
+           requests this row would actually settle (`pending`, not `approvals`:
+           an item already decided elsewhere is not part of what this press
+           does). */
+        aria-label={decideButtonLabel("Decline", pending, askerNames, now)}
         disabled={busy}
         onClick={() => decideAll("deny")}
       >
@@ -437,6 +447,7 @@ export function ApprovalRow({
           variant={approveVariant}
           size="sm"
           className={actionClass}
+          aria-label={decideButtonLabel("Approve", pending, askerNames, now)}
           disabled={busy}
           onClick={() => decideAll("approve")}
         >

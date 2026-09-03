@@ -40,7 +40,7 @@ import {
 import { approvalsByDeadline } from "@/lib/approval-order";
 import {
   approvalSummary,
-  decisionLabel,
+  decideButtonLabel,
   grantHeadline,
   grantSubject,
   timeAgo,
@@ -1053,7 +1053,7 @@ export function ApprovalCard({
             <Button
               variant="outline"
               size="sm"
-              aria-label={`Extend the deadline: ${decisionLabel(a, askerNames, now)}`}
+              aria-label={decideButtonLabel("Extend the deadline", [a], askerNames, now)}
               disabled={deciding !== null || extending}
               onClick={onExtend}
             >
@@ -1071,16 +1071,20 @@ export function ApprovalCard({
             /* `decisionLabel`, not `approvalAction`: two same-kind cards read
                identically from the kind alone, and button-only screen-reader
                navigation never hears the card body (#1411). */
-            aria-label={`Decline: ${decisionLabel(a, askerNames, now)} — ${
+            /* Defect B-076: no ` — request <epoch>` tail. The id was appended
+               only when the contents were NOT hidden — that is, exactly when
+               `decisionLabel` already carries the request's own words, the
+               amount, the method and (below) the batch position, every one of
+               them a discriminator a person can use. On a hidden card, where
+               those are absent and an opaque number would be the only thing
+               telling two buttons apart, it was omitted and `decisionLabel`'s
+               "composed … (…)" did the job instead. So it was present only
+               where it added nothing, and it was the tail of the four hundred
+               characters a screen-reader user heard. */
+            aria-label={`${decideButtonLabel("Decline", [a], askerNames, now)} — ${
               declineScope.kind === "tool"
                 ? `don't ask again for this tool for ${grantDurationLabel(declineScope.expiresInMillis)}`
                 : "just this once"
-            }${
-              // Redacted cards already carry the exact timestamp in
-              // `decisionLabel`'s "composed … (…)"; appending the usual
-              // `request <timestamp>` suffix here too would announce the opaque
-              // epoch twice on every hidden card.
-              a.contents_hidden ? "" : ` — request ${a.at_millis}`
             }${
               batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
             }`}
@@ -1098,15 +1102,13 @@ export function ApprovalCard({
           </Button>
           <Button
             size="sm"
-            aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — ${
+            aria-label={`${decideButtonLabel("Approve", [a], askerNames, now)} — ${
               scope.kind === "tool"
                 ? `let this ${
                     a.workflow_id ? "workflow" : "teammate"
                   } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
                 : "just this once"
-            }${a.contents_hidden ? "" : ` — request ${a.at_millis}`}${
-              batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
-            }`}
+            }${batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""}`}
             disabled={deciding !== null}
             onClick={() => onDecide("approve", scope, answer)}
           >
