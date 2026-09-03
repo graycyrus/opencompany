@@ -4382,9 +4382,10 @@ impl CompanyRuntime {
                         return Ok(seq == parent);
                     }
                     CompanyEvent::DeskTaskCompleted { origin_chat_id, .. }
-                        if origin_chat_id.as_deref().is_some_and(|origin| {
-                            crate::server::chat_history::same_conversation(Some(origin), Some(desk))
-                        }) =>
+                        if crate::server::chat_history::stamped_conversation_is(
+                            origin_chat_id.as_deref(),
+                            desk,
+                        ) =>
                     {
                         return Ok(false);
                     }
@@ -5591,6 +5592,16 @@ impl CompanyRuntime {
 
     /// The parked blockers pending in one DM, folded into root-cause groups
     /// (issue #1862). Oldest-first, the order `pending` already returns.
+    ///
+    /// Matched through
+    /// [`stamped_conversation_is`](crate::server::chat_history::stamped_conversation_is)
+    /// rather than `same_conversation`, so a blocker that names **no** thread is
+    /// pending in no conversation rather than in General. `park_blocker` always
+    /// stamps the sender's DM, but `cycle_conversation` hands back a thread-less
+    /// `ApprovalConversation` for every park that came from no conversation at
+    /// all — a planning pass, a scheduler tick, an unaddressed trigger — and
+    /// through `same_conversation` each of those read as pending in `#general`,
+    /// where the next top-level message was consumed as its answer.
     #[cfg(feature = "openhuman")]
     fn pending_blocker_groups(&self, desk: &str) -> Vec<PendingBlockerGroup> {
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
@@ -5599,7 +5610,7 @@ impl CompanyRuntime {
             if !p.effect.kind.starts_with(&prefix) {
                 continue;
             }
-            if !crate::server::chat_history::same_conversation(p.thread.as_deref(), Some(desk)) {
+            if !crate::server::chat_history::stamped_conversation_is(p.thread.as_deref(), desk) {
                 continue;
             }
             let Ok(payload) = serde_json::from_value::<crate::ports::blockers::BlockerPayload>(
@@ -5663,10 +5674,10 @@ impl CompanyRuntime {
                 thread,
                 ..
             } if effect_kind.starts_with(&prefix)
-                && crate::server::chat_history::same_conversation(
-                    thread.as_deref(),
-                    Some(desk),
-                )
+                // Same rule as `pending_blocker_groups`: a card stamped with no
+                // thread was raised by no conversation, so no conversation's
+                // reply anchors to it — General included.
+                && crate::server::chat_history::stamped_conversation_is(thread.as_deref(), desk)
                 && self.is_blocker(&approval_id) =>
             {
                 Ok(Some(approval_id))
@@ -6445,6 +6456,7 @@ impl PendingBlockerGroup {
 
 /// What resolving a blocker reply does, decided before anything is written.
 #[cfg(feature = "openhuman")]
+#[derive(Debug)]
 pub(crate) enum BlockerReplyPlan {
     /// Not a verdict, or no blocker pending here — run an ordinary turn.
     NotBlocker,
@@ -9724,6 +9736,114 @@ mod tests {
                 runtime.pending_approvals().is_empty(),
                 "the verdict fanned to every card in the group"
             );
+        }
+
+        /// Parks a blocker the way a cycle that came from **no** conversation
+        /// does: `cycle_conversation` answers with a default
+        /// `ApprovalConversation`, so the journal row carries `thread: None`.
+        /// Every planning-pass park written before commit `26d558c92` has the
+        /// same shape, and those rows survive journal replay.
+        async fn park_thread_less_blocker(runtime: &Arc<CompanyRuntime>, task_id: &str) {
+            use crate::ports::types::{Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let payload = blocker(task_id, None);
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            let id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("parks");
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    super::super::now_millis(),
+                    TaskLink::from_task_id(Some(task_id)),
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("journals");
+        }
+
+        /// A blocker that names no conversation is pending in **no**
+        /// conversation — `#general` least of all.
+        ///
+        /// The bug (B-059): `pending_blocker_groups` matched through
+        /// `same_conversation`, which reads a missing chat id as "unaddressed,
+        /// therefore General". A thread-less park therefore read as pending in
+        /// the company-wide line, and the founder's next top-level message there
+        /// was consumed as its *answer* — accepted, settled in milliseconds with
+        /// no cycle and no reply, and indistinguishable in the console from a
+        /// message being worked on.
+        ///
+        /// All four General spellings are asserted because the fold admits all
+        /// four (`is_general_chat`), so fixing only the console's `"main"` would
+        /// leave the same drop reachable from a host addressing `"General"`.
+        #[tokio::test]
+        async fn a_thread_less_blocker_is_pending_in_no_conversation() {
+            let (runtime, _home) = runtime().await;
+            park_thread_less_blocker(&runtime, "t-1").await;
+            assert_eq!(
+                runtime.pending_approvals()[0].thread,
+                None,
+                "the park under test is the thread-less shape"
+            );
+
+            for desk in ["main", "general", "General", ""] {
+                let plan = runtime
+                    .plan_blocker_reply(desk, None, "please retry the nightly import")
+                    .await
+                    .expect("plan");
+                assert!(
+                    matches!(plan, BlockerReplyPlan::NotBlocker),
+                    "a top-level message in {desk:?} must run as an ordinary turn, not settle a \
+                     blocker no conversation raised: {plan:?}"
+                );
+            }
+            assert_eq!(
+                runtime.pending_approvals().len(),
+                1,
+                "nothing was consumed, so the blocker still pends for whoever can actually answer it"
+            );
+        }
+
+        /// The carve-out is not a blanket refusal: a blocker stamped with a real
+        /// thread still answers to it. Guards the fix from being "skip every
+        /// blocker", which would pass the test above and break #1862 outright.
+        #[tokio::test]
+        async fn a_threaded_blocker_still_answers_in_its_own_dm() {
+            let (runtime, _home) = runtime().await;
+            park_thread_less_blocker(&runtime, "t-1").await;
+            runtime
+                .park_blocker(&blocker("t-2", None), "t-2", assignee("eng"))
+                .await
+                .expect("parks");
+
+            let plan = runtime
+                .plan_blocker_reply("dm:eng", None, "retry it")
+                .await
+                .expect("plan");
+            match plan {
+                BlockerReplyPlan::Resolve { ids, .. } => assert_eq!(
+                    ids.len(),
+                    1,
+                    "only the blocker stamped with this DM is in scope; the thread-less one is in \
+                     no conversation and must not be fanned in"
+                ),
+                other => panic!("the DM's own blocker still resolves: {other:?}"),
+            }
         }
 
         /// An unrelated reply is not a verdict — it falls through to an ordinary
