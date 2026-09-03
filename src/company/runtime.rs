@@ -2803,10 +2803,17 @@ impl CompanyRuntime {
         card.column = TODO.to_string();
         card.bounced = Some(BLOCKER_CANCELLED.to_string());
         card.updated_at_millis = now_millis();
+        let title = card.title.clone();
         self.ops.tasks.upsert(&self.id, &card).await?;
+        // Named, because this is the destructive verdict (defect B-115). A
+        // two-word "Okay — cancelled." left an operator unable to tell which of
+        // two cards had just been thrown away, and it was the wrong one.
         self.post_blocker_resume_note(
             thread,
-            "Okay — I've cancelled that. It's back in To-do if you want to pick it up later.",
+            &format!(
+                "Okay — I've cancelled \"{title}\". It's back in To-do if you want to pick it up \
+                 later."
+            ),
         )
         .await
     }
@@ -6633,7 +6640,27 @@ fn blocker_resume_note(
         BlockerVerdict::Skip => "Okay — skipping that.",
         // Cancel never reaches here: it does not resume, and its callers post
         // their own settle notice.
-        BlockerVerdict::Cancel => return "Okay — cancelled.".to_string(),
+        // Cancel does not resume, and its card-carrying caller
+        // (`cancel_task_card`) posts its own notice naming the card. This arm
+        // is what is left: a park with nothing behind it to name. It still has
+        // to say *what* it cancelled (defect B-115) — "Okay — cancelled." named
+        // nothing, and an operator who had two things parked could not tell
+        // which one had just been thrown away.
+        BlockerVerdict::Cancel => {
+            return match outcome {
+                BlockerResumeOutcome::Reentered => {
+                    "Okay — I've cancelled that and put the card back in To-do.".to_string()
+                }
+                BlockerResumeOutcome::RecordedOnly => {
+                    "Okay — I've dropped the question I asked you here. There was no step waiting \
+                     behind it, so nothing else changes."
+                        .to_string()
+                }
+                BlockerResumeOutcome::RunNotRestarted => {
+                    "Okay — I've cancelled that workflow step, and its run is settled.".to_string()
+                }
+            };
+        }
     };
     // And what actually happened, from the caller that did it — never assumed.
     // This is the half that was a standing claim (defect B-070).
@@ -6938,19 +6965,43 @@ mod tests {
             assert!(panel.contains(shared), "the run panel drifted: {panel}");
         }
 
-        /// A cancel is settled by its own callers and keeps its own words.
+        /// A cancel keeps its own settle notice — and it says what it settled
+        /// (defect B-115).
+        ///
+        /// It used to be the two words "Okay — cancelled." for every arm. A
+        /// founder with two things parked read that after the wrong one was
+        /// thrown away and had no way to tell which, from the reply or from
+        /// anywhere else.
         #[test]
-        fn a_cancel_keeps_its_own_settle_notice() {
+        fn a_cancel_says_what_it_cancelled() {
             for outcome in [
                 BlockerResumeOutcome::Reentered,
                 BlockerResumeOutcome::RecordedOnly,
                 BlockerResumeOutcome::RunNotRestarted,
             ] {
-                assert_eq!(
-                    blocker_resume_note(&resolution(BlockerVerdict::Cancel), outcome),
-                    "Okay — cancelled.",
+                let note = blocker_resume_note(&resolution(BlockerVerdict::Cancel), outcome);
+                assert_ne!(note, "Okay — cancelled.", "{outcome:?} names nothing");
+                assert!(
+                    note.contains("cancelled") || note.contains("dropped"),
+                    "it is still plainly a cancel: {note}",
+                );
+                // Every arm names the kind of thing it settled, so two parks in
+                // one conversation cannot produce one indistinguishable reply.
+                assert!(
+                    note.contains("card") || note.contains("question") || note.contains("workflow"),
+                    "{outcome:?} must say what was cancelled: {note}",
                 );
             }
+            // And the three are distinguishable from each other.
+            let notes: std::collections::BTreeSet<String> = [
+                BlockerResumeOutcome::Reentered,
+                BlockerResumeOutcome::RecordedOnly,
+                BlockerResumeOutcome::RunNotRestarted,
+            ]
+            .into_iter()
+            .map(|o| blocker_resume_note(&resolution(BlockerVerdict::Cancel), o))
+            .collect();
+            assert_eq!(notes.len(), 3, "each arm reads differently: {notes:?}");
         }
     }
 

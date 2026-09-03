@@ -946,6 +946,32 @@ const RETRY_WORDS: &[&str] = &[
 ///
 /// Model-assisted disambiguation is #678; this is the lexical tier that abstains
 /// to [`Unrelated`] rather than guessing.
+///
+/// # The one verdict that has to be the whole sentence (defect B-115)
+///
+/// The priority above is a claim about *ranking* two verdicts, and it was read
+/// as a claim about ranking a verdict against everything else. A founder wrote,
+/// in one message: "ok scrap the reminder card. 500 candles worth — jar, lid
+/// and label for 500 units total across the four scents, cold source it, under
+/// 4k. that's the answer". `scrap` appears, so the whole message read as a
+/// cancel; the work was abandoned, and the answer it carried — the only thing
+/// that could have unblocked the card — was discarded with it. The card was
+/// left paused with nothing behind it to restart it.
+///
+/// So a cancel now has to be the whole of the ask: every clause that is not the
+/// cancel clause must be filler. Where it is not, the cancel reading is dropped
+/// and the message is judged on its remaining merits — which for that sentence
+/// is [`Amend`](BlockerReplyIntent::Amend), i.e. the answer it was written to
+/// give.
+///
+/// **Only cancel**, and the asymmetry is the reason.
+/// [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) is "the one
+/// verdict that does not re-enter" — being wrong about it destroys the work,
+/// while being wrong about retry, skip or amend costs a re-run that the next
+/// message can correct. It is the same trade [`triage_message`] already makes
+/// between [`Answer`](MessageTriage::Answer) and
+/// [`Chatter`](MessageTriage::Chatter), for the same reason: only the expensive
+/// direction is worth a guard.
 pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -962,7 +988,7 @@ pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
     if is_question(core) {
         return BlockerReplyIntent::Unrelated;
     }
-    if mentions_any(&lower, CANCEL_WORDS) {
+    if mentions_any(&lower, CANCEL_WORDS) && cancel_is_the_whole_ask(&lower) {
         return BlockerReplyIntent::Cancel;
     }
     if mentions_any(&lower, SKIP_WORDS) {
@@ -978,6 +1004,26 @@ pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
         return BlockerReplyIntent::Unrelated;
     }
     BlockerReplyIntent::Amend
+}
+
+/// Whether abandoning the work is the **whole** of what `lower` asks for
+/// (defect B-115) — every clause that does not itself carry a
+/// [`CANCEL_WORDS`] entry is filler.
+///
+/// Clause-wise rather than message-wise, over the same [`clauses`] split
+/// [`later_clause_is_imperative`] uses, so the two places that ask "does a
+/// later part of this sentence say something the first part does not" answer it
+/// the same way. A comma is deliberately *not* a clause boundary there, which
+/// keeps "cancel this one, retry the other" a cancel — that reading is the
+/// priority rule this function is scoped not to disturb.
+///
+/// An `all` over an empty iterator is `true`, which is the right answer and not
+/// an accident: a message whose every clause names the cancel is a cancel and
+/// nothing else.
+fn cancel_is_the_whole_ask(lower: &str) -> bool {
+    clauses(lower)
+        .filter(|clause| !mentions_any(clause, CANCEL_WORDS))
+        .all(is_pure_social)
 }
 
 /// Whether any whole word of `lower` is in `words` and is not negated by a
@@ -1700,6 +1746,42 @@ mod blocker_reply_tests {
             "drop it",
             "forget about it",
             "scrap the task",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Cancel,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    /// Defect B-115: a message whose main content is the answer is not a cancel
+    /// because one clause of it mentions scrapping something else.
+    ///
+    /// This exact sentence cancelled a card and threw the answer away with it.
+    /// The card was left paused with no blocker behind it, so nothing would
+    /// ever have resumed it, and the reply named nothing.
+    #[test]
+    fn an_answer_that_mentions_scrapping_something_is_not_a_cancel() {
+        let reply = "@tomas ok scrap the reminder card. 500 candles worth - jar, lid and \
+                     label for 500 units total across the four scents, cold source it, \
+                     under 4k. that's the answer";
+        assert_eq!(
+            classify_blocker_reply(reply),
+            BlockerReplyIntent::Amend,
+            "the message's own words say what it is: {reply:?}"
+        );
+    }
+
+    /// The guard is a scope, not a removal: a cancel that really is the whole
+    /// of the ask still cancels, filler and all.
+    #[test]
+    fn a_cancel_that_is_the_whole_message_still_cancels() {
+        for reply in [
+            "ok, scrap it",
+            "please drop this one",
+            "yeah, abandon it. thanks",
+            "cancel that. cheers",
         ] {
             assert_eq!(
                 classify_blocker_reply(reply),
