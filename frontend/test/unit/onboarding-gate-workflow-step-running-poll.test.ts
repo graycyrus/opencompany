@@ -165,6 +165,54 @@ describe("WorkflowStep re-polls a run that was running when it mounted", () => {
     ).toBeNull();
   });
 
+  it("retries after the initial read fails, instead of staying stuck", async () => {
+    // tinysweeper critique, PR #2046: the poll effect used to arm only on
+    // `progress.kind === "running"`. A FAILED initial read leaves `progress`
+    // at `null` forever, so that guard never opened and the "Couldn't read
+    // this company's run history" message was permanently stuck — a
+    // transient failure had no way back to a live card without a reload.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    const client = fakeClient(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("network blip");
+      return { runs: [succeededRun], hasMore: false };
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(WorkflowStep, {
+          client,
+          company: null,
+          onOpenWorkflows: () => {},
+          onOpenApprovals: () => {},
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(calls).toBe(1);
+    expect(
+      container.textContent,
+      "the initial failure must render the couldn't-read message",
+    ).toContain("run history just now");
+
+    // Advance past one poll tick — the retry this fix adds.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(calls, "a failed initial read must be retried").toBeGreaterThan(1);
+    expect(
+      container.textContent,
+      "a successful retry must replace the stuck failure message",
+    ).not.toContain("run history just now");
+    expect(
+      container.querySelector('[data-testid="gate-workflow-succeeded"]'),
+      "the retry's success must render normally",
+    ).toBeTruthy();
+  });
+
   it("does not keep polling once the run has settled", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let calls = 0;

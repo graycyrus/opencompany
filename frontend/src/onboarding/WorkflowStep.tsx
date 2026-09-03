@@ -107,12 +107,23 @@ export function WorkflowStep({
   // because a run finished — so the card would say "is still running"
   // indefinitely until the founder collapses and reopens the step or reloads.
   //
-  // A second, narrower effect rather than folding this into the one above: it
-  // only arms once `progress.kind` is actually `"running"`, and its own
-  // cleanup disarms the poll the moment a fresh read moves it to anything
-  // else — so a settled run costs nothing beyond the one poll that noticed.
+  // tinysweeper critique, PR #2046: the same reasoning covers a transient
+  // FAILURE on that first read, and the original version of this effect
+  // missed it — it armed only on `progress.kind === "running"`, but a failed
+  // read leaves `progress` at `null` forever, so nothing ever retried and the
+  // "Couldn't read this company's run history" message was as permanently
+  // stuck as the "still running" card was. `shouldPoll` below covers both: no
+  // confirmed non-running answer yet (`progress === null`, whether that is
+  // the read still in flight or one that already failed) or a confirmed
+  // `running` one.
+  //
+  // Depends on that one boolean, not `progress` itself: `progress` is a fresh
+  // object every fetch, and every poll tick would otherwise tear the interval
+  // down and rebuild it — `shouldPoll` only flips at the transitions that
+  // actually matter (armed → answered, or answered → running again).
+  const shouldPoll = progress === null || progress.kind === "running";
   useEffect(() => {
-    if (progress?.kind !== "running") return;
+    if (!shouldPoll) return;
     let live = true;
     // CodeRabbit review, PR #2046: a tick fires the next read without waiting
     // for the previous one, so two requests can be in flight together, and
@@ -128,10 +139,15 @@ export function WorkflowStep({
         (page) => {
           if (!live || requestId !== latestRequest) return;
           setProgress(gateWorkflowProgress(page.runs));
+          setFailed(false);
         },
         () => {
-          /* a transient poll failure just tries again next tick — the initial
-           * read's own `failed` state already covers a durable one */
+          if (!live || requestId !== latestRequest) return;
+          // Still no good answer — keep the failure message up (it may
+          // already be true; explicit for the case this is itself the retry
+          // that follows the FIRST read's own failure) and stay armed:
+          // `shouldPoll` is still true because `progress` is still `null`.
+          setFailed(true);
         },
       );
     }, RUNNING_POLL_MS);
@@ -139,7 +155,7 @@ export function WorkflowStep({
       live = false;
       stopPolling();
     };
-  }, [client, company, progress?.kind]);
+  }, [client, company, shouldPoll]);
 
   const label = (run: WorkflowRunOutcome | undefined) =>
     (run && names.get(run.workflowId)) ?? run?.workflowId ?? "your workflow";
