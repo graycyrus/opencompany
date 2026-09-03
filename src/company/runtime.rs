@@ -2661,18 +2661,122 @@ impl CompanyRuntime {
                     .await
             }
             // An agent question with no step behind it — there is nothing to
-            // re-dispatch, so carrying the answer back into its DM is the whole
-            // of the resume. Defect B-070: and the note has to *say* that. It
-            // used to claim "picking that back up now" here, over a card it
-            // had just consumed and a question nothing was going to re-ask.
-            None => {
-                self.post_blocker_resume_note(
-                    thread,
-                    &blocker_resume_note(resolution, BlockerResumeOutcome::RecordedOnly),
-                )
-                .await
-            }
+            // re-dispatch, so carrying the answer back into its conversation is
+            // the whole of the resume. Defect B-070: and the note has to *say*
+            // that. It used to claim "picking that back up now" here, over a
+            // card it had just consumed and a question nothing was going to
+            // re-ask.
+            //
+            // Defect B-124: and then it has to actually be carried. This arm
+            // wrote the note and stopped. The answer was durable — journaled,
+            // acknowledged, visible in the queue's history — and the agent that
+            // asked never saw it, so the only thing an operator could do next
+            // was type the same words again by hand into the same conversation.
+            None => match self.deliverable_answer(resolution, thread) {
+                Some((thread, answer)) => self.deliver_blocker_answer(thread, answer).await,
+                None => {
+                    self.post_blocker_resume_note(
+                        thread,
+                        &blocker_resume_note(resolution, BlockerResumeOutcome::RecordedOnly),
+                    )
+                    .await
+                }
+            },
         }
+    }
+
+    /// The conversation and the words to carry into it, when a question raised
+    /// mid-conversation has actually been **answered** (defect B-124).
+    ///
+    /// Three conditions, all of them load-bearing:
+    ///
+    /// * The verdict is an [`Amend`](crate::ports::blockers::BlockerVerdict::Amend).
+    ///   That is the one verdict `BlockerResolution::answer` is populated for,
+    ///   and the one that means "here is what you asked for". A retry says do
+    ///   it again — but there is no step here to do again, which is why this
+    ///   arm is reached at all; a skip waives a gate this park does not have;
+    ///   and a cancel is settled before ever reaching here.
+    /// * The answer is not blank. Two independent guards already keep an empty
+    ///   console answer out of `Amend` (`arm_console_blocker_resolution` and
+    ///   `resume_task_card`); this is the third, at the one place that would
+    ///   otherwise start a turn over nothing and bill for it.
+    /// * The park recorded a conversation. Without one there is no thread to
+    ///   answer into, and inventing one is how a workflow's park came to post
+    ///   into an operator's DM as though a teammate had written to them
+    ///   unprompted (issue #1092).
+    #[cfg(feature = "openhuman")]
+    fn deliverable_answer<'a>(
+        &self,
+        resolution: &'a crate::ports::blockers::BlockerResolution,
+        thread: Option<&'a str>,
+    ) -> Option<(&'a str, &'a str)> {
+        use crate::ports::blockers::BlockerVerdict;
+        if resolution.verdict != BlockerVerdict::Amend {
+            return None;
+        }
+        let answer = resolution.answer.trim();
+        if answer.is_empty() {
+            return None;
+        }
+        Some((thread?, answer))
+    }
+
+    /// Delivers an operator's answer to a question an agent raised
+    /// mid-conversation, by **saying it in that conversation** (defect B-124).
+    ///
+    /// # Why this and not a new mechanism
+    ///
+    /// `escalate_to_human` parks a question with no card and no node, on the
+    /// stated grounds that "carrying the answer back into its DM is the whole
+    /// of the resume". That sentence is right, and it describes something the
+    /// product already does perfectly well: an operator types into the thread
+    /// and the teammate answers. The gap was never a missing *capability* — it
+    /// was that answering from the Approvals card took a different route into
+    /// the host and that route stopped at the journal.
+    ///
+    /// So this is the same route the typed message takes: an
+    /// [`OperatorMessage`](CompanyEvent::OperatorMessage) into the recorded
+    /// thread, run through [`run_cycle`](Self::run_cycle). Everything downstream
+    /// — who answers, whether the thread is a desk or a DM, mention routing,
+    /// spend accounting, the transcript — is decided by the machinery that
+    /// already decides it, rather than by a second understanding of the same
+    /// conversation that could disagree with the first. A second mechanism here
+    /// is exactly the shape of defect B-072 and B-070: two places describing one
+    /// thing, and the one that drifts is the one nobody was reading.
+    ///
+    /// It is also why the answer needs no separate acknowledgement. The operator
+    /// sees their own words land in the thread and the teammate reply to them,
+    /// which is a stronger statement than any note the host could compose about
+    /// itself — and this whole family of defects is notes composed about work
+    /// that was not happening.
+    ///
+    /// `parent` is `None` deliberately: the blocker card is not a message, so
+    /// there is no message sequence to hang a reply off, and the park itself
+    /// records `parent: None` for the same reason.
+    ///
+    /// A failure is reported to the caller, which retires the armed answer
+    /// regardless — the durable verdict already stands, and a resume that
+    /// retried forever would re-ask on every boot.
+    #[cfg(feature = "openhuman")]
+    async fn deliver_blocker_answer(self: &Arc<Self>, thread: &str, answer: &str) -> Result<()> {
+        self.run_cycle(vec![CompanyEvent::OperatorMessage {
+            text: answer.to_string(),
+            by: Some(Actor {
+                kind: ActorKind::Operator,
+                id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+            }),
+            chat: Some(thread.to_string()),
+            parent: None,
+            deliverable: None,
+            // The operator answered a card, not a composer: there is nobody to
+            // ping and nothing attached. Both stay empty rather than being
+            // derived from the answer's text, which would turn an `@` inside a
+            // pasted value into a notification nobody wrote.
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .map(|_| ())
     }
 
     /// Re-dispatches a board card a blocker had paused, moving it back into In
@@ -10767,7 +10871,7 @@ mod tests {
         async fn an_unlinked_park_blocks_no_card() {
             let (runtime, _home) = runtime().await;
             seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
-            park_unlinked(&runtime).await;
+            let _parked = park_unlinked(&runtime).await;
             assert!(runtime.undecided_approvals_for_task("t-1").is_empty());
 
             let mut resumed = stored(&runtime, "t-1").await;
@@ -10780,7 +10884,7 @@ mod tests {
 
         /// Parks a blocker recorded as belonging to **no** card, the way a
         /// question raised mid-conversation is.
-        async fn park_unlinked(runtime: &Arc<CompanyRuntime>) {
+        async fn park_unlinked(runtime: &Arc<CompanyRuntime>) -> crate::ports::types::ApprovalId {
             use crate::ports::types::{Effect, EffectGroup};
             use crate::runtime::journal::{ApprovalConversation, TaskLink};
 
@@ -10815,6 +10919,7 @@ mod tests {
                 )
                 .await
                 .expect("journals");
+            id
         }
 
         /// The headline of the tier: an operator's "retry" moves the paused card
@@ -11295,6 +11400,87 @@ mod tests {
                     .expect("cards")
                     .is_empty(),
                 "an unlinked question must not conjure a card to re-enter"
+            );
+        }
+
+        /// Every message an operator has sent this company, with the
+        /// conversation it was addressed to.
+        async fn operator_messages(runtime: &Arc<CompanyRuntime>) -> Vec<(String, Option<String>)> {
+            runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    crate::ports::types::CompanyEvent::OperatorMessage { text, chat, .. } => {
+                        Some((text, chat))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Defect B-124: an answer to a question raised mid-conversation is
+        /// carried into that conversation, so the agent that asked receives it.
+        ///
+        /// The park site says carrying the answer back into the DM "is the whole
+        /// of the resume". It was never carried. The answer was durable —
+        /// journaled, acknowledged, in the queue's history — and the only way to
+        /// act on it was for the operator to type the same words again by hand,
+        /// into the same conversation, from memory.
+        #[tokio::test]
+        async fn an_answered_chat_question_is_carried_into_its_conversation() {
+            let (runtime, _home) = runtime().await;
+            // Genuinely `Unlinked`, which `park_blocker(.., "", ..)` is not:
+            // `TaskLink::from_task_id(Some(""))` is a link to the empty card id,
+            // and the resume then routes down the card arm.
+            let id = park_unlinked(&runtime).await;
+
+            runtime
+                .apply_blocker_reply(
+                    &[id],
+                    BlockerReplyIntent::Amend,
+                    "the 14th, not the 7th",
+                    None,
+                )
+                .await
+                .expect("resumes");
+
+            let sent = operator_messages(&runtime).await;
+            assert!(
+                sent.iter()
+                    .any(|(text, chat)| text.contains("the 14th, not the 7th")
+                        && chat.as_deref() == Some("dm:eng")),
+                "the answer reaches the conversation the question was asked in: {sent:?}",
+            );
+        }
+
+        /// A verdict that carries no answer delivers nothing.
+        ///
+        /// A retry says "do it again", and this arm is reached precisely because
+        /// there is nothing to do again — so starting a turn over it would spend
+        /// a model call to say nothing. The operator gets the note instead.
+        #[tokio::test]
+        async fn a_wordless_verdict_on_a_chat_question_starts_no_turn() {
+            let (runtime, _home) = runtime().await;
+            let id = park_unlinked(&runtime).await;
+
+            runtime
+                .apply_blocker_reply(&[id], BlockerReplyIntent::Retry, "retry", None)
+                .await
+                .expect("resumes");
+
+            assert!(
+                operator_messages(&runtime)
+                    .await
+                    .iter()
+                    .all(|(_, chat)| chat.as_deref() != Some("dm:eng")),
+                "nothing was said into the conversation on the operator's behalf",
             );
         }
 
