@@ -523,8 +523,110 @@ pub fn extract_at_names(text: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// An `@name` that named **more than one** thing and therefore named nobody
+/// (B-101).
+///
+/// The refusal is right — see the module docs, never guess a ping — but until
+/// this existed it was communicated only by the *absence* of a chip. An absence
+/// is invisible in a wall of text and completely invisible to anyone posting
+/// over the API, so the sender's ping reached no one and nothing said so; the
+/// channel's catch-all answered instead and spoke about the person in the third
+/// person. Reporting the refusal is what turns a silent negative into something
+/// a sender can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousMention {
+    /// The literal span, exactly as typed — `"@Priya"`, `@` included.
+    pub text: String,
+    /// Byte offset of the `@` in the body the scan was given, on the same terms
+    /// as [`Mention::offset`].
+    pub offset: usize,
+    /// The two claimants whose collision refused the span, in the order the
+    /// scan met them.
+    ///
+    /// Two, not all of them: the scan short-circuits on the first collision,
+    /// because by then the answer is already "nobody" and reading on would
+    /// change nothing. A name claimed by three things reports the first two —
+    /// enough to say what happened, and it keeps this report strictly additive
+    /// to which spans resolve.
+    pub targets: Vec<MentionTarget>,
+}
+
+/// One pass of [`scan`]: what resolved, and what was refused for being
+/// ambiguous.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Extraction {
+    /// One [`Mention`] per `@` that named exactly one thing.
+    pub mentions: Vec<Mention>,
+    /// One [`AmbiguousMention`] per `@` that named several. Empty in the
+    /// overwhelmingly common case, which is why it costs callers nothing to
+    /// ignore it — and why nothing did, for as long as it did not exist.
+    pub ambiguous: Vec<AmbiguousMention>,
+}
+
+/// What a mention target is, in one noun phrase a sender will recognise.
+///
+/// A kind, not an identity. Naming the two colliding rows would need their
+/// display labels, and the whole reason the span was refused is that those
+/// labels are **the same string** — "Priya and Priya" tells a sender nothing.
+/// What actually resolves their confusion is that one is a teammate and one is
+/// a person, which is also exactly what the picker shows on its two rows.
+fn target_noun(target: &MentionTarget) -> &'static str {
+    match target {
+        MentionTarget::Agent { .. } => "a teammate",
+        MentionTarget::User { .. } => "a person",
+        MentionTarget::Desk { .. } => "a desk",
+        MentionTarget::Everyone => "the whole channel",
+    }
+}
+
+/// The line posted back into a conversation when an `@name` reached more than
+/// one thing and therefore reached nobody (B-101).
+///
+/// It has to carry three things, because the sender can act on all three: the
+/// literal they typed, what it collided with, and the one move that fixes it.
+/// "Never guess a ping" is the right rule and this does not soften it — the
+/// message still pinged nobody. It only stops that being something the sender
+/// has to deduce from a chip that never appeared.
+///
+/// Returns `None` for an empty list, so the caller posts nothing rather than an
+/// empty line — which is every message ever sent, bar these.
+pub fn ambiguity_note(refused: &[AmbiguousMention]) -> Option<String> {
+    let (first, rest) = refused.split_first()?;
+    let names = |a: &AmbiguousMention| a.text.clone();
+    let head = if rest.is_empty() {
+        let mut nouns = first.targets.iter().map(target_noun);
+        match (nouns.next(), nouns.next()) {
+            (Some(one), Some(two)) if one == two => {
+                format!("{} matches two of these here", names(first))
+            }
+            (Some(one), Some(two)) => format!("{} matches {one} and {two} here", names(first)),
+            // Unreachable by construction — a collision has two claimants — and
+            // still worded rather than panicked, because a sentence nobody sees
+            // is cheaper than an `unwrap` somebody eventually does.
+            _ => format!("{} matches more than one thing here", names(first)),
+        }
+    } else {
+        let all: Vec<String> = refused.iter().map(names).collect();
+        format!("{} each match more than one thing here", all.join(", "))
+    };
+    let subject = if rest.is_empty() { "it" } else { "they" };
+    Some(format!(
+        "{head}, so {subject} pinged nobody. Pick the one you mean from the @ list and send again — \
+         a name that reaches two people is never guessed at."
+    ))
+}
+
 /// Resolve `text` against `dir`, returning one [`Mention`] per `@` that names
 /// exactly one thing.
+///
+/// [`scan`] with the refusals dropped. Kept because most callers only route,
+/// and routing has nothing to do with a span that reached nobody.
+pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
+    scan(text, dir).mentions
+}
+
+/// Resolve `text` against `dir`, reporting both what each `@` named and what it
+/// refused to name.
 ///
 /// # Longest alias wins
 ///
@@ -532,17 +634,19 @@ pub fn extract_at_names(text: &str) -> Vec<(usize, String)> {
 /// resolves `@Ann Lee` to Ann Lee rather than to Ann with a stray `Lee` after
 /// it. Without this the shorter name always wins, because it matches first.
 ///
-/// # An ambiguous name resolves to nothing
+/// # An ambiguous name resolves to nothing — and says so
 ///
 /// When one alias reaches two targets — two people called "Sam", a desk and a
 /// teammate sharing a name — the span is skipped entirely and stays literal
-/// text. See the module docs: never guess a ping.
+/// text. See the module docs: never guess a ping. It also lands in
+/// [`Extraction::ambiguous`], so the caller can tell the sender their ping went
+/// nowhere instead of leaving them to infer it from a missing chip (B-101).
 ///
 /// Offsets in the returned mentions index `text`, so pass the **original**
 /// body, not a stripped copy, when the offsets have to line up with what a
 /// reader sees. Callers that want code regions ignored should mask with
 /// [`strip_code_regions`] first, which preserves offsets exactly so both hold.
-pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
+pub fn scan(text: &str, dir: &[MentionAlias]) -> Extraction {
     // Longest first so a name that prefixes another cannot claim it.
     let mut by_alias: Vec<(&str, &MentionTarget)> = Vec::new();
     for entry in dir {
@@ -574,6 +678,7 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
     };
 
     let mut out: Vec<Mention> = Vec::new();
+    let mut refused: Vec<AmbiguousMention> = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
         if !opens_mention(text, bytes, i) {
@@ -590,7 +695,11 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
             (i + 1, false)
         };
         let mut matched: Option<(usize, &MentionTarget)> = None;
-        let mut ambiguous = false;
+        // The collision that refused this span, when there was one: the end
+        // offset it claimed and the two claimants (B-101). `Some` is exactly
+        // the old `ambiguous = true`, carrying what it refused so the caller
+        // can say so.
+        let mut ambiguous: Option<(usize, [MentionTarget; 2])> = None;
         for (alias, target) in &by_alias {
             if desk_only && !matches!(target, MentionTarget::Desk { .. }) {
                 continue;
@@ -617,14 +726,14 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
                 // A second target claiming a span of the same length is a real
                 // collision. A shorter one is not — longest already won.
                 Some((prev_end, prev)) if prev_end == end && prev != *target => {
-                    ambiguous = true;
+                    ambiguous = Some((end, [prev.clone(), (*target).clone()]));
                     break;
                 }
                 Some(_) => break,
             }
         }
 
-        if let (Some((end, target)), false) = (matched, ambiguous) {
+        if let (Some((end, target)), None) = (matched, &ambiguous) {
             out.push(Mention {
                 target: (*target).clone(),
                 text: text[i..end].to_string(),
@@ -634,11 +743,24 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
             i = end;
             continue;
         }
+        // Refused for ambiguity: still literal text, and now also reported, so
+        // the sender learns their ping reached nobody rather than inferring it
+        // from a chip that never appeared (B-101).
+        if let Some((end, targets)) = ambiguous {
+            refused.push(AmbiguousMention {
+                text: text[i..end].to_string(),
+                offset: i,
+                targets: targets.to_vec(),
+            });
+        }
         // Unresolved or ambiguous: leave it as text, and skip past this `@` so
         // a longer alias starting mid-word cannot re-match inside it.
         i = after;
     }
-    out
+    Extraction {
+        mentions: out,
+        ambiguous: refused,
+    }
 }
 
 /// Dedupe, drop self-mentions, and cap.
@@ -816,6 +938,9 @@ pub fn revalidate(
 /// Uses `supplied` when the caller had a picker, and falls back to extracting
 /// from the text when it did not. Either way the result is normalized, so both
 /// paths obey the cap, the dedupe, and the no-self-mention rule identically.
+///
+/// [`resolve_reporting`] with the refusals dropped — what every caller that
+/// only needs to route should use.
 pub fn resolve(
     text: &str,
     supplied: Option<Vec<Mention>>,
@@ -823,28 +948,66 @@ pub fn resolve(
     record: &CompanyRecord,
     users: &[UserRecord],
 ) -> Vec<Mention> {
-    let found = match supplied {
-        Some(supplied) if !supplied.is_empty() => revalidate(text, supplied, record, users),
+    resolve_reporting(text, supplied, sender, record, users).mentions
+}
+
+/// [`resolve`], also reporting every `@name` that reached more than one thing
+/// and therefore reached nobody (B-101).
+///
+/// **Only the extraction path can report anything**, and that is the point: a
+/// caller with a picker has already disambiguated — the picker offers the two
+/// colliding rows separately and the click says which was meant — so a
+/// `supplied` list carries no ambiguity to report. The free-typed path is the
+/// one where a name matching two people silently reaches neither, which is
+/// exactly how people write.
+pub fn resolve_reporting(
+    text: &str,
+    supplied: Option<Vec<Mention>>,
+    sender: Option<&Actor>,
+    record: &CompanyRecord,
+    users: &[UserRecord],
+) -> Extraction {
+    let (found, ambiguous) = match supplied {
+        Some(supplied) if !supplied.is_empty() => {
+            (revalidate(text, supplied, record, users), Vec::new())
+        }
         // An explicitly empty list is still an answer — a console that ran its
         // picker and found nothing must not have the host guess on its behalf.
-        Some(_) => Vec::new(),
+        Some(_) => (Vec::new(), Vec::new()),
         None => {
             let masked = strip_code_regions(text);
-            extract_with_known(&masked, &directory(record, users))
-                .into_iter()
-                .map(|mut m| {
-                    // Offsets are preserved by the mask, so re-read the span
-                    // from the real body — the masked copy has spaces where a
-                    // code region was.
-                    if let Some(real) = text.get(m.offset..m.offset + m.text.len()) {
-                        m.text = real.to_string();
-                    }
-                    m
-                })
-                .collect()
+            let scanned = scan(&masked, &directory(record, users));
+            // Offsets are preserved by the mask, so re-read each span from the
+            // real body — the masked copy has spaces where a code region was.
+            let real_span = |offset: usize, len: usize, fallback: String| {
+                text.get(offset..offset + len)
+                    .map(str::to_string)
+                    .unwrap_or(fallback)
+            };
+            (
+                scanned
+                    .mentions
+                    .into_iter()
+                    .map(|mut m| {
+                        m.text = real_span(m.offset, m.text.len(), m.text);
+                        m
+                    })
+                    .collect(),
+                scanned
+                    .ambiguous
+                    .into_iter()
+                    .map(|mut a| {
+                        a.text = real_span(a.offset, a.text.len(), a.text);
+                        a
+                    })
+                    .collect(),
+            )
         }
     };
-    normalize(found, sender)
+    Extraction {
+        mentions: normalize(found, sender),
+        ambiguous,
+    }
 }
 
 /// The teammate an operator message addresses by name, or `None` to fall
@@ -1288,6 +1451,102 @@ members = ["engineer", "ceo"]
             found.is_empty(),
             "two people share this name, so it must stay literal text: {found:?}"
         );
+    }
+
+    /// …and says so (B-101).
+    ///
+    /// The refusal above is right and stays. What was missing is that it was
+    /// announced only by the absence of a chip — invisible in a wall of text,
+    /// and for an API poster, who renders no chips at all, not a signal in any
+    /// sense. A founder's `@Priya` reached neither the teammate nor the person
+    /// of that name and nothing told them; the channel catch-all answered and
+    /// spoke about her in the third person.
+    #[test]
+    fn an_ambiguous_name_is_reported_with_what_it_collided_with() {
+        // The reported shape exactly: a roster teammate and a human member who
+        // share one spelling.
+        let record = record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"priya\"\nrole = \"Merchandiser\"\n",
+        );
+        let users = vec![user("u1", "priya@acme.test", Some("Priya"))];
+        let found = resolve_reporting(
+            "@Priya which scent sold best last month?",
+            None,
+            None,
+            &record,
+            &users,
+        );
+
+        assert!(found.mentions.is_empty(), "still pings nobody");
+        assert_eq!(found.ambiguous.len(), 1, "and the refusal is reported once");
+        let refused = &found.ambiguous[0];
+        assert_eq!(refused.text, "@Priya", "the literal the sender typed");
+        assert_eq!(refused.offset, 0);
+        assert_eq!(
+            refused.targets,
+            vec![
+                MentionTarget::Agent {
+                    id: "priya".to_string()
+                },
+                MentionTarget::User {
+                    id: "u1".to_string()
+                },
+            ],
+            "both claimants, so the note can say what the collision was"
+        );
+
+        let note = ambiguity_note(&found.ambiguous).expect("a refusal produces a note");
+        assert!(note.contains("@Priya"), "names the literal: {note}");
+        assert!(note.contains("a teammate"), "names the kinds: {note}");
+        assert!(note.contains("a person"), "names the kinds: {note}");
+        assert!(
+            note.contains("pinged nobody"),
+            "states the consequence: {note}"
+        );
+    }
+
+    /// The negative half. Nothing is reported for a message whose names all
+    /// resolve, or for one that names nobody at all — otherwise the notice
+    /// would fire on every message and be worth nothing.
+    #[test]
+    fn an_unambiguous_message_reports_no_refusal() {
+        for body in [
+            "hey @engineer, can you look?",
+            "no names in this one at all",
+        ] {
+            let found = resolve_reporting(body, None, None, &acme(), &people());
+            assert!(
+                found.ambiguous.is_empty(),
+                "{body:?} refused nothing: {:?}",
+                found.ambiguous
+            );
+        }
+        assert_eq!(ambiguity_note(&[]), None, "and an empty list posts nothing");
+    }
+
+    /// A caller that ran a picker has already disambiguated — its two rows are
+    /// the two colliding targets, and the click said which. Reporting a
+    /// collision there would tell the console it failed at the one thing it
+    /// definitely did.
+    #[test]
+    fn a_picker_answer_reports_no_ambiguity() {
+        let record = record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"priya\"\nrole = \"Merchandiser\"\n",
+        );
+        let users = vec![user("u1", "priya@acme.test", Some("Priya"))];
+        let supplied = vec![Mention {
+            target: MentionTarget::User {
+                id: "u1".to_string(),
+            },
+            text: "@Priya".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let found = resolve_reporting("@Priya which scent?", Some(supplied), None, &record, &users);
+        assert!(found.ambiguous.is_empty());
+        assert_eq!(found.mentions.len(), 1, "the pick still resolves");
     }
 
     #[test]

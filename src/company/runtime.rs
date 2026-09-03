@@ -5850,6 +5850,59 @@ impl CompanyRuntime {
         Ok(())
     }
 
+    /// Says, in the conversation itself, that an `@name` reached more than one
+    /// thing and therefore reached nobody (B-101).
+    ///
+    /// Attributed to [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR), which the
+    /// console renders as a centred system pill rather than as a teammate
+    /// speaking — the runtime is reporting its own refusal, and putting a
+    /// roster face on that would be a small lie about who decided.
+    ///
+    /// **Journaled, not returned in the POST response.** The response reaches
+    /// only the sender's own request, and this has to survive a reload and be
+    /// readable by anyone who later reads the channel — including the person
+    /// wondering why a reply is talking about them in the third person. It is
+    /// also what makes the notice reach an API poster, who never renders a chip
+    /// and for whom the old signal (a missing chip) did not exist at all.
+    ///
+    /// Never fatal: a message whose advisory line could not be appended is still
+    /// a delivered message, so a failure is logged and swallowed on exactly the
+    /// terms `resolve_mentions` already refuses to fail a send.
+    pub async fn post_mention_ambiguity_note(
+        &self,
+        desk: &str,
+        refused: &[crate::runtime::mentions::AmbiguousMention],
+    ) {
+        let Some(text) = crate::runtime::mentions::ambiguity_note(refused) else {
+            return;
+        };
+        if let Err(err) = self
+            .events
+            .append(
+                &self.id,
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    chat_id: desk.to_string(),
+                    agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                    text,
+                    steps: Vec::new(),
+                    task_id: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                company = %self.id,
+                desk = %desk,
+                error = %err,
+                "[mentions] an ambiguous @name could not be reported in the channel; the ping \
+                 still reached nobody and now nothing says so"
+            );
+        }
+    }
+
     /// Captures a feedback item: persists it to the feedback family and logs a
     /// `FeedbackFiled` event. Nothing is filed — capture is always safe and
     /// local. Used by the built-in `feedback` tool and operator-chat intent.
@@ -6040,6 +6093,29 @@ impl CompanyRuntime {
         supplied: Option<Vec<Mention>>,
         sender: Option<&Actor>,
     ) -> Vec<Mention> {
+        self.resolve_mentions_reporting(text, supplied, sender)
+            .await
+            .mentions
+    }
+
+    /// [`resolve_mentions`](Self::resolve_mentions), also reporting every
+    /// `@name` that matched more than one thing and therefore matched nobody
+    /// (B-101).
+    ///
+    /// The refusal itself is correct and long-standing — see
+    /// [`crate::runtime::mentions`], never guess a ping — but it used to be
+    /// announced only by the *absence* of a chip. An absence is not a signal: it
+    /// is invisible in a wall of text and completely invisible over the API, so
+    /// a founder's `@Priya` reached neither the teammate nor the person of that
+    /// name, the channel's catch-all answered, and the reply talked about her in
+    /// the third person. Whoever refuses has to be the one who says so, which is
+    /// why this is here and not a second guess in the console.
+    pub async fn resolve_mentions_reporting(
+        &self,
+        text: &str,
+        supplied: Option<Vec<Mention>>,
+        sender: Option<&Actor>,
+    ) -> crate::runtime::mentions::Extraction {
         // Issue: on the operator-message path this runs BEFORE the journal
         // append (`mention_responder` reads the resolved mentions off the
         // journaled event, so the append cannot go first), which puts these
@@ -6051,7 +6127,7 @@ impl CompanyRuntime {
             tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
         let record = match record {
             Ok(Some(record)) => record,
-            Ok(None) => return Vec::new(),
+            Ok(None) => return Default::default(),
             Err(err) => {
                 tracing::warn!(
                     company = %self.id,
@@ -6059,7 +6135,7 @@ impl CompanyRuntime {
                     "[mentions] the company record could not be read; this message is \
                      journaled with no mentions"
                 );
-                return Vec::new();
+                return Default::default();
             }
         };
         let mut users = user_list.unwrap_or_else(|err| {
@@ -6081,7 +6157,7 @@ impl CompanyRuntime {
         // otherwise resolve `@sam-2` to a different person than the one the
         // picker showed under that label.
         users.sort_by(|a, b| a.id.cmp(&b.id));
-        crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
+        crate::runtime::mentions::resolve_reporting(text, supplied, sender, &record, &users)
     }
 
     /// A status snapshot, loading the company record for name and lifecycle.
@@ -9562,6 +9638,114 @@ mod tests {
             "a wholly refused blocked node starts no continuation, so its checkpoint lineage \
              must be pruned: {remaining:?}"
         );
+    }
+
+    /// B-101: an `@name` that reaches two things reaches nobody — and the
+    /// conversation is told so, in the conversation.
+    mod ambiguous_mentions {
+        use crate::company::runtime::CompanyRuntime;
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        /// A company where one spelling reaches two different things: a roster
+        /// teammate `writer` and a desk `writer`. The reported case was a
+        /// teammate and a *person* sharing a name, which `mentions.rs` covers
+        /// directly; the collision is the same one and this needs no user store
+        /// to set up.
+        async fn runtime() -> (Arc<CompanyRuntime>, TempDir) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-ambiguous-mentions-")
+                .tempdir()
+                .expect("tempdir");
+            let manifest: crate::company::CompanyManifest = toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\
+                 [[group_chat]]\nid = \"writer\"\nname = \"Writer desk\"\nmembers = [\"writer\"]\n",
+            )
+            .expect("manifest");
+            let runtime = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                    .with_id(CompanyId::new("acme"))
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            (runtime, home)
+        }
+
+        /// Every `AgentReply` journaled so far, as `(agent, chat, text)`.
+        async fn replies(runtime: &Arc<CompanyRuntime>) -> Vec<(String, String, String)> {
+            runtime
+                .events
+                .read_from(runtime.id(), EventSeq::new(0), 500)
+                .await
+                .expect("events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    CompanyEvent::AgentReply {
+                        agent_id,
+                        chat_id,
+                        text,
+                        ..
+                    } => Some((agent_id, chat_id, text)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The signal the founder never got: a positive line in the channel
+        /// saying the ping matched two things and reached neither. It is
+        /// attributed to the runtime itself, not to a teammate — the console
+        /// renders `SYSTEM_AUTHOR` as a centred system pill, and putting a
+        /// roster face on the runtime's own refusal would misstate who decided.
+        #[tokio::test]
+        async fn an_ambiguous_name_is_reported_in_the_channel_it_was_sent_to() {
+            let (runtime, _home) = runtime().await;
+            let resolved = runtime
+                .resolve_mentions_reporting("@writer can you draft the autumn brief?", None, None)
+                .await;
+            assert!(
+                resolved.mentions.is_empty(),
+                "the ping is still refused: {:?}",
+                resolved.mentions
+            );
+            assert_eq!(resolved.ambiguous.len(), 1, "and reported once");
+
+            runtime
+                .post_mention_ambiguity_note("main", &resolved.ambiguous)
+                .await;
+
+            let posted = replies(&runtime).await;
+            assert_eq!(posted.len(), 1, "exactly one line: {posted:?}");
+            let (agent, chat, text) = &posted[0];
+            assert_eq!(agent, crate::ports::SYSTEM_AUTHOR);
+            assert_eq!(chat, "main", "into the conversation it was sent to");
+            assert!(text.contains("@writer"), "names the literal typed: {text}");
+            assert!(
+                text.contains("pinged nobody"),
+                "states what happened: {text}"
+            );
+        }
+
+        /// The negative half, and the one that keeps the notice worth reading: a
+        /// message whose names all resolve says nothing at all.
+        #[tokio::test]
+        async fn an_unambiguous_message_posts_nothing() {
+            let (runtime, _home) = runtime().await;
+            let resolved = runtime
+                .resolve_mentions_reporting("@ceo can you take a look?", None, None)
+                .await;
+            assert_eq!(resolved.mentions.len(), 1, "the ping resolves");
+            runtime
+                .post_mention_ambiguity_note("main", &resolved.ambiguous)
+                .await;
+            assert!(
+                replies(&runtime).await.is_empty(),
+                "nothing is posted for a message that named somebody"
+            );
+        }
     }
 
     /// Blocker DMs + reply attribution (issue #1862): a parked blocker surfaces
