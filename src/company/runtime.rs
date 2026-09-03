@@ -5649,22 +5649,34 @@ impl CompanyRuntime {
     }
 
     /// The full group a single parked blocker belongs to — its root-cause
-    /// siblings, or itself alone when it carries no group key.
+    /// siblings, or itself alone when nothing folds with it.
+    ///
+    /// Folded by [`blocker_fold_key`], the same rule
+    /// [`pending_blocker_groups`](Self::pending_blocker_groups) uses, so a
+    /// verdict given by naming the card and a verdict given in the
+    /// conversation reach the same set. They used to differ: this asked only
+    /// for the payload's `group_key`, so a follow-up reminder about a card was
+    /// settled without the card it reminded you of.
     #[cfg(feature = "openhuman")]
     fn blocker_group_of(&self, id: &ApprovalId) -> Vec<ApprovalId> {
-        match self
-            .journal
-            .pending()
-            .into_iter()
+        let pending = self.journal.pending();
+        let Some(key) = pending
+            .iter()
             .find(|p| &p.id == id)
-            .and_then(|p| blocker_group_key_of(&p.effect))
-        {
-            Some(key) => self.blocker_group_members(&key),
-            None => vec![id.clone()],
-        }
+            .and_then(blocker_fold_key)
+        else {
+            return vec![id.clone()];
+        };
+        pending
+            .iter()
+            .filter(|p| blocker_fold_key(p).as_deref() == Some(key.as_str()))
+            .map(|p| p.id.clone())
+            .collect()
     }
-    /// The parked blockers pending in one DM, folded into root-cause groups
-    /// (issue #1862). Oldest-first, the order `pending` already returns.
+
+    /// The parked blockers pending in one conversation, folded into the
+    /// questions an operator actually has to answer (issue #1862).
+    /// Oldest-first, the order `pending` already returns.
     #[cfg(feature = "openhuman")]
     fn pending_blocker_groups(&self, desk: &str) -> Vec<PendingBlockerGroup> {
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
@@ -5685,21 +5697,15 @@ impl CompanyRuntime {
             ) else {
                 continue;
             };
-            let label: String = payload
-                .reason
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(80)
-                .collect();
-            match &payload.group_key {
+            let label = blocker_label(&payload.reason);
+            match blocker_fold_key(&p) {
                 Some(key) => {
-                    if let Some(group) = groups.iter_mut().find(|g| g.key.as_deref() == Some(key)) {
+                    if let Some(group) = groups.iter_mut().find(|g| g.key.as_deref() == Some(&key))
+                    {
                         group.ids.push(p.id);
                     } else {
                         groups.push(PendingBlockerGroup {
-                            key: Some(key.clone()),
+                            key: Some(key),
                             ids: vec![p.id],
                             label,
                         });
@@ -5854,13 +5860,18 @@ impl CompanyRuntime {
             });
         }
         let lower = text.to_lowercase();
-        let mut named = groups.iter().filter(|group| {
+        // Two ways to name one: the connection it is about, and the position
+        // the prompt printed beside it (defect B-111). The second is what makes
+        // the prompt answerable at all — a park with no `connection:` key had
+        // no name the operator could type.
+        let mut named = groups.iter().enumerate().filter(|(i, group)| {
             group
                 .connection_hint()
                 .is_some_and(|hint| lower.contains(hint))
+                || names_option(&lower, i + 1)
         });
         match (named.next(), named.next()) {
-            (Some(group), None) => Ok(BlockerReplyPlan::Resolve {
+            (Some((_, group)), None) => Ok(BlockerReplyPlan::Resolve {
                 ids: group.ids.clone(),
                 intent,
             }),
@@ -6497,6 +6508,7 @@ fn blocker_group_key_of(effect: &crate::ports::types::Effect) -> Option<String> 
 /// #1862): the approvals that share a cause, plus a one-line label for the
 /// ask-which prompt.
 #[cfg(feature = "openhuman")]
+#[derive(Debug)]
 struct PendingBlockerGroup {
     /// The shared `group_key`, or `None` for a lone ungrouped blocker.
     key: Option<String>,
@@ -6514,8 +6526,9 @@ impl PendingBlockerGroup {
     /// from its own card.
     fn connection_hint(&self) -> Option<&str> {
         self.key
-            .as_deref()
-            .and_then(|k| k.strip_prefix("connection:"))
+            .as_deref()?
+            .strip_prefix(BLOCKER_CAUSE_KEY)?
+            .strip_prefix("connection:")
     }
 }
 
@@ -6627,9 +6640,124 @@ fn blocker_resume_note(
     format!("{acknowledgement}{}", outcome.consequence())
 }
 
-/// The line asked back when a DM holds several distinct blocked things and the
-/// reply did not name one (issue #1862). Says what is blocked and asks which —
-/// and deliberately does not promise that answering resumes anything (#1863).
+/// What makes two parked blockers **one question** to the person answering
+/// (defect B-111).
+///
+/// Two rungs, and the second one is the fix:
+///
+/// 1. The payload's own `group_key` — ten cards stalled on one broken OAuth
+///    grant are one question, which is what issue #1862 built it for.
+/// 2. **The card they were parked for.** A teammate who parks a question and
+///    then parks "this is a follow-up reminder on my parked quote card" has
+///    asked one thing twice. Nothing folded those, so the disambiguation prompt
+///    offered the operator two options that *were the same question* and asked
+///    which one they meant — a question with no true answer, on top of a queue
+///    that already counted the work twice.
+///
+/// A park with neither is on its own, which is right: a question raised
+/// mid-conversation with no card behind it shares nothing with anything.
+///
+/// The prefixes keep the two spaces apart, so a company that names a connection
+/// after a card id cannot merge them.
+#[cfg(feature = "openhuman")]
+fn blocker_fold_key(parked: &crate::runtime::journal::PendingApproval) -> Option<String> {
+    if !crate::ports::blockers::is_blocker_effect(&parked.effect) {
+        return None;
+    }
+    if let Some(key) = blocker_group_key_of(&parked.effect) {
+        return Some(format!("{BLOCKER_CAUSE_KEY}{key}"));
+    }
+    parked
+        .task
+        .as_ref()
+        .and_then(|link| link.task_id())
+        .map(|id| format!("{BLOCKER_CARD_KEY}{id}"))
+}
+
+/// The [`blocker_fold_key`] prefix for a shared root cause — the payload's own
+/// `group_key`, which is itself namespaced (`connection:<name>`).
+#[cfg(feature = "openhuman")]
+const BLOCKER_CAUSE_KEY: &str = "cause:";
+
+/// The [`blocker_fold_key`] prefix for "these were parked for the same card".
+#[cfg(feature = "openhuman")]
+const BLOCKER_CARD_KEY: &str = "card:";
+
+/// How much of a blocker's reason the disambiguation prompt shows, in
+/// characters.
+///
+/// 80 was the old cap and it was too short to tell two questions apart: both
+/// options in the reported case were cut inside the sentence that would have
+/// distinguished them ("…what the 500 r", "…I still need the scope bef").
+#[cfg(feature = "openhuman")]
+const BLOCKER_LABEL_CHARS: usize = 160;
+
+/// A blocker's first line, cut to something a person can read back (defect
+/// B-111).
+///
+/// Cut on a **word boundary** and marked with an ellipsis. The old cut was
+/// `chars().take(80)`, which stopped mid-word; the prompt then asked the
+/// operator to "reply naming it" while showing them a fragment that named
+/// nothing and ended in the middle of the word that would have.
+#[cfg(feature = "openhuman")]
+fn blocker_label(reason: &str) -> String {
+    let line = reason.lines().next().unwrap_or_default().trim();
+    if line.chars().count() <= BLOCKER_LABEL_CHARS {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(BLOCKER_LABEL_CHARS).collect();
+    let kept = match cut.rfind(char::is_whitespace) {
+        // Never cut back to nothing: one very long word keeps its hard cut.
+        Some(at) if at >= BLOCKER_LABEL_CHARS / 2 => &cut[..at],
+        _ => cut.as_str(),
+    };
+    format!(
+        "{}…",
+        kept.trim_end_matches([',', ';', ':', '-', '—']).trim()
+    )
+}
+
+/// Whether `lower` names option `position` of the ask-which list by its number
+/// (defect B-111).
+///
+/// The prompt lists the options `1.`, `2.`, … and then asks the operator to
+/// name one. Until this existed the only thing that could be named was a
+/// **connection** — a park with no `connection:` group key was, by the
+/// disambiguation's own doc, answerable "only from its own card" — so an
+/// operator who did exactly what the prompt asked, including quoting an
+/// option's visible text back verbatim, got the identical prompt again. The
+/// list's own numbering is the one label the prompt guarantees is there.
+///
+/// Digits and ordinal words only. The cardinals are deliberately absent: "one"
+/// and "two" are ordinary words in an ordinary sentence ("one of the four
+/// scents"), and reading those as a selection is how a guess gets made.
+/// Whole-token matched on the same tokenization [`mentions_any`] uses, so `500`
+/// is not a `5`.
+///
+/// [`mentions_any`]: crate::company::task_intent
+#[cfg(feature = "openhuman")]
+fn names_option(lower: &str, position: usize) -> bool {
+    const ORDINALS: [&str; 9] = [
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+    ];
+    let Some(ordinal) = ORDINALS.get(position.wrapping_sub(1)) else {
+        return false;
+    };
+    let digit = position.to_string();
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|token| token == digit || token == *ordinal)
+}
+
+/// The line asked back when a conversation holds several distinct blocked
+/// things and the reply did not name one (issue #1862). Says what is blocked
+/// and asks which — and deliberately does not promise that answering resumes
+/// anything (#1863).
+///
+/// It now asks for the **number**, because the number is the only handle the
+/// prompt itself supplies (defect B-111). "Reply naming it" was an instruction
+/// the product could not honour: nothing but a connection name was matchable,
+/// so quoting an option back verbatim reproduced the prompt unchanged.
 #[cfg(feature = "openhuman")]
 fn ask_which_prompt(groups: &[PendingBlockerGroup]) -> String {
     let items = groups
@@ -6638,8 +6766,9 @@ fn ask_which_prompt(groups: &[PendingBlockerGroup]) -> String {
         .map(|(i, group)| format!("{}. {}", i + 1, group.label))
         .collect::<Vec<_>>()
         .join("\n");
+    let last = groups.len();
     format!(
-        "A few different things are blocked in this chat. Which one do you mean?\n{items}\n\nReply naming it and what you'd like done."
+        "A few different things are blocked in this chat. Which one do you mean?\n{items}\n\nReply with its number — 1 to {last} — and what you'd like done."
     )
 }
 
@@ -6822,6 +6951,73 @@ mod tests {
                     "Okay — cancelled.",
                 );
             }
+        }
+    }
+
+    /// Defect B-111: the disambiguation prompt has to be readable and
+    /// answerable, or it is a dead end with the queue's own words in it.
+    #[cfg(feature = "openhuman")]
+    mod ask_which {
+        use super::super::{BLOCKER_LABEL_CHARS, blocker_label, names_option};
+
+        /// The two options in the report were both cut inside the sentence
+        /// that would have told them apart — "…what the 500 r", "…I still need
+        /// the scope bef". A fragment ending mid-word names nothing.
+        #[test]
+        fn a_long_reason_is_cut_on_a_word_boundary_and_marked() {
+            let reason = "Before I source a quote for the autumn run of 500 I need to know what \
+                          the 500 refers to, and whether the jar, the lid and the label are all \
+                          in scope or only the jar itself, because the four scents share a lid";
+            let label = blocker_label(reason);
+            assert!(label.ends_with('…'), "a cut is marked as one: {label}");
+            let body = label.trim_end_matches('…');
+            assert!(
+                !body.ends_with(char::is_alphanumeric)
+                    || reason.starts_with(body) && reason[body.len()..].starts_with(' '),
+                "the cut lands between words, not inside one: {label}",
+            );
+            assert!(
+                body.chars().count() <= BLOCKER_LABEL_CHARS,
+                "and still bounded: {label}",
+            );
+        }
+
+        /// A reason that fits is shown whole, ellipsis and all left off.
+        #[test]
+        fn a_short_reason_is_shown_whole() {
+            assert_eq!(
+                blocker_label("Which launch date should I write to?"),
+                "Which launch date should I write to?",
+            );
+        }
+
+        /// Only the first line — a blocker's reason carries the agent's own
+        /// context underneath it.
+        #[test]
+        fn only_the_first_line_is_the_label() {
+            assert_eq!(
+                blocker_label("Which launch date?\n\nWhat eng already has: the January doc"),
+                "Which launch date?",
+            );
+        }
+
+        /// The number and the ordinal name an option. The cardinals do not:
+        /// "one of the four scents" is a sentence, not a selection.
+        #[test]
+        fn a_position_is_named_by_its_digit_or_its_ordinal() {
+            assert!(names_option("1 - retry that", 1));
+            assert!(names_option("the first one, retry", 1));
+            assert!(names_option("do the second one", 2));
+
+            assert!(
+                !names_option("one of the four scents is different", 1),
+                "a cardinal in ordinary prose is not a selection",
+            );
+            assert!(
+                !names_option("500 candles worth", 5),
+                "a digit inside a number is not that number",
+            );
+            assert!(!names_option("the first one, retry", 2));
         }
     }
 
@@ -10088,6 +10284,89 @@ mod tests {
                 .await
                 .expect("journals");
             id
+        }
+
+        /// Defect B-111: a card's follow-up reminder is not a second question.
+        ///
+        /// A teammate parked a question, the board's Resume re-ran the turn,
+        /// and he parked again — "this is a follow-up reminder on my parked
+        /// quote card". The queue then held two cards that were the same
+        /// question, and the disambiguation prompt offered them as two options
+        /// and asked which one the operator meant. There was no true answer:
+        /// both options *were* the same thing.
+        #[tokio::test]
+        async fn two_parks_for_one_card_are_one_question() {
+            let (runtime, _home) = runtime().await;
+            let first = park_into(&runtime, "dm:eng", "t-1").await;
+            let second = park_into(&runtime, "dm:eng", "t-1").await;
+
+            let groups = runtime.pending_blocker_groups("dm:eng");
+            assert_eq!(
+                groups.len(),
+                1,
+                "one card asking one thing twice is one question: {groups:?}",
+            );
+
+            let plan = runtime
+                .plan_blocker_reply("dm:eng", None, "500 candles worth, jar lid and label")
+                .await
+                .expect("plan");
+            match plan {
+                BlockerReplyPlan::Resolve { ids, intent } => {
+                    assert_eq!(intent, BlockerReplyIntent::Amend);
+                    assert_eq!(
+                        ids,
+                        vec![first, second],
+                        "and answering it answers the reminder with it",
+                    );
+                }
+                other => panic!("a single question resolves without asking which: {other:?}"),
+            }
+        }
+
+        /// Defect B-111: the ask-which prompt can be answered by the one label
+        /// it guarantees — the number it printed.
+        ///
+        /// Three phrasings were tried against the real prompt, including
+        /// quoting an option's visible text back verbatim, which is exactly
+        /// what "reply naming it" asks for. All three got the identical prompt
+        /// again, because nothing but a `connection:` group key was matchable.
+        #[tokio::test]
+        async fn an_option_is_named_by_the_number_the_prompt_printed() {
+            let (runtime, _home) = runtime().await;
+            let first = park_into(&runtime, "dm:eng", "t-1").await;
+            park_into(&runtime, "dm:eng", "t-2").await;
+
+            let prompt = match runtime
+                .plan_blocker_reply("dm:eng", None, "go ahead and retry")
+                .await
+                .expect("plan")
+            {
+                BlockerReplyPlan::AskWhich { prompt } => prompt,
+                other => panic!("two distinct cards ask which: {other:?}"),
+            };
+            assert!(
+                prompt.contains("Reply with its number"),
+                "the prompt asks for the handle it actually supplies: {prompt}",
+            );
+
+            let named = runtime
+                .plan_blocker_reply("dm:eng", None, "the first one - retry that")
+                .await
+                .expect("plan");
+            match named {
+                BlockerReplyPlan::Resolve { ids, .. } => assert_eq!(ids, vec![first.clone()]),
+                other => panic!("naming an option by its position resolves it: {other:?}"),
+            }
+
+            let numbered = runtime
+                .plan_blocker_reply("dm:eng", None, "1 - retry that")
+                .await
+                .expect("plan");
+            match numbered {
+                BlockerReplyPlan::Resolve { ids, .. } => assert_eq!(ids, vec![first]),
+                other => panic!("so does its digit: {other:?}"),
+            }
         }
 
         /// Defect B-113: a room is not a blocked teammate's DM.
