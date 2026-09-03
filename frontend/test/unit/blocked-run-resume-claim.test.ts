@@ -144,14 +144,27 @@ describe("the claim each split produces", () => {
 /**
  * The wording parity that makes this one answer rather than two agreeing ones.
  *
- * The Observatory's sentence is written by the host (`blocked_diagnosis`,
- * `src/workflows/caps/mod.rs`) and the run drawer's by this console; they
- * cannot literally share a string across the language boundary. What they can
- * share is the rule and the words, and this is what fails when they drift —
- * which is the whole shape of the original bug: two independently written
- * strings for one state, and nobody noticing they disagreed.
+ * The host's sentence and the run drawer's are written in different languages
+ * and cannot literally share a string. What they can share is the rule and the
+ * words, and this is what fails when they drift — which is the whole shape of
+ * the original bug: two independently written strings for one state, and
+ * nobody noticing they disagreed.
+ *
+ * Defect B-072 moved the host's half out of `blocked_diagnosis` and into
+ * `src/workflows/resume_claim.rs`, because the host turned out to compose this
+ * sentence *twice* and only one of the two branched — so a corrected panel
+ * rendered the host's uncorrected claim directly beneath it. The wording is
+ * read from its new home rather than from `caps/mod.rs`, which now calls it.
+ * That the host still has only one copy of these words is `resume_claim`'s own
+ * `both_host_composers_make_the_same_claim` to enforce; this file's job is the
+ * language boundary.
  */
 const here = dirname(fileURLToPath(import.meta.url));
+const hostWording = readFileSync(
+  resolve(here, "../../../src/workflows/resume_claim.rs"),
+  "utf8",
+);
+// The counts the branch is fed still come from `caps`, and are asserted below.
 const caps = readFileSync(
   resolve(here, "../../../src/workflows/caps/mod.rs"),
   "utf8",
@@ -163,7 +176,7 @@ function rustText(source: string): string {
 }
 
 describe("the console's claim matches the host's, phrase for phrase", () => {
-  const host = rustText(caps);
+  const host = rustText(hostWording);
 
   it("uses the host's own words for an all-gated run", () => {
     const claim = resumeClaim({ gated: 1, blockers: 0, unknown: false });
