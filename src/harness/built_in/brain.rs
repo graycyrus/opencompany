@@ -253,6 +253,10 @@ pub struct HarnessBrain {
     /// use (issue #1835). Lazy and `OnceLock` for exactly [`Self::triage`]'s
     /// reasons — it needs the company id, and once built it is immutable.
     selector: std::sync::OnceLock<crate::harness::selector::MeteredSelector>,
+    /// The card-titling pass, built on first use. Lazy and `OnceLock` for
+    /// exactly [`Self::triage`]'s reasons — it needs the company id, and once
+    /// built it is immutable.
+    titler: std::sync::OnceLock<crate::harness::title::MeteredTitler>,
     /// The company's record, **re-read from the store at the top of every
     /// cycle** (issue #707).
     ///
@@ -464,6 +468,7 @@ impl HarnessBrain {
             runs: None,
             triage: std::sync::OnceLock::new(),
             selector: std::sync::OnceLock::new(),
+            titler: std::sync::OnceLock::new(),
         }
     }
 
@@ -1091,7 +1096,7 @@ impl HarnessBrain {
                 key: card.id.clone(),
                 task_id: Some(card.id.clone()),
                 kind: InflightKind::Task,
-                title: card.title.clone(),
+                title: card.title.to_string(),
                 agent_id: responder.clone(),
                 started_at_millis: now_millis(),
                 pending_action: None,
@@ -2706,7 +2711,9 @@ impl HarnessBrain {
 
         let card = TaskRecord {
             id: generate_id(),
-            title: publish::conversation_card_title(&published),
+            title: crate::ports::tasks::TaskTitle::system(&publish::conversation_card_title(
+                &published,
+            )),
             note: Some(publish::conversation_card_note(responder, &published)),
             // Finished agent work a person has not accepted yet — the same
             // landing `column_for_settled_run(Succeeded)` gives a dispatched run.
@@ -2732,6 +2739,7 @@ impl HarnessBrain {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
@@ -3203,6 +3211,17 @@ impl HarnessBrain {
         .with_approvals(&self.deps.approval_requests)
         .with_workflow_refs(&self.deps.workflow_refs)
         .with_triage(self.triage_escalation(&record.id))
+        .with_titler(self.title_pass(&record.id))
+    }
+
+    /// The company's card-titling pass, built once.
+    fn title_pass(
+        &self,
+        company: &crate::ports::types::CompanyId,
+    ) -> &crate::harness::title::MeteredTitler {
+        self.titler.get_or_init(|| {
+            crate::harness::title::MeteredTitler::from_deps(&self.deps, company.clone())
+        })
     }
 
     /// The company's triage escalation, built once (issue #678).
@@ -3379,6 +3398,12 @@ fn settle(card: &mut TaskRecord, end: TaskRunEnd, responder: &str, body: &str) {
 
 #[async_trait]
 impl Brain for HarnessBrain {
+    /// The company's titling pass, so the card-opening paths that compile
+    /// without the harness can still name what they open.
+    fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
+        Some(self.title_pass(&self.record().id))
+    }
+
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
         // Issue #707: re-read the record before anything routes on it, so a desk
         // reorder / new desk / added desk member saved through the console
@@ -3505,7 +3530,12 @@ impl HarnessBrain {
         }
 
         let mut channel_responses = Vec::new();
-        for event in &req.events {
+        for (index, event) in req.events.iter().enumerate() {
+            // The durable log position of this event, which `CycleRequest`
+            // carries positionally alongside the events themselves. Empty for a
+            // caller that built the request without threading seqs, so the
+            // lookup answers `None` rather than assuming an index is a seq.
+            let event_seq = req.event_seqs.get(index).copied();
             match event {
                 CompanyEvent::OperatorMessage {
                     text,
@@ -3704,6 +3734,10 @@ impl HarnessBrain {
                         // unparented message carries `None` and lands on the
                         // channel-level conversation.
                         .in_thread(*parent)
+                        // This message's own line in the journal, so the chat
+                        // seed can tell it apart from a concurrently accepted
+                        // sibling by identity instead of by text.
+                        .answering(event_seq)
                         // Issue #1846 review (Codex #3864988176): the operator's
                         // own words, so a delegate's budget-pause marker re-parks
                         // with what the operator actually asked for rather than
@@ -4289,6 +4323,7 @@ impl HarnessBrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
 
     use tinyinference::message::Message;
     use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
@@ -5855,7 +5890,7 @@ members = ["engineer"]
     fn card(id: &str, assignee: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: "Ship the thing".to_string(),
+            title: TaskTitle::authored("Ship the thing"),
             note: None,
             column: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -5870,6 +5905,7 @@ members = ["engineer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -10107,7 +10143,7 @@ members = ["eng1", "eng2"]
     fn card_in_review(id: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: format!("Work item {id}"),
+            title: TaskTitle::authored(&format!("Work item {id}")),
             note: None,
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -10122,6 +10158,7 @@ members = ["eng1", "eng2"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -10944,6 +10981,38 @@ members = ["eng1", "eng2"]
                 .load(std::sync::atomic::Ordering::SeqCst),
             0,
             "a company past its hard ceiling must not pay to route"
+        );
+    }
+
+    /// The same ceiling, one pass later (codex on #2055): naming a card is a
+    /// model call with no agent behind it, exactly like a selection, so
+    /// `total_ceiling_refusal` never fires for it either.
+    ///
+    /// Without the gate in `MeteredTitler::title` the provider answers and this
+    /// returns `Some("chief")` — a tenant past its hard ceiling paying once per
+    /// card opened, forever.
+    #[tokio::test]
+    async fn an_exhausted_total_ceiling_names_a_card_without_paying_for_a_title() {
+        use crate::ports::tasks::TitleSummariser;
+
+        let dir = tempfile::tempdir().unwrap();
+        let meter = Arc::new(SpentMeter);
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: Default::default(),
+            total_budget: Some(10),
+        };
+        let (brain, _provider) =
+            brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
+        let company = brain.record().id.clone();
+
+        assert_eq!(
+            brain
+                .title_pass(&company)
+                .title("can you fix the checkout bug, it keeps dropping orders")
+                .await,
+            None,
+            "past the ceiling the card is named from the request, not by a model"
         );
     }
 

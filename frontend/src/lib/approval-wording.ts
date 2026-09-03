@@ -63,11 +63,16 @@ export function approvedByRuntimeLine(stillAwaiting: StillAwaiting, detail?: str
  *
  * `approvedLine` and `approvedByRuntimeLine` both answer "is anything still
  * owed before this moves?" — and when nothing is, they say the work is
- * starting. For a blocker parked `unlinked` that is false however few sign-offs
- * remain: there is no step to re-enter, so the answer is banked and nothing
- * runs. A founder read "Approved — carrying it out now", watched the card leave
- * the queue, and waited twenty-five minutes for work that was never going to
- * begin.
+ * starting. For the blocker `isAnswerOnlyBlocker` names that is false however
+ * few sign-offs remain: a question asked mid-conversation, with no card and no
+ * workflow run behind it, has no step to re-enter, so the answer is banked and
+ * nothing runs. A founder read "Approved — carrying it out now", watched the
+ * card leave the queue, and waited twenty-five minutes for work that was never
+ * going to begin.
+ *
+ * A blocker `unlinked` on a workflow node is not this case — it re-enters the
+ * node it stopped (issues #1863, #2005), just not through this line; see
+ * `isAnswerOnlyBlocker`'s own doc for the three-way split.
  *
  * Deliberately says what DID happen and what did not, in the host's own words
  * for the same event, so the banner here and the note that lands in the

@@ -494,12 +494,13 @@ export interface WorkflowBlockedNode {
    * gated tool call it wants authorised (issue B-013).
    *
    * The two ride the same id list and hold the node open the same way, and they
-   * promise opposite things about what deciding them does. Approving a gated
-   * call continues this run by itself — the park carries the node's turn key,
-   * so a verdict re-runs the turn. Answering a question does not: its card is
-   * parked with no continuation, on purpose, because answering a question is
-   * not the act of authorising a call. The host banks the answer and delivers
-   * it into the DM; node-level restart is still issue #1864.
+   * restart by different routes. Approving a gated call continues this run by
+   * itself — the park carries the node's turn key, so a verdict re-runs the
+   * turn. A question is parked with no continuation, on purpose, because
+   * answering it is not the act of authorising a call — the host banks the
+   * answer, delivers it into the DM, and re-dispatches the node itself from
+   * the run's own trigger input, carrying the answer onto it (issues #1863,
+   * #2005).
    *
    * Absent when zero, which is every run that parked only gated calls. A host
    * predating this field sends nothing, and `resumeClaim` treats that as "the

@@ -901,14 +901,13 @@ function DailyBudgetLine({
 
   const spent = member.spentTodayUsd ?? 0;
   const overBudget = spent >= cap;
-  const usd = formatUsd;
   return (
     <div className="space-y-0.5">
       <p
         data-testid="team-budget"
         className={cn("text-xs", overBudget ? "text-destructive" : "text-muted-foreground")}
       >
-        {usd(cap)}/day · {usd(spent)} spent today
+        {formatUsd(cap)}/day · {formatUsd(spent)} spent today
         {overBudget && " · paused until 00:00 UTC"}
       </p>
       {attribution}

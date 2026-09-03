@@ -413,6 +413,21 @@ describe("the Approvals page card", () => {
       return { ...blocker(id), task: { link: "task", id: "t-1" } };
     }
 
+    /**
+     * The same question again, but raised by a workflow node — `unlinked`
+     * like B-070's card, with no board card behind it either, but it really
+     * does re-enter the node it stopped (issues #1863, #2005). Distinguished
+     * from `unlinkedQuestion` only by `workflow_run_id`.
+     */
+    function workflowNodeQuestion(id: string): ApprovalSummary {
+      return {
+        ...blocker(id),
+        agent: null,
+        task: { link: "unlinked" },
+        workflow_run_id: "run-1",
+      };
+    }
+
     it("tells the operator nothing restarts, on a question with no card behind it", async () => {
       await renderCard(unlinkedQuestion("b1"));
       const text = container.textContent ?? "";
@@ -430,7 +445,17 @@ describe("the Approvals page card", () => {
       expect(text).not.toContain("nothing restarts on its own");
     });
 
-    it("keeps the answer box on both — the distinction is the claim, not the field", async () => {
+    it("promises the resume for a workflow node's question too, without claiming a card", async () => {
+      // A third shape: `unlinked` like B-070's card, but a run behind it
+      // (issues #1863, #2005) — neither of the other two sentences is true.
+      await renderCard(workflowNodeQuestion("b4"));
+      const text = container.textContent ?? "";
+      expect(text).toContain("re-enters the workflow step");
+      expect(text).not.toContain("nothing restarts on its own");
+      expect(text).not.toContain("the teammate picks the card up with it");
+    });
+
+    it("keeps the answer box on all three — the distinction is the claim, not the field", async () => {
       await renderCard(unlinkedQuestion("b3"));
       expect(box()).toBeTruthy();
     });
@@ -454,6 +479,11 @@ describe("the approve confirmation for an answer-only question (B-070)", () => {
     const unlinked = { kind: "blocker.information", task: { link: "unlinked" } } as const;
     const fromCard = { kind: "blocker.information", task: { link: "task", id: "t-1" } } as const;
     const gatedCall = { kind: "payment.send", task: { link: "unlinked" } } as const;
+    const workflowNode = {
+      kind: "blocker.information",
+      task: { link: "unlinked" },
+      workflow_run_id: "run-1",
+    } as const;
 
     expect(isAnswerOnlyBlocker(unlinked)).toBe(true);
     // A blocker the host says has a card behind it resumes, and must not be
@@ -462,6 +492,12 @@ describe("the approve confirmation for an answer-only question (B-070)", () => {
     // A gated tool call is not a question at all; approving it really does
     // continue the turn.
     expect(isAnswerOnlyBlocker(gatedCall)).toBe(false);
+    // A workflow node's blocker is `unlinked` too — there is no card — but it
+    // carries a `workflow_run_id`, and `resume_node_blocker` really does
+    // re-dispatch that node from the run's trigger input (issues #1863,
+    // #2005). The task link alone cannot tell this apart from the true
+    // answer-only case above; the run id is what does.
+    expect(isAnswerOnlyBlocker(workflowNode)).toBe(false);
     // A host that never sent the field is "we do not know", and guessing is
     // the failure this whole family of fixes is about.
     expect(isAnswerOnlyBlocker({ kind: "blocker.information" })).toBe(false);

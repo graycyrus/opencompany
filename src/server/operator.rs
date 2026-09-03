@@ -2244,7 +2244,12 @@ async fn run_chat(
     let not_work = message
         .deliverable
         .is_some_and(crate::ports::types::MessageIntent::is_chat);
-    if let Some(title) = (!confined && !not_work)
+    // The lexical layer answers two questions at once, and only the first is a
+    // decision: whether this message becomes a card, and — for a host with no
+    // model wired — what to call it. The second is now a fallback. Keeping it
+    // matters: the classifier returns a *tidied* title, so discarding it would
+    // make an offline company's cards worse than before rather than no better.
+    let lexical = (!confined && !not_work)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
             crate::company::task_intent::MessageTriage::Track(title) => Some(title),
@@ -2254,12 +2259,19 @@ async fn run_chat(
         .or_else(|| {
             workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
         })
-        .filter(|title| !title.trim().is_empty())
-    {
-        // Keep the full message as the note only when the title was shortened
-        // from it, so a one-line ask doesn't duplicate itself.
-        let note =
-            (title.trim_end_matches('…') != message.text.trim()).then(|| message.text.clone());
+        .filter(|title| !title.trim().is_empty());
+    if let Some(lexical) = lexical {
+        let title = crate::ports::tasks::mint_task_title(
+            message.text.trim(),
+            Some(&lexical),
+            runtime.titler(),
+        )
+        .await;
+        // The full ask, kept as the note whenever the headline is not already
+        // the whole of it — which a named title almost always is not. This is
+        // where the context, the caveats and the operator's own wording live now
+        // that the title is a name rather than an excerpt.
+        let note = (title.as_str() != message.text.trim()).then(|| message.text.clone());
         // Issue #576: the prompt box opens the card **already in Planning**, so
         // the spine epic #183 draws — prompt in, deliverable out — runs without
         // a human dragging the first step. The card is created *directly* in
@@ -2368,6 +2380,10 @@ async fn run_chat(
             // behind a chat turn, and inventing one would be a lie the board
             // then carries forever.
             origin_run_id: accepted.turn_id.clone(),
+            // The message this card was opened for. The runtime turn that
+            // follows finds the card by this and nothing else, so the headline
+            // above is free to be a name rather than an excerpt.
+            origin_message_seq: Some(accepted.message_seq),
             origin_workflow_id: None,
             bounced: None,
         };
@@ -2739,7 +2755,21 @@ async fn accept_chat_turn(
         .runs()
         .create_run(
             id,
-            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk),
+            // Which *thread* this turn is in, not just which channel. A
+            // channel holds many threads since #1890 and `chat_id` names only
+            // the channel, so without this the console cannot tell whose turn
+            // is running and suppresses the working indicator for the whole
+            // channel whenever any thread is open — hiding a turn the host is
+            // actively running.
+            //
+            // Only a threaded reply carries a root. A message sent from the
+            // channel composer is left unrooted deliberately: its turn is the
+            // channel's own, it is what the channel timeline shows, and the
+            // console has to arm its indicator optimistically at POST time —
+            // before the host has assigned this message a seq. Rooting it at
+            // its own seq would key the two legs differently and the reload
+            // leg would stop matching the arm.
+            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk).in_thread(parent),
         )
         .await
     {
@@ -3063,6 +3093,225 @@ async fn chat_and_emit(
     })))
 }
 
+/// The HTTP status written immediately after `marker` in `lower`, when one is.
+///
+/// `lower` must already be lowercased. Only a three-digit run counts, so a
+/// message that merely mentions the marker cannot produce a status.
+///
+/// Needed because our own errors read `inference returned 429 Too Many
+/// Requests: …`, and `structured_http_status` looks for a status at the start
+/// of the string, after a `(`, or behind an `http`/`status:` marker — none of
+/// which that shape offers. The status we already knew was therefore invisible
+/// to the classifier, leaving classification to whatever prose the provider
+/// happened to choose.
+fn status_after_marker(lower: &str, marker: &str) -> Option<u16> {
+    let rest = lower.split_once(marker)?.1.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() != 3 {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod turn_failure_notice_tests {
+    use super::{provider_failure_sentence, turn_failure_notice};
+
+    /// The failure that put a wall of provider JSON into company chat, verbatim
+    /// from the 1/9 round (issue #2016). None of it may reach the operator, and
+    /// what they read instead has to say whether waiting will help.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn a_rate_limit_reaches_the_operator_as_a_sentence_not_a_payload() {
+        let raw = concat!(
+            "turn for 'frontend_engineer': inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"Provider returned error","code":429,"metadata":"#,
+            r#"{"raw":"deepseek/deepseek-chat is temporarily rate-limited upstream. "#,
+            r#"Please retry shortly, or add your own key to accumulate your rate limits: "#,
+            r#"https://openrouter.ai/settings/integrations","provider_name":"DeepInfra"}}}"#,
+        );
+        let notice = turn_failure_notice(raw);
+
+        assert!(notice.contains("rate-limiting"), "{notice}");
+        for leaked in ["{", "openrouter.ai", "deepseek", "DeepInfra", "429"] {
+            assert!(
+                !notice.contains(leaked),
+                "the provider payload leaked {leaked:?} into chat: {notice}"
+            );
+        }
+    }
+
+    /// An empty inference is its own message: the harness has already retried it
+    /// by the time this is written, so leading with "try again" is wrong advice
+    /// and the cause is worth naming.
+    #[test]
+    fn an_empty_inference_says_so() {
+        let notice = turn_failure_notice(concat!(
+            "inference response carried neither choices[0].message.content nor tool_calls ",
+            "(finish_reason: failed; choices: 1; usage: in=0 out=0 total=0)"
+        ));
+
+        assert!(notice.contains("empty response"), "{notice}");
+        assert!(
+            !notice.contains("finish_reason"),
+            "diagnostics leaked into chat: {notice}"
+        );
+    }
+
+    /// Quota exhaustion is not wait-and-retry — somebody has to go and fix the
+    /// account — so it must not be worded like a transient blip.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn quota_exhaustion_points_at_the_account() {
+        let notice = turn_failure_notice(concat!(
+            "inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"insufficient balance"}}"#
+        ));
+
+        assert!(notice.contains("quota or credit"), "{notice}");
+        assert!(notice.contains("Settings"), "{notice}");
+    }
+
+    /// A status our own error format hides from `structured_http_status`. With
+    /// it invisible, a 402 fell through to the `Retryable` default and was
+    /// reported as "temporarily unavailable" — telling an operator to wait for
+    /// something that will never clear on its own.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn a_status_only_our_own_prefix_carries_is_still_classified() {
+        let notice = turn_failure_notice("inference returned 402 Payment Required: no credit");
+
+        assert!(notice.contains("rejected the request"), "{notice}");
+    }
+
+    /// The guard against over-claiming. `classify_provider_failure` falls back
+    /// to `Retryable` for text it recognizes nothing in, so a tool that ran out
+    /// of wall-clock would otherwise be reported as a provider outage.
+    #[test]
+    fn a_failure_that_is_not_the_providers_is_not_blamed_on_it() {
+        let raw = "the tool call exceeded its wall-clock budget";
+
+        assert!(
+            provider_failure_sentence(raw).is_none(),
+            "a non-provider failure must not be classified as one"
+        );
+        let notice = turn_failure_notice(raw);
+        assert!(notice.contains("something went wrong"), "{notice}");
+        assert!(!notice.contains("provider"), "{notice}");
+    }
+
+    /// Whatever the cause, the operator is told the turn left nothing behind —
+    /// the one fact they need in order to decide whether to re-send.
+    #[test]
+    fn every_notice_states_that_nothing_was_half_done() {
+        for raw in [
+            "inference returned 429 Too Many Requests: rate limited",
+            "inference response carried neither choices[0].message.content nor tool_calls",
+            "something else entirely",
+        ] {
+            assert!(
+                turn_failure_notice(raw).contains("Nothing was left half-done"),
+                "missing for: {raw}"
+            );
+        }
+    }
+}
+
+/// What an operator is told when a turn could not be finished.
+///
+/// The raw error is a diagnostic and never belongs in company chat. On the
+/// rate-limit path it was a wall of provider JSON with a settings URL in it,
+/// which is what a tester saw instead of an answer (issue #2016). It is logged
+/// in full at the call site; this renders the one sentence that tells the
+/// operator whether to wait, retry, or go and fix something.
+///
+/// Deliberately narrow about when it blames the provider. `classify_provider_
+/// failure` falls back to `Retryable` for text it recognizes nothing in, so
+/// classifying every failure would describe a tool that timed out as a provider
+/// outage. A cause is named only when the error is one the inference path
+/// actually emits; anything else keeps the generic wording.
+fn turn_failure_notice(detail: &str) -> String {
+    const CLOSING: &str = "Nothing was left half-done.";
+    let cause = provider_failure_sentence(detail).unwrap_or(
+        "This turn couldn't be finished — something went wrong or a step took too long.",
+    );
+    format!("{cause} {CLOSING} Send the message again to retry.")
+}
+
+/// The operator-facing sentence for a failure the inference path produced, or
+/// `None` when the failure did not come from there.
+///
+/// Deliberately narrow about when it blames the provider. The classifier falls
+/// back to `Retryable` for text it recognizes nothing in, so classifying every
+/// failure indiscriminately would report a tool that ran out of wall-clock as a
+/// provider outage. A cause is named only when the error is one the inference
+/// path actually emits, or carries a recognizable HTTP status.
+fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
+    let lower = detail.to_ascii_lowercase();
+
+    // An empty turn is its own case, and not one more retrying fixes: the
+    // harness has already retried it by the time this is written. Recognized
+    // from our own error text, so it holds in every build.
+    if lower.contains("carried neither") {
+        return Some(
+            "This turn couldn't be finished — the AI provider returned an empty response.",
+        );
+    }
+
+    let status = status_after_marker(&lower, "inference returned ");
+    let from_inference = lower.contains("inference returned")
+        || lower.contains("inference request failed")
+        || lower.contains("inference response")
+        || lower.contains("configured inference model");
+    if !from_inference && status.is_none() {
+        return None;
+    }
+
+    classified_provider_sentence(status, detail)
+}
+
+/// The sentence for a recognized provider failure, classified through the
+/// harness's own [`classify_provider_failure`].
+///
+/// Reused rather than re-implemented: the crate already knows which 429s are
+/// transient and which mean an account needs topping up, and a second
+/// classifier here would drift from the one that decides whether to retry.
+///
+/// [`classify_provider_failure`]: tinyagents_harness::retry::classify_provider_failure
+#[cfg(feature = "openhuman")]
+fn classified_provider_sentence(status: Option<u16>, detail: &str) -> Option<&'static str> {
+    use tinyagents_harness::retry::{
+        ProviderFailureClass, classify_provider_failure, structured_http_status,
+    };
+
+    let status = status.or_else(|| structured_http_status(detail));
+    Some(match classify_provider_failure(status, None, detail) {
+        ProviderFailureClass::RateLimited => {
+            "This turn couldn't be finished — the AI provider is rate-limiting requests."
+        }
+        ProviderFailureClass::NonRetryableRateLimit => {
+            "This turn couldn't be finished — the AI provider reports no quota or credit left. \
+             An admin needs to check the provider account under Settings."
+        }
+        ProviderFailureClass::NonRetryable => {
+            "This turn couldn't be finished — the AI provider rejected the request, usually a \
+             model or configuration mismatch. An admin can check Settings."
+        }
+        ProviderFailureClass::UpstreamUnhealthy | ProviderFailureClass::Retryable => {
+            "This turn couldn't be finished — the AI provider is temporarily unavailable."
+        }
+    })
+}
+
+/// The default build links no inference harness at all — it keeps the
+/// echo-brained offline behaviour — so it produces no provider failures to
+/// classify and has no classifier to reach for. The generic notice is the
+/// honest answer there.
+#[cfg(not(feature = "openhuman"))]
+fn classified_provider_sentence(_status: Option<u16>, _detail: &str) -> Option<&'static str> {
+    None
+}
+
 /// Everything a chat turn needs once it is off the request's future.
 ///
 /// A struct rather than six positional arguments because the spawn boundary is
@@ -3137,18 +3386,22 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                     parent: reply_thread(parent, accepted.message_seq),
                     chat_id: desk.clone(),
                     agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
-                    text: format!(
-                        "This turn couldn't be finished — something went wrong or \
-                         a step took too long ({}). Nothing was left half-done. \
-                         Send the message again to retry; if it keeps failing, \
-                         try breaking it into a smaller request.",
-                        err.0
-                    ),
+                    text: turn_failure_notice(&err.0.to_string()),
                     steps: Vec::new(),
                     task_id: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
                 };
+                // The raw provider text is a diagnostic, not an operator
+                // message: it is unbounded, provider-shaped, and on the rate-limit
+                // path it carried a wall of JSON and a settings URL into company
+                // chat. It stays here, in full (issue #2016).
+                tracing::warn!(
+                    company = %company,
+                    desk = %desk,
+                    detail = %err.0,
+                    "a chat turn could not be finished"
+                );
                 if let Err(journal_err) = runtime.events().append(&company, notice).await {
                     tracing::warn!(
                         company = %company,
@@ -4575,6 +4828,7 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
@@ -8101,7 +8355,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-77".to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
@@ -8116,6 +8370,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13472,7 +13727,7 @@ mode = "full"
                     runtime.id(),
                     &crate::ports::tasks::TaskRecord {
                         id: task_id.to_string(),
-                        title: "Ship it".to_string(),
+                        title: TaskTitle::authored("Ship it"),
                         note: None,
                         column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                         priority: "medium".to_string(),
@@ -13487,6 +13742,7 @@ mode = "full"
                         workflow_proposal: None,
                         origin_run_id: None,
                         origin_workflow_id: None,
+                        origin_message_seq: None,
                         bounced: None,
                     },
                 )
@@ -13548,7 +13804,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-review".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13563,6 +13819,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13609,7 +13866,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: Some("[writer] first draft".to_string()),
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13624,6 +13881,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13684,7 +13942,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13699,6 +13957,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13794,7 +14053,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13809,6 +14068,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13857,7 +14117,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13872,6 +14132,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13942,7 +14203,7 @@ mode = "full"
     fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::TaskRecord {
         crate::ports::tasks::TaskRecord {
             id: id.to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -13957,6 +14218,7 @@ mode = "full"
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

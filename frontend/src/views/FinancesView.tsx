@@ -1,7 +1,3 @@
-// Issue #302: unmounted from the console — hidden, not retired. The host's
-// finances routes, economy state and tests are unchanged; re-listing "finances"
-// in `app-shell.tsx`'s `View`/`NAV` (behind a `lazy()` import, as it was)
-// brings this surface back. Do not delete it as dead code.
 import { useEffect, useState } from "react";
 import { Bar, BarChart, LabelList, XAxis, YAxis } from "recharts";
 import { ArrowDownLeft, ArrowUpRight, CircleAlert, Coins, PiggyBank, TrendingUp, Wallet } from "lucide-react";
@@ -24,7 +20,6 @@ import {
 import { formatUsd } from "@/lib/cost";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
-
 
 /* The brand leads slot 1, and the token already themes itself — see the note
    in UsageView on why the hex pair this replaced was a liability. */
@@ -147,6 +142,11 @@ export function FinancesView({ client, company }: Props) {
                 : budgetUsd === 0
                   ? "Spending is capped at $0.00 this month."
                   : `${formatUsd(data.spentUsd)} of ${formatUsd(budgetUsd)} used · ${formatUsd(budgetUsd - data.spentUsd)} left`}
+            </CardDescription>
+            <CardDescription data-testid="monthly-budget-origin">
+              This cap is read from the company manifest's <code>[budget]</code>{" "}
+              section and cannot be changed here. To limit spending from the
+              console, set a daily cap on each teammate's page.
             </CardDescription>
           </CardHeader>
           {hasBudget && (

@@ -5898,6 +5898,7 @@ pub(crate) fn create_workflow_parameters_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
     use std::sync::Mutex as StdMutex;
 
     use crate::ports::runs::RunStatus;
@@ -11726,7 +11727,7 @@ name = "Morning"
     fn task_card(id: &str, title: &str, column: &str, assignee: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: title.to_string(),
+            title: TaskTitle::authored(title),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -11741,6 +11742,7 @@ name = "Morning"
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

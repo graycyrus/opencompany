@@ -32,13 +32,13 @@ import { classifyLoadFailure } from "@/lib/section-load";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { cn } from "@/lib/utils";
 import { formatDuration, relativeTime } from "@/views/workflows/run-health";
+import { formatUsdCost } from "@/lib/cost";
 import { AnalyticsLens } from "./AnalyticsLens";
 import { AttemptCard } from "./AttemptCard";
 import { WaterfallLens } from "./WaterfallLens";
 import { observatoryHref, readObservatoryHash, writeObservatoryQuery } from "./hash";
 import { byWorkflowRun, runState, spansFromRuns, totals } from "./model";
 import { peakConcurrency } from "./waterfall";
-import { formatUsdCost } from "@/lib/cost";
 
 /** Refetch cadence while something is still running. */
 const LIVE_POLL_MS = 4_000;
@@ -330,7 +330,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
             <span>
               <dt className="inline">cost</dt>{" "}
               <dd className="text-foreground inline tabular-nums">
-                {formatUsdCost({ amountUsd: summary.costUsd }, "total") ?? "$0.00"}
+                {formatUsdCost({ amountUsd: summary.costUsd }, "line") ?? "$0.00"}
               </dd>
             </span>
           </dl>

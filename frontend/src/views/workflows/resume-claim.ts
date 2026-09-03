@@ -26,9 +26,10 @@
 //   * A **blocker** — a question the agent raised — is parked with no
 //     continuation, deliberately, because answering a question is not the act
 //     of authorising a call. `resume_node_blocker` (`src/company/runtime.rs`)
-//     banks the answer and delivers it into the DM the question was asked in;
-//     re-executing the node from the run's trigger input is issue #1864 and has
-//     not landed. So answering does not restart the run.
+//     banks the answer, delivers it into the DM the question was asked in, and
+//     then re-dispatches the node itself from the run's own trigger input,
+//     carrying the answer onto it (issues #1863, #2005). So answering it also
+//     restarts the run — just by a different route than a gated call's.
 //
 // The host has always known the difference — `ParkedCalls::blockers`
 // (`src/workflows/caps/mod.rs`) is what `blocked_diagnosis` branches on to word
@@ -105,10 +106,11 @@ export function parkedSplit(nodes: readonly WorkflowBlockedNode[]): ParkedSplit 
  * Four outcomes, mirroring `blocked_diagnosis`'s three branches plus the
  * degraded one an older host forces:
  *
- * - only gated calls → approving continues the run;
- * - only questions → answering is recorded but does not restart it;
- * - both, or an unclassifiable node → say both, and claim neither for the whole
- *   set.
+ * - only gated calls → approving continues the run automatically;
+ * - only questions → answering re-enters the node, by approving it again or
+ *   stopping the run;
+ * - both, or an unclassifiable node → say both, naming the verdicts each kind
+ *   actually takes.
  *
  * The mixed sentence is deliberately the fallback rather than an error state.
  * It is true whichever kind the cards turn out to be, so a host that cannot
@@ -120,8 +122,8 @@ export function resumeClaim(split: ParkedSplit): string | null {
   if (unknown || (gated > 0 && blockers > 0)) {
     return (
       "Some of these are gated tool calls, which continue this run when approved; the rest are " +
-      "questions the agent raised, which are recorded but do not restart it — re-run the " +
-      "workflow once those are answered."
+      "questions the agent raised, which re-enter the step they stopped — approving runs it " +
+      "again, and denying stops the run."
     );
   }
   if (blockers === 0) {
@@ -132,8 +134,8 @@ export function resumeClaim(split: ParkedSplit): string | null {
   }
   return (
     `${blockers === 1 ? "The card is" : "The cards are"} a question the agent raised, not a ` +
-    "call waiting to be authorised: answering it is recorded against the card, but it does not " +
-    "restart this run — re-run the workflow once the answer is in hand."
+    "call waiting to be authorised: answering it re-enters this step — approving runs it " +
+    "again, and denying stops the run."
   );
 }
 

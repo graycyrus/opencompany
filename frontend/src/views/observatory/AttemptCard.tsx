@@ -10,12 +10,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { formatUsdCost } from "@/lib/cost";
 import { cn } from "@/lib/utils";
 import { formatDuration, relativeTime } from "@/views/workflows/run-health";
 import { stepTotal, type ObservatoryRun } from "@/api/observatory";
 import { runState } from "./model";
 import { StepRow } from "./StepRow";
-import { formatUsdCost } from "@/lib/cost";
 
 const TONE = {
   done: "border-l-[var(--status-done)]",

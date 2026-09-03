@@ -16,7 +16,7 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
-import type { OpenTurn } from "@/lib/live-reply";
+import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
@@ -196,7 +196,7 @@ interface Props {
    * this one says the POST is over and the turn is not, so the shell keeps the
    * working row up and stops suppressing the live reply frame.
    */
-  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   /**
    * The chat POST **threw** rather than answering (issue #1000).
    *
@@ -392,6 +392,19 @@ const FIRST_TEAM_BRIEF =
  * backend. Threads and reactions are console-local for the same reason: the
  * host has no surface for either yet.
  */
+/**
+ * The host seq a console message id names, for keying live-turn state.
+ *
+ * `undefined` for an unthreaded send and for a local id the host has not
+ * reconciled yet — both of which key at the channel, which is what they are.
+ */
+function threadRootOf(parentId: string | undefined): number | undefined {
+  const seq = toHostMessageId(parentId);
+  if (seq === null) return undefined;
+  const n = Number(seq);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function ChatView({
   client,
   company,
@@ -1382,8 +1395,20 @@ export function ChatView({
 
   // An open thread only makes sense while its parent is on screen; switching
   // channels closes it rather than leaving a panel pointing at nothing.
+  // `?thread=<id>` on the hash opens straight into that thread instead, and
+  // is consumed (stripped via `replaceState`) so it does not reopen on a
+  // later switch back to this channel.
   useEffect(() => {
-    setOpenThreadId(null);
+    if (!channel?.id) return;
+    const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+    const params = new URLSearchParams(query);
+    const threadId = params.get("thread");
+    setOpenThreadId(threadId);
+    if (threadId !== null) {
+      params.delete("thread");
+      const qs = params.toString();
+      window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+    }
   }, [channel?.id]);
 
   // Whoever owns the unread counts needs to know what is actually being looked
@@ -1574,7 +1599,52 @@ export function ChatView({
    * false on every reload and on every walk to another view. An open turn is a
    * fact about the company, so the indicator survives both.
    */
-  const openTurn = activeThreadId ? openTurns?.[activeThreadId]?.[0] : undefined;
+  /**
+   * The turns open in this channel, split by whether they belong to the thread
+   * the panel is showing.
+   *
+   * They used to be one lookup on the channel id, which could not tell the two
+   * apart — so `ChatView` suppressed the channel's indicator whenever any
+   * thread was open, and a turn the host was actively running showed nowhere at
+   * all. The shell now keys them per thread (`turnStateKey`), which is what
+   * makes this split expressible.
+   *
+   * `channelTurn` deliberately spans *every other* thread in the channel rather
+   * than only channel-rooted turns: from the channel timeline, a turn running in
+   * a thread you are not reading is still this channel's work, and saying
+   * nothing about it is the failure this replaces.
+   */
+  // Only when a thread is actually open. Without the `openThreadId` guard this
+  // collapses to the channel key for an unthreaded view, and `openTurn` below —
+  // which excludes it — would then hide the channel's own turn: the exact
+  // silence this change exists to remove, reintroduced one line down.
+  const threadTurnKey =
+    activeThreadId && openThreadId
+      ? turnStateKey(activeThreadId, threadRootOf(openThreadId))
+      : undefined;
+  const threadTurn = threadTurnKey ? openTurns?.[threadTurnKey]?.[0] : undefined;
+  const openTurn = (() => {
+    if (!activeThreadId) return undefined;
+    const candidates = Object.entries(openTurns ?? {})
+      .filter(
+        ([key, turns]) =>
+          key !== threadTurnKey &&
+          (key === activeThreadId || key.startsWith(`${activeThreadId}#`)) &&
+          turns.length > 0,
+      )
+      // Every turn, not each list's head. `mergeOpenTurns` appends rather than
+      // re-sorts, so a reload re-arm racing a detached POST can leave a running
+      // row *behind* a queued one in the same list — and a search over heads
+      // alone would never see it, which is the same "Queued…" over live work
+      // this is here to prevent (Codex review on #2044).
+      .flatMap(([, turns]) => turns);
+    // A running turn outranks a queued one. Taking the first match instead
+    // would let map order decide the wording, and map order follows `/runs`,
+    // which is newest-first — so the ordinary serialized case (an older turn
+    // working while a newer one waits on the company lock) rendered "Queued…"
+    // over live work (Codex review on #2042).
+    return candidates.find((t) => !t.queued) ?? candidates[0];
+  })();
   /**
    * The count beside the channel title.
    *
@@ -1705,7 +1775,19 @@ export function ChatView({
     // this POST reaches below, so a clear this send triggers can never delete
     // a receipt a *later* send has since armed for the same (possibly
     // cross-company-reused) thread id — see `shouldClearReceipt`.
-    const gen = chatId ? onSendStart?.(chatId) : undefined;
+    // Armed under the same key the reload leg folds runs into, or the two
+    // legs describe the same turn under two names and the indicator that
+    // survives a reload is not the one the POST armed. Unthreaded sends key at
+    // the channel exactly as before — `turnStateKey` returns `chatId` for them.
+    // Derived from `openThreadId`, not from `parentId`. A review reply is
+    // anchored to a *reply* (`threadReviewAnchor.anchorId`), not to the thread
+    // root, so keying on the parent would arm a key the panel's own lookup —
+    // which keys on the open thread — could never match. `parentId` stays what
+    // it was: the host's `parent`, for `client.chat` alone.
+    const stateKey = chatId
+      ? turnStateKey(chatId, threadRootOf(openThreadId ?? undefined))
+      : undefined;
+    const gen = stateKey ? onSendStart?.(stateKey) : undefined;
     // Which of the POST's three outcomes actually happened, decided here and
     // reported once in the `finally`. Only `"resolved"` means the reply is on
     // screen; the other two leave a turn running on the host and the stream as
@@ -1770,7 +1852,9 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (chatId) onSendDetached?.(chatId, answer.turnId, gen);
+        // The desk goes with the state key: the key can be composite and the
+        // shell's settle poll has to ask the host about a real desk.
+        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen, chatId);
         return true;
       }
       const reply = answer;
@@ -1868,9 +1952,9 @@ export function ChatView({
       // carries on regardless, so the frame it holds is the only copy of the
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
-      if (chatId) {
-        if (outcome === "resolved") onSendEnd?.(chatId, gen);
-        else if (outcome === "failed") onSendFailed?.(chatId, gen);
+      if (stateKey) {
+        if (outcome === "resolved") onSendEnd?.(stateKey, gen);
+        else if (outcome === "failed") onSendFailed?.(stateKey, gen);
       }
       setSending(false);
     }
@@ -2306,7 +2390,11 @@ export function ChatView({
               openThreadId={openThreadId}
               // An open turn keeps the row up after the POST has resolved, and
               // puts it back on a console that reloaded mid-turn (#983).
-              typing={(sending || !!openTurn) && !openThreadId}
+              // `!openThreadId` used to be here, blanking the channel's row for
+              // every turn whenever any thread was open. `openTurn` now
+              // excludes the open thread's own turn, so the row can stay for
+              // the work that is genuinely the channel's.
+              typing={sending || !!openTurn}
               queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
               // Thread-panel receipts are out of v1 (issue #1934): excluded here
@@ -2587,6 +2675,7 @@ export function ChatView({
               }}
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
+              openTurn={threadTurn}
               onTyping={() => onTyping?.(active.id, parent.id)}
               // A thread is not a lesser transcript (issue #1734): an echoed
               // reply read here is the same false attribution as one read in

@@ -432,14 +432,13 @@ function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabe
 
   const spent = member.spentTodayUsd ?? 0;
   const overBudget = spent >= cap;
-  const usd = formatUsd;
   return (
     <span className="block">
       <span
         data-testid="team-budget"
         className={cn("block truncate text-3xs", overBudget ? "text-destructive" : "text-muted-foreground")}
       >
-        {usd(cap)}/day · {usd(spent)} spent today
+        {formatUsd(cap)}/day · {formatUsd(spent)} spent today
         {overBudget && " · paused"}
       </span>
       {attribution}

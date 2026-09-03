@@ -181,31 +181,44 @@ export function isBlockerKind(kind: string): boolean {
 }
 
 /**
- * Whether deciding this card records an answer and restarts nothing
- * (defect B-070).
+ * Whether deciding this card only records an answer, with no step behind it
+ * for the answer to re-enter (defect B-070).
  *
- * A blocker parks two quite different things on one queue. One is a question an
- * agent raised *from a card*, and the approval's task link names it: approving
- * moves that card back into In Progress, where its dispatch edge fires, and the
- * work really does carry on. The other is a question asked mid-conversation,
- * which parks `unlinked` with no continuation at all — the host says so on the
- * wire — and deciding it banks the answer and starts nothing.
+ * A blocker parks three quite different things under one `unlinked` task
+ * link — the link alone cannot tell them apart, which is why
+ * {@link ApprovalSummary.workflow_run_id} is the second half of this
+ * predicate:
  *
- * The console told both the same story. A founder answered a genuine either/or,
- * watched the card vanish under "Approved — carrying it out now", and
- * twenty-five minutes later nothing had been routed, created or said; the card
- * was gone from the queue, so the question could not even be re-decided. This
- * is the predicate that keeps the two apart, and it is exported so the card's
- * own footnote and the confirmation banner cannot claim different things about
- * one press.
+ * * A question an agent raised *from a card* is linked (`{link: "task"}`), not
+ *   `unlinked` at all — approving moves that card back into In Progress, where
+ *   its dispatch edge fires, and the work really does carry on. Never
+ *   answer-only.
+ * * A question a workflow node raised is `unlinked` **and carries a
+ *   {@link ApprovalSummary.workflow_run_id}** — there is no card, but
+ *   `resume_node_blocker` re-dispatches the node from the run's own trigger
+ *   input, carrying the answer onto it (issues #1863, #2005). Not answer-only
+ *   either, even though the task link alone looks identical to the case below.
+ * * A question asked mid-conversation is `unlinked` with **no** run behind it
+ *   — the host says so on the wire — and deciding it banks the answer and
+ *   starts nothing. This is the only true answer-only case.
+ *
+ * The console used to tell all three the same story. A founder answered a
+ * genuine either/or, watched the card vanish under "Approved — carrying it out
+ * now", and twenty-five minutes later nothing had been routed, created or
+ * said; the card was gone from the queue, so the question could not even be
+ * re-decided. This is the predicate that keeps them apart, and it is exported
+ * so the card's own footnote and the confirmation banner cannot claim
+ * different things about one press.
  *
  * A `task` the host did not send at all is deliberately NOT treated as
  * answer-only: that is "we do not know", and guessing either way is what the
  * `stillAwaiting === undefined` arm of {@link approvedLine} already refuses to
  * do.
  */
-export function isAnswerOnlyBlocker(a: Pick<ApprovalSummary, "kind" | "task">): boolean {
-  return isBlockerKind(a.kind) && a.task?.link === "unlinked";
+export function isAnswerOnlyBlocker(
+  a: Pick<ApprovalSummary, "kind" | "task" | "workflow_run_id">,
+): boolean {
+  return isBlockerKind(a.kind) && a.task?.link === "unlinked" && !a.workflow_run_id;
 }
 
 /**
@@ -296,16 +309,15 @@ export function BlockerAnswerControl({
         placeholder="Answer what was asked — this goes back with your approval"
         className={cn("text-sm", compact && "min-h-14 py-1.5 text-xs md:text-xs")}
       />
-      {/* Only what the host actually does with it. Approve carries the words
-          back and the teammate picks the card up with them on it; Approve with
-          the box empty is the pre-B-046 request unchanged, which is still the
-          right move when "go ahead" is the whole answer; Decline never sends
-          it, because a refusal ends the step rather than re-entering it.
-
-          Defect B-070: and only where there IS a card to pick up. A question
-          asked mid-conversation parks with nothing behind it, and promising
-          that a teammate resumes it is the same claim B-013 and B-072 were
-          filed about — made here over a card the press is about to consume. */}
+      {/* Only what the host actually does with it, and the three re-entry
+          shapes are worded differently rather than folded into one claim
+          (defect B-070): a card-linked question really is picked up by the
+          teammate on it; a workflow node's question has no card at all, but
+          the node it stopped is re-dispatched from the run's own trigger
+          input (issues #1863, #2005); a question asked mid-conversation has
+          neither, and promising a resume there is the same claim B-013 and
+          B-072 were filed about. `isAnswerOnlyBlocker` is the one place that
+          tells the last apart from the middle — see its own doc. */}
       {!compact &&
         (isAnswerOnlyBlocker(a) ? (
           <p className="text-xs text-muted-foreground">
@@ -313,6 +325,11 @@ export function BlockerAnswerControl({
             conversation rather than from a task, so nothing restarts on its
             own — tell the teammate in chat when you want it acted on. Decline
             doesn't send it.
+          </p>
+        ) : isBlockerKind(a.kind) && a.task?.link === "unlinked" ? (
+          <p className="text-xs text-muted-foreground">
+            Approve records your answer and re-enters the workflow step it
+            stopped — approving runs it again, and denying stops the run.
           </p>
         ) : (
           <p className="text-xs text-muted-foreground">

@@ -37,6 +37,7 @@ import { Label } from "@/components/ui/label";
 // waiting for its 30s poll. Not a cycle: `use-autonomy` imports only
 // `@/api/policy` and `@/lib/visible-poll`.
 import { applyAutonomy } from "@/hooks/use-autonomy";
+import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { formatUsd } from "@/lib/cost";
 

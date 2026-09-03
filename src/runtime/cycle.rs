@@ -972,7 +972,7 @@ impl<'a> CycleRunner<'a> {
             // the same trigger events, from the same retained origins. Issue
             // #435 widened this to the channel *and* the thread within it, in
             // one pass, so the pair always describes a single message.
-            cycle_conversation(&request.events, |id| {
+            cycle_conversation(&request.events, &request.event_seqs, |id| {
                 self.rt.journal.approval_conversation(id)
             }),
         );
@@ -3013,14 +3013,34 @@ fn cycle_task_id(
 /// conversation altogether. A finer key must never cost a coarser answer that
 /// was already right. Dropping to `None` here means "the channel is the
 /// answer", which is precisely the pre-#435 behaviour.
+/// # A channel-level message is its own thread root (issue #1890)
+///
+/// `OperatorMessage::parent` is `None` for a message sent straight into a
+/// channel, and reading it verbatim recorded "no thread" for the approval —
+/// so the continuation after a sign-off landed flat in the channel while the
+/// *pre-approval* reply to the very same message landed under it. The reply
+/// path has not read `parent` verbatim since #1890: `reply_thread` is
+/// `asked_in.unwrap_or(message_seq)`, because an unparented message is the
+/// root of its own thread. This applies that same rule, which is why the
+/// sequence numbers are needed here at all — a `CompanyEvent` is a body with
+/// no identity, and a root can only name itself if something tells it its own
+/// seq.
+///
+/// `seqs` is positionally aligned with `events` ([`CycleRequest::event_seqs`])
+/// and may be **empty**: a caller that builds a request without threading seqs
+/// is documented and supported. An absent seq degrades to `None` — today's
+/// answer — rather than to a guess. The runtime always populates them, so the
+/// paths an operator actually drives get the root; a seq-less caller keeps the
+/// behaviour it already had.
 fn cycle_conversation(
     events: &[CompanyEvent],
+    seqs: &[EventSeq],
     approval_conversation: impl Fn(&ApprovalId) -> Option<ApprovalConversation>,
 ) -> ApprovalConversation {
     // `(channel, thread-root-within-it)`. The channel is what rivals; the root
     // rides along and is demoted to `None` on disagreement — see above.
     let mut found: Option<(String, Option<EventSeq>)> = None;
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         let candidate = match event {
             // The one event that names a thread outright. An unaddressed message
             // (`chat: None`) went to the orchestrator with no conversation of its
@@ -3038,7 +3058,11 @@ fn cycle_conversation(
                 let Some(chat) = chat else {
                     return ApprovalConversation::default();
                 };
-                Some((chat.clone(), *parent))
+                // `parent` when it names one, otherwise this message's own seq
+                // — the `reply_thread` rule, see the header. `seqs` may be
+                // shorter than `events` (or empty), and then there is nothing
+                // honest to fall back to.
+                Some((chat.clone(), parent.or_else(|| seqs.get(index).copied())))
             }
             CompanyEvent::ApprovalResolved { approval_id, .. } => {
                 match approval_conversation(approval_id) {
@@ -3496,7 +3520,7 @@ impl<'a> CycleHostImpl<'a> {
         };
         let card = TaskRecord {
             id: generate_id(),
-            title: parsed.title.clone(),
+            title: crate::ports::tasks::TaskTitle::system(&parsed.title),
             note: parsed.note,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -3521,6 +3545,7 @@ impl<'a> CycleHostImpl<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
@@ -3619,7 +3644,12 @@ impl<'a> CycleHostImpl<'a> {
         };
         let card = TaskRecord {
             id: generate_id(),
-            title: first_line(&parsed.instruction, 80),
+            title: crate::ports::tasks::mint_task_title(
+                &parsed.instruction,
+                None,
+                self.rt.titler(),
+            )
+            .await,
             note: Some(note),
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -3644,6 +3674,7 @@ impl<'a> CycleHostImpl<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
@@ -4063,6 +4094,7 @@ impl CycleHost for CycleHostImpl<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
 
     /// `single_agent` picks an agent slot only when the batch is one addressed
     /// operator message, and falls back to the whole-company lock otherwise —
@@ -4203,7 +4235,7 @@ mod test {
 
         let card = |id: &str, title: &str, column: &str| TaskRecord {
             id: id.to_string(),
-            title: title.to_string(),
+            title: TaskTitle::authored(title),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -4218,6 +4250,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         rt.tasks()
@@ -4378,7 +4411,7 @@ mod test {
                 rt.id(),
                 &TaskRecord {
                     id: "t-paused".to_string(),
-                    title: "Investigate the flaky nightly job".to_string(),
+                    title: TaskTitle::authored("Investigate the flaky nightly job"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
                     priority: "medium".to_string(),
@@ -4393,6 +4426,7 @@ mod test {
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -4520,7 +4554,7 @@ mod test {
                     rt.id(),
                     &TaskRecord {
                         id: format!("t-{n}"),
-                        title: format!("Card {n}"),
+                        title: TaskTitle::authored(&format!("Card {n}")),
                         note: None,
                         column: COLUMN_TODO.to_string(),
                         priority: "medium".to_string(),
@@ -4535,6 +4569,7 @@ mod test {
                         workflow_proposal: None,
                         origin_run_id: None,
                         origin_workflow_id: None,
+                        origin_message_seq: None,
                         bounced: None,
                     },
                 )
@@ -5414,7 +5449,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Draft the spec".to_string(),
+                    title: TaskTitle::authored("Draft the spec"),
                     note: None,
                     column: COLUMN_IN_PROGRESS.to_string(),
                     priority: "medium".to_string(),
@@ -5431,6 +5466,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -5501,7 +5537,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Draft the spec".to_string(),
+                    title: TaskTitle::authored("Draft the spec"),
                     note: Some("[operator] parked this".to_string()),
                     column: COLUMN_PAUSED.to_string(),
                     priority: "medium".to_string(),
@@ -5518,6 +5554,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -9118,30 +9155,31 @@ members = ["writer"]
 
         // An addressed message names the thread outright.
         assert_eq!(
-            cycle_conversation(&[addressed("desk-finance")], approval_conversation).thread,
+            cycle_conversation(&[addressed("desk-finance")], &[], approval_conversation).thread,
             Some("desk-finance".into()),
         );
         // The whole point, stated as an assertion: the desk channel and a DM to
         // that desk's lead are different stamps, even though the same agent
         // answers both.
         assert_eq!(
-            cycle_conversation(&[addressed("agent-cfo")], approval_conversation).thread,
+            cycle_conversation(&[addressed("agent-cfo")], &[], approval_conversation).thread,
             Some("agent-cfo".into()),
         );
         // A follow-up cycle inherits the thread from the approval it resolves, so
         // a turn needing a second sign-off re-parks in the same channel.
         assert_eq!(
-            cycle_conversation(&[resolved("appr-desk")], approval_conversation).thread,
+            cycle_conversation(&[resolved("appr-desk")], &[], approval_conversation).thread,
             Some("desk-finance".into()),
         );
         assert_eq!(
-            cycle_conversation(&[resolved("appr-dm")], approval_conversation).thread,
+            cycle_conversation(&[resolved("appr-dm")], &[], approval_conversation).thread,
             Some("agent-cfo".into()),
         );
         // An approval with no origin at all claims nothing — and does not block.
         assert_eq!(
             cycle_conversation(
                 &[resolved("appr-unknown"), addressed("desk-finance")],
+                &[],
                 approval_conversation
             )
             .thread,
@@ -9150,12 +9188,13 @@ members = ["writer"]
         // An unaddressed message went to the orchestrator with no conversation of
         // its own. It is a rival, not a pass-through.
         assert_eq!(
-            cycle_conversation(&[unaddressed()], approval_conversation).thread,
+            cycle_conversation(&[unaddressed()], &[], approval_conversation).thread,
             None
         );
         assert_eq!(
             cycle_conversation(
                 &[addressed("desk-finance"), unaddressed()],
+                &[],
                 approval_conversation
             )
             .thread,
@@ -9167,6 +9206,7 @@ members = ["writer"]
         assert_eq!(
             cycle_conversation(
                 &[addressed("desk-finance"), addressed("agent-cfo")],
+                &[],
                 approval_conversation,
             )
             .thread,
@@ -9176,6 +9216,7 @@ members = ["writer"]
         assert_eq!(
             cycle_conversation(
                 &[addressed("desk-finance"), resolved("appr-desk")],
+                &[],
                 approval_conversation,
             )
             .thread,
@@ -9185,6 +9226,7 @@ members = ["writer"]
         assert_eq!(
             cycle_conversation(
                 &[addressed("desk-finance"), resolved("appr-none")],
+                &[],
                 approval_conversation,
             )
             .thread,
@@ -9217,6 +9259,7 @@ members = ["writer"]
             assert_eq!(
                 cycle_conversation(
                     &[addressed("desk-finance"), rival.clone()],
+                    &[],
                     approval_conversation
                 )
                 .thread,
@@ -9264,6 +9307,7 @@ members = ["writer"]
             assert_eq!(
                 cycle_conversation(
                     &[addressed("desk-finance"), record.clone()],
+                    &[],
                     approval_conversation
                 )
                 .thread,
@@ -9273,12 +9317,66 @@ members = ["writer"]
         }
         // And alone neither claims a conversation of its own.
         assert_eq!(
-            cycle_conversation(&[workspace_changed()], approval_conversation).thread,
+            cycle_conversation(&[workspace_changed()], &[], approval_conversation).thread,
             None,
         );
         assert_eq!(
-            cycle_conversation(&[workflow_node_started()], approval_conversation).thread,
+            cycle_conversation(&[workflow_node_started()], &[], approval_conversation).thread,
             None,
+        );
+    }
+
+    /// A message sent straight into a channel is the root of its own thread,
+    /// and the approval raised from it inherits that root (issue #1890).
+    ///
+    /// `OperatorMessage::parent` is `None` for such a message, and reading it
+    /// verbatim recorded "no thread". The visible cost was a transcript that
+    /// contradicted itself: the reply *before* the sign-off landed under the
+    /// question (`reply_thread` treats an unparented message as its own root),
+    /// and the continuation *after* it landed flat in the channel. Same
+    /// conversation, two different answers to "which thread is this".
+    ///
+    /// Reproduced by hand on the repro rig before it was fixed:
+    ///
+    /// ```text
+    /// 37  parentId=None  operator  THREAD-THREE: deploy to staging
+    /// 42  parentId=37    ceo       Done with step 3.      <- reply: threaded
+    /// 46  parentId=None  ceo       Done with step 5.      <- continuation: flat
+    /// ```
+    #[test]
+    fn a_channel_level_message_is_the_root_its_approval_resumes_in() {
+        let addressed = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "deploy to staging".into(),
+            by: None,
+            chat: Some("general".into()),
+            deliverable: None,
+            attachments: Vec::new(),
+        };
+        let none = |_: &ApprovalId| None;
+
+        assert_eq!(
+            cycle_conversation(&[addressed()], &[EventSeq::new(37)], none),
+            ApprovalConversation {
+                thread: Some("general".into()),
+                parent: Some(EventSeq::new(37)),
+            },
+            "the message's own seq is the thread it resumes in"
+        );
+
+        // **Absent seqs degrade to today's answer, never to a guess.** A caller
+        // that builds a request without threading seqs is documented and
+        // supported (`CycleRequest::event_seqs`), and inventing a root for one
+        // would write a wrong parent where there is currently an honest absent
+        // one.
+        assert_eq!(
+            cycle_conversation(&[addressed()], &[], none),
+            ApprovalConversation {
+                thread: Some("general".into()),
+                parent: None,
+            },
+            "no seq, no root — the channel is still the answer"
         );
     }
 
@@ -9326,23 +9424,31 @@ members = ["writer"]
 
         // A message asked inside a thread names both keys.
         assert_eq!(
-            cycle_conversation(&[in_thread("desk-finance", Some(7))], approval_conversation),
+            cycle_conversation(
+                &[in_thread("desk-finance", Some(7))],
+                &[],
+                approval_conversation
+            ),
             conv(Some("desk-finance"), Some(7)),
         );
         // A message asked straight in the channel names only the channel —
         // the pre-#435 behaviour, which must not change.
         assert_eq!(
-            cycle_conversation(&[in_thread("desk-finance", None)], approval_conversation),
+            cycle_conversation(
+                &[in_thread("desk-finance", None)],
+                &[],
+                approval_conversation
+            ),
             conv(Some("desk-finance"), None),
         );
         // A follow-up cycle inherits the thread as well as the channel, so a
         // second sign-off re-parks under the same root rather than flat.
         assert_eq!(
-            cycle_conversation(&[resolved("appr-threaded")], approval_conversation),
+            cycle_conversation(&[resolved("appr-threaded")], &[], approval_conversation),
             conv(Some("desk-finance"), Some(7)),
         );
         assert_eq!(
-            cycle_conversation(&[resolved("appr-flat")], approval_conversation),
+            cycle_conversation(&[resolved("appr-flat")], &[], approval_conversation),
             conv(Some("desk-finance"), None),
         );
         // The same thread twice is not ambiguous.
@@ -9352,6 +9458,7 @@ members = ["writer"]
                     in_thread("desk-finance", Some(7)),
                     resolved("appr-threaded")
                 ],
+                &[],
                 approval_conversation,
             ),
             conv(Some("desk-finance"), Some(7)),
@@ -9367,6 +9474,7 @@ members = ["writer"]
                     in_thread("desk-finance", Some(7)),
                     in_thread("desk-finance", Some(9)),
                 ],
+                &[],
                 approval_conversation,
             ),
             conv(Some("desk-finance"), None),
@@ -9384,7 +9492,7 @@ members = ["writer"]
             ],
         ] {
             assert_eq!(
-                cycle_conversation(&batch, approval_conversation),
+                cycle_conversation(&batch, &[], approval_conversation),
                 conv(Some("desk-finance"), None),
             );
         }
@@ -9396,6 +9504,7 @@ members = ["writer"]
                     in_thread("desk-finance", Some(9)),
                     resolved("appr-threaded"),
                 ],
+                &[],
                 approval_conversation,
             ),
             conv(Some("desk-finance"), None),
@@ -9409,6 +9518,7 @@ members = ["writer"]
                     in_thread("desk-finance", Some(7)),
                     in_thread("agent-cfo", Some(7)),
                 ],
+                &[],
                 approval_conversation,
             ),
             ApprovalConversation::default(),
@@ -9425,6 +9535,7 @@ members = ["writer"]
                         run_id: None,
                     },
                 ],
+                &[],
                 approval_conversation,
             ),
             ApprovalConversation::default(),
@@ -9839,7 +9950,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t1".into(),
-                    title: "Ship invoicing".into(),
+                    title: TaskTitle::authored("Ship invoicing"),
                     note: Some("build the importer".into()),
                     column: COLUMN_TODO.into(),
                     priority: "medium".into(),
@@ -9856,6 +9967,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -9919,7 +10031,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t1".into(),
-                    title: "Already finished".into(),
+                    title: TaskTitle::authored("Already finished"),
                     note: None,
                     column: "done".into(),
                     priority: "medium".into(),
@@ -9936,6 +10048,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -11067,7 +11180,7 @@ members = ["writer"]
     fn a_card_has_settled_only_once_its_run_stopped() {
         let card = |column: &str, bounced: Option<&str>| TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship the thing".to_string(),
+            title: TaskTitle::authored("Ship the thing"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -11082,6 +11195,7 @@ members = ["writer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: bounced.map(str::to_string),
         };
         // Stopped, whether or not it succeeded — the misleading case this
@@ -11122,7 +11236,7 @@ members = ["writer"]
     fn a_settled_line_names_the_landing_and_a_bounce_names_its_reason() {
         let mut card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Draft the investor update".to_string(),
+            title: TaskTitle::authored("Draft the investor update"),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -11137,6 +11251,7 @@ members = ["writer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         assert_eq!(
@@ -11356,7 +11471,7 @@ timeout)",
     fn settled_card(id: &str, title: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: title.to_string(),
+            title: TaskTitle::authored(title),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -11376,6 +11491,7 @@ timeout)",
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

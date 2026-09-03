@@ -9,7 +9,7 @@ use crate::workflows::runner::blocked_notice;
 /// The claim a gated call makes, and the claim a blocker makes, as the
 /// fragments a reader would pick out of either composer's paragraph.
 const GATED: &str = "continues this run automatically";
-const BLOCKER: &str = "does not restart this run";
+const BLOCKER: &str = "re-enters this step";
 const MIXED: &str = "continue this run when approved";
 
 fn parked(waiting: usize, blockers: usize) -> ParkedCalls {
@@ -55,15 +55,16 @@ fn both_host_composers_make_the_same_claim() {
     }
 }
 
-/// A question the agent raised must never be described as something approving
-/// carries on by itself — the sentence B-013 was filed about, now asserted
-/// against the composer that kept making it.
+/// A question the agent raised must never be described with the gated-call's
+/// own wording — the sentence B-013 was filed about, now asserted against the
+/// composer that kept making it. It really does re-enter the node now (issues
+/// #1863, #2005), just by a different mechanism than a gated call's approval.
 #[test]
-fn a_notice_for_a_question_does_not_promise_an_automatic_resume() {
+fn a_notice_for_a_question_names_re_entry_not_automatic_continuation() {
     let notice = blocked_notice(&blocked(1, 1));
     assert!(
         notice.contains(BLOCKER),
-        "a blocker's notice must say it does not restart the run: {notice}",
+        "a blocker's notice must say the node re-enters: {notice}",
     );
     assert!(
         !notice.contains("continues on its own"),

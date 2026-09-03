@@ -4,12 +4,14 @@
 //! # Why this module exists
 //!
 //! A run that stopped for a person parks two different things on one id list,
-//! and they promise **opposite** outcomes. A gated tool call's park carries the
-//! node's turn key, so a verdict re-runs the turn and the run goes on by
-//! itself. A blocker — a question the agent raised — is parked `Unlinked` with
-//! no continuation, deliberately, because answering a question is not the act
-//! of authorising a call; deciding it is recorded against the card and restarts
-//! nothing (node-level restart is issue #1864).
+//! and each restarts differently. A gated tool call's park carries the node's
+//! turn key, so a verdict re-runs the turn and the run goes on by itself. A
+//! blocker — a question the agent raised — is parked `Unlinked` with no
+//! continuation, deliberately, because answering a question is not the act of
+//! authorising a call; deciding it is recorded against the card, and then the
+//! node itself is re-dispatched from the run's trigger input carrying the
+//! answer (issues #1863, #2005) — approving runs the node again, denying stops
+//! the run.
 //!
 //! [`ParkedCalls::blockers`](crate::workflows::caps::ParkedCalls) and
 //! [`WorkflowBlockedNode::blockers`](crate::ports::WorkflowBlockedNode) are how
@@ -50,8 +52,9 @@
 ///
 /// `pub(crate)` rather than `pub(super)` because the claim outgrew this module
 /// with defect B-070: the chat note a resolved workflow blocker posts is the
-/// same statement about the same card, so `company::runtime` asserts its own
-/// wording against this one rather than keeping a fourth copy of it.
+/// same statement about the same card, so `company::runtime`'s own tests check
+/// they never disagree, even though the two are worded for different surfaces
+/// (a run panel here, a DM acknowledgement there).
 pub(crate) fn resume_claim(waiting: usize, blockers: usize) -> Option<String> {
     if waiting == 0 {
         // Nothing was parked, so there is no card to decide and no promise to
@@ -69,8 +72,7 @@ pub(crate) fn resume_claim(waiting: usize, blockers: usize) -> Option<String> {
     if blockers >= waiting {
         return Some(format!(
             "{} a question the agent raised, not a call waiting to be authorised: answering it \
-             is recorded against the card, but it does not restart this run — re-run the \
-             workflow once the answer is in hand.",
+             re-enters this step — approving runs it again, and denying stops the run.",
             if waiting == 1 {
                 "The card is"
             } else {
@@ -80,8 +82,8 @@ pub(crate) fn resume_claim(waiting: usize, blockers: usize) -> Option<String> {
     }
     Some(
         "Some of these are gated tool calls, which continue this run when approved; the rest \
-         are questions the agent raised, which are recorded but do not restart it — re-run the \
-         workflow once those are answered."
+         are questions the agent raised, which re-enter the step they stopped — approving runs \
+         it again, and denying stops the run."
             .to_string(),
     )
 }

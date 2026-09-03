@@ -288,6 +288,14 @@ export interface Task {
    */
   originChatId?: string;
   /**
+   * The message within `originChatId` the raising turn replied to, when the
+   * card was opened from inside a thread rather than the channel's own
+   * timeline. A stringified value of this equals that message's `id` in
+   * `chat/history`. Omitted for a channel-level origin, and for every card
+   * created before this field existed.
+   */
+  originParent?: number;
+  /**
    * The workflow run whose agent node opened this card (issue #661), and the
    * graph it is a run of.
    *
@@ -343,7 +351,17 @@ export interface Task {
 
 /** The create body; the host defaults column→`pending`, priority→`medium`. */
 export interface CreateTask {
-  title: string;
+  /**
+   * The card's headline, when a person typed one.
+   *
+   * Omit it and the host names the card from `note`. The board's `+` dialog and
+   * the prompt box both send one and it is taken verbatim; "Add to board" sends
+   * none, because a chat message is not a title and shortening one in the
+   * browser is how a card ended up called `hey can you take a look at the…`.
+   *
+   * Omitting both this and `note` is a 400.
+   */
+  title?: string;
   note?: string;
   column?: string;
   priority?: string;

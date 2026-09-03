@@ -902,6 +902,16 @@ impl CompanyRuntime {
         &self.id
     }
 
+    /// The pass that names the work a card is opened for, when this company's
+    /// brain has a model to name it with.
+    ///
+    /// `None` on an echo brain and in any build without the harness, which
+    /// leaves [`mint_task_title`](crate::ports::tasks::mint_task_title) on the
+    /// shortened request.
+    pub fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
+        self.brain.titler()
+    }
+
     /// This company's secret store (SMTP creds, OAuth tokens, domain config).
     /// Sets the install-wide default MCP servers (issue #527). Called by
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from resolved config.
@@ -2361,9 +2371,11 @@ impl CompanyRuntime {
         // the same badge behind.
         let unanswered = self.unanswered_blocker(id);
         let is_blocker = self.is_blocker(id);
+        let waiting_runs = self.parked_workflow_attempts(id).await;
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await?;
-        self.finish_expiry(id, is_blocker, unanswered).await;
+        self.finish_expiry(id, is_blocker, unanswered, waiting_runs)
+            .await;
         Ok(())
     }
 
@@ -2932,25 +2944,54 @@ impl CompanyRuntime {
         .await
     }
 
-    /// Carries a resolved workflow-node blocker's answer back into the run
-    /// (issue #1863).
+    /// Re-enters the workflow node a resolved blocker stopped, carrying the
+    /// operator's answer into the run (issues #1863, #2005).
     ///
     /// A [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) settles the
-    /// run and starts nothing. A resuming verdict banks the answer (already
-    /// durable) and delivers it into the DM the question was asked in, so the
-    /// operator's decision is never silently dropped. Re-executing the node from
-    /// the run's trigger input — retry re-runs it, amend injects the value, skip
-    /// treats it satisfied — is the workflow engine's own resume seam (issue
-    /// #1864's node-level restart lives beside it); this hands the answer across
-    /// without disturbing that machinery.
+    /// run and starts nothing — the short-circuit that runs before any cycle.
+    ///
+    /// A resuming verdict re-dispatches the run. A paused workflow run is
+    /// *settled*, not suspended (see
+    /// [`workflow_resume`](crate::runtime::workflow_resume)'s module docs), so
+    /// re-entry means a fresh supervised run started from the blocked run's own
+    /// trigger input with the answer threaded onto it under
+    /// [`CONTINUATION_BLOCKER_KEY`](crate::runtime::workflow_resume::CONTINUATION_BLOCKER_KEY).
+    /// The executing node reads it back and acts on the verdict: a retry runs
+    /// again as it was, an amend runs again carrying the operator's words, a
+    /// skip does not run at all and the branch proceeds past it.
+    ///
+    /// The facts that re-dispatch needs — workflow id, trigger input,
+    /// attribution, checkpoint lineage — are the blocked-node stash the park
+    /// armed (`stash_node_blocker_resume`), keyed per (run, node). Reusing that
+    /// key rather than a second registry is what makes the at-most-once
+    /// guarantee hold across both ways into this node: the gated-call resume and
+    /// this one share
+    /// [`is_blocked_node_dispatched`](crate::runtime::journal::RuntimeJournal::is_blocked_node_dispatched),
+    /// so whichever arrives second records the decision and launches nothing.
+    ///
+    /// **Every failure is loud.** A stash this host no longer holds, a graph
+    /// that has since been deleted, a build with no workflow execution wired —
+    /// each returns `Err`, which
+    /// [`resume_blocker`](Self::resume_blocker) propagates. Reporting a resume
+    /// that did not happen as success is the silent drop the blocker family
+    /// exists to close.
+    ///
+    /// Re-running from the trigger costs the upstream nodes again unless
+    /// #1864's node-level checkpoint restart is available for this lineage;
+    /// `spawn_blocked_node_continuation` picks the cheaper of the two. What it
+    /// must never cost is a second report: the delivery (#438), outward-call
+    /// (#846) and denial (#978) ledgers ride the same trigger input this
+    /// threads onto, unchanged, and `deliver_outputs` skips a node either
+    /// ledger already names.
     #[cfg(feature = "openhuman")]
     async fn resume_node_blocker(
         self: &Arc<Self>,
         run_id: &str,
-        _node_id: &str,
+        node_id: &str,
         resolution: &crate::ports::blockers::BlockerResolution,
         thread: Option<&str>,
     ) -> Result<()> {
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, node_id);
         if !resolution.resumes() {
             let outcome =
                 crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
@@ -2963,17 +3004,92 @@ impl CompanyRuntime {
                     "[blockers] a cancelled workflow-node blocker's run could not be settled"
                 );
             }
+            let stashed = self.blocked_nodes.peek(&turn);
+            self.prune_checkpoint_lineage_of_stash(stashed.as_ref())
+                .await;
+            self.retire_blocked_stash(&turn).await;
             return self
                 .post_blocker_resume_note(thread, "Okay — I've cancelled that workflow step.")
                 .await;
         }
-        // Defect B-070: this hands the answer across and re-executes nothing —
-        // node-level restart is #1864, as the doc above says — so the note must
-        // not promise the run continues. Same claim `workflows::resume_claim`
-        // makes on the run panel, in the same words.
+        // A continuation already launched for this node — by the gated-call
+        // resume, or by a ghost decision replaying this one — must not launch a
+        // second. Same guard, same reason as `resume_blocked_agent_node`: the
+        // dispatch marker is host-durable and the run behind it is not
+        // idempotent. Checked before the stash below is required: a node
+        // parking more than one blocker card shares this turn's stash, and
+        // resolving the first already retired it on dispatch — a second card's
+        // answer must find the dispatch marker and be acknowledged, not read
+        // the missing stash as "this host no longer holds the run".
+        if self.journal.is_blocked_node_dispatched(&turn) {
+            tracing::warn!(
+                company = %self.id,
+                %turn,
+                "[blockers] a blocker was answered on a node whose continuation was already \
+                 dispatched; recording the answer and retiring the stash without launching a \
+                 second continuation"
+            );
+            self.retire_blocked_stash(&turn).await;
+            return self
+                .post_blocker_resume_note(
+                    thread,
+                    &blocker_resume_note(resolution, BlockerResumeOutcome::Reentered),
+                )
+                .await;
+        }
+        // Read without taking: the spawn below can still fail, and retiring the
+        // stash first would leave a restart with no pending decision and no run
+        // to continue — the stranding shape `resume_blocked_agent_node`'s own
+        // Stage 4 comment describes.
+        let Some(stashed) = self.blocked_nodes.peek(&turn) else {
+            self.post_blocker_resume_note(
+                thread,
+                "I have your answer, but this host no longer holds that workflow run — re-run \
+                 the workflow to pick it back up.",
+            )
+            .await?;
+            self.retire_blocked_stash(&turn).await;
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "a blocker on workflow node `{node_id}` of run `{run_id}` was answered, but \
+                 this host no longer holds the run's stash, so the node cannot be re-entered"
+            )));
+        };
+        let input = crate::runtime::workflow_resume::blocker_continuation_input(
+            stashed.input,
+            node_id,
+            resolution,
+        )?;
+        if let Err(error) = crate::runtime::workflow_resume::spawn_blocked_node_continuation(
+            self,
+            &turn,
+            &stashed.workflow_id,
+            input,
+            stashed.started_by,
+            stashed.thread_id,
+            stashed.workflow_fingerprint,
+        )
+        .await
+        {
+            // The stash is deliberately left in place — nothing was admitted and
+            // nothing was marked dispatched, so it stays recoverable, exactly as
+            // `resume_blocked_agent_node`'s own failure arm keeps it. Said out
+            // loud in the blocker's own DM as well as returned, because the
+            // operator answered a question and is owed the news that the answer
+            // did not land.
+            self.post_blocker_resume_note(
+                thread,
+                &format!(
+                    "I have your answer, but that workflow step could not be restarted right \
+                     now: {error}"
+                ),
+            )
+            .await?;
+            return Err(error);
+        }
+        self.retire_blocked_stash(&turn).await;
         self.post_blocker_resume_note(
             thread,
-            &blocker_resume_note(resolution, BlockerResumeOutcome::RunNotRestarted),
+            &blocker_resume_note(resolution, BlockerResumeOutcome::Reentered),
         )
         .await
     }
@@ -3830,11 +3946,8 @@ impl CompanyRuntime {
             // stop holding; retire it the same way that branch does and move
             // on, without touching the dispatched check below, which exists
             // solely to guard the *approved* replay path.
-            if !self
-                .blocked_nodes
-                .peek(&turn)
-                .is_some_and(|stashed| stashed.approved)
-            {
+            let stashed = self.blocked_nodes.peek(&turn);
+            if !stashed.as_ref().is_some_and(|stashed| stashed.approved) {
                 tracing::info!(
                     company = %self.id,
                     %turn,
@@ -3842,6 +3955,8 @@ impl CompanyRuntime {
                      with nothing approved, before its retirement could run; retiring the stash \
                      now instead of leaving it to rehydrate on every future boot"
                 );
+                self.prune_checkpoint_lineage_of_stash(stashed.as_ref())
+                    .await;
                 self.retire_blocked_stash(&turn).await;
                 continue;
             }
@@ -4946,8 +5061,12 @@ impl CompanyRuntime {
             // as blockers, not ordinary approvals, even though unanswered
             // returns None for them.
             let is_blocker = self.is_blocker(id);
+            // Issue B-012: and which workflow run was waiting on it, for the
+            // same before-the-retirement reason as the two above.
+            let waiting_runs = self.parked_workflow_attempts(id).await;
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
-            self.finish_expiry(id, is_blocker, unanswered).await;
+            self.finish_expiry(id, is_blocker, unanswered, waiting_runs)
+                .await;
         }
         Ok(expired)
     }
@@ -4979,7 +5098,66 @@ impl CompanyRuntime {
         id: &ApprovalId,
         was_blocker: bool,
         unanswered: Option<(String, String)>,
+        waiting_runs: Vec<crate::ports::runs::RunRecord>,
     ) {
+        // **The run that was waiting stops claiming it still is** (issue B-012).
+        //
+        // A workflow that parks on a gate is recorded `WaitingApproval` — the
+        // run is settled, nothing is executing, and that status is the row's
+        // account of why it stopped. Expiry retired the approval and removed it
+        // from the pending set, but nothing ever revisited the row, so it went
+        // on naming an approval no sweep will see again: the Observatory showed
+        // a run waiting for a decision that had already defaulted, and the
+        // approvals list showed nothing to decide. Two screens, no way to tell
+        // which was lying.
+        //
+        // `Cancelled` — "the attempt was cancelled before it could settle" — is
+        // what a default-deny leaves behind. Not `Declined`, which is reserved
+        // for work refused *by design* by the compiler or a step; here the
+        // decision was made by the clock and nobody chose it. Not `Failed`:
+        // nothing errored.
+        //
+        // **Whether or not the expiry released a continuation** (Codex on this
+        // PR, third round). It is tempting to skip this when something was
+        // released — a node whose *other* gated call the operator approved does
+        // continue — but the continuation runs as a **new attempt**:
+        // `RunAttempts` is an in-memory map built fresh per run
+        // (`workflows/runner.rs`) and `caps` mints every attempt under
+        // `generate_id()`. Nothing ever writes this row again. So skipping it
+        // left exactly the stale `WaitingApproval` this issue exists to remove,
+        // and — because the continuation cannot touch this id — there was never
+        // a race here to avoid in the first place. This attempt stopped at a
+        // gate that defaulted to denied, which is true either way.
+        //
+        // **Usage is carried, not reset** (Codex, same round). `finish_run`
+        // assigns `run.usage` and `run.step_count` from the outcome
+        // (`ports/runs.rs`), and `RunOutcome::new` zeroes both — so settling
+        // from a bare outcome would silently erase the tokens and cost this
+        // attempt really did spend, on a row the billing surfaces read.
+        //
+        // Best-effort and last, like everything else here: a row that cannot be
+        // written must not undo a default-deny that already happened.
+        for row in waiting_runs {
+            let run_id = row.id;
+            let outcome =
+                crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
+                    .with_error(
+                        "the approval this attempt was waiting on expired and defaulted to denied",
+                    )
+                    .with_usage(row.usage)
+                    .with_step_count(row.step_count);
+            if let Err(err) = self.runs().finish_run(&self.id, &run_id, outcome).await {
+                tracing::warn!(
+                    company = %self.id,
+                    approval = %id,
+                    run = %run_id,
+                    %err,
+                    "[approval] expired, but the waiting run's row could not be settled; \
+                     it will keep reporting `waiting_approval`"
+                );
+            }
+        }
+
         let mut card_returned = false;
         if let Some((task_id, question)) = unanswered {
             match crate::runtime::advance::return_expired_blocker_card(
@@ -5045,6 +5223,86 @@ impl CompanyRuntime {
         };
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
         pending.effect.kind.starts_with(&prefix)
+    }
+
+    /// The **attempt rows** this approval left recorded `WaitingApproval`, read
+    /// **before** the retirement for the reason its two siblings are (B-012).
+    ///
+    /// `workflow_run_of` needs the pending entry, and retiring is what removes
+    /// it — so after `retire_approval` there is no way back to which run was
+    /// waiting, exactly as there is no way back to what was being asked.
+    ///
+    /// # Why the cycle, and not `Effect::run_id` or the effect kind
+    ///
+    /// Two Codex findings, in sequence, both about reaching for the wrong
+    /// handle. `Effect::run_id` on a `workflow.approve` gate is the **lineage**
+    /// id, while `RunStore` rows are per-node *attempts* minted under
+    /// `generate_id()` and merely linked to it (`NewRun::for_workflow_node`), so
+    /// handing it to `finish_run` names no row at all. And the path that
+    /// actually leaves an attempt reading `WaitingApproval` is not that gate: it
+    /// is a **gated tool call** inside a workflow agent node
+    /// (`caps::park_gated_calls` → the `!parked.is_empty()` settle), parked with
+    /// `ApprovalPolicy::effect_for`'s own effect — whose `kind` is the tool name
+    /// and whose `run_id` is `None`. So on the real path neither the kind test
+    /// nor `workflow_run_of` can say anything, and a fix keyed on either is a
+    /// no-op that a fixture combining a gate effect with a hand-made attempt row
+    /// will nonetheless report as working.
+    ///
+    /// The **cycle recorded at park time** is the one correlation that survives
+    /// both shapes, so it is what this reads:
+    ///
+    /// * `workflow-node:{run}:{node}` — a blocked node's gated calls. The real
+    ///   case, and it names the run and the node outright.
+    /// * `workflow-run:{run}` — a run-level gate, whose node is on its own
+    ///   payload (`gate_node_id`).
+    ///
+    /// Narrowed to that node, never "every `WaitingApproval` attempt in the
+    /// lineage": a graph can park two nodes on two gates and only one expired.
+    /// Anything whose node cannot be resolved settles nothing — a stale row is
+    /// the bug, but cancelling a sibling still waiting on a live decision would
+    /// be a worse one.
+    async fn parked_workflow_attempts(
+        &self,
+        id: &ApprovalId,
+    ) -> Vec<crate::ports::runs::RunRecord> {
+        use crate::runtime::workflow_resume::{gate_node_id, run_and_node_from_node_turn};
+
+        let Some(pending) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
+            return Vec::new();
+        };
+        let cycle = self.journal.approval_cycle(id).flatten();
+        let resolved = cycle
+            .as_deref()
+            .and_then(run_and_node_from_node_turn)
+            .map(|(run, node)| (run.to_string(), node.to_string()))
+            .or_else(|| {
+                let run = workflow_run_of(&pending)?;
+                let node = gate_node_id(&pending.effect)?;
+                Some((run, node.to_string()))
+            });
+        let Some((lineage, node)) = resolved else {
+            return Vec::new();
+        };
+        let filter = crate::ports::runs::RunFilter {
+            workflow_run_id: Some(lineage),
+            statuses: vec![crate::ports::runs::RunStatus::WaitingApproval],
+            ..Default::default()
+        };
+        match self.runs().list_runs(&self.id, &filter).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| row.node_id.as_deref() == Some(node.as_str()))
+                .collect(),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    approval = %id,
+                    %err,
+                    "[approval] could not resolve the attempts waiting on an expiring approval"
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn unanswered_blocker(&self, id: &ApprovalId) -> Option<(String, String)> {
@@ -5751,24 +6009,6 @@ impl CompanyRuntime {
             .collect()
     }
 
-    /// Every pending blocker sharing `group_key` — the set one verdict fans
-    /// across (issue #1862).
-    ///
-    /// Ten cards stalled on one broken OAuth grant are one question, so
-    /// answering the card answers all of them. A blocker with no `group_key`
-    /// never reaches here (the caller resolves it alone), so a solo verdict can
-    /// never fan by accident. Oldest-first, the order
-    /// [`pending`](crate::runtime::journal::Journal::pending) already returns.
-    #[cfg(feature = "openhuman")]
-    pub(crate) fn blocker_group_members(&self, group_key: &str) -> Vec<ApprovalId> {
-        self.journal
-            .pending()
-            .into_iter()
-            .filter(|p| blocker_group_key_of(&p.effect).as_deref() == Some(group_key))
-            .map(|p| p.id)
-            .collect()
-    }
-
     /// The full group a single parked blocker belongs to — its root-cause
     /// siblings, or itself alone when nothing folds with it.
     ///
@@ -6431,6 +6671,34 @@ impl CompanyRuntime {
         self.store
             .save_importing(&record, gate_seen_to_persist)
             .await?;
+        // **Stopping the company stops the work already running** (B-037).
+        //
+        // Refusing new runs is only half of "Pause stops this company": a graph
+        // that is twenty nodes into thirty goes on calling models and spending
+        // for as long as it takes to finish, and the operator who pressed Pause
+        // — often *because* of that run — watches it keep going with no control
+        // that bites. `is_busy` already treats a live run as work; pause has to
+        // agree with it.
+        //
+        // Fired **after** the durable write, never before: the lifecycle is what
+        // `ensure_running` reads, so once it says paused nothing new can be
+        // admitted, and a run cancelled before it landed could be replaced by
+        // one racing in behind it.
+        //
+        // This is the Stop button's own path (`run_supervisor().cancel`, issue
+        // #383), not a second stop mechanism: the engine checks the token at the
+        // next node boundary, a node already executing finishes and is
+        // journaled, and a wedged one is hard-aborted after a bounded grace. So
+        // a paused run settles `cancelled` with its partial trail intact, the
+        // same outcome and the same shape as the operator pressing Stop on each
+        // one by hand.
+        //
+        // Best-effort, exactly as cancelling is everywhere else: a run
+        // registered on a superseded runtime (see `RuntimeHandover`) still
+        // finishes and still journals. Nothing here can fail the transition.
+        if to != "running" {
+            self.stop_live_runs(&to);
+        }
         self.events
             .append(
                 &self.id,
@@ -6442,6 +6710,36 @@ impl CompanyRuntime {
             )
             .await?;
         Ok(from)
+    }
+
+    /// Fires the stop signal on every workflow run this company still has in
+    /// flight, for a lifecycle that means "not running" (B-037).
+    ///
+    /// Separate from [`set_lifecycle`](Self::set_lifecycle) so the sweep is
+    /// readable and directly testable, and because the cancel is deliberately
+    /// synchronous: `RunSupervisor` is a `Mutex`-guarded map and firing a token
+    /// does not await, so there is no window between the lifecycle write and the
+    /// stop for another run to slip through.
+    ///
+    /// Deliberately **only** the workflow supervisor. A dispatched card or a
+    /// desk delegation lives in the steer registry and is stopped by its own
+    /// controls; folding them in here would make Pause a silent bulk-cancel of
+    /// work the operator never saw a Stop button for. Workflow runs are what the
+    /// promise on the settings screen is about, and what the report named.
+    fn stop_live_runs(&self, to: &str) {
+        let live = self.run_supervisor.live();
+        if live.is_empty() {
+            return;
+        }
+        tracing::info!(
+            company = %self.id,
+            lifecycle = %to,
+            runs = live.len(),
+            "company stopped: cancelling the workflow runs still in flight"
+        );
+        for (run_id, _workflow_id) in live {
+            self.run_supervisor.cancel(&run_id);
+        }
     }
 
     // -- Emergency stop (issue #86) -----------------------------------------
@@ -6684,32 +6982,30 @@ const BLOCKER_CANCELLED: &str =
 /// # Why the note has to be told
 ///
 /// A resolved blocker's DM note used to be composed from the verdict alone, so
-/// it said "picking that back up now" for **every** resuming verdict. Only one
-/// of its three callers re-enters anything:
+/// it said "picking that back up now" for **every** resuming verdict. That was
+/// wrong for whichever caller had nothing behind it to restart:
 ///
-/// * [`resume_task_card`](CompanyRuntime::resume_task_card) really does — it
-///   moves the paused card back to In Progress through `upsert_task`, the write
-///   that carries the dispatch edge.
-/// * [`resume_node_blocker`](CompanyRuntime::resume_node_blocker) does not, and
-///   says so in its own doc: re-executing the node is the workflow engine's
-///   resume seam and node-level restart is issue #1864, still open. It hands
-///   the answer across and starts nothing.
+/// * [`resume_task_card`](CompanyRuntime::resume_task_card) really re-enters —
+///   it moves the paused card back to In Progress through `upsert_task`, the
+///   write that carries the dispatch edge.
+/// * [`resume_node_blocker`](CompanyRuntime::resume_node_blocker) really
+///   re-enters too (issues #1863, #2005) — it re-dispatches the blocked node
+///   via `spawn_blocked_node_continuation`, carrying the operator's answer
+///   onto the run's trigger input.
 /// * The no-step arm of [`drive_blocker_resume`](CompanyRuntime::drive_blocker_resume)
-///   does not either. A question asked mid-conversation parks `Unlinked` with
-///   no continuation, and the design says a note is the whole answer.
+///   does not. A question asked mid-conversation parks `Unlinked` with no
+///   continuation, and the design says a note is the whole answer.
 ///
-/// So two of the three told the operator their work was proceeding while
-/// nothing was, and a founder who answered a genuine either/or watched twenty-
-/// five minutes pass with the card consumed and no way to re-decide it.
+/// So the one caller with nothing to restart told the operator their work was
+/// proceeding while nothing was, and a founder who answered a genuine
+/// either/or watched twenty-five minutes pass with the card consumed and no
+/// way to re-decide it.
 ///
 /// This is the same fault B-013 and B-072 were about — a park with no
-/// continuation described as one that continues by itself — a third time, in
-/// the DM prose rather than in a run panel. The `RunNotRestarted` wording is
-/// deliberately `workflows::resume_claim`'s, so the sentence in the chat and
-/// the sentence on the run panel about one card cannot disagree.
-///
-/// Passing the fact in, rather than deriving it, is what stops a fourth caller
-/// inheriting the claim: there is no default.
+/// continuation described as one that continues by itself. The
+/// [`Reentered`](Self::Reentered) wording is deliberately generic across both
+/// re-entering callers, so a fourth caller has to pick a real outcome rather
+/// than inheriting a default.
 #[cfg(feature = "openhuman")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BlockerResumeOutcome {
@@ -6718,8 +7014,6 @@ enum BlockerResumeOutcome {
     /// A question asked mid-conversation: recorded, with nothing behind it to
     /// restart.
     RecordedOnly,
-    /// A workflow node's question: recorded, and the run did not restart.
-    RunNotRestarted,
 }
 
 #[cfg(feature = "openhuman")]
@@ -6732,10 +7026,6 @@ impl BlockerResumeOutcome {
                 " It's recorded against the card. That was a question I asked in this \
                  conversation, so there's no step waiting behind it and nothing starts again on \
                  its own — tell me here when you'd like it acted on."
-            }
-            Self::RunNotRestarted => {
-                " It's recorded against the card, but it does not restart this run — re-run the \
-                 workflow once the answer is in hand."
             }
         }
     }
@@ -6769,9 +7059,6 @@ fn blocker_resume_note(
                     "Okay — I've dropped the question I asked you here. There was no step waiting \
                      behind it, so nothing else changes."
                         .to_string()
-                }
-                BlockerResumeOutcome::RunNotRestarted => {
-                    "Okay — I've cancelled that workflow step, and its run is settled.".to_string()
                 }
             };
         }
@@ -7023,16 +7310,12 @@ mod tests {
                     blocker_resume_note(&r, BlockerResumeOutcome::Reentered).contains(RESUMES),
                     "a re-dispatched card really does carry on: {verdict:?}",
                 );
-                for silent in [
-                    BlockerResumeOutcome::RecordedOnly,
-                    BlockerResumeOutcome::RunNotRestarted,
-                ] {
-                    let note = blocker_resume_note(&r, silent);
-                    assert!(
-                        !note.contains(RESUMES),
-                        "{silent:?} restarts nothing and must not promise it: {note}",
-                    );
-                }
+                let silent = BlockerResumeOutcome::RecordedOnly;
+                let note = blocker_resume_note(&r, silent);
+                assert!(
+                    !note.contains(RESUMES),
+                    "{silent:?} restarts nothing and must not promise it: {note}",
+                );
             }
         }
 
@@ -7062,21 +7345,34 @@ mod tests {
             assert!(note.contains("I've got your answer"), "{note}");
         }
 
-        /// The chat note and the run panel are one host talking about one card,
-        /// so they use one sentence — the same parity B-072 established between
-        /// the host's two run composers, across one more surface.
+        /// Regression coverage for the false "does not restart" claim this pair
+        /// used to make in lockstep (B-072). A workflow blocker really does
+        /// re-enter its node now (issues #1863, #2005), so neither the chat
+        /// note nor the run panel may say otherwise, and both agree the run
+        /// goes on.
         #[test]
-        fn a_workflow_node_says_what_the_run_panel_says() {
+        fn a_workflow_node_and_the_run_panel_agree_the_run_continues() {
             let note = blocker_resume_note(
                 &resolution(BlockerVerdict::Amend),
-                BlockerResumeOutcome::RunNotRestarted,
+                BlockerResumeOutcome::Reentered,
             );
             let panel =
                 crate::workflows::resume_claim::resume_claim(1, 1).expect("a blocker's claim");
-            let shared =
-                "does not restart this run — re-run the workflow once the answer is in hand";
-            assert!(note.contains(shared), "the chat note drifted: {note}");
-            assert!(panel.contains(shared), "the run panel drifted: {panel}");
+            for stale in ["does not restart", "nothing starts again"] {
+                assert!(
+                    !note.contains(stale),
+                    "the chat note still claims no restart: {note}"
+                );
+                assert!(
+                    !panel.contains(stale),
+                    "the run panel still claims no restart: {panel}"
+                );
+            }
+            assert!(note.contains(RESUMES), "{note}");
+            assert!(
+                panel.contains("re-enters this step"),
+                "the run panel does not say the node re-enters: {panel}"
+            );
         }
 
         /// A cancel keeps its own settle notice — and it says what it settled
@@ -7091,7 +7387,6 @@ mod tests {
             for outcome in [
                 BlockerResumeOutcome::Reentered,
                 BlockerResumeOutcome::RecordedOnly,
-                BlockerResumeOutcome::RunNotRestarted,
             ] {
                 let note = blocker_resume_note(&resolution(BlockerVerdict::Cancel), outcome);
                 assert_ne!(note, "Okay — cancelled.", "{outcome:?} names nothing");
@@ -7106,16 +7401,15 @@ mod tests {
                     "{outcome:?} must say what was cancelled: {note}",
                 );
             }
-            // And the three are distinguishable from each other.
+            // And the two are distinguishable from each other.
             let notes: std::collections::BTreeSet<String> = [
                 BlockerResumeOutcome::Reentered,
                 BlockerResumeOutcome::RecordedOnly,
-                BlockerResumeOutcome::RunNotRestarted,
             ]
             .into_iter()
             .map(|o| blocker_resume_note(&resolution(BlockerVerdict::Cancel), o))
             .collect();
-            assert_eq!(notes.len(), 3, "each arm reads differently: {notes:?}");
+            assert_eq!(notes.len(), 2, "each arm reads differently: {notes:?}");
         }
     }
 
@@ -7251,6 +7545,7 @@ mod tests {
         CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
         task_enters_planning,
     };
+    use crate::ports::tasks::TaskTitle;
 
     /// Issue #880: which parked approvals name a workflow run, and which must
     /// not.
@@ -7475,6 +7770,75 @@ mod tests {
     /// production. Deliberately outside any feature gate: the steer registry is
     /// only wired under `openhuman`, so a test that relied on it alone would not
     /// run in the default build at all.
+    /// **B-037, the other half.** Pausing a company stops the runs it already
+    /// has in flight, not only the ones it would have started next.
+    ///
+    /// Refusing new runs was the reported symptom; this is the promise on the
+    /// same settings screen. A graph twenty nodes into thirty goes on spending
+    /// until it finishes, and the operator who pressed Pause — usually because
+    /// of that run — had no control that reached it.
+    #[tokio::test]
+    async fn pausing_a_company_stops_the_runs_already_in_flight() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+
+        let (ctx, _guard) = runtime
+            .run_supervisor()
+            .begin("wf-1", false)
+            .expect("begin a workflow run");
+        assert!(
+            !ctx.cancel.is_cancelled(),
+            "the run starts un-cancelled, or this test proves nothing"
+        );
+
+        runtime
+            .set_lifecycle(
+                "paused",
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: "operator".into(),
+                },
+            )
+            .await
+            .expect("pause the company");
+
+        assert!(
+            ctx.cancel.is_cancelled(),
+            "pausing must fire the stop signal on a run already executing"
+        );
+    }
+
+    /// The mirror, so the sweep cannot quietly become "cancel on every
+    /// transition": **resuming** must not stop the work it is resuming into.
+    ///
+    /// A resume runs through the same `set_lifecycle`, so a guard keyed on the
+    /// wrong side of the comparison would kill runs at exactly the moment the
+    /// operator asked for them to continue.
+    #[tokio::test]
+    async fn resuming_a_company_does_not_stop_anything() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+
+        let (ctx, _guard) = runtime
+            .run_supervisor()
+            .begin("wf-1", false)
+            .expect("begin a workflow run");
+
+        runtime
+            .set_lifecycle(
+                "running",
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: "operator".into(),
+                },
+            )
+            .await
+            .expect("resume the company");
+
+        assert!(
+            !ctx.cancel.is_cancelled(),
+            "resuming must leave a live run alone"
+        );
+    }
+
     #[tokio::test]
     async fn is_busy_sees_every_source_of_work() {
         let (runtime, _record, _home) = runtime_and_record().await;
@@ -7578,7 +7942,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "card-1".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -7593,6 +7957,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             // A stale chip from a dispatch attempt that already bounced.
             bounced: Some("a previous run's dispatch failed".to_string()),
         };
@@ -7656,7 +8021,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "card-2".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -7671,6 +8036,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             // A stale chip from a dispatch attempt that already bounced.
             bounced: Some("a previous run's dispatch failed".to_string()),
         };
@@ -8164,7 +8530,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -8179,6 +8545,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -8258,7 +8625,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -8273,6 +8640,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -8414,7 +8782,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -8431,6 +8799,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -8571,7 +8940,7 @@ mod tests {
         let orchestrator = "ceo";
         let card = |id: &str, origin: &str| TaskRecord {
             id: id.to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -8586,6 +8955,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         let dm_card = card("t-dm", "writer");
@@ -8805,7 +9175,7 @@ mod tests {
 
         let mut card = crate::ports::tasks::TaskRecord {
             id: "t-relay".to_string(),
-            title: "Draft the launch email".to_string(),
+            title: TaskTitle::authored("Draft the launch email"),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -8820,6 +9190,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         rt.tasks().upsert(&id, &card).await.unwrap();
@@ -8937,6 +9308,83 @@ mod tests {
         }
     }
 
+    /// A **gated tool call** parked by a workflow agent node, in the shape
+    /// production actually creates (Codex on the B-012 PR, second round).
+    ///
+    /// This is the path that leaves an attempt reading `WaitingApproval`:
+    /// `caps::park_gated_calls` journals `ApprovalPolicy::effect_for`'s effect —
+    /// `kind` is the **tool name**, `run_id` is `None` — under the node's
+    /// `workflow-node:{run}:{node}` cycle, and the node then settles its attempt
+    /// `WaitingApproval`. The earlier fixture here paired a `gate_effect` with a
+    /// hand-made attempt row, a combination no parking path produces, and so
+    /// reported a fix that could not fire in production as working.
+    ///
+    /// Returns the attempt row's id — the row the expiry has to find.
+    async fn park_gated_node_call(
+        rt: &std::sync::Arc<crate::company::runtime::CompanyRuntime>,
+        approval: &crate::ports::types::ApprovalId,
+        lineage: &str,
+        node: &str,
+        at_millis: u64,
+        arm_continuation: bool,
+    ) -> String {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::{Effect, EffectGroup, EventSeq};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let attempt = crate::ports::generate_id();
+        rt.runs()
+            .create_run(
+                rt.id(),
+                crate::ports::NewRun::for_workflow_node(attempt.clone(), lineage, node, "ceo"),
+            )
+            .await
+            .unwrap();
+        rt.runs()
+            .begin_run(rt.id(), &attempt, EventSeq::new(1))
+            .await
+            .unwrap();
+        rt.runs()
+            .finish_run(
+                rt.id(),
+                &attempt,
+                crate::ports::runs::RunOutcome::new(RunStatus::WaitingApproval),
+            )
+            .await
+            .unwrap();
+
+        // `effect_for`'s shape, field for field: the tool's own name as the
+        // kind, the agent stamped, and **no** `run_id`.
+        let effect = Effect {
+            kind: "workspace.write".into(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "path": "README.md" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+        let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(lineage, node);
+        if arm_continuation {
+            rt.continuations.arm(&node_turn);
+        }
+        rt.approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at_millis);
+        rt.journal
+            .record_parked(
+                approval,
+                &effect,
+                at_millis,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                Some(node_turn),
+            )
+            .await
+            .unwrap();
+        attempt
+    }
+
     /// Seeds one parked approval into BOTH the live gate and the durable journal
     /// under a fixed id at `at_millis`, exactly as a real park leaves them — the
     /// gate answers "is this live?" for extend/sweep, the journal projects the
@@ -8964,6 +9412,232 @@ mod tests {
             .await
             .unwrap();
         approval
+    }
+
+    /// **B-012.** A workflow run parked on a gate stops claiming it is waiting
+    /// once that approval expires.
+    ///
+    /// A parked run is recorded `WaitingApproval` — settled, nothing executing,
+    /// and the status is the row's account of *why* it stopped. Expiry retired
+    /// the approval and dropped it from the pending set, but nothing revisited
+    /// the row, so it went on naming an approval no sweep would see again: the
+    /// Observatory showed a run awaiting a decision while the approvals list
+    /// showed nothing to decide, and neither screen was wrong about its own
+    /// data.
+    #[tokio::test]
+    async fn an_expired_approval_settles_the_workflow_run_that_was_waiting_on_it() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::ApprovalId;
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        // A workflow node parked on a gate: an attempt row settled
+        // `WaitingApproval` and linked to the lineage, plus the gate itself
+        // carrying that lineage. Parked at epoch 0 — past any TTL.
+        let approval = ApprovalId::new("appr-b012");
+        let attempt = park_gated_node_call(&rt, &approval, "wr-b012", "solve", 0, false).await;
+
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&approval),
+            "the sweep must find the epoch-0 park: {expired:?}"
+        );
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), &attempt)
+            .await
+            .unwrap()
+            .expect("the attempt row survives the sweep");
+        assert_eq!(
+            row.status,
+            RunStatus::Cancelled,
+            "a default-denied gate leaves the attempt cancelled, not still waiting"
+        );
+    }
+
+    /// **The narrowing** the settle above is scoped by. One expiry must not
+    /// cancel a *sibling* node still waiting on a live decision.
+    ///
+    /// A graph can park two nodes on two gates, and `RunFilter` can only ask
+    /// for the lineage — so "every `WaitingApproval` attempt of this run" is
+    /// the obvious query and the wrong one. The node is read off the gate's own
+    /// payload (`gate_node_id`) to close that gap.
+    #[tokio::test]
+    async fn an_expiry_leaves_a_sibling_node_still_waiting_on_a_live_gate() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::ApprovalId;
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        // Same lineage, two nodes: one parked at epoch 0 (past any TTL), one
+        // parked now (nowhere near it).
+        let expiring = ApprovalId::new("appr-expiring");
+        let attempt_expiring =
+            park_gated_node_call(&rt, &expiring, "wr-two-gates", "solve", 0, false).await;
+        let live = ApprovalId::new("appr-live");
+        let attempt_live = park_gated_node_call(
+            &rt,
+            &live,
+            "wr-two-gates",
+            "review",
+            crate::ports::now_millis(),
+            false,
+        )
+        .await;
+
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&expiring) && !expired.contains(&live),
+            "only the epoch-0 park expires: {expired:?}"
+        );
+
+        let settled = rt
+            .runs()
+            .get_run(rt.id(), &attempt_expiring)
+            .await
+            .unwrap()
+            .expect("the expired node's attempt survives");
+        assert_eq!(settled.status, RunStatus::Cancelled);
+
+        let sibling = rt
+            .runs()
+            .get_run(rt.id(), &attempt_live)
+            .await
+            .unwrap()
+            .expect("the sibling's attempt survives");
+        assert_eq!(
+            sibling.status,
+            RunStatus::WaitingApproval,
+            "the sibling node is still waiting on a decision nobody has made"
+        );
+    }
+
+    /// **An expiry settles its attempt even when it releases a continuation**
+    /// (Codex on the B-012 PR, third round).
+    ///
+    /// The tempting reading is that a released node is "still going" and must
+    /// not be settled. It is not: a continuation runs as a **new** attempt —
+    /// `RunAttempts` is rebuilt per run and `caps` mints every attempt under
+    /// `generate_id()` — so nothing ever writes this row again. Skipping it left
+    /// exactly the stale `WaitingApproval` this issue exists to remove, and the
+    /// earlier version of this test could not see that, because it asserted only
+    /// that the cancellation *error* was absent and never looked at the status.
+    ///
+    /// The scenario is the one that makes a node's batch non-empty, since an
+    /// expiry alone never does (`ContinuationQueue::decide` banks no event for
+    /// one): two gated calls on one node, one answered and one expired.
+    #[tokio::test]
+    async fn an_expiry_settles_its_attempt_even_when_it_releases_a_continuation() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Verdict};
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        let approval = ApprovalId::new("appr-released");
+        let attempt = park_gated_node_call(&rt, &approval, "wr-released", "solve", 0, true).await;
+
+        // The node's *second* gated call, answered by the operator before the
+        // first expires. Its banked event is what makes the released batch
+        // non-empty, and so what makes this node continue at all.
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key("wr-released", "solve");
+        rt.continuations.arm(&node_turn);
+        assert!(
+            rt.continuations
+                .decide(
+                    &node_turn,
+                    Some(CompanyEvent::ApprovalResolved {
+                        approval_id: ApprovalId::new("appr-answered"),
+                        verdict: Verdict::Approve,
+                        by: Actor {
+                            kind: ActorKind::Operator,
+                            id: "operator".into(),
+                        },
+                    }),
+                )
+                .is_none(),
+            "the node is still blocked on the gate that has not expired yet"
+        );
+
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&approval),
+            "the sweep must find the epoch-0 park: {expired:?}"
+        );
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), &attempt)
+            .await
+            .unwrap()
+            .expect("the attempt row survives the sweep");
+        assert_eq!(
+            row.status,
+            RunStatus::Cancelled,
+            "the released continuation runs as a NEW attempt, so this row is nobody else's \
+             to settle and must not be left reading `WaitingApproval`"
+        );
+    }
+
+    /// **A settle that only changes status must not erase what the attempt
+    /// spent** (Codex on the B-012 PR, third round).
+    ///
+    /// `RunStore::finish_run` assigns `usage` and `step_count` from the outcome
+    /// rather than merging, and `RunOutcome::new` zeroes both — so cancelling an
+    /// expired attempt from a bare outcome silently wipes the tokens and cost it
+    /// really did spend, on a row the billing surfaces read.
+    #[tokio::test]
+    async fn settling_an_expired_attempt_keeps_the_usage_it_recorded() {
+        use crate::ports::runs::{RunOutcome, RunStatus};
+        use crate::ports::types::{ApprovalId, TokenUsage};
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        let approval = ApprovalId::new("appr-usage");
+        let attempt = park_gated_node_call(&rt, &approval, "wr-usage", "solve", 0, false).await;
+
+        // What the attempt spent before it parked. Re-settled onto the parked
+        // row exactly as a real turn's trace fold would leave it.
+        let usage = TokenUsage {
+            input: 1_200,
+            output: 340,
+            cached_input: 0,
+            cost_usd: 0.042,
+        };
+        rt.runs()
+            .finish_run(
+                rt.id(),
+                &attempt,
+                RunOutcome::new(RunStatus::WaitingApproval)
+                    .with_usage(usage)
+                    .with_step_count(7),
+            )
+            .await
+            .unwrap();
+
+        rt.sweep_expired_approvals().await.unwrap();
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), &attempt)
+            .await
+            .unwrap()
+            .expect("the attempt row survives the sweep");
+        assert_eq!(row.status, RunStatus::Cancelled);
+        assert_eq!(
+            row.usage, usage,
+            "the expiry changed the status; it must not have erased the spend"
+        );
+        assert_eq!(row.step_count, 7, "nor the trace it recorded");
     }
 
     /// Issue #1865 (Codex review on PR #1883): a late resolve that discovers
@@ -9465,7 +10139,9 @@ mod tests {
     #[cfg(feature = "openhuman")]
     mod review {
         use crate::ports::TaskRecord;
-        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskStore};
+        use crate::ports::tasks::{
+            COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskStore, TaskTitle,
+        };
         use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
         use std::sync::Arc;
         use tempfile::TempDir;
@@ -9599,7 +10275,7 @@ mod tests {
         fn card(id: &str, origin: &str, column: &str) -> TaskRecord {
             TaskRecord {
                 id: id.to_string(),
-                title: "Ship it".to_string(),
+                title: TaskTitle::authored("Ship it"),
                 note: None,
                 column: column.to_string(),
                 priority: "medium".to_string(),
@@ -9614,6 +10290,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }
@@ -10233,13 +10910,19 @@ mod tests {
                     .await
                     .expect("parks");
             }
-            let members = runtime.blocker_group_members("connection:slack");
+            // `blocker_group_of` is the production fold (B-111): given any one
+            // member's id, it returns the whole group. A `group_key` bypasses
+            // task-based folding entirely (`blocker_fold_key`), so this reads
+            // the same three ids the old group-key-only `blocker_group_members`
+            // did.
+            let pending = runtime.pending_approvals();
+            let members = runtime.blocker_group_of(&pending[0].id);
             assert_eq!(
                 members.len(),
                 3,
                 "every card on the broken connection is one group"
             );
-            for summary in runtime.pending_approvals() {
+            for summary in &pending {
                 assert_eq!(summary.group_key.as_deref(), Some("connection:slack"));
             }
         }
@@ -10336,13 +11019,25 @@ mod tests {
                 "a bare verdict over two blocked things asks which"
             );
 
+            // `blocker_group_of` is the production fold (B-111): given the
+            // slack blocker's own id, it returns its whole group — the same
+            // read the old group-key-only `blocker_group_members` gave here,
+            // since a `group_key` bypasses task-based folding entirely
+            // (`blocker_fold_key`).
+            let slack_id = runtime
+                .pending_approvals()
+                .into_iter()
+                .find(|p| p.group_key.as_deref() == Some("connection:slack"))
+                .map(|p| p.id)
+                .expect("the slack blocker is pending");
+
             let named = runtime
                 .plan_blocker_reply("dm:eng", None, "retry slack")
                 .await
                 .expect("plan");
             match named {
                 BlockerReplyPlan::Resolve { ids, .. } => {
-                    assert_eq!(ids, runtime.blocker_group_members("connection:slack"));
+                    assert_eq!(ids, runtime.blocker_group_of(&slack_id));
                 }
                 _ => panic!("naming the connection resolves only its group"),
             }
@@ -10665,7 +11360,7 @@ mod tests {
         use crate::company::task_intent::BlockerReplyIntent;
         use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
         use crate::ports::tasks::{
-            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
+            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord, TaskTitle,
         };
         use crate::ports::types::CompanyId;
         use std::path::Path;
@@ -10739,7 +11434,7 @@ mod tests {
         fn card(id: &str, column: &str) -> TaskRecord {
             TaskRecord {
                 id: id.to_string(),
-                title: "Draft the launch note".to_string(),
+                title: TaskTitle::authored("Draft the launch note"),
                 note: None,
                 column: column.to_string(),
                 priority: "medium".to_string(),
@@ -10754,6 +11449,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }
@@ -11753,6 +12449,653 @@ mod tests {
                 stored(&runtime, "t-1").await.column,
                 COLUMN_TODO,
                 "a console Deny abandons the work rather than re-dispatching it"
+            );
+        }
+    }
+
+    /// Issue #2005: the workflow-NODE half of the blocker resume — the answer
+    /// reaching the engine's trigger reader, not just the DM.
+    ///
+    /// The workflow runner is the only double, on `workflow_resume`'s own
+    /// reasoning: what is under test is whether a continuation run is started,
+    /// with what trigger input, and how many times.
+    #[cfg(feature = "openhuman")]
+    mod node_blocker_resume {
+        use std::sync::{Arc, Mutex};
+
+        use async_trait::async_trait;
+        use serde_json::{Value, json};
+
+        use crate::company::CompanyManifest;
+        use crate::company::runtime::CompanyRuntime;
+        use crate::company::task_intent::BlockerReplyIntent;
+        use crate::ports::blockers::{
+            BlockerKind, BlockerPayload, BlockerSource, BlockerStep, BlockerVerdict,
+        };
+        use crate::ports::types::{CompanyId, Effect, EffectGroup};
+        use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
+        use crate::runtime::RuntimeBuilder;
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        use crate::runtime::workflow_resume::{
+            CONTINUATION_BLOCKER_KEY, blocker_answer_for, workflow_node_turn_key,
+        };
+
+        const RUN_ID: &str = "run-that-blocked";
+        const NODE_ID: &str = "draft";
+        const WORKFLOW_TOML: &str = r#"
+id = "reporting"
+name = "Reporting"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "draft"
+kind = "output"
+name = "Draft"
+[[edge]]
+from = "start"
+to = "draft"
+"#;
+
+        #[derive(Clone, Debug)]
+        struct StartedRun {
+            workflow_id: String,
+            input: Value,
+        }
+
+        #[derive(Default)]
+        struct RecordingRunner {
+            started: Mutex<Vec<StartedRun>>,
+        }
+
+        impl RecordingRunner {
+            fn started(&self) -> Vec<StartedRun> {
+                self.started.lock().expect("recording runner").clone()
+            }
+        }
+
+        #[async_trait]
+        impl WorkflowRunner for RecordingRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                workflow: &crate::company::WorkflowFile,
+                input: Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                self.started
+                    .lock()
+                    .expect("recording runner")
+                    .push(StartedRun {
+                        workflow_id: workflow.id.clone(),
+                        input,
+                    });
+                Ok(WorkflowRun {
+                    output: json!({ "ok": true }),
+                    pending_approvals: Vec::new(),
+                    deliveries: Vec::new(),
+                    cancelled: false,
+                    nodes: Vec::new(),
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                })
+            }
+        }
+
+        fn manifest() -> CompanyManifest {
+            toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            )
+            .expect("manifest")
+        }
+
+        fn seed_home() -> tempfile::TempDir {
+            let dir = tempfile::Builder::new()
+                .prefix("opencompany-node-blocker-")
+                .tempdir()
+                .expect("tempdir");
+            let workflows = dir.path().join("workflows");
+            std::fs::create_dir_all(&workflows).expect("workflows dir");
+            std::fs::write(workflows.join("reporting.toml"), WORKFLOW_TOML).expect("seed graph");
+            dir
+        }
+
+        async fn runtime(
+            home: &std::path::Path,
+            with_runner: bool,
+        ) -> (Arc<CompanyRuntime>, Arc<RecordingRunner>) {
+            let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .with_seed_dir(home.to_path_buf())
+                .build()
+                .await
+                .expect("runtime builds");
+            let runner = Arc::new(RecordingRunner::default());
+            if with_runner {
+                rt.set_workflow_runner(runner.clone());
+            }
+            (Arc::new(rt), runner)
+        }
+
+        /// Parks a node blocker exactly as `park_node_blocker_as` does, and
+        /// arms the same per-(run, node) stash its `stash_node_blocker_resume`
+        /// writes at park time.
+        async fn park_node_blocker(rt: &Arc<CompanyRuntime>, input: Value) -> String {
+            park_node_blocker_stashed(rt, input, true, None).await
+        }
+
+        async fn park_node_blocker_stashed(
+            rt: &Arc<CompanyRuntime>,
+            input: Value,
+            stash: bool,
+            thread_id: Option<&str>,
+        ) -> String {
+            let payload = BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Provider,
+                step: Some(BlockerStep::Node {
+                    run_id: RUN_ID.to_string(),
+                    node_id: NODE_ID.to_string(),
+                }),
+                reason: "the model id `gpt-nope` was rejected".to_string(),
+                needed: "a model id this provider serves".to_string(),
+                group_key: None,
+            };
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: Some(RUN_ID.to_string()),
+            };
+            let id = rt
+                .approvals
+                .park(rt.id(), effect.clone())
+                .await
+                .expect("parks");
+            rt.journal()
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("journals");
+            if stash {
+                let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+                rt.blocked_nodes.arm_checkpointed(
+                    &turn,
+                    "reporting",
+                    &input,
+                    &crate::ports::types::StartedBy::from_scheduled(false),
+                    thread_id,
+                    None,
+                );
+                rt.journal()
+                    .record_blocked_node_stashed_checkpointed(
+                        &turn,
+                        "reporting",
+                        &input,
+                        &crate::ports::types::StartedBy::from_scheduled(false),
+                        thread_id,
+                        None,
+                    )
+                    .await
+                    .expect("stashes");
+            }
+            id.to_string()
+        }
+
+        async fn answer(
+            rt: &Arc<CompanyRuntime>,
+            id: &str,
+            intent: BlockerReplyIntent,
+            text: &str,
+        ) {
+            let ids = vec![crate::ports::types::ApprovalId::from(id.to_string())];
+            rt.apply_blocker_reply(&ids, intent, text, None)
+                .await
+                .expect("applies");
+        }
+
+        /// The acceptance headline: a workflow parked at a failed node and
+        /// answered `retry` re-runs, and the answer is on the trigger input the
+        /// re-run carries — not banked in the DM and dropped.
+        #[tokio::test]
+        async fn retry_re_runs_the_node_with_the_answer_in_the_trigger_input() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Retry, "go ahead and retry").await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1, "a retry re-enters the node exactly once");
+            assert_eq!(started[0].workflow_id, "reporting");
+            assert_eq!(
+                started[0].input["topic"], "quarterly numbers",
+                "the blocked run's own trigger input is replayed"
+            );
+            let carried = blocker_answer_for(&started[0].input, NODE_ID)
+                .expect("readable")
+                .expect("the answer rides the trigger input");
+            assert_eq!(carried.verdict, BlockerVerdict::Retry);
+        }
+
+        /// An amend carries the operator's words into the re-run, the workflow
+        /// twin of the card path's note append.
+        #[tokio::test]
+        async fn amend_carries_the_operators_words_into_the_re_run() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(
+                &rt,
+                &id,
+                BlockerReplyIntent::Amend,
+                "use gpt-4o-mini instead",
+            )
+            .await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1);
+            let carried = blocker_answer_for(&started[0].input, NODE_ID)
+                .expect("readable")
+                .expect("the answer rides the trigger input");
+            assert_eq!(carried.verdict, BlockerVerdict::Amend);
+            assert_eq!(
+                carried.answer, "use gpt-4o-mini instead",
+                "the correction must reach the node, or the re-run repeats the failure"
+            );
+        }
+
+        /// A skip proceeds past the node: the run is re-entered carrying a
+        /// verdict the node reads as "waived", rather than being abandoned.
+        #[tokio::test]
+        async fn skip_continues_the_run_past_the_node() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Skip, "skip it").await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1, "a skip still continues the run");
+            let carried = blocker_answer_for(&started[0].input, NODE_ID)
+                .expect("readable")
+                .expect("the answer rides the trigger input");
+            assert_eq!(carried.verdict, BlockerVerdict::Skip);
+        }
+
+        /// The one verdict that starts nothing.
+        #[tokio::test]
+        async fn cancel_starts_no_run() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Cancel, "cancel that").await;
+
+            assert!(
+                runner.started().is_empty(),
+                "a cancel abandons the work rather than re-entering it"
+            );
+        }
+
+        /// The ledgers ride the same trigger input the answer is threaded onto,
+        /// so a continuation still knows what the blocked run already sent
+        /// (issues #438 / #846 / #978).
+        #[tokio::test]
+        async fn a_skip_continuation_still_carries_what_the_run_already_sent() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let input = json!({
+                "topic": "quarterly numbers",
+                crate::runtime::workflow_resume::CONTINUATION_DELIVERED_KEY: [
+                    { "node": "report", "kind": "owner" }
+                ],
+                crate::runtime::workflow_resume::CONTINUATION_PERFORMED_KEY: [
+                    { "node": "post", "tool": "send", "result": { "ok": true } }
+                ],
+                crate::runtime::workflow_resume::CONTINUATION_DENIED_KEY: ["refused-gate"],
+            });
+            let id = park_node_blocker(&rt, input).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Skip, "skip it").await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1);
+            let carried = &started[0].input;
+            assert_eq!(
+                crate::runtime::workflow_resume::delivered_in_input(carried).len(),
+                1,
+                "the report the blocked run already delivered must not be sent twice"
+            );
+            assert_eq!(
+                crate::runtime::workflow_resume::performed_in_input(carried).len(),
+                1,
+                "the call the blocked run already made must not be made twice"
+            );
+            assert_eq!(
+                crate::runtime::workflow_resume::denied_in_input(carried),
+                vec!["refused-gate".to_string()],
+                "a gate the operator already refused must not be asked about again"
+            );
+        }
+
+        /// Answering twice re-enters the node once: the second decision finds
+        /// the continuation already dispatched and launches nothing.
+        #[tokio::test]
+        async fn a_node_is_re_entered_once_however_many_answers_land() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let first = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+            answer(&rt, &first, BlockerReplyIntent::Retry, "retry").await;
+
+            let second = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+            answer(&rt, &second, BlockerReplyIntent::Retry, "retry").await;
+
+            assert_eq!(
+                runner.started().len(),
+                1,
+                "the dispatch marker is what stops a second continuation for one node"
+            );
+        }
+
+        /// Two blocker cards on one node share one stash: only the first park
+        /// arms it. Resolving the first dispatches and retires that shared
+        /// stash — the second card's answer must then find the dispatch
+        /// marker and be acknowledged, not read the now-missing stash as "this
+        /// host no longer holds the run".
+        #[tokio::test]
+        async fn a_second_card_on_the_same_node_is_acknowledged_once_the_first_dispatches() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let first = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+            let second = park_node_blocker_stashed(
+                &rt,
+                json!({ "topic": "quarterly numbers" }),
+                false,
+                None,
+            )
+            .await;
+
+            answer(&rt, &first, BlockerReplyIntent::Retry, "retry").await;
+            assert_eq!(
+                runner.started().len(),
+                1,
+                "the first answer dispatches the node"
+            );
+
+            let ids = vec![crate::ports::types::ApprovalId::from(second)];
+            let outcome = rt
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await;
+
+            assert!(
+                outcome.is_ok(),
+                "the second card's answer must be acknowledged once the dispatch marker is set, \
+                 not returned as an error: {outcome:?}"
+            );
+            assert_eq!(
+                runner.started().len(),
+                1,
+                "the dispatch marker must still stop a second continuation for this node"
+            );
+        }
+
+        /// A host that no longer holds the run's stash reports it rather than
+        /// acknowledging a resume that did not happen.
+        #[tokio::test]
+        async fn an_answer_with_no_run_to_re_enter_is_reported_not_swallowed() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker_stashed(
+                &rt,
+                json!({ "topic": "quarterly numbers" }),
+                false,
+                None,
+            )
+            .await;
+
+            let ids = vec![crate::ports::types::ApprovalId::from(id)];
+            let outcome = rt
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await;
+
+            assert!(
+                outcome.is_err(),
+                "an answer that reached no run must not read as a resume"
+            );
+            assert!(runner.started().is_empty());
+        }
+
+        /// The reserved key is never written for a verdict that starts no run.
+        #[tokio::test]
+        async fn a_cancelled_answer_never_reaches_a_trigger_input() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Cancel, "cancel that").await;
+
+            assert!(
+                runner
+                    .started()
+                    .iter()
+                    .all(|run| run.input.get(CONTINUATION_BLOCKER_KEY).is_none()),
+                "a cancel writes no answer onto any trigger input"
+            );
+        }
+
+        /// A cancel must retire the per-node stash it parked with — in memory
+        /// and durably — and prune the checkpoint lineage that stash names,
+        /// the same as every other terminal outcome on this queue.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn a_cancelled_answer_retires_the_stash_and_prunes_its_checkpoint() {
+            use tinyflows::graph::Checkpointer;
+
+            let home = seed_home();
+            let mut rt = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .with_seed_dir(home.path().to_path_buf())
+                .build()
+                .await
+                .expect("runtime builds");
+            let checkpoints = std::sync::Arc::new(
+                crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                    home.path().join("checkpoints"),
+                ),
+            );
+            checkpoints
+                .put(tinyflows::graph::Checkpoint {
+                    thread_id: RUN_ID.to_string(),
+                    checkpoint_id: "c1".to_string(),
+                    run_id: Some(RUN_ID.to_string()),
+                    parent_checkpoint_id: None,
+                    namespace: Vec::new(),
+                    state: json!({}),
+                    next_nodes: vec![tinyflows::graph::ids::NodeId::new(NODE_ID)],
+                    completed_tasks: Vec::new(),
+                    pending_writes: Vec::new(),
+                    interrupts: Vec::new(),
+                    pending_activations: None,
+                    barrier_arrivals: Vec::new(),
+                    metadata: Value::Null,
+                })
+                .await
+                .expect("seed checkpoint");
+            rt.set_workflow_checkpoints(checkpoints.clone());
+            let rt = Arc::new(rt);
+
+            let payload = BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Provider,
+                step: Some(BlockerStep::Node {
+                    run_id: RUN_ID.to_string(),
+                    node_id: NODE_ID.to_string(),
+                }),
+                reason: "the model id `gpt-nope` was rejected".to_string(),
+                needed: "a model id this provider serves".to_string(),
+                group_key: None,
+            };
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: Some(RUN_ID.to_string()),
+            };
+            let id = rt
+                .approvals
+                .park(rt.id(), effect.clone())
+                .await
+                .expect("parks");
+            rt.journal()
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("journals");
+            let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+            let input = json!({ "topic": "quarterly numbers" });
+            rt.blocked_nodes.arm_checkpointed(
+                &turn,
+                "reporting",
+                &input,
+                &crate::ports::types::StartedBy::from_scheduled(false),
+                Some(RUN_ID),
+                None,
+            );
+            rt.journal()
+                .record_blocked_node_stashed_checkpointed(
+                    &turn,
+                    "reporting",
+                    &input,
+                    &crate::ports::types::StartedBy::from_scheduled(false),
+                    Some(RUN_ID),
+                    None,
+                )
+                .await
+                .expect("stashes");
+
+            rt.apply_blocker_reply(&[id], BlockerReplyIntent::Cancel, "cancel that", None)
+                .await
+                .expect("applies");
+
+            assert!(
+                !rt.blocked_nodes.is_armed(&turn),
+                "a cancel must retire the stash it parked with, not leave it stranded until \
+                 restart"
+            );
+            assert!(
+                rt.journal()
+                    .blocked_stashes()
+                    .iter()
+                    .all(|(recorded_turn, ..)| recorded_turn != &turn),
+                "the durable stash mirror must be retired too"
+            );
+            let remaining = checkpoints
+                .get_thread(RUN_ID)
+                .await
+                .expect("checkpoint read");
+            assert!(
+                remaining.is_empty(),
+                "a cancel must prune the checkpoint lineage its stash named, the same as every \
+                 other terminal outcome: {remaining:?}"
+            );
+        }
+
+        /// The restart reconciler's own retire path for an unapproved stranded
+        /// stash (a cancel that crashed before its own cleanup ran, or any
+        /// other resolved-with-nothing-approved shape) must prune that stash's
+        /// checkpoint lineage too, not only release the stash.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn reconcile_stranded_blocked_nodes_prunes_checkpoint_lineage_for_an_unapproved_stash()
+         {
+            use tinyflows::graph::Checkpointer;
+
+            let home = seed_home();
+            let mut rt = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .with_seed_dir(home.path().to_path_buf())
+                .build()
+                .await
+                .expect("runtime builds");
+            let checkpoints = std::sync::Arc::new(
+                crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                    home.path().join("checkpoints"),
+                ),
+            );
+            checkpoints
+                .put(tinyflows::graph::Checkpoint {
+                    thread_id: RUN_ID.to_string(),
+                    checkpoint_id: "c1".to_string(),
+                    run_id: Some(RUN_ID.to_string()),
+                    parent_checkpoint_id: None,
+                    namespace: Vec::new(),
+                    state: json!({}),
+                    next_nodes: vec![tinyflows::graph::ids::NodeId::new(NODE_ID)],
+                    completed_tasks: Vec::new(),
+                    pending_writes: Vec::new(),
+                    interrupts: Vec::new(),
+                    pending_activations: None,
+                    barrier_arrivals: Vec::new(),
+                    metadata: Value::Null,
+                })
+                .await
+                .expect("seed checkpoint");
+            rt.set_workflow_checkpoints(checkpoints.clone());
+
+            // Stashed but never parked (or already resolved with nothing left
+            // in the journal's live set) — the same "stranded, unapproved"
+            // shape a crash mid-cleanup leaves behind.
+            let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+            rt.blocked_nodes.arm_checkpointed(
+                &turn,
+                "reporting",
+                &json!({ "topic": "quarterly numbers" }),
+                &crate::ports::types::StartedBy::from_scheduled(false),
+                Some(RUN_ID),
+                None,
+            );
+
+            rt.reconcile_stranded_blocked_nodes().await;
+
+            assert!(
+                !rt.blocked_nodes.is_armed(&turn),
+                "an unapproved stranded stash must be retired"
+            );
+            let remaining = checkpoints
+                .get_thread(RUN_ID)
+                .await
+                .expect("checkpoint read");
+            assert!(
+                remaining.is_empty(),
+                "the reconciler must prune the checkpoint lineage an unapproved stranded stash \
+                 names, not only release the stash: {remaining:?}"
             );
         }
     }

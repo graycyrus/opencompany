@@ -19,12 +19,18 @@ import { parkedSplit, resumeClaim, resumeClaimFor } from "@/views/workflows/resu
  *   to be authorised: answering it is recorded against the card, but it does
  *   not restart this run — re-run the workflow once the answer is in hand."
  *
- * The Observatory was right. A gated tool call's park carries the node's turn
- * key, so approving re-runs the turn and the run continues; a blocker is parked
- * with no continuation, and answering it banks the answer without restarting
- * anything (node-level restart is issue #1864, still open). The workflow panel
- * stated the first behaviour for both kinds because the host never put the
- * split on the wire, so the console could not tell them apart.
+ * The Observatory was right at the time. A gated tool call's park carries the
+ * node's turn key, so approving re-runs the turn and the run continues; a
+ * blocker is parked with no continuation, because answering a question is not
+ * the act of authorising a call. The workflow panel stated the gated-call
+ * behaviour for both kinds because the host never put the split on the wire,
+ * so the console could not tell them apart.
+ *
+ * Node-level restart has since shipped (issues #1863, #2005):
+ * `resume_node_blocker` banks a blocker's answer and re-dispatches the node
+ * from the run's own trigger input, so answering a question restarts the run
+ * too now — just by a different route than a gated call's. Both sentences
+ * below say so, in the host's own words for each route.
  */
 
 const node = (over: Partial<WorkflowBlockedNode> = {}): WorkflowBlockedNode => ({
@@ -106,12 +112,15 @@ describe("the claim each split produces", () => {
     expect(claim).toContain("a changed decision may ask again");
   });
 
-  it("says answering does not restart the run when every card is a question", () => {
-    // The exact failure. Before the fix this branch did not exist and the
-    // screen promised an auto-resume that cannot happen.
+  it("says answering re-enters the step, not the gated-call sentence, when every card is a question", () => {
+    // Before B-013's fix this branch did not exist and the screen promised
+    // the gated-call sentence for a question instead. Since #1863/#2005,
+    // answering really does re-enter the node — just not by the gated call's
+    // own turn-key route, which is the distinction this branch still has to
+    // make.
     const claim = resumeClaim({ gated: 0, blockers: 1, unknown: false });
-    expect(claim).toContain("does not restart this run");
-    expect(claim).toContain("re-run the workflow once the answer is in hand");
+    expect(claim).toContain("re-enters this step");
+    expect(claim).toContain("approving runs it again, and denying stops the run");
     expect(claim).not.toContain("continues this run automatically");
   });
 
@@ -120,10 +129,10 @@ describe("the claim each split produces", () => {
     expect(resumeClaim({ gated: 0, blockers: 1, unknown: false })).toContain("The card is");
   });
 
-  it("claims neither behaviour for the whole set when the cards are mixed", () => {
+  it("names the right verdicts for each kind when the cards are mixed", () => {
     const claim = resumeClaim({ gated: 1, blockers: 1, unknown: false });
     expect(claim).toContain("gated tool calls, which continue this run when approved");
-    expect(claim).toContain("do not restart it");
+    expect(claim).toContain("re-enter the step they stopped");
   });
 
   it("degrades to the mixed sentence rather than promising a resume it cannot verify", () => {
@@ -132,7 +141,7 @@ describe("the claim each split produces", () => {
     // it serves.
     const claim = resumeClaim({ gated: 0, blockers: 0, unknown: true });
     expect(claim).not.toContain("continues this run automatically");
-    expect(claim).toContain("do not restart it");
+    expect(claim).toContain("re-enter the step they stopped");
   });
 
   it("claims nothing when the run has nothing decidable", () => {

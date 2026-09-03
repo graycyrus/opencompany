@@ -1001,8 +1001,8 @@ function renderValue(value: unknown): string {
  * cents, so an approval for $0.004 rendered as `$0.00` — an operator asked to
  * authorise a payment the card told them was free.
  */
-export function money(usd: number): string {
-  return formatUsd(usd);
+export function money(amountUsd: number): string {
+  return formatUsd(amountUsd);
 }
 
 /** Feedback categories, phrased the way an operator would think about them. */
