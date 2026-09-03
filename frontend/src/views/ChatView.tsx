@@ -322,6 +322,23 @@ interface Props {
    */
   approvals?: ApprovalSummary[];
   chatChannelByThread?: Record<string, string>;
+  /**
+   * The shell's fingerprint of the live roster (defect B-071).
+   *
+   * The shell polls `GET …/team` every five seconds and knows, cheaply, when
+   * the roster has actually moved. This view reads the roster three times on
+   * its own — `boot()` for the teammate list, `client.mentionables()` for the
+   * `@`-picker's directory, and `listDesks()` for the channel memberships that
+   * mark who is in the room — and all three were mount snapshots, refreshed
+   * only by a write made *in this tab*. A teammate hired in a second tab was
+   * therefore addressable by nobody here: they were absent from the picker,
+   * and `@Rafi` silently matched the channel's catch-all agent, which replied
+   * as though it were them.
+   *
+   * Optional so a caller that has no roster poll (tests, embeds) simply gets
+   * the previous mount-snapshot behaviour rather than an error.
+   */
+  rosterEpoch?: string;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /** Now, for a card's "waiting N minutes" line. */
@@ -405,6 +422,7 @@ export function ChatView({
   onChatPaneVisibilityChange,
   approvals,
   chatChannelByThread,
+  rosterEpoch,
   taskStatusByTaskId,
   now,
   onDecideApproval,
@@ -695,8 +713,20 @@ export function ChatView({
     }
   }, [client, company]);
 
+  /**
+   * The roster fingerprint this view has already acted on (defect B-071).
+   *
+   * `null` means "this scope has not read the roster for any epoch yet", which
+   * is exactly the state the effect below must not act in: `boot()` has just
+   * been fired for whatever the roster is now, and re-reading it would double
+   * every mount's `/team` request. Reset here rather than keyed on `company`
+   * so the two stay in step by construction — this effect IS the scope's
+   * roster read, and the marker is cleared by the same thing that re-runs it.
+   */
+  const rosterEpochActedOn = useRef<string | null>(null);
   useEffect(() => {
     setLoadingTeam(true);
+    rosterEpochActedOn.current = null;
     void boot();
     void loadViewer();
   }, [boot, loadViewer]);
@@ -793,28 +823,46 @@ export function ChatView({
    * broken `/desks` permanently show `#general` while the URL claimed a real
    * desk (issue #370). Those surface as an error the operator can retry.
    */
-  const loadDesks = useCallback(async () => {
-    const run = ++desksRun.current;
-    setDesks(null);
-    setDesksError(null);
-    try {
-      const dtos = await client.listDesks(company);
-      if (run !== desksRun.current) return;
-      // An answered read is never the fallback set, empty or not.
-      desksAreFallback.current = false;
-      setDesks(dtos.map(deskFromDto));
-    } catch (error) {
-      if (run !== desksRun.current) return;
-      if (error instanceof ApiError && error.status === 404) {
-        desksAreFallback.current = true;
-        setDesks(defaultDesks());
-        return;
+  /**
+   * `quiet` re-reads without tearing the rail down first (defect B-071).
+   *
+   * A first load has nothing to show and says so. A re-read triggered by the
+   * roster moving in another tab already has a correct rail on screen, and
+   * blanking it to a spinner — then restoring the same channels a moment later
+   * — would make someone else's hire look like a fault in the tab you are
+   * typing in. For the same reason a quiet re-read that fails keeps what it
+   * has: the desks on screen were served by the host and are still the best
+   * answer available, and replacing them with an error would turn a background
+   * refresh into a worse state than not refreshing at all.
+   */
+  const loadDesks = useCallback(
+    async (quiet = false) => {
+      const run = ++desksRun.current;
+      if (!quiet) {
+        setDesks(null);
+        setDesksError(null);
       }
-      setDesksError(
-        error instanceof Error ? error.message : "Couldn't load this company's channels.",
-      );
-    }
-  }, [client, company]);
+      try {
+        const dtos = await client.listDesks(company);
+        if (run !== desksRun.current) return;
+        // An answered read is never the fallback set, empty or not.
+        desksAreFallback.current = false;
+        setDesks(dtos.map(deskFromDto));
+      } catch (error) {
+        if (run !== desksRun.current) return;
+        if (error instanceof ApiError && error.status === 404) {
+          desksAreFallback.current = true;
+          setDesks(defaultDesks());
+          return;
+        }
+        if (quiet) return;
+        setDesksError(
+          error instanceof Error ? error.message : "Couldn't load this company's channels.",
+        );
+      }
+    },
+    [client, company],
+  );
 
   useEffect(() => {
     void loadDesks();
@@ -1075,6 +1123,57 @@ export function ChatView({
       directoryEpoch.current += 1;
     };
   }, [client, company]);
+
+  /**
+   * Re-derive from the roster when the roster changes — wherever it changed
+   * (defect B-071).
+   *
+   * `reloadDirectory` above covers a write made in THIS tab, which is why
+   * hiring someone here put them in the picker immediately and hiring them in
+   * a second tab did not. Four surfaces write the roster, a company's own
+   * agents can add a teammate, and another tab or another operator can too, so
+   * the only signal that covers all of them is what the host says the roster
+   * *is* — which the shell is already polling for. This is B-030's argument,
+   * applied to the three structures its own fix did not reach.
+   *
+   * All three from one signal, because the failure is what happens when they
+   * disagree:
+   *
+   * * `boot()` — the teammate list the DM rail is built from.
+   * * `reloadDirectory()` — the `@`-mention directory. This is the one that
+   *   bites. A loaded-but-stale directory is truthy, so `resolvableMentions`
+   *   finds no row for the new hire and the composer sends an explicit
+   *   `mentions: []`, which the wire contract defines as "the directory
+   *   resolved none — do not extract from the text". So `@Rafi` is stripped of
+   *   any target *in this tab*, reaches the channel as plain prose, and the
+   *   catch-all agent answers it under Rafi's name. Omitting the field would
+   *   have let the host find them; sending an empty one is what silences it.
+   * * `loadDesks(true)` — the channels, whose `memberIds` are roster agent ids.
+   *   `inChannel` is `channel.memberIds` × `members`, so refreshing `members`
+   *   alone leaves a teammate hired and seated elsewhere permanently outside
+   *   every channel here: absent from the members pane, ranked below everyone
+   *   in the picker, and — the part an operator feels — blocked on first send
+   *   by the "not on this channel" warning, about a channel they are on.
+   *
+   * The desk read is `quiet` because this one has a rail on screen already;
+   * see `loadDesks`. Note the boundary: `rosterIdentity` fingerprints who is on
+   * the roster, so this covers a hire, a departure and a rename. Re-seating an
+   * existing teammate onto a different desk changes no roster identity and is
+   * still only picked up on remount — a narrower gap than the one B-071 is
+   * about, and one that needs a desk signal rather than a roster one.
+   */
+  useEffect(() => {
+    if (rosterEpoch === undefined) return;
+    if (rosterEpochActedOn.current === null) {
+      rosterEpochActedOn.current = rosterEpoch;
+      return;
+    }
+    if (rosterEpochActedOn.current === rosterEpoch) return;
+    rosterEpochActedOn.current = rosterEpoch;
+    void boot();
+    reloadDirectory();
+    void loadDesks(true);
+  }, [rosterEpoch, boot, reloadDirectory, loadDesks]);
 
   /**
    * The directory with this channel's teammates marked, so they rank first.

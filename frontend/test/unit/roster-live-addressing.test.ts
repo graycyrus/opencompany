@@ -174,3 +174,93 @@ describe("the shell's chat addressing is re-derived from the live roster", () =>
     expect(appShell).toMatch(/rosterReadInFlight = false;\n\s*\}\);/);
   });
 });
+
+/**
+ * Defect B-071: B-030 fixed the poll set; the ADDRESSING set stayed a snapshot.
+ *
+ * A teammate hired in a second tab became readable and unaddressable at the
+ * same time. Their turn output arrived live — that is B-030's fix working — and
+ * the `@`-mention picker in the open tab never listed them. Typing `@Rafi`
+ * matched nothing, and the fall-through is the part that makes this a P2 rather
+ * than a cosmetic gap: a loaded-but-stale directory is truthy, so the composer
+ * resolves no span and sends an explicit `mentions: []`, which the wire
+ * contract defines as "the directory resolved none — do NOT extract from the
+ * text". Omitting the field would have let the host find Rafi. Sending an empty
+ * one silences it, the line reaches the channel as plain prose, and the
+ * channel's catch-all agent answers it *under Rafi's name*.
+ *
+ * The fix is one signal — the shell's roster fingerprint, which it already
+ * computes for the poll — published to every structure derived from the roster.
+ * These tests read the source for the same reason the block above does:
+ * `AppShell` and `ChatView` are too large and too connected to mount here.
+ */
+const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+
+describe("the roster fingerprint reaches everything derived from the roster (B-071)", () => {
+  it("publishes the fingerprint the poll already computes", () => {
+    // Before the fix `rosterIdentity` was computed on the polling path and
+    // compared against a local, then thrown away. Nothing outside that closure
+    // could learn the roster had moved.
+    expect(appShell).toMatch(/const \[rosterEpoch, setRosterEpoch\] = useState\(""\);/);
+    expect(appShell).toMatch(/setRosterEpoch\(rosterIdentity\(members\)\);/);
+  });
+
+  it("re-derives the shell's own people map on it", () => {
+    // The label map behind every typing line and the People section. A person
+    // the directory did not name at mount was dropped from both forever.
+    const at = appShell.indexOf("}, [client, company, rosterEpoch]);");
+    expect(at, "the companyPeople effect is not keyed on the roster").toBeGreaterThan(-1);
+  });
+
+  it("hands the fingerprint to the chat view", () => {
+    // The half that was missing: the prop existed and the shell never passed
+    // it, so the view's own re-derivation was unreachable code.
+    expect(appShell).toMatch(/rosterEpoch=\{rosterEpoch\}/);
+  });
+
+  it("re-derives all three of the chat view's roster reads from it", () => {
+    const start = chatView.indexOf("if (rosterEpochActedOn.current === rosterEpoch) return;");
+    expect(start, "the epoch effect").toBeGreaterThan(-1);
+    const body = chatView.slice(start, chatView.indexOf("}, [rosterEpoch", start));
+
+    // The DM rail's teammate list.
+    expect(body).toContain("void boot();");
+    // The `@`-mention directory — the one that causes the wrong answer.
+    expect(body).toContain("reloadDirectory();");
+    // The channels, whose `memberIds` are roster agent ids and so decide
+    // `inChannel`: membership in the pane, ranking in the picker, and the
+    // "not on this channel" warning that blocks the first send.
+    expect(body).toContain("void loadDesks(true);");
+  });
+
+  it("does not re-read on the mount epoch, which the boot read already covers", () => {
+    // Acting on the first epoch seen would double every mount's `/team` and
+    // `/mentionables` request, for a roster that has not moved.
+    expect(chatView).toMatch(/const rosterEpochActedOn = useRef<string \| null>\(null\);/);
+    expect(chatView).toMatch(
+      /if \(rosterEpochActedOn\.current === null\) \{\s*rosterEpochActedOn\.current = rosterEpoch;\s*return;\s*\}/,
+    );
+    // And the marker is cleared by the same effect that fires `boot()`, so the
+    // two cannot drift apart.
+    const bootEffect = chatView.indexOf("rosterEpochActedOn.current = null;");
+    expect(bootEffect).toBeGreaterThan(-1);
+    expect(chatView.slice(bootEffect, bootEffect + 120)).toContain("void boot();");
+  });
+
+  it("refreshes the channels without tearing the rail down", () => {
+    // A background re-read has a correct rail on screen. Blanking it to a
+    // spinner would make someone else's hire look like a fault in this tab —
+    // and a failed refresh must keep the desks it already has rather than
+    // replace them with an error.
+    expect(chatView).toMatch(/async \(quiet = false\) => \{/);
+    expect(chatView).toMatch(/if \(!quiet\) \{\s*setDesks\(null\);/);
+    expect(chatView).toMatch(/if \(quiet\) return;\s*setDesksError\(/);
+  });
+
+  it("stays inert for a caller that has no roster poll", () => {
+    // The prop is optional so a test or an embed keeps the old behaviour
+    // rather than crashing — but an absent epoch must not be read as a
+    // *changed* one, which would refetch on every render.
+    expect(chatView).toMatch(/if \(rosterEpoch === undefined\) return;/);
+  });
+});
