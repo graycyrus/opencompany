@@ -80,6 +80,7 @@ import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
 import { AgentRuns } from "@/views/team/AgentRuns";
+import { formatUsd } from "@/lib/cost";
 
 type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
 
@@ -496,7 +497,7 @@ export function AgentDetailView({
             }
           : held,
       );
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to $${cap.toFixed(2)}.`);
+      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${formatUsd(cap)}.`);
     } catch (error) {
       toast.error(budgetError(error, "Couldn't change the daily cap."));
     }
@@ -1255,8 +1256,8 @@ function FactLine({
       )}
       {capped && (
         <span data-testid="agent-spend">
-          Today ${(agent.spentTodayUsd ?? 0).toFixed(2)} of $
-          {(agent.budgetUsdDaily ?? 0).toFixed(2)}
+          Today {formatUsd(agent.spentTodayUsd ?? 0)} of{" "}
+          {formatUsd(agent.budgetUsdDaily ?? 0)}
         </span>
       )}
     </div>
@@ -1840,7 +1841,7 @@ function Budget({
   // An override exists (someone set this deliberately), as opposed to the cap
   // simply coming from the company's own definition.
   const overridden = agent.budgetSetBy !== undefined;
-  const usd = (n: number) => `$${n.toFixed(2)}`;
+  const usd = formatUsd;
   return (
     <Section
       title="Budget"

@@ -48,6 +48,7 @@ import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
 import { FieldCopilot } from "@/views/team/FieldCopilot";
+import { formatUsd } from "@/lib/cost";
 
 interface Props {
   client: OpenCompanyClient;
@@ -900,7 +901,7 @@ function DailyBudgetLine({
 
   const spent = member.spentTodayUsd ?? 0;
   const overBudget = spent >= cap;
-  const usd = (n: number) => `$${n.toFixed(2)}`;
+  const usd = formatUsd;
   return (
     <div className="space-y-0.5">
       <p

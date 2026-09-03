@@ -43,6 +43,7 @@ import {
 import type { PrereqStatus, Prerequisite, TaskPlan } from "@/api/tasks";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { formatUsd } from "@/lib/cost";
 
 /**
  * How each verdict reads to a person, and what it means for the card.
@@ -409,7 +410,7 @@ function Estimates({ step }: { step: TaskPlan["steps"][number] }) {
     );
   }
   if (typeof step.estimatedCostUsd === "number") {
-    parts.push(`~$${step.estimatedCostUsd.toFixed(2)}`);
+    parts.push(`~${formatUsd(step.estimatedCostUsd)}`);
   }
   if (parts.length === 0) return null;
   return (
