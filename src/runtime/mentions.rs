@@ -954,12 +954,26 @@ pub fn resolve(
 /// [`resolve`], also reporting every `@name` that reached more than one thing
 /// and therefore reached nobody (B-101).
 ///
-/// **Only the extraction path can report anything**, and that is the point: a
-/// caller with a picker has already disambiguated — the picker offers the two
-/// colliding rows separately and the click says which was meant — so a
-/// `supplied` list carries no ambiguity to report. The free-typed path is the
-/// one where a name matching two people silently reaches neither, which is
-/// exactly how people write.
+/// # Routing comes from the caller; ambiguity is always the host's to judge
+///
+/// A `supplied` list still decides **who is pinged**, exactly as before — the
+/// picker asked and the click answered, and nothing here second-guesses it.
+/// But a supplied list is not evidence that nothing was refused, and treating
+/// it that way is what made this bug invisible from the surface it was reported
+/// on: the console runs the *same* refusal rule in `resolvableMentions`, and a
+/// loaded directory then sends `[]` explicitly to suppress host extraction
+/// (`MessageComposer`: "Preserve absent-versus-empty"). So a free-typed
+/// `@Priya` was refused by the console, arrived here as "the picker resolved
+/// nothing", and the host had nothing to report — the console's silent refusal
+/// wearing the host's clothes.
+///
+/// So the scan runs either way, and its refusals are reported for every span
+/// the supplied list did **not** claim. A span the picker did resolve is not
+/// ambiguous — the operator settled it — so it is filtered out by overlap,
+/// which is also what keeps a picked `@Priya` from being told it went nowhere.
+///
+/// The cost is one extra scan on the picker path: pure string work over the
+/// directory, the same pass the extraction path has always run.
 pub fn resolve_reporting(
     text: &str,
     supplied: Option<Vec<Mention>>,
@@ -967,43 +981,50 @@ pub fn resolve_reporting(
     record: &CompanyRecord,
     users: &[UserRecord],
 ) -> Extraction {
-    let (found, ambiguous) = match supplied {
-        Some(supplied) if !supplied.is_empty() => {
-            (revalidate(text, supplied, record, users), Vec::new())
-        }
+    // Offsets survive the mask, so every span is re-read from the real body —
+    // the masked copy has spaces where a code region was.
+    let masked = strip_code_regions(text);
+    let real_span = |offset: usize, len: usize, fallback: String| {
+        text.get(offset..offset + len)
+            .map(str::to_string)
+            .unwrap_or(fallback)
+    };
+    let scanned = scan(&masked, &directory(record, users));
+
+    let found = match supplied {
+        Some(supplied) if !supplied.is_empty() => revalidate(text, supplied, record, users),
         // An explicitly empty list is still an answer — a console that ran its
         // picker and found nothing must not have the host guess on its behalf.
-        Some(_) => (Vec::new(), Vec::new()),
-        None => {
-            let masked = strip_code_regions(text);
-            let scanned = scan(&masked, &directory(record, users));
-            // Offsets are preserved by the mask, so re-read each span from the
-            // real body — the masked copy has spaces where a code region was.
-            let real_span = |offset: usize, len: usize, fallback: String| {
-                text.get(offset..offset + len)
-                    .map(str::to_string)
-                    .unwrap_or(fallback)
-            };
-            (
-                scanned
-                    .mentions
-                    .into_iter()
-                    .map(|mut m| {
-                        m.text = real_span(m.offset, m.text.len(), m.text);
-                        m
-                    })
-                    .collect(),
-                scanned
-                    .ambiguous
-                    .into_iter()
-                    .map(|mut a| {
-                        a.text = real_span(a.offset, a.text.len(), a.text);
-                        a
-                    })
-                    .collect(),
-            )
-        }
+        Some(_) => Vec::new(),
+        None => scanned
+            .mentions
+            .into_iter()
+            .map(|mut m| {
+                m.text = real_span(m.offset, m.text.len(), m.text);
+                m
+            })
+            .collect(),
     };
+
+    // Byte ranges the caller's own resolution claims. A refusal overlapping one
+    // of them was settled by whoever supplied it and is not reported.
+    let claimed: Vec<(usize, usize)> = found
+        .iter()
+        .map(|m| (m.offset, m.offset + m.text.len()))
+        .collect();
+    let ambiguous = scanned
+        .ambiguous
+        .into_iter()
+        .filter(|a| {
+            let (start, end) = (a.offset, a.offset + a.text.len());
+            !claimed.iter().any(|(s, e)| start < *e && *s < end)
+        })
+        .map(|mut a| {
+            a.text = real_span(a.offset, a.text.len(), a.text);
+            a
+        })
+        .collect();
+
     Extraction {
         mentions: normalize(found, sender),
         ambiguous,
@@ -1528,9 +1549,11 @@ members = ["engineer", "ceo"]
     /// A caller that ran a picker has already disambiguated — its two rows are
     /// the two colliding targets, and the click said which. Reporting a
     /// collision there would tell the console it failed at the one thing it
-    /// definitely did.
+    /// A span the picker resolved is not reported: the operator was shown the
+    /// two colliding rows and clicked one, so telling them it reached nobody
+    /// would contradict what they just did.
     #[test]
-    fn a_picker_answer_reports_no_ambiguity() {
+    fn a_span_the_picker_resolved_is_not_reported() {
         let record = record(
             "[company]\nname = \"Acme\"\n\
              [[agent]]\nid = \"priya\"\nrole = \"Merchandiser\"\n",
@@ -1545,8 +1568,59 @@ members = ["engineer", "ceo"]
             quiet: false,
         }];
         let found = resolve_reporting("@Priya which scent?", Some(supplied), None, &record, &users);
-        assert!(found.ambiguous.is_empty());
+        assert!(
+            found.ambiguous.is_empty(),
+            "the click settled it: {:?}",
+            found.ambiguous
+        );
         assert_eq!(found.mentions.len(), 1, "the pick still resolves");
+    }
+
+    /// The case the console actually produces, and the one that made this bug
+    /// invisible from the surface it was reported on.
+    ///
+    /// `resolvableMentions` in the console runs the same refusal rule, and a
+    /// loaded directory then sends `[]` explicitly to suppress host extraction
+    /// ("Preserve absent-versus-empty", `MessageComposer`). So a free-typed
+    /// `@Priya` arrives here as "the picker resolved nothing" — indistinguishable
+    /// from a message that named nobody — and reporting only on the extraction
+    /// path left the console exactly as silent as before.
+    #[test]
+    fn an_empty_picker_answer_still_reports_what_the_scan_refuses() {
+        let record = record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"priya\"\nrole = \"Merchandiser\"\n",
+        );
+        let users = vec![user("u1", "priya@acme.test", Some("Priya"))];
+        let found = resolve_reporting(
+            "@Priya which scent sold best last month?",
+            Some(Vec::new()),
+            None,
+            &record,
+            &users,
+        );
+        assert!(found.mentions.is_empty(), "routing is unchanged: nobody");
+        assert_eq!(
+            found.ambiguous.len(),
+            1,
+            "but the refusal is the host's to report, whoever asked"
+        );
+        assert_eq!(found.ambiguous[0].text, "@Priya");
+    }
+
+    /// …and an empty picker answer over a message that names nobody at all
+    /// still reports nothing, so the notice cannot become background noise.
+    #[test]
+    fn an_empty_picker_answer_over_a_plain_message_reports_nothing() {
+        let found = resolve_reporting(
+            "which scent sold best last month?",
+            Some(Vec::new()),
+            None,
+            &acme(),
+            &people(),
+        );
+        assert!(found.mentions.is_empty());
+        assert!(found.ambiguous.is_empty());
     }
 
     #[test]
