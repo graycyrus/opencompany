@@ -1743,13 +1743,23 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
     let parked = blocked.approval_ids.len();
     let mut tail = String::new();
     if parked > 0 {
+        // The receipt — what this run parked, which stays true after the queue
+        // moves — and then, separately, what deciding it does.
         tail.push_str(&format!(
-            " It parked {parked} approval{}; approve {} in Approvals and this run continues on \
-             its own. Approving re-runs the step, so if the agent's next turn differs it may ask \
-             again.",
-            if parked == 1 { "" } else { "s" },
-            if parked == 1 { "it" } else { "them" }
+            " It parked {parked} approval{}.",
+            if parked == 1 { "" } else { "s" }
         ));
+    }
+    // Defect B-072. This used to append "approve it in Approvals and this run
+    // continues on its own" for every park with a card on it, which is the
+    // gated-call promise stated over an agent's question — the exact claim
+    // B-013 was filed about, still shipped by the composer B-013's fix did not
+    // touch, and rendered by the console directly beneath the corrected one.
+    // Both host composers now read the same function, so the two sentences in
+    // that panel cannot disagree again; see `super::resume_claim`.
+    if let Some(claim) = super::resume_claim::resume_claim(parked, blocked.blockers) {
+        tail.push(' ');
+        tail.push_str(&claim);
     }
     if blocked.unparkable > 0 {
         tail.push_str(&format!(
