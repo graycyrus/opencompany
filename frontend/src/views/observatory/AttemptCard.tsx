@@ -15,6 +15,7 @@ import { formatDuration, relativeTime } from "@/views/workflows/run-health";
 import { stepTotal, type ObservatoryRun } from "@/api/observatory";
 import { runState } from "./model";
 import { StepRow } from "./StepRow";
+import { formatUsdCost } from "@/lib/cost";
 
 const TONE = {
   done: "border-l-[var(--status-done)]",
@@ -142,7 +143,7 @@ export function AttemptCard({ run, nowMs, turn, focusStep, onOpen }: Props) {
         )}
         {run.usage.costUsd > 0 && (
           <span className="text-muted-foreground hidden shrink-0 text-xs tabular-nums sm:inline">
-            ${run.usage.costUsd.toFixed(3)}
+            {formatUsdCost({ amountUsd: run.usage.costUsd }, "line")}
           </span>
         )}
       </button>

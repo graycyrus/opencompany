@@ -17,6 +17,7 @@ import type { PresenceStatus } from "@/lib/awareness";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { PresenceDot } from "@/views/chat/PresenceDot";
+import { formatUsd } from "@/lib/cost";
 
 interface Props {
   /**
@@ -431,7 +432,7 @@ function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabe
 
   const spent = member.spentTodayUsd ?? 0;
   const overBudget = spent >= cap;
-  const usd = (n: number) => `$${n.toFixed(2)}`;
+  const usd = formatUsd;
   return (
     <span className="block">
       <span

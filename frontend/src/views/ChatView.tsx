@@ -77,6 +77,7 @@ import { MessageTimeline } from "./chat/MessageTimeline";
 import type { ChatReceipt } from "./chat/ChatLiveReceipt";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { formatUsd } from "@/lib/cost";
 import {
   buildChannels,
   buildTimeline,
@@ -728,7 +729,7 @@ export function ChatView({
       // Update the one card from the host's answer rather than refetching the
       // roster: the response IS the new state, so a refetch could only disagree.
       setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to $${cap.toFixed(2)}.`);
+      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${formatUsd(cap)}.`);
     } catch (error) {
       toast.error(budgetError(error, "Couldn't change the daily cap."));
     }
