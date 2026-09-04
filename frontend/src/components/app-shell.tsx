@@ -946,20 +946,10 @@ export function AppShell({
   useEffect(() => {
     setGateWaived(waivedGateSteps(scope));
   }, [scope]);
-  // Codex review, PR #2046: a waiver is durably scoped and meant to survive a
-  // FRESH tab (see `markGateStepWaived`'s own doc) — but a tab that was
-  // already open when a DIFFERENT tab wrote one never noticed, because
-  // `gateWaived` only re-reads when `scope` itself changes. If the other
-  // steps were already done, that tab kept the gate up over a step the
-  // founder had, in fact, already answered — durably — one tab over. The
-  // `storage` event is the browser's own cross-tab signal for exactly this:
-  // it fires in every OTHER same-origin tab (never the one that wrote), so
-  // listening for it and re-reading closes the gap without polling.
-  useEffect(() => {
-    const onStorage = () => setGateWaived(waivedGateSteps(scope));
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [scope]);
+  // The `storage`-event cross-tab listener lives further down, right after
+  // `activationGate` is declared — a REMOVAL it observes has to trigger a
+  // fresh activation read on THIS tab before it is safe to apply, so it
+  // needs `activationGate.refresh` in scope. See that effect's own doc.
   const waiveGateStep = useCallback(
     (step: GateStepId) => {
       markGateStepWaived(scope, step);
@@ -1108,6 +1098,53 @@ export function AppShell({
     clearGateStepWaivers(scope);
     setGateWaived([]);
   }, [activationGate.status?.isActivated, scope]);
+
+  // Codex review, PR #2046: a waiver is durably scoped and meant to survive a
+  // FRESH tab (see `markGateStepWaived`'s own doc) — but a tab that was
+  // already open when a DIFFERENT tab wrote one never noticed, because
+  // `gateWaived` only re-read when `scope` itself changed. The `storage`
+  // event is the browser's own cross-tab signal for exactly this: it fires
+  // in every OTHER same-origin tab (never the one that wrote), so listening
+  // for it and re-reading closes the gap without polling.
+  //
+  // Codex review, round 2: an ADDITION and a REMOVAL are not safe to trust
+  // the same way. `clearGateStepWaivers` above fires from ANOTHER tab too,
+  // the moment THAT tab's own poll confirms `isActivated` — and every
+  // `removeItem` it makes is a deletion `storage` event here. Applying that
+  // removal immediately would drop this tab's waiver against a `status` this
+  // tab has not yet refreshed itself: `outstandingGateSteps` would count the
+  // step as outstanding again, and the gate would reopen until this tab's
+  // own poll independently catches up — or, through an outage, stay open
+  // for as long as that poll keeps failing. An addition has no such failure
+  // mode (it can only shorten `outstandingGateSteps`, never lengthen it), so
+  // only a removal needs the extra caution: ask `activationGate` to refresh
+  // right now instead of trusting the other tab's word, and let THIS tab's
+  // own cleanup effect above — gated on ITS OWN confirmed `isActivated` —
+  // be what actually drops the waiver once it lands.
+  useEffect(() => {
+    const onStorage = () => {
+      setGateWaived((previous) => {
+        const next = waivedGateSteps(scope);
+        const isRemoval = previous.some((step) => !next.includes(step));
+        if (isRemoval) {
+          void activationGate.refresh();
+          return previous;
+        }
+        return next;
+      });
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+    // `activationGate.refresh` (not the whole `activationGate` object) is the
+    // dependency: `useActivationGate` returns a fresh object literal every
+    // render, so depending on the object itself would tear down and re-add
+    // this listener on every AppShell render regardless of whether anything
+    // it actually reads (`scope`, `refresh`) changed — the same reason the
+    // cleanup effect above depends on `activationGate.status?.isActivated`
+    // rather than `activationGate.status`. `refresh` (`load`) is itself
+    // `useCallback`-memoized on `[client, company]`, so this is stable across
+    // ordinary renders.
+  }, [scope, activationGate.refresh]);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;

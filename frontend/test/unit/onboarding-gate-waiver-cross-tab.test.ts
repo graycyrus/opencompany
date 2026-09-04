@@ -10,7 +10,7 @@ import { AppShell } from "@/components/app-shell";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
 import type { Connection, ConnectionId, LocalScope } from "@/connections/types";
-import { markGateStepWaived } from "@/onboarding/state";
+import { clearGateStepWaivers, markGateStepWaived } from "@/onboarding/state";
 
 /**
  * Codex review, PR #2046.
@@ -179,6 +179,73 @@ describe("AppShell notices a waiver written by another tab", () => {
     expect(
       container.querySelector("#main-content"),
       "the gate must close once the storage event is noticed, with no reload",
+    ).toBeTruthy();
+  });
+
+  /**
+   * Codex review, PR #2046, round 2.
+   *
+   * `clearGateStepWaivers` fires from ANOTHER tab too, the moment THAT tab's
+   * own poll confirms `isActivated` — and every `removeItem` it makes is a
+   * deletion `storage` event here. This tab's `/activation` read never
+   * settles `isActivated: true` (stands in for an outage, or simply this
+   * tab's own poll not having caught up yet), so applying the removal
+   * immediately would reopen the gate over a step the founder already
+   * answered. The fix must defer the removal — leave this tab's own waiver
+   * state untouched — until this tab's OWN activation read independently
+   * confirms it, rather than trusting the other tab's word.
+   */
+  it("does not reopen the gate on a removal-type storage event while this tab's own activation is still stale", async () => {
+    const client = buildClient();
+
+    await act(async () => {
+      root.render(
+        createElement(HostsProvider, {
+          value: HOSTS,
+          children: createElement(ConnectionScopeProvider, {
+            scope: SCOPE,
+            children: createElement(AppShell, {
+              client,
+              company: STATUS.id,
+              initialStatus: STATUS,
+              companies: [STATUS],
+              onSwitchCompany: () => {},
+            }),
+          }),
+        }),
+      );
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+
+    // Precondition: the gate is up (integration outstanding).
+    expect(container.querySelector("#main-content")).toBeNull();
+
+    // This tab waives the outstanding step (standing in for either a local
+    // click or another tab's addition, already covered above) so the gate
+    // closes.
+    await act(async () => {
+      markGateStepWaived(SCOPE, "integration");
+      window.dispatchEvent(new StorageEvent("storage", { key: "irrelevant-to-the-browser" }));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector("#main-content"),
+      "the gate must be closed before the removal arrives, or this test proves nothing",
+    ).toBeTruthy();
+
+    // Another tab's OWN poll confirms activation and clears every waiver —
+    // but this tab's `/activation` mock keeps answering `isActivated: false`
+    // forever, standing in for an outage or a poll that has not caught up.
+    // The resulting deletion `storage` event must not reopen the gate.
+    await act(async () => {
+      clearGateStepWaivers(SCOPE);
+      window.dispatchEvent(new StorageEvent("storage", { key: "irrelevant-to-the-browser" }));
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector("#main-content"),
+      "a removal must not reopen the gate before this tab's own activation independently confirms it",
     ).toBeTruthy();
   });
 });
