@@ -254,6 +254,8 @@ export function OnboardingGate({
                 )}
                 {step.id === "integration" && (
                   <IntegrationStep
+                    client={client}
+                    company={company}
                     onOpenApps={() => onLeave(APPS_ROUTE)}
                     onWaive={() => onWaiveStep("integration")}
                   />

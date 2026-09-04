@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { ArrowRight, KeyRound } from "lucide-react";
 
+import type { OpenCompanyClient } from "@/api/client";
+import { getComposioStatus } from "@/api/composio";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -21,47 +24,110 @@ import { Button } from "@/components/ui/button";
  * credential path has no way to satisfy it at all, offer an honest way past it
  * that is remembered (see [`markGateStepWaived`] for why that has to be durable
  * rather than session-scoped).
+ *
+ * **Two different sentences for two different reasons `integrationConnected`
+ * reads false** (Codex review, PR #2046). `src/company/activation.rs` derives
+ * that step from whether an active Composio CONNECTION exists — not from
+ * whether a CREDENTIAL exists. A hosted founder can already have an
+ * `attested`/`company`/`static` credential (`ComposioCredentialSource`,
+ * `@/api/composio`) and simply not have connected a provider yet, which is an
+ * ordinary, always-completable action — the exact opposite of the "self-hosted,
+ * no lever at all" case the original copy and its waiver escape hatch were
+ * written for. Telling that founder "this company needs a credential" and
+ * offering to waive a step they can finish normally would both be wrong, so
+ * this reads `getComposioStatus` the same way `OAuthView` does and branches on
+ * `credentialSource !== "none"`.
  */
 export function IntegrationStep({
+  client,
+  company,
   onOpenApps,
   onWaive,
 }: {
+  client: OpenCompanyClient;
+  company: string | null;
   /** Leaves the gate for the real Apps page — see `OnboardingGate`'s `onLeave`. */
   onOpenApps: () => void;
   /** Records this step as answered as far as this build allows. */
   onWaive: () => void;
 }) {
+  // Defaults to "no credential" — the same copy this card always showed
+  // before this read existed — so a still-loading or failed read costs one
+  // extra "enter a credential" prompt rather than ever claiming a credential
+  // exists when the read could not confirm one.
+  const [hasCredential, setHasCredential] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void getComposioStatus(client, company).then(
+      (status) => {
+        if (!live) return;
+        setHasCredential(status.credentialSource !== "none");
+      },
+      () => {
+        /* transient failure — stay on the safe "no credential" default */
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
   return (
     <div className="space-y-4" data-testid="gate-integration-step">
-      <div className="space-y-2 text-sm text-muted-foreground">
-        <p>
-          Teammates reach Gmail, Slack and GitHub through a connected account. Before any
-          provider can be connected, this company needs a credential to connect it with — a
-          TinyHumans account key, or a Composio token of your own.
-        </p>
-        <p className="flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2">
-          <KeyRound aria-hidden className="mt-0.5 size-4 shrink-0" />
-          <span>
-            Self-hosted builds ship without one. Until a credential is entered, every
-            provider stays unavailable — that is the build, not a fault in your setup.
-          </span>
-        </p>
-      </div>
+      {hasCredential ? (
+        <div className="space-y-2 text-sm text-muted-foreground" data-testid="gate-integration-has-credential">
+          <p>
+            Teammates reach Gmail, Slack and GitHub through a connected account. This
+            company already has a credential to connect one with — Apps is where you pick
+            a provider and connect it.
+          </p>
+          <p className="flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2">
+            <KeyRound aria-hidden className="mt-0.5 size-4 shrink-0" />
+            <span>
+              This step needs an actual connected provider, not just a credential — open
+              Apps and connect one to finish it.
+            </span>
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2 text-sm text-muted-foreground">
+          <p>
+            Teammates reach Gmail, Slack and GitHub through a connected account. Before any
+            provider can be connected, this company needs a credential to connect it with — a
+            TinyHumans account key, or a Composio token of your own.
+          </p>
+          <p className="flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2">
+            <KeyRound aria-hidden className="mt-0.5 size-4 shrink-0" />
+            <span>
+              Self-hosted builds ship without one. Until a credential is entered, every
+              provider stays unavailable — that is the build, not a fault in your setup.
+            </span>
+          </p>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button onClick={onOpenApps} data-testid="gate-integration-open-apps">
-          Enter a credential in Apps
+          {hasCredential ? "Connect a provider in Apps" : "Enter a credential in Apps"}
           <ArrowRight className="size-4" />
         </Button>
-        <Button variant="ghost" onClick={onWaive} data-testid="gate-integration-waive">
-          I don&apos;t have one — skip this step
-        </Button>
+        {/* A credential that exists is always a completable step — offering to
+            waive it the way a build with no lever at all needs to would invite
+            a founder who could just connect a provider to skip it instead. */}
+        {!hasCredential && (
+          <Button variant="ghost" onClick={onWaive} data-testid="gate-integration-waive">
+            I don&apos;t have one — skip this step
+          </Button>
+        )}
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        Skipping is remembered for this company, so this step won&apos;t be asked again in a
-        new tab. Connect an account later from Apps whenever you have a credential.
-      </p>
+      {!hasCredential && (
+        <p className="text-xs text-muted-foreground">
+          Skipping is remembered for this company, so this step won&apos;t be asked again in a
+          new tab. Connect an account later from Apps whenever you have a credential.
+        </p>
+      )}
     </div>
   );
 }

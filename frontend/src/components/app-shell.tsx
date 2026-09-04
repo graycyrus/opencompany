@@ -946,6 +946,20 @@ export function AppShell({
   useEffect(() => {
     setGateWaived(waivedGateSteps(scope));
   }, [scope]);
+  // Codex review, PR #2046: a waiver is durably scoped and meant to survive a
+  // FRESH tab (see `markGateStepWaived`'s own doc) — but a tab that was
+  // already open when a DIFFERENT tab wrote one never noticed, because
+  // `gateWaived` only re-reads when `scope` itself changes. If the other
+  // steps were already done, that tab kept the gate up over a step the
+  // founder had, in fact, already answered — durably — one tab over. The
+  // `storage` event is the browser's own cross-tab signal for exactly this:
+  // it fires in every OTHER same-origin tab (never the one that wrote), so
+  // listening for it and re-reading closes the gap without polling.
+  useEffect(() => {
+    const onStorage = () => setGateWaived(waivedGateSteps(scope));
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [scope]);
   const waiveGateStep = useCallback(
     (step: GateStepId) => {
       markGateStepWaived(scope, step);
