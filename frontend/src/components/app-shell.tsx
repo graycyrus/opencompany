@@ -60,6 +60,7 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
 import {
   hasOtherOpenTurns,
+  isDuplicateLiveReply,
   mergeOpenTurns,
   openTurnsFromRuns,
   PendingSyncPosts,
@@ -2276,9 +2277,20 @@ export function AppShell({
         // history's own order rather than appending to the recent tail this
         // scans. Live-then-hydrate was the one route neither guard covered,
         // and it doubled every reply that arrived while its channel was closed.
-        const dup = existing
-          .slice(-8)
-          .some((m) => m.from === from && m.text === event.text);
+        //
+        // **The content check alone is too broad** (Codex review, PR #2052):
+        // two genuinely different events can carry identical text — an
+        // operator repeating the same ambiguous `@name` produces two
+        // B-101 notices with the same wording — and content matching then
+        // suppressed the second one outright, not merely deduped it.
+        // `isDuplicateLiveReply` checks this event's own durable identity
+        // first (`event.seq`) and only falls back to content for a row that
+        // has not yet been reconciled to a durable id — see its own doc for
+        // why that scoping is what keeps two same-text-but-different events
+        // from being conflated. Named and extracted for the same reason
+        // every rule in `live-reply.ts` is: this is exactly the kind of
+        // regression that shows up nowhere but a repeated-mention screenshot.
+        const dup = isDuplicateLiveReply(existing.slice(-8), event, from);
         if (dup) return t;
         return {
           ...t,

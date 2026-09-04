@@ -8,6 +8,46 @@
 // As a closure over a ref it could only be exercised by driving the whole shell;
 // as a rule with a name it can be asserted transition by transition.
 
+import { hostMessageId, isHostMessageId, type ChatMessage } from "./chat";
+
+/**
+ * Whether a live `agent_reply` frame is a duplicate of something already in
+ * the recent tail of a transcript — never render it if so (PR #2052 review).
+ *
+ * Two checks, because one alone fails in a different direction each:
+ *
+ * - **Identity first.** Every frame carries a durable id via its own `seq`
+ *   (`hostMessageId(String(event.seq))`, the same value `liveReplyIdentity`
+ *   spreads into the row it renders as `messageId`). A row already bearing
+ *   that exact id is unambiguously this same event, rendered before —
+ *   whatever its content, it is always a duplicate.
+ * - **Content, but only against an unreconciled row.** The operator's own
+ *   turn is rendered locally, immediately, under an ephemeral `m<n>` id from
+ *   the awaited POST response; the backend also journals and broadcasts that
+ *   same reply, and the SSE echo can arrive first, mid-await, before the
+ *   POST resolves and reconciles that row to its durable id. In that narrow
+ *   window identity cannot recognise the echo as the same message — only
+ *   content can. Scoping this check to `!isHostMessageId(m.id)` is what
+ *   keeps it from over-firing once that window closes: two *different*
+ *   events that merely share wording — an operator repeating the same
+ *   ambiguous `@name` produces two B-101 notices with identical text — both
+ *   carry durable ids from the start, so neither is `!isHostMessageId`, and
+ *   content matching never gets a chance to conflate them. Before this
+ *   distinction existed, content matching alone silently dropped the second
+ *   one outright, which is a stronger failure than a duplicate render: this
+ *   check exists to prevent noise, not to swallow a genuinely new refusal.
+ */
+export function isDuplicateLiveReply(
+  recentTail: readonly Pick<ChatMessage, "id" | "from" | "text">[],
+  event: { seq: number; text: string },
+  from: ChatMessage["from"],
+): boolean {
+  const eventId = hostMessageId(String(event.seq));
+  return recentTail.some(
+    (m) => m.id === eventId || (!isHostMessageId(m.id) && m.from === from && m.text === event.text),
+  );
+}
+
 /**
  * The one field {@link PendingSyncPosts.capture} needs off a live `agent_reply`
  * frame. A local shape rather than importing the hook's event type, matching
