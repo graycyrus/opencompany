@@ -1008,8 +1008,20 @@ pub fn resolve_reporting(
 
     // Byte ranges the caller's own resolution claims. A refusal overlapping one
     // of them was settled by whoever supplied it and is not reported.
+    //
+    // Built only from the **non-quiet** entries of `found` (Codex review): a
+    // picker-supplied mention `revalidate` demoted (its target renamed,
+    // removed, or resolved to a different roster entry since the picker ran)
+    // keeps its span in `found` — `revalidate` demotes rather than drops it,
+    // so the composer can still show what the operator *typed* — but that
+    // span was never actually delivered to anyone, `quiet` is exactly what
+    // says so. Counting it as claimed anyway suppressed the live scan's own
+    // finding at the same span: an old alias that now names two live targets
+    // pinged nobody (quiet) and reported nothing (falsely claimed), the exact
+    // silent failure B-101 exists to surface.
     let claimed: Vec<(usize, usize)> = found
         .iter()
+        .filter(|m| !m.quiet)
         .map(|m| (m.offset, m.offset + m.text.len()))
         .collect();
     let ambiguous = scanned
@@ -1573,6 +1585,52 @@ members = ["engineer", "ceo"]
             found.ambiguous
         );
         assert_eq!(found.mentions.len(), 1, "the pick still resolves");
+    }
+
+    /// A picker-supplied mention `revalidate` demoted to `quiet` (its target
+    /// renamed, removed, or reassigned since the picker ran) must not suppress
+    /// an ambiguity the live scan finds at the very same span (Codex review,
+    /// PR #2052).
+    ///
+    /// `revalidate` keeps a stale mention in `found` rather than dropping it —
+    /// `quiet` is what says "typed, but delivered to nobody" — so `claimed`
+    /// built from every entry of `found` counted this span as settled even
+    /// though nothing was actually pinged. If the old alias now names two live
+    /// targets, that produced the exact silent failure B-101 exists to catch:
+    /// the picker's answer reaches nobody (quiet), and the ambiguity the scan
+    /// found at the same span goes unreported (falsely claimed) — an operator
+    /// watching the transcript sees nothing say their `@name` went nowhere.
+    #[test]
+    fn a_demoted_picker_answer_does_not_suppress_the_scan_s_own_ambiguity() {
+        // Two live targets share the alias "Priya" — the same collision
+        // `an_ambiguous_name_is_reported_with_what_it_collided_with` uses.
+        let record = record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"priya\"\nrole = \"Merchandiser\"\n",
+        );
+        let users = vec![user("u1", "priya@acme.test", Some("Priya"))];
+        // The picker supplied a THIRD, now-gone user at this exact span — not
+        // one of the two live claimants above. `revalidate` cannot find it on
+        // the roster, so it survives only as `quiet: true`.
+        let supplied = vec![Mention {
+            target: MentionTarget::User {
+                id: "u-departed".to_string(),
+            },
+            text: "@Priya".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let found = resolve_reporting("@Priya which scent?", Some(supplied), None, &record, &users);
+
+        assert_eq!(found.mentions.len(), 1, "the stale pick is kept, demoted");
+        assert!(found.mentions[0].quiet, "and pings nobody");
+        assert_eq!(
+            found.ambiguous.len(),
+            1,
+            "the live scan's own collision at the same span must still be reported: {:?}",
+            found.ambiguous
+        );
+        assert_eq!(found.ambiguous[0].text, "@Priya");
     }
 
     /// The case the console actually produces, and the one that made this bug

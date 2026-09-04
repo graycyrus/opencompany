@@ -2327,7 +2327,20 @@ export function AppShell({
       // still be listed. That only defers the clear to its own settle, which
       // then runs the re-read above — the conservative direction, and the one
       // that never erases a running turn's rows.
-      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+      //
+      // Also guarded on `from !== "system"` (Codex review, PR #2052). A
+      // system-attributed frame — B-101's mention-ambiguity note among them —
+      // is emitted mid-turn, before the cycle that answers has even run, and
+      // is never itself the turn's completion. `onSendFailed` can release such
+      // a frame (held while the POST was in flight) before its own async
+      // `/runs` lookup below has had a chance to install the still-running
+      // turn into `openTurnsRef` — so at the instant this runs, `openTurns`
+      // legitimately knows nothing about it yet, `hasOtherOpenTurns` reads
+      // `false`, and treating the advisory as "the end of that turn" would
+      // erase the live tool trace of a turn that is, per the very lookup
+      // racing it, still running. Only the actual reply — never an advisory
+      // interleaved before it — is a completion signal.
+      if (from !== "system" && !hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
         setLiveStepsByThread((prev) =>
           prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
         );
