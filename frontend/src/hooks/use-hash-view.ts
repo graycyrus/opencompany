@@ -2,6 +2,68 @@ import { useCallback, useEffect, useState } from "react";
 
 import { withHostParam } from "@/hooks/use-host-route";
 
+/**
+ * How many dirty forms are currently claiming the right to answer a hash
+ * navigation themselves, rather than let it land (Codex review, PR #2054).
+ *
+ * Module-level and plain, not React state or context: every `useHashView`
+ * instance below registers its OWN `window` `hashchange` listener at its own
+ * mount time — the app shell's top-level router, `WorkspaceView`,
+ * `WorkflowsView`, `LedgersView`, `CompanyView`, `OrgChartView`, and more —
+ * so there is no single listener whose registration order a later-mounting
+ * guard (a dialog opened well after the shell) could arrange to run before.
+ * DOM listeners on one target fire in registration order regardless of the
+ * `capture` flag once the target has no ancestors (`window` is both target
+ * and the whole propagation path for `hashchange`), so a guard that only
+ * reacts to the SAME event can never win a listener-order race against a
+ * router that was already listening. This has to be checked as the very
+ * first thing inside every router's own listener, synchronously, before any
+ * of them reads `location.hash` or calls `setState` — a value read from
+ * context or props is already too late, since it is only current once a
+ * render has happened, and the whole point is to act before any of this
+ * event's several listeners have caused one.
+ *
+ * The bug this exists to fix: `WorkflowCreateDialog`'s own unsaved-work guard
+ * (issue #1006, defect B-081) restores a changed hash and raises a
+ * confirmation from its OWN `hashchange` listener — but that listener
+ * necessarily mounts, and therefore registers, after the app shell's router
+ * already has. On Back or a manual hash edit, the shell's router listener ran
+ * first, read the NEW hash before the dialog's restoration touched anything,
+ * and queued a route change. React 18 batches that together with the
+ * dialog's own `setState` (raising the confirmation) into one commit — and
+ * since the route change unmounts `WorkflowCreateDialog`, the confirmation's
+ * state died with it in the very same commit that would have shown it. The
+ * operator's draft was gone with no confirmation ever rendered, on the exact
+ * path B-081 was written to protect.
+ */
+let activeHashNavigationGuards = 0;
+
+/**
+ * Claims (or releases) the right to answer the next hash navigation, for as
+ * long as `active` is true. See {@link activeHashNavigationGuards}'s doc for
+ * why this has to be a plain synchronous counter rather than React state.
+ *
+ * A form calls this with its own "would this navigation lose work" flag —
+ * `WorkflowCreateDialog` passes `dirty`, the same flag that already gates its
+ * `beforeunload` and `hashchange` guards, so there is one fact about whether
+ * an exit is dangerous rather than three that could drift. Registering as
+ * soon as the form BECOMES dirty, rather than only inside a `hashchange`
+ * listener, is what closes the race: by the time any navigation is
+ * attempted, the claim already exists, so every `useHashView`'s own listener
+ * below sees it on its very first line and returns without touching its
+ * route — the claiming form's own listener is the only one left to act, and
+ * it is no longer racing anybody.
+ */
+export function useHashNavigationGuard(active: boolean): void {
+  useEffect(() => {
+    if (!active) return;
+    activeHashNavigationGuards += 1;
+    return () => {
+      activeHashNavigationGuards -= 1;
+    };
+  }, [active]);
+}
+
 /** The hash split into path segments: `#/settings/people` → `["settings", "people"]`. */
 function readSegments(): string[] {
   return window.location.hash
@@ -92,6 +154,11 @@ export function useHashView<T extends string>(
   // Follow browser back/forward and manual hash edits.
   useEffect(() => {
     const onHash = () => {
+      // A dirty form elsewhere has claimed this navigation — see
+      // `useHashNavigationGuard`'s doc. Its own listener will restore the
+      // hash and ask; this router leaves its route alone until then, so
+      // there is nothing here for the restoration to race.
+      if (activeHashNavigationGuards > 0) return;
       const next = resolve();
       setRoute(next);
       canonicalize(next);

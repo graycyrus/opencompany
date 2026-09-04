@@ -322,10 +322,18 @@ export function ApprovalRow({
    *
    *  * **one approval, not a batch** — the host appends the answer to the card
    *    the approval is linked to, so one box over several parks would copy one
-   *    reply onto work it was not written for. It cannot arise in practice (an
-   *    agent's question parks with `group_key: None`, so it never batches), and
-   *    it is checked anyway because the cost of being wrong is a wrong answer
-   *    attached to somebody's card.
+   *    reply onto work it was not written for. A blocker with no `group_key`
+   *    used to be assumed batch-free on the reasoning that batching is a
+   *    `group_key` fact; it is not — `approvalBatchKey`
+   *    (`views/chat/model.ts`) also folds by the turn's own `batch`, which the
+   *    host sets on a blocker exactly as it does on an ordinary gated call
+   *    (issue #842), so a turn parking a blocker alongside another approval
+   *    really did reach this arm with `approvals.length > 1`. Fixed at the
+   *    source instead of here: `approvalBatchKey` now keeps a blocker out of
+   *    the turn-batch fold entirely, so `approvals.length === 1` is
+   *    guaranteed for any card this component ever renders one on — this
+   *    condition stays as the belt to that braces, because the cost of being
+   *    wrong is a wrong answer attached to somebody's card.
    *  * **still pending** — `pending[0]`, so a card whose only item was decided
    *    on the Approvals page does not go on offering to answer it.
    *  * **a blocker** — {@link BlockerAnswerControl} self-gates on this too; it

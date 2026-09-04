@@ -47,6 +47,7 @@ import {
   configFromDraft,
   hasConfigForm,
 } from "@/lib/workflow-node-config";
+import { useHashNavigationGuard } from "@/hooks/use-hash-view";
 import { draftBanners, draftLanding } from "@/lib/workflow-draft";
 import { isSafeId, slugifyWorkflowId } from "@/lib/workflow-id";
 import type { OpenCompanyClient } from "@/api/client";
@@ -1191,6 +1192,16 @@ export function WorkflowCreateDialog({
     // has to be wrapped to be stored rather than called.
     setDiscardPending(() => () => onOpenChange(false));
   }, [dirty, onOpenChange]);
+
+  // Codex review, PR #2054: claims this navigation for the in-app guard
+  // below, for every OTHER `useHashView` router mounted anywhere in the
+  // console — the app shell's own top-level route among them. Without this,
+  // the shell's router listener (registered at app mount, so always earlier
+  // than this dialog's own) read a Back press's new hash and queued a route
+  // change in the same React batch as the confirmation below, unmounting
+  // this dialog before the confirmation could ever render. See
+  // `useHashNavigationGuard`'s own doc for the full race.
+  useHashNavigationGuard(dirty);
 
   // Issue #1006: the tab-level guard. A reload or a close is the one exit the
   // dialog cannot intercept itself, so it hands the question to the browser.

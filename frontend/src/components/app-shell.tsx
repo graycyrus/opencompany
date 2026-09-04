@@ -129,7 +129,7 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, rosterIdentity, type TeamMember } from "@/lib/team";
-import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
+import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue, type PendingReRead } from "@/lib/re-read-queue";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
@@ -1477,27 +1477,19 @@ export function AppShell({
           // actually changing.
           setRosterEpoch(rosterIdentity(members));
           // Issue #151 §3.3: desks first, then one DM thread per roster
-          // teammate.
+          // teammate. This used to also carry the legacy `#/conversation`
+          // route's own copy of the pinned Operator row into a `threads`
+          // state array that route read directly — both `Conversation` and
+          // `threads` are gone now (`aba2395e5`), so `resolved` exists only
+          // to feed `targets.threadIds` below; the Operator channel's id is
+          // folded into that separately a few lines down.
           const resolved = [
             ...deskThreads,
             ...agentDmThreads(
               members,
               deskThreads.map((t) => t.id),
             ),
-            // The legacy `#/conversation` route's own copy of the pinned
-            // Operator row — Chat's channel model gets it through
-            // `operatorSection`, but `Conversation` reads this thread list
-            // directly and never received one, so its `readOnly` plumbing had
-            // nothing to gate (issue #1781 review, Codex P2).
-            ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
           ];
-          setThreads((prev) => {
-            const byId = new Map(prev.map((t) => [t.id, t]));
-            return resolved.map((t) => {
-              const existing = byId.get(t.id);
-              return existing ? { ...t, messages: existing.messages } : t;
-            });
-          });
           const roster = members.map(fromDto);
           // The name map the live receipt resolves an agent id through (issue
           // #1934) — derived from the roster this effect already read, so it
