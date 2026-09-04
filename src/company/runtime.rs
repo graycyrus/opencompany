@@ -7118,15 +7118,38 @@ fn blocker_resume_note(
 ///
 /// 1. The payload's own `group_key` — ten cards stalled on one broken OAuth
 ///    grant are one question, which is what issue #1862 built it for.
-/// 2. **The card they were parked for.** A teammate who parks a question and
-///    then parks "this is a follow-up reminder on my parked quote card" has
-///    asked one thing twice. Nothing folded those, so the disambiguation prompt
-///    offered the operator two options that *were the same question* and asked
-///    which one they meant — a question with no true answer, on top of a queue
-///    that already counted the work twice.
+/// 2. **The card they were parked for, and the exact same `reason`.** A
+///    teammate who parks a question, has it re-dispatched (a board Resume, a
+///    retry), and asks the identical question again has asked one thing
+///    twice. Nothing folded those, so the disambiguation prompt offered the
+///    operator two options that *were the same question* and asked which one
+///    they meant — a question with no true answer, on top of a queue that
+///    already counted the work twice.
 ///
 /// A park with neither is on its own, which is right: a question raised
 /// mid-conversation with no card behind it shares nothing with anything.
+///
+/// # Why rung 2 also checks `reason` (Codex review, PR #2054)
+///
+/// `escalate_to_human` stamps every question it raises with `group_key:
+/// None`, on its own stated reasoning — "a question is particular to its own
+/// card; nothing else shares its answer, so it groups with nothing"
+/// (`harness/built_in/blockers.rs`). Folding by card id alone contradicted
+/// that: a card genuinely CAN hold two independent pending questions at
+/// once — a re-dispatch that asks something new before the first answer
+/// lands is not the same shape as a re-dispatch that repeats itself — and
+/// [`blocker_group_of`](CompanyRuntime::blocker_group_of) fans **one verdict**
+/// across every id a fold returns. Two unrelated questions folded only
+/// because they shared a card meant an unparented DM answer, or an explicit
+/// reply to either card, could silently drop the second question or attach
+/// the first one's answer to it.
+///
+/// Requiring the identical `reason` text keeps the rung's own motivating case
+/// working exactly as written above (a repeated ask is, word for word, a
+/// repeated ask) while refusing to fold two parks whose text actually
+/// differs — the direction a false negative here is safe to fail in: the
+/// operator sees one extra, honestly-labelled option in the disambiguation
+/// prompt, rather than a verdict silently landing on the wrong question.
 ///
 /// The prefixes keep the two spaces apart, so a company that names a connection
 /// after a card id cannot merge them.
@@ -7138,11 +7161,13 @@ fn blocker_fold_key(parked: &crate::runtime::journal::PendingApproval) -> Option
     if let Some(key) = blocker_group_key_of(&parked.effect) {
         return Some(format!("{BLOCKER_CAUSE_KEY}{key}"));
     }
-    parked
-        .task
-        .as_ref()
-        .and_then(|link| link.task_id())
-        .map(|id| format!("{BLOCKER_CARD_KEY}{id}"))
+    let id = parked.task.as_ref().and_then(|link| link.task_id())?;
+    let reason = serde_json::from_value::<crate::ports::blockers::BlockerPayload>(
+        parked.effect.payload.clone(),
+    )
+    .ok()?
+    .reason;
+    Some(format!("{BLOCKER_CARD_KEY}{id}:{reason}"))
 }
 
 /// The [`blocker_fold_key`] prefix for a shared root cause — the payload's own
@@ -11225,6 +11250,108 @@ mod tests {
                 }
                 other => panic!("a single question resolves without asking which: {other:?}"),
             }
+        }
+
+        /// Parks a blocker like [`park_into`], but with a caller-chosen `reason`
+        /// rather than the fixed one `blocker()` derives from the task id — so a
+        /// test can park two genuinely different questions on one card.
+        async fn park_reason_into(
+            runtime: &Arc<CompanyRuntime>,
+            thread: &str,
+            task_id: &str,
+            reason: &str,
+        ) -> crate::ports::types::ApprovalId {
+            use crate::ports::types::{Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let payload = BlockerPayload {
+                reason: reason.to_string(),
+                ..blocker(task_id, None)
+            };
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            let id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("parks");
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::from_task_id(Some(task_id)),
+                    ApprovalConversation {
+                        thread: Some(thread.to_string()),
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("journals");
+            id
+        }
+
+        /// Codex review, PR #2054: two INDEPENDENT questions parked on the same
+        /// card must not be folded — the opposite case from the test above,
+        /// which pins the fold `blocker_fold_key` exists for. A card-id-only
+        /// fallback could not tell these apart from a literal repeat, and
+        /// `blocker_group_of` fans one verdict across every id a fold returns —
+        /// so before the `reason` check, an unparented DM answer to either
+        /// question silently landed on both: dropping whichever one the
+        /// operator did not mean, or attaching the first question's answer to
+        /// the second.
+        #[tokio::test]
+        async fn two_independent_questions_on_one_card_stay_apart() {
+            let (runtime, _home) = runtime().await;
+            let quote = park_reason_into(
+                &runtime,
+                "dm:eng",
+                "t-1",
+                "What's the quote for the wedding order?",
+            )
+            .await;
+            let venue = park_reason_into(
+                &runtime,
+                "dm:eng",
+                "t-1",
+                "Which venue should the tasting happen at?",
+            )
+            .await;
+            assert_ne!(quote, venue);
+
+            // Presentation: two real questions, not one.
+            let groups = runtime.pending_blocker_groups("dm:eng");
+            assert_eq!(
+                groups.len(),
+                2,
+                "two different questions on one card are two questions: {groups:?}",
+            );
+
+            // Resolution: `blocker_group_of` must not fan one id's verdict onto
+            // the other's — each stands alone.
+            assert_eq!(runtime.blocker_group_of(&quote), vec![quote.clone()]);
+            assert_eq!(runtime.blocker_group_of(&venue), vec![venue.clone()]);
+
+            // An unparented DM reply is ambiguous over genuinely different
+            // questions — asking which, never guessing, is the honest outcome.
+            let plan = runtime
+                .plan_blocker_reply("dm:eng", None, "the beach one")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(plan, BlockerReplyPlan::AskWhich { .. }),
+                "two unrelated questions must ask which, never silently pick one: {plan:?}",
+            );
         }
 
         /// Defect B-111: the ask-which prompt can be answered by the one label
