@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { withHostParam } from "@/hooks/use-host-route";
 
@@ -54,14 +54,40 @@ let activeHashNavigationGuards = 0;
  * route — the claiming form's own listener is the only one left to act, and
  * it is no longer racing anybody.
  */
-export function useHashNavigationGuard(active: boolean): void {
+export function useHashNavigationGuard(active: boolean): () => void {
+  // Whether THIS instance currently holds a claim — not just `active`, but
+  // "has the effect below actually incremented the counter yet". Lets the
+  // returned `release` and the effect's own cleanup share one guard against
+  // double-releasing, whichever fires first.
+  const heldRef = useRef(false);
+
+  // CodeRabbit review, PR #2054: an approved navigation still raced the
+  // guard's release. `WorkflowCreateDialog`'s discard confirm answers
+  // `onOpenChange(false)` and *then* replays the hash change — but
+  // `onOpenChange(false)` only makes `dirty` false on the NEXT render, and
+  // this hook's own cleanup (below) runs as a passive effect, which React
+  // flushes on its own schedule rather than synchronously inside that click
+  // handler. The replayed `hashchange` — fired from a plain assignment to
+  // `window.location.hash`, a macrotask — could reach every `useHashView`'s
+  // listener before that cleanup ran, so the still-active guard swallowed
+  // the very navigation the operator had just approved: the address bar
+  // moved, nothing else did. `release` lets the approving code drop the
+  // claim synchronously, in the same click handler, before it touches
+  // `location.hash` again — no waiting on React's own schedule.
+  const release = useCallback(() => {
+    if (!heldRef.current) return;
+    heldRef.current = false;
+    activeHashNavigationGuards -= 1;
+  }, []);
+
   useEffect(() => {
     if (!active) return;
+    heldRef.current = true;
     activeHashNavigationGuards += 1;
-    return () => {
-      activeHashNavigationGuards -= 1;
-    };
-  }, [active]);
+    return release;
+  }, [active, release]);
+
+  return release;
 }
 
 /** The hash split into path segments: `#/settings/people` → `["settings", "people"]`. */
@@ -188,6 +214,23 @@ export function useHashView<T extends string>(
     if (window.location.hash !== destinationHash) {
       window.location.hash = destinationHash;
     }
+    // CodeRabbit review, PR #2054: the guard above only protected the
+    // `hashchange` LISTENER path (Back/Forward, a manual address edit) — this
+    // function is the OTHER way a route changes, called directly by sidebar
+    // links and every other in-app "go to this view" affordance, and it used
+    // to call `setRoute` synchronously in the same breath as the assignment
+    // above, bypassing the listener (and its guard check) entirely. A sidebar
+    // click while `WorkflowCreateDialog` was dirty unmounted it before its own
+    // listener ever got a chance to run.
+    //
+    // The hash assignment above still happens unconditionally — that is what
+    // gives the guard-holder's OWN `hashchange` listener something to react
+    // to, restore, and ask about, exactly as it already does for a Back
+    // press. Only `setRoute` is withheld here: this router's rendered view
+    // stays put until the guard clears, the same outcome its own `onHash`
+    // listener would reach reacting to the very `hashchange` event this
+    // assignment is about to raise.
+    if (activeHashNavigationGuards > 0) return;
     setRoute([next, nextSub ?? null]);
   }, []);
 

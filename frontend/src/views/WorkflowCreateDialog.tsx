@@ -1201,7 +1201,7 @@ export function WorkflowCreateDialog({
   // change in the same React batch as the confirmation below, unmounting
   // this dialog before the confirmation could ever render. See
   // `useHashNavigationGuard`'s own doc for the full race.
-  useHashNavigationGuard(dirty);
+  const releaseHashNavigationGuard = useHashNavigationGuard(dirty);
 
   // Issue #1006: the tab-level guard. A reload or a close is the one exit the
   // dialog cannot intercept itself, so it hands the question to the browser.
@@ -1240,6 +1240,14 @@ export function WorkflowCreateDialog({
       window.location.hash = at;
       setDiscardPending(() => () => {
         at = moved;
+        // CodeRabbit review, PR #2054: released synchronously, here, rather
+        // than left to the `dirty`-keyed effect's own cleanup — that cleanup
+        // is a passive effect, flushed on React's own schedule, and the
+        // `hashchange` the assignment below is about to raise is a
+        // plain browser macrotask that can reach every `useHashView`'s
+        // listener before React gets to it. An approved navigation must not
+        // itself get swallowed by the guard it is retiring.
+        releaseHashNavigationGuard();
         onOpenChange(false);
         window.location.hash = moved;
       });

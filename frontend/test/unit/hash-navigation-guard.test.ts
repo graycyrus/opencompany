@@ -30,19 +30,23 @@ import { useHashNavigationGuard, useHashView } from "@/hooks/use-hash-view";
  */
 
 const VIEWS = ["workflows", "settings"] as const;
+type View = (typeof VIEWS)[number];
 
 let container: HTMLDivElement;
 let root: Root;
 let seenRoute: [string, string | null];
+let navigate: (view: View, sub?: string) => void;
+let release: () => void;
 
 function Router() {
-  const [view, sub] = useHashView<(typeof VIEWS)[number]>(VIEWS, "workflows");
+  const [view, sub, nav] = useHashView<View>(VIEWS, "workflows");
   seenRoute = [view, sub];
+  navigate = nav;
   return null;
 }
 
 function Guard({ active }: { active: boolean }) {
-  useHashNavigationGuard(active);
+  release = useHashNavigationGuard(active);
   return null;
 }
 
@@ -118,6 +122,76 @@ describe("useHashNavigationGuard blocking useHashView", () => {
     await act(async () => {
       root.render(createElement(Router));
     });
+    await fireHashChange("#/settings");
+    expect(seenRoute).toEqual(["settings", null]);
+  });
+
+  /**
+   * CodeRabbit review, PR #2054: `navigate` — the OTHER way a route changes,
+   * called directly by sidebar links rather than through the `hashchange`
+   * listener above — used to call `setRoute` synchronously in the same
+   * breath as its own `window.location.hash` assignment, bypassing the guard
+   * entirely. A sidebar click while a dirty form was open unmounted it before
+   * its own listener ever ran.
+   */
+  it("leaves the route alone when navigate() is called while guarded, but still moves the hash", async () => {
+    await renderRouterAndGuard(true);
+
+    await act(async () => {
+      navigate("settings");
+    });
+
+    // The address bar moved — that is what gives the guard-holder's own
+    // `hashchange` listener something to react to and restore — but this
+    // router's own rendered view did not follow it.
+    expect(window.location.hash).toBe("#/settings");
+    expect(seenRoute).toEqual(["workflows", null]);
+  });
+
+  it("navigates normally through navigate() with no guard active", async () => {
+    await renderRouterAndGuard(false);
+    await act(async () => {
+      navigate("settings");
+    });
+    expect(seenRoute).toEqual(["settings", null]);
+  });
+
+  /**
+   * CodeRabbit review, PR #2054: an approved navigation could still lose to
+   * its own guard. `WorkflowCreateDialog`'s discard confirm answers
+   * `onOpenChange(false)` and replays the hash change in the same click
+   * handler — but the guard's OWN cleanup is a passive effect, flushed on
+   * React's schedule, and the replayed `hashchange` is a plain browser
+   * macrotask that can win that race. `release()` (returned by
+   * `useHashNavigationGuard`) lets the approving code drop the claim
+   * synchronously instead of waiting on a render.
+   */
+  it("release() lets an immediately-following hash change through with no render in between", async () => {
+    await renderRouterAndGuard(true);
+    await fireHashChange("#/settings");
+    expect(seenRoute).toEqual(["workflows", null]);
+
+    // No re-render of Guard with `active: false` here — exactly the shape of
+    // the real bug: the component that still THINKS it is dirty (`active`
+    // prop unchanged) drops the claim itself, synchronously, the way the
+    // dialog's discard continuation does.
+    await act(async () => {
+      release();
+      window.location.hash = "#/settings";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(seenRoute).toEqual(["settings", null]);
+  });
+
+  it("release() is idempotent against the guard's own later cleanup", async () => {
+    await renderRouterAndGuard(true);
+    await act(async () => {
+      release();
+    });
+    // The effect's cleanup still runs when `active` later goes false (or the
+    // component unmounts) — it must not decrement a second time for a claim
+    // `release()` already dropped.
+    await renderRouterAndGuard(false);
     await fireHashChange("#/settings");
     expect(seenRoute).toEqual(["settings", null]);
   });
