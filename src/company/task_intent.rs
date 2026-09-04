@@ -1024,9 +1024,29 @@ pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
 /// An `all` over an empty iterator is `true`, which is the right answer and not
 /// an accident: a message whose every clause names the cancel is a cancel and
 /// nothing else.
+///
+/// # A cancel clause is exempt, not invisible (Codex + CodeRabbit review, PR #2054)
+///
+/// A clause naming the cancel used to be dropped from consideration
+/// unconditionally — the whole point above, for "cancel this one, retry the
+/// other" and "please drop this one". But a comma does not introduce a clause
+/// boundary here, so "scrap the reminder card, budget is $500" is ALSO one
+/// clause, and the same blanket exemption threw the budget away with it: the
+/// message read as a pure cancel and the amendment never reached anywhere.
+///
+/// A clause is exempt only when it carries no digit. A cancel word beside
+/// ordinary filler — "it", "this one", "that", pronouns `is_pure_social`
+/// does not even recognise — stays exempt exactly as before, which is what
+/// keeps every existing case above unchanged: none of them names a number.
+/// A digit is the cheap, reliable tell that a clause carries a genuine
+/// second fact rather than filler around the cancel word — an amount, a
+/// count, an id — and once kept in, `is_pure_social` correctly fails it
+/// (digits are not [`SOCIAL_WORDS`]), so the whole message falls through to
+/// [`BlockerReplyIntent::Amend`] instead of silently discarding it.
 fn cancel_is_the_whole_ask(lower: &str) -> bool {
+    let carries_a_fact = |clause: &&str| clause.chars().any(|c| c.is_ascii_digit());
     clauses(lower)
-        .filter(|clause| !mentions_any(clause, CANCEL_WORDS))
+        .filter(|clause| !mentions_any(clause, CANCEL_WORDS) || carries_a_fact(clause))
         .all(is_pure_social)
 }
 
@@ -1803,6 +1823,26 @@ mod blocker_reply_tests {
             classify_blocker_reply("cancel this one, retry the other"),
             BlockerReplyIntent::Cancel
         );
+    }
+
+    /// Codex + CodeRabbit review, PR #2054: a cancel word beside a genuine
+    /// second fact must not swallow it. A comma is not a clause boundary
+    /// (`cancel_is_the_whole_ask`'s own doc), so "scrap the reminder card,
+    /// budget is $500" is one clause naming both the cancel and the amount —
+    /// discarding it wholesale because it names the cancel lost the $500
+    /// entirely and settled the blocker as a pure cancel nobody asked for.
+    #[test]
+    fn a_cancel_word_beside_a_real_fact_is_an_amendment_not_a_cancel() {
+        for reply in [
+            "scrap the reminder card, budget is $500",
+            "scrap the reminder, use 500 units for the final order",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Amend,
+                "reply: {reply}"
+            );
+        }
     }
 
     #[test]
