@@ -15,7 +15,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
+import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
@@ -42,6 +42,7 @@ import {
   makeMessage,
   markSendFailed,
   reconcileIds,
+  replyVoice,
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
@@ -65,6 +66,7 @@ import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { TypingLine } from "./chat/TypingLine";
+import { InflightRunBar } from "./chat/InflightRunBar";
 import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
@@ -257,6 +259,14 @@ interface Props {
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
   /**
+   * Live rows per query, keyed by the asking message's id (see
+   * `MessageTimeline`). Passed straight through — unlike `liveStepsByThread`,
+   * nothing here has to resolve a key for it: the message id is the key, so it
+   * needs neither `activeThreadId` nor the desk map, and cannot be affected by
+   * their load order.
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
+  /**
    * The live receipt for a synchronous chat turn in flight, keyed by **host
    * thread id** (issue #1934) — resolved to this channel's thread the same way
    * `liveStepsByThread` is. Present between the operator's send and the reply
@@ -336,6 +346,14 @@ interface Props {
   chatChannelByThread?: Record<string, string>;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /**
+   * The company's steerable runs, whole. Separate from `taskStatusByTaskId`
+   * because that map is card-keyed and a delegation has no card, so the runs
+   * that most need a control here are exactly the ones it cannot carry.
+   */
+  inflightRuns?: readonly InflightRun[];
+  /** Re-read the in-flight list after a steer lands. */
+  onInflightSteered?: () => void | Promise<void>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -415,6 +433,7 @@ export function ChatView({
   scopeRef,
   openTurns,
   liveStepsByThread,
+  liveStepsByMessage,
   receiptByThread,
   agentNames,
   unread,
@@ -425,6 +444,8 @@ export function ChatView({
   approvals,
   chatChannelByThread,
   taskStatusByTaskId,
+  inflightRuns,
+  onInflightSteered,
   now,
   onDecideApproval,
   decidingApprovals,
@@ -1883,7 +1904,9 @@ export function ChatView({
       if (stateKey) onSendEnd?.(stateKey, gen, responseTexts);
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
-            makeMessage("company", r.text, {
+            // Same rule as the live path and `fromHistory`: a host-authored
+            // response renders as a centred row, not an agent bubble.
+            makeMessage(replyVoice(r.channel), r.text, {
               channel: r.channel,
               parentId,
               steps: r.steps,
@@ -2355,6 +2378,10 @@ export function ChatView({
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
   const threadReplies = parent ? repliesInThread(parent, messages) : [];
+  // Asked of `buildTimeline`'s own rule rather than re-derived, for the reason
+  // the mention map above gives: the panel's count and the channel's chip must
+  // not drift about what is already on screen. See `ThreadPanel`'s prop docs.
+  const threadInlineReplyIds = parent ? inlineReplyIds(messages) : undefined;
   // Every review surface this thread hangs off, newest first — the thread
   // root itself when opened directly on the pill/relay, or one of its
   // replies when the card that produced them was sent inside an
@@ -2446,6 +2473,11 @@ export function ChatView({
               typing={sending || !!openTurn}
               queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
+              // NOT excluded when a thread is open: these rows render inside
+              // their own message rather than as one strip for the channel, so
+              // there is no ambiguity about which turn they describe — which is
+              // the whole reason `liveSteps` above is withheld.
+              liveStepsByMessage={liveStepsByMessage}
               // Thread-panel receipts are out of v1 (issue #1934): excluded here
               // the same way `liveSteps` is when a thread is open.
               receipt={openThreadId ? undefined : receipt}
@@ -2662,6 +2694,17 @@ export function ChatView({
                 DOM gets nothing — no textarea, no Send, no `data-tour` anchor —
                 while the draft survives. See that prop's doc for why a
                 `display:none` wrapper is not the same thing. */}
+            {/* Above the composer, and outside the read-only branch: a channel
+                nobody may post in is still a place the company's runs are
+                visible, and stopping one is not posting. */}
+            {inflightRuns !== undefined && onInflightSteered !== undefined && (
+              <InflightRunBar
+                client={client}
+                company={company}
+                runs={inflightRuns}
+                onSteered={onInflightSteered}
+              />
+            )}
             <MessageComposer
               suppressed={readOnly}
               placeholder={`Message ${channelTitle(channel)}`}
@@ -2701,6 +2744,11 @@ export function ChatView({
               members={members}
               parent={parent}
               replies={threadReplies}
+              inlineReplyIds={threadInlineReplyIds}
+              // A query typed into this panel renders only here — parented
+              // messages never reach the channel timeline — so the panel needs
+              // the per-query rows too, or its turns show nothing at all.
+              liveStepsByMessage={liveStepsByMessage}
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
