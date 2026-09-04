@@ -198,9 +198,24 @@ pub fn direct_message_teammate(record: &CompanyRecord, chat: &str) -> Option<Str
     if desk_default_responder(record, chat).is_some() {
         return None;
     }
+    // CodeRabbit review, PR #2054: `resolve_roster_agent_id` is deliberately
+    // id-only (its own doc — display names live in the overlay roster, not
+    // the id namespace) — but `dm:<name>` is exactly how a chat keyed by an
+    // operator-added teammate's *display name* looks (pre-#686 records keep
+    // their generated ids forever, and a rename never re-mints one either),
+    // so this rung 3 read `None` for those DMs and rung 3's caller then
+    // treated a genuinely private, single-teammate conversation as a room —
+    // silently skipping the direct-message blocker-reply path (B-113) for
+    // exactly the teammates whose DM is not addressed by id.
+    // `resolve_teammate_key` is the joined id-then-name resolver every other
+    // caller of "who did the human mean" already goes through; its own
+    // `.agent()` collapses `Unknown` and `Ambiguous` to `None` too, on the
+    // same "a room, not a two-party line" side this function already
+    // defaults unresolved cases to.
     record
-        .resolve_roster_agent_id(chat)
-        .or_else(|| record.resolve_roster_agent_id(dm_key(chat)?))
+        .resolve_teammate_key(chat)
+        .agent()
+        .or_else(|| record.resolve_teammate_key(dm_key(chat)?).agent())
 }
 
 /// Resolves `assignee` against `record`'s full roster.
@@ -730,6 +745,42 @@ members = ["eng"]
             assert_eq!(dm(&record, "nobody"), None);
             assert_eq!(dm(&record, "dm:nobody"), None);
             assert_eq!(dm(&record, "dm:"), None);
+        }
+
+        /// CodeRabbit review, PR #2054: an operator-added teammate's DM is a
+        /// direct message too, even when it is keyed by their *display name*
+        /// rather than their id — the shape every overlay teammate minted
+        /// before #686 is stuck in forever, and a rename never re-mints one
+        /// either (`CompanyRecord::overlay_agent_ids_by_name`'s own doc).
+        /// `resolve_roster_agent_id` alone is id-only by design, so this used
+        /// to read `None` for exactly these teammates' DMs and route their
+        /// answer through the room tier instead of the private one — silently
+        /// skipping the B-113 path for any teammate an operator had added by
+        /// hand and never renamed onto a typable id.
+        #[test]
+        fn an_overlay_teammates_line_is_a_direct_message_even_keyed_by_name() {
+            use crate::ports::types::OverlayAgent;
+
+            let mut record = colliding();
+            record.overlay_agents.push(OverlayAgent {
+                id: "a1b2c3".into(),
+                name: "Shane".into(),
+                role: "Growth".into(),
+                description: None,
+                tools: None,
+                model: None,
+                harness: None,
+            });
+            assert_eq!(dm(&record, "dm:Shane").as_deref(), Some("a1b2c3"));
+            assert_eq!(dm(&record, "Shane").as_deref(), Some("a1b2c3"));
+            assert_eq!(
+                dm(&record, "dm:shane").as_deref(),
+                Some("a1b2c3"),
+                "a typed capital addresses the same person"
+            );
+            // The id namespace still wins over a colliding name — unchanged
+            // from `resolve_teammate_key`'s own guarantee.
+            assert_eq!(dm(&record, "dm:a1b2c3").as_deref(), Some("a1b2c3"));
         }
     }
 }
