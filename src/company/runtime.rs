@@ -4343,14 +4343,28 @@ impl CompanyRuntime {
     }
 
     /// Whether `parent` is the relay bubble `pill` actually produced: the
-    /// first `AgentReply` (`task_id: None`) posted to `desk` after `pill`,
-    /// with no other settle pill for `desk` interleaved.
+    /// first non-advisory `AgentReply` (`task_id: None`) posted to `desk`
+    /// after `pill`, with no other settle pill for `desk` interleaved.
     ///
     /// Without this check, any later ordinary chat turn in the same desk —
     /// also an `AgentReply` with `task_id: None` — would satisfy the "reply
     /// targets the relay bubble" test just by being the nearest one before
     /// whatever the operator replied to, silently turning a normal reply into
     /// review feedback on a card the operator never looked at.
+    ///
+    /// **Skips `SYSTEM_AUTHOR` replies** — the B-101 mention-ambiguity
+    /// advisory ([`Self::post_mention_ambiguity_note`]) also journals as an
+    /// `AgentReply` with `task_id: None` in the same desk. A dispatch can
+    /// append its `DeskTaskCompleted` and not yet reach
+    /// `journal_dispatch_replies`, leaving a window in which another accepted
+    /// chat's ambiguous `@name` interleaves that advisory between the pill
+    /// and the genuine relay. Before this guard the advisory — not the relay —
+    /// was "the first `AgentReply` after `pill`", so the scan returned
+    /// `Ok(false)` for the real relay's own reply and a review pass silently
+    /// ran as an ordinary chat turn instead (codex P2, PR #2052 fresh review
+    /// round). The advisory can never itself be the relay bubble a review
+    /// reply anchors to — nothing dispatches review feedback on a runtime
+    /// notice — so skipping it here costs nothing a real relay could need.
     ///
     /// Pages forward past [`RELAY_SCAN_PAGE`] rather than giving up at one
     /// page, for the same company-wide-log reason as [`settle_pill_before`].
@@ -4385,11 +4399,13 @@ impl CompanyRuntime {
                     CompanyEvent::AgentReply {
                         task_id: None,
                         chat_id,
+                        agent_id,
                         ..
-                    } if crate::server::chat_history::same_conversation(
-                        Some(chat_id.as_str()),
-                        Some(desk),
-                    ) =>
+                    } if agent_id != crate::ports::SYSTEM_AUTHOR
+                        && crate::server::chat_history::same_conversation(
+                            Some(chat_id.as_str()),
+                            Some(desk),
+                        ) =>
                     {
                         return Ok(seq == parent);
                     }
@@ -9697,6 +9713,25 @@ mod tests {
             }
         }
 
+        /// The B-101 mention-ambiguity advisory
+        /// ([`CompanyRuntime::post_mention_ambiguity_note`]) — an `AgentReply`
+        /// with the identical `task_id: None` shape a relay bubble has, but
+        /// authored by [`crate::ports::SYSTEM_AUTHOR`] rather than a roster
+        /// agent. Used to seed the interleaving `is_relay_bubble_for` must not
+        /// be fooled by (codex P2, PR #2052 fresh review round).
+        fn advisory_bubble(origin: &str) -> CompanyEvent {
+            CompanyEvent::AgentReply {
+                chat_id: origin.to_string(),
+                agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                text: "@sam matches two people here, so it pinged nobody.".to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                parent: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            }
+        }
+
         async fn seed(runtime: &Arc<Runtime>, c: &TaskRecord) {
             runtime.tasks().upsert(runtime.id(), c).await.expect("seed");
         }
@@ -9806,6 +9841,57 @@ mod tests {
                 "replying to a later ordinary turn must run a normal turn, not \
                  re-open the earlier card just because the pill is still the \
                  nearest one before it"
+            );
+        }
+
+        /// PR #2052 fresh review round, codex P2: a dispatch that has appended
+        /// its `DeskTaskCompleted` but has not yet run
+        /// `journal_dispatch_replies` leaves a window in which another
+        /// accepted chat's ambiguous `@name` can interleave a same-desk B-101
+        /// advisory before the genuine relay lands. The advisory carries
+        /// `task_id: None` exactly like a relay bubble, so it must not be
+        /// mistaken for "the first `AgentReply` after the pill" — that would
+        /// make the real relay's own reply fail `seq == parent` and silently
+        /// run as an ordinary chat turn instead of review feedback.
+        #[tokio::test]
+        async fn the_resolver_skips_an_interleaved_ambiguity_advisory_to_find_the_real_relay() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            // The advisory lands between the pill and the relay: exactly the
+            // interleaving window the finding describes.
+            append(&rt, advisory_bubble("strategy")).await;
+            let true_relay = append(&rt, relay_bubble("strategy")).await;
+
+            assert_eq!(
+                rt.review_feedback_target("strategy", true_relay)
+                    .await
+                    .unwrap()
+                    .map(|c| c.id),
+                Some("t-1".to_string()),
+                "the real relay must still anchor to its card past an \
+                 interleaved system advisory"
+            );
+        }
+
+        /// The negative half: a reply to the advisory itself is not a relay
+        /// bubble and must not anchor to the card either — only the genuine
+        /// relay does.
+        #[tokio::test]
+        async fn a_reply_to_the_advisory_itself_is_not_review_feedback() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            let advisory = append(&rt, advisory_bubble("strategy")).await;
+            append(&rt, relay_bubble("strategy")).await;
+
+            assert!(
+                rt.review_feedback_target("strategy", advisory)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the advisory is not itself a relay bubble, so replying to it \
+                 must run an ordinary chat turn"
             );
         }
 
