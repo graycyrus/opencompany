@@ -31,6 +31,7 @@ describe("the toast line decideApproval leaves behind", () => {
     const cardQuestion = {
       kind: "blocker.information",
       task: { link: "task", id: "t-1" },
+      agent: "eng",
     } as const;
     expect(decideApprovalToastLine(cardQuestion, "approve", 0)).toBe(
       "Approved — the teammate is picking it up now",
@@ -46,6 +47,7 @@ describe("the toast line decideApproval leaves behind", () => {
       kind: "blocker.information",
       task: { link: "unlinked" },
       workflow_run_id: "run-1",
+      agent: "eng",
     } as const;
     expect(decideApprovalToastLine(workflowNode, "approve", 0)).toBe(
       "Approved — the teammate is picking it up now",
@@ -53,16 +55,50 @@ describe("the toast line decideApproval leaves behind", () => {
   });
 
   it("promises the resume for an ordinary gated call, which is not a blocker at all", () => {
-    const gatedCall = { kind: "payment.send", task: { link: "unlinked" } } as const;
+    const gatedCall = { kind: "payment.send", task: { link: "unlinked" }, agent: "eng" } as const;
     expect(decideApprovalToastLine(gatedCall, "approve", 0)).toBe(
       "Approved — the teammate is picking it up now",
     );
   });
 
   it("names what is still owed on an approve that did not release the turn", () => {
-    const gatedCall = { kind: "payment.send", task: { link: "unlinked" } } as const;
+    const gatedCall = { kind: "payment.send", task: { link: "unlinked" }, agent: "eng" } as const;
     expect(decideApprovalToastLine(gatedCall, "approve", 2)).toBe(
       "Approved — waiting on 2 more sign-offs before the teammate continues",
+    );
+  });
+
+  /**
+   * CodeRabbit review, PR #2054: a native `workflow.approve` gate carries a
+   * `workflow_run_id` (so it is never answer-only) but no `agent` — the
+   * runtime performs that gate itself, and `ApprovalsView`'s own `decide`
+   * already branches on `agent` for exactly this reason (`a.agent ?
+   * approvedLine(...) : approvedByRuntimeLine(...)`). This shared handler —
+   * behind the chat inline row, the task board, task detail and the ledgers
+   * board — did not, and said "the teammate is picking it up now" for a gate
+   * no teammate is involved in.
+   */
+  it("says the runtime carries it out, not that a teammate does, for an agentless gate", () => {
+    const runtimeGate = {
+      kind: "workflow.approve",
+      task: { link: "unlinked" },
+      workflow_run_id: "run-1",
+      agent: null,
+    } as const;
+    expect(decideApprovalToastLine(runtimeGate, "approve", 0)).toBe(
+      "Approved — carrying it out now",
+    );
+  });
+
+  it("names what is still owed on an agentless gate too, without naming a teammate", () => {
+    const runtimeGate = {
+      kind: "workflow.approve",
+      task: { link: "unlinked" },
+      workflow_run_id: "run-1",
+      agent: null,
+    } as const;
+    expect(decideApprovalToastLine(runtimeGate, "approve", 2)).toBe(
+      "Approved — waiting on 2 more sign-offs before it runs",
     );
   });
 
@@ -71,6 +107,7 @@ describe("the toast line decideApproval leaves behind", () => {
     const cardQuestion = {
       kind: "blocker.information",
       task: { link: "task", id: "t-1" },
+      agent: "eng",
     } as const;
     expect(decideApprovalToastLine(unlinkedQuestion, "deny", 0)).toBe("Declined — recorded.");
     expect(decideApprovalToastLine(cardQuestion, "deny", 0)).toBe("Declined — recorded.");

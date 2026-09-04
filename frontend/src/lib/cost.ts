@@ -63,6 +63,14 @@ export function formatUsdCost(
  * for. {@link formatUsdCost} pins `en-US` because a per-turn cost sits inside
  * English prose; a balance does not.
  */
+/** The `toLocaleString` options `formatUsd` renders every amount through. */
+const USD_TWO_DECIMALS: Intl.NumberFormatOptions = {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+};
+
 export function formatUsd(amount: number): string {
   if (!Number.isFinite(amount)) return "—";
   // `-0` is what `revenue - spend` produces on a company that has neither, and
@@ -73,12 +81,13 @@ export function formatUsd(amount: number): string {
   // `$0.00` is reserved for actually nothing. Half a cent still rounds to it,
   // which is this bug one order of magnitude down.
   if (value !== 0 && Math.abs(value) < 0.005) {
-    return value < 0 ? "−<$0.01" : "<$0.01";
+    // CodeRabbit review, PR #2054: rendered through the same locale-aware
+    // formatter as every other amount below, rather than a hardcoded
+    // "$0.01" — a `de-DE` or `fr-FR` operator reads the ordinary amounts on
+    // this same tile in their own locale's decimal and currency placement,
+    // and this threshold is the one figure here that did not follow.
+    const threshold = (0.01).toLocaleString(undefined, USD_TWO_DECIMALS);
+    return value < 0 ? `−<${threshold}` : `<${threshold}`;
   }
-  return value.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  return value.toLocaleString(undefined, USD_TWO_DECIMALS);
 }

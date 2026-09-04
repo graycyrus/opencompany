@@ -677,9 +677,20 @@ export function ChatView({
     }
   }
 
+  // CodeRabbit review, PR #2054: only the newest call may write, on the same
+  // `loadViewer`/`loadDesks` idiom just below. `rosterEpoch` re-fires `boot()`
+  // on every roster change (B-071, above) — the shell serializes ITS OWN
+  // polling reads, but nothing serialized two overlapping `boot()` calls
+  // against each other, so a roster change quickly followed by another (two
+  // hires close together) could let the FIRST call's `listTeam` resolve
+  // after the SECOND's and commit a stale roster last, silently reverting a
+  // fresher one this same effect had already applied.
+  const bootRun = useRef(0);
   const boot = useCallback(async () => {
+    const run = ++bootRun.current;
     try {
       const roster = await client.listTeam(company);
+      if (run !== bootRun.current) return;
       if (roster.length) {
         setMembers(roster.map(fromDto));
         setFromHost(true);
@@ -692,12 +703,13 @@ export function ChatView({
         setFromHost(false);
       }
     } catch {
+      if (run !== bootRun.current) return;
       // The roster read failed, so we do not know who works here. Still nobody:
       // guessing a team is what this change exists to stop.
       setMembers([]);
       setFromHost(false);
     } finally {
-      setLoadingTeam(false);
+      if (run === bootRun.current) setLoadingTeam(false);
     }
   }, [client, company]);
 

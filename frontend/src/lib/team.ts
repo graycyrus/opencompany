@@ -293,7 +293,15 @@ export function newMember(fields: { name: string; role: string; description: str
  * fingerprint identically.
  */
 export function rosterIdentity(team: readonly TeamMemberDto[]): string {
-  return team.map((m) => `${m.id ?? ""}\u001f${m.name ?? ""}`).join("\u001e");
+  // Codex review, PR #2054: the DISPLAYED name, not the raw `name` field —
+  // `fromDto` falls back to `role` when a teammate carries no explicit name,
+  // and a fingerprint keyed on the raw field never moved for that teammate's
+  // own role change (`m.name` stayed `undefined`/empty on both sides of it).
+  // The shell read "same roster" and skipped `applyRoster`, so the DM rail,
+  // the live-reply name map and the mention directory kept showing the old
+  // role as that teammate's name until a reload.
+  const name = (m: TeamMemberDto) => m.name?.trim() || m.role;
+  return team.map((m) => `${m.id ?? ""}\u001f${name(m)}`).join("\u001e");
 }
 
 /**

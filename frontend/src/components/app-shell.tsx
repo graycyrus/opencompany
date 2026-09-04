@@ -120,6 +120,7 @@ import { lifecycle } from "@/lib/language";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import {
   answerRecordedLine,
+  approvedByRuntimeLine,
   approvedLine,
   staleDecisionLine,
   type StillAwaiting,
@@ -465,7 +466,7 @@ interface Props {
  * the whole shell to click a button.
  */
 export function decideApprovalToastLine(
-  approval: Pick<ApprovalSummary, "kind" | "task" | "workflow_run_id">,
+  approval: Pick<ApprovalSummary, "kind" | "task" | "workflow_run_id" | "agent">,
   verdict: Verdict,
   stillAwaiting: StillAwaiting,
   /** The operator's reply, if any (B-046) — see `answerRecordedLine`'s own
@@ -473,9 +474,16 @@ export function decideApprovalToastLine(
   answer?: string,
 ): string {
   if (verdict !== "approve") return "Declined — recorded.";
-  return isAnswerOnlyBlocker(approval)
-    ? answerRecordedLine(Boolean(answer?.trim()))
-    : approvedLine(stillAwaiting);
+  if (isAnswerOnlyBlocker(approval)) return answerRecordedLine(Boolean(answer?.trim()));
+  // CodeRabbit review, PR #2054: say "the teammate" only when there is one
+  // (#395) — the same branch `ApprovalsView`'s own `decide` already takes.
+  // A native `workflow.approve` gate carries `workflow_run_id` (so it is
+  // never answer-only) but no `agent`: the runtime performs that gate
+  // itself, and this shared handler — the chat inline row, the task board,
+  // task detail, and the ledgers board — was still saying "the teammate is
+  // picking it up now" for it, the exact small lie `approvedByRuntimeLine`
+  // exists to remove.
+  return approval.agent ? approvedLine(stillAwaiting) : approvedByRuntimeLine(stillAwaiting);
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */

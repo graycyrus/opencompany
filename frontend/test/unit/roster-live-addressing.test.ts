@@ -85,6 +85,18 @@ describe("rosterIdentity", () => {
     expect(rosterIdentity(after)).not.toBe(rosterIdentity(before));
   });
 
+  // Codex review, PR #2054: `fromDto` (`@/lib/team`) falls back to `role` as
+  // the displayed name when a teammate carries no explicit `name` — the
+  // fingerprint has to follow that same fallback, or a role change on a
+  // nameless teammate is invisible to it and the shell never re-derives the
+  // DM rail, the live-reply name map or the mention directory for them.
+  it("changes when a nameless teammate's role changes", () => {
+    const before = [{ id: "priya", name: undefined, role: "Engineer" } as TeamMemberDto];
+    const after = [{ id: "priya", name: undefined, role: "Growth" } as TeamMemberDto];
+
+    expect(rosterIdentity(after)).not.toBe(rosterIdentity(before));
+  });
+
   it("changes when the roster is reordered", () => {
     // Roster order is the order DM threads are built in, so a reorder really
     // does change what renders.
