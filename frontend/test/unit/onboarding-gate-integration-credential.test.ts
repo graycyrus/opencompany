@@ -113,6 +113,45 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
   it("defaults to the safe no-credential copy while the read is still in flight", async () => {
     await render("hang");
     expect(container.querySelector('[data-testid="gate-integration-has-credential"]')).toBeNull();
-    expect(container.querySelector('[data-testid="gate-integration-waive"]')).toBeTruthy();
+  });
+
+  it("withholds the durable waiver until the credential read actually settles", async () => {
+    // Codex review, PR #2046: `hasCredential` starts `false` so the COPY is
+    // safe by default, but the waive button used to key off that same flag —
+    // so it was visible for the entire loading window too. A click there
+    // could permanently mark the step skipped before a slow read went on to
+    // report a credential DID exist. The waive button (and its footer) now
+    // also require `credentialConfirmed`, which only a settled SUCCESSFUL
+    // read sets.
+    await render("hang");
+    expect(
+      container.querySelector('[data-testid="gate-integration-waive"]'),
+      "the waiver must stay hidden while the read is still pending",
+    ).toBeNull();
+    expect(
+      container.textContent,
+      "the footer explaining the (not-yet-offered) waiver must also stay hidden",
+    ).not.toContain("Skipping is remembered");
+  });
+
+  it("withholds the durable waiver when the credential read fails outright", async () => {
+    const client = {
+      scopeFor: () => "/api/v1/company",
+      get: (path: string) => {
+        if (path.includes("/composio")) return Promise.reject(new Error("network blip"));
+        throw new Error(`unexpected path: ${path}`);
+      },
+    } as unknown as OpenCompanyClient;
+    await act(async () => {
+      root.render(
+        createElement(IntegrationStep, { client, company: null, onOpenApps: () => {}, onWaive: () => {} }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="gate-integration-waive"]'),
+      "a failed read is not a confirmed 'no credential' — the waiver must stay withheld",
+    ).toBeNull();
   });
 });

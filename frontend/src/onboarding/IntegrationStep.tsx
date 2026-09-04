@@ -37,6 +37,20 @@ import { Button } from "@/components/ui/button";
  * offering to waive a step they can finish normally would both be wrong, so
  * this reads `getComposioStatus` the same way `OAuthView` does and branches on
  * `credentialSource !== "none"`.
+ *
+ * **The waiver needs its own "do we actually know" flag, separate from the
+ * copy's `hasCredential`** (Codex review, PR #2046). `hasCredential` starts
+ * `false` so the COPY defaults to the safe "no credential" reading while the
+ * read is in flight or fails — but the waive button used to key off that same
+ * boolean, which means it was VISIBLE for that entire window too. A durable
+ * waiver clicked during it would permanently mark a step skipped that a
+ * confirmed-slow `getComposioStatus` might have gone on to report as already
+ * credentialed — exactly the "waive a step you could complete normally" harm
+ * the credential-vs-connection fix above exists to prevent, just reached
+ * through the timing instead of the verdict. `credentialConfirmed` is `true`
+ * only once a read has actually SETTLED with an answer (never on failure —
+ * unknown stays unknown, not "confirmed none"), and the waive button and its
+ * footer both gate on it in addition to `!hasCredential`.
  */
 export function IntegrationStep({
   client,
@@ -56,6 +70,11 @@ export function IntegrationStep({
   // extra "enter a credential" prompt rather than ever claiming a credential
   // exists when the read could not confirm one.
   const [hasCredential, setHasCredential] = useState(false);
+  // Separate from `hasCredential` on purpose — see this component's own doc.
+  // Only a SUCCESSFUL read flips this; a failure leaves it `false` right
+  // alongside "still loading", so the durable waiver stays unreachable for
+  // either until a read has actually confirmed there is nothing to connect.
+  const [credentialConfirmed, setCredentialConfirmed] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -63,9 +82,11 @@ export function IntegrationStep({
       (status) => {
         if (!live) return;
         setHasCredential(status.credentialSource !== "none");
+        setCredentialConfirmed(true);
       },
       () => {
-        /* transient failure — stay on the safe "no credential" default */
+        /* transient failure — stay on the safe "no credential" default, and
+         * leave `credentialConfirmed` false so the waiver stays withheld too */
       },
     );
     return () => {
@@ -114,15 +135,20 @@ export function IntegrationStep({
         </Button>
         {/* A credential that exists is always a completable step — offering to
             waive it the way a build with no lever at all needs to would invite
-            a founder who could just connect a provider to skip it instead. */}
-        {!hasCredential && (
+            a founder who could just connect a provider to skip it instead.
+            Gated on `credentialConfirmed` too (Codex review, PR #2046): while
+            the read is still in flight or has failed, we do not yet KNOW
+            which case this is, and a durable waiver clicked in that window
+            would be as wrong as the credential-vs-connection mix-up this
+            whole component exists to prevent. */}
+        {!hasCredential && credentialConfirmed && (
           <Button variant="ghost" onClick={onWaive} data-testid="gate-integration-waive">
             I don&apos;t have one — skip this step
           </Button>
         )}
       </div>
 
-      {!hasCredential && (
+      {!hasCredential && credentialConfirmed && (
         <p className="text-xs text-muted-foreground">
           Skipping is remembered for this company, so this step won&apos;t be asked again in a
           new tab. Connect an account later from Apps whenever you have a credential.

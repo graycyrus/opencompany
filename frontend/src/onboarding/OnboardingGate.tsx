@@ -8,10 +8,24 @@ import { ApiError } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { VIEWS } from "@/lib/console-routes";
 import { cn } from "@/lib/utils";
 import { IntegrationStep } from "@/onboarding/IntegrationStep";
 import type { GateStepId } from "@/onboarding/state";
 import { WorkflowStep } from "@/onboarding/WorkflowStep";
+
+/**
+ * Whether `href` names a route this console actually serves — the same test
+ * `useHashView` applies to the real router's own hash (`hooks/use-hash-view.ts`'s
+ * `readSegments`, mirrored here since that function reads `window.location.hash`
+ * directly rather than taking a string to validate). Only the first path
+ * segment is checked, the same way the router itself only routes on it — a
+ * sub-page's own validity is that view's problem, not this gate's.
+ */
+function isKnownConsoleRoute(href: string): boolean {
+  const head = href.replace(/^#\/?/, "").split("?")[0].split("/")[0];
+  return (VIEWS as readonly string[]).includes(head);
+}
 
 // Same reason `app-shell.tsx` lazy-loads it: React Flow is heavy, and it
 // should not tax a screen an operator only sees once.
@@ -180,6 +194,20 @@ export function OnboardingGate({
         const href = anchor?.getAttribute("href");
         if (!anchor || !href?.startsWith("#")) return;
         if (anchor.target && anchor.target !== "_self") return;
+        // CodeRabbit review, PR #2046: nothing this gate renders today puts an
+        // `<a>` in its own tree — every step's controls are plain buttons
+        // going through `onLeave` with one of the three hardcoded routes
+        // below — but the handler's own doc above says it means to catch
+        // one "wherever it came from", which promises more than the
+        // `href?.startsWith("#")` check alone delivers: a same-origin hash is
+        // not itself unsafe (it cannot execute script the way a `javascript:`
+        // URI would), but forwarding an unrecognized one to `onLeave` still
+        // stands the gate down for an address this console does not route —
+        // not a bug today with no such link to click, but not a check this
+        // handler should rely on staying true forever either. Validated the
+        // same way `useHashView` validates the real router's own hash: the
+        // first path segment must name a known `View`.
+        if (!isKnownConsoleRoute(href)) return;
         event.preventDefault();
         onLeave(href);
       }}

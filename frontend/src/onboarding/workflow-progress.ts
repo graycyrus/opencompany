@@ -22,7 +22,7 @@
 // disagree with the run's own badge two clicks away.
 
 import type { WorkflowRunOutcome, WorkflowRunVerdict } from "@/api/workflows";
-import { verdictOf } from "@/views/workflows/run-health";
+import { strandedApprovalCount, verdictOf } from "@/views/workflows/run-health";
 
 export type GateWorkflowProgressKind =
   /** No run has been recorded for this company at all. */
@@ -111,13 +111,31 @@ function kindFor(verdict: WorkflowRunVerdict): GateWorkflowProgressKind {
  * Mirrors `BlockedNodeApprovals`' own rule (issue #1143/#1189): a node whose
  * every card has been stranded has nothing to link to, so its ids are dropped
  * rather than offered as an action that lands on an empty page.
+ *
+ * CodeRabbit review, PR #2046: that rule used to apply only to `blockedNodes`
+ * — `run.pendingApprovals` (the top-level gate-approval receipt) was unioned
+ * in UNFILTERED, with no equivalent check against `run.strandedApprovals`.
+ * The gap is invisible for a run that is PURELY stranded, because
+ * `workflow_verdict.rs` scores that `stranded` outright and `kindFor` above
+ * never reaches this function for it (`"stranded"` maps to `"needs-rerun"`,
+ * not `"waiting-on-you"`) — but the host deliberately does NOT call a run
+ * `stranded` while it ALSO carries a pending delivery (`workflow_verdict.rs`
+ * lines 929-947: the delivery is still genuinely actionable), so a run with
+ * every gate approval stranded AND a pending delivery reads `awaiting-approval`
+ * — landing exactly on `"waiting-on-you"` with `pendingApprovals` ids this
+ * function returned as if they were live. Since the host reports COUNTS, not
+ * which specific ids survived, the same all-or-nothing rule `blockedNodes`
+ * already uses is the only one available here: if every entry could be
+ * stranded, drop the whole list rather than guess which one is not.
  */
 export function gateApprovalTargets(run: WorkflowRunOutcome | undefined): string[] {
   if (!run) return [];
+  const stranded = strandedApprovalCount(run);
+  const topLevel = stranded >= run.pendingApprovals.length ? [] : run.pendingApprovals;
   const fromNodes = (run.blockedNodes ?? []).flatMap((node) => {
     const ids = node.approvalIds ?? [];
-    const stranded = node.stranded ?? 0;
-    return stranded >= ids.length ? [] : ids;
+    const nodeStranded = node.stranded ?? 0;
+    return nodeStranded >= ids.length ? [] : ids;
   });
-  return Array.from(new Set([...run.pendingApprovals, ...fromNodes]));
+  return Array.from(new Set([...topLevel, ...fromNodes]));
 }

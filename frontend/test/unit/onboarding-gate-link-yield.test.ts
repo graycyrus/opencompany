@@ -138,4 +138,29 @@ describe("the gate never swallows an in-app link", () => {
     click(skip);
     expect(onLeave).not.toHaveBeenCalled();
   });
+
+  it("does not forward a hash whose first segment names no console route", () => {
+    // CodeRabbit review, PR #2046: nothing this gate renders today puts an
+    // `<a>` in its own tree, so this has no live trigger yet — but the
+    // handler's own doc promises to catch a link "wherever it came from",
+    // which the bare `href?.startsWith("#")` check alone did not keep: any
+    // hash at all was forwarded to `onLeave`, whether or not it named a
+    // route this console actually serves.
+    const onLeave = vi.fn();
+    renderGate(onLeave);
+    const ev = click(plantAnchor("#/not-a-real-view"));
+    expect(onLeave, "an unrecognized route must not reach onLeave").not.toHaveBeenCalled();
+    // Left alone rather than intercepted — the same "browser's own default
+    // is correct" treatment a modified click or an external link already
+    // gets. `onLeave`'s side effects (standing the gate down, marking it
+    // skipped) are reserved for a route this console actually validated.
+    expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it("still validates a route that carries a sub-page", () => {
+    const onLeave = vi.fn();
+    renderGate(onLeave);
+    click(plantAnchor("#/connections/apps"));
+    expect(onLeave).toHaveBeenCalledWith("#/connections/apps");
+  });
 });

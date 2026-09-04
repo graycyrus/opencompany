@@ -125,4 +125,30 @@ describe("gateApprovalTargets", () => {
   it("has nothing to offer for no run", () => {
     expect(gateApprovalTargets(undefined)).toEqual([]);
   });
+
+  it("drops the top-level pending approvals once every one is stranded", () => {
+    // CodeRabbit review, PR #2046: the blocked-node case above already
+    // dropped a fully-stranded node's ids; `pendingApprovals` itself had no
+    // equivalent check against `strandedApprovals`. Reachable specifically
+    // when a pending DELIVERY keeps the host from calling the run outright
+    // `stranded` (workflow_verdict.rs) even though every gate card IS gone.
+    const r = run({
+      pendingApprovals: ["ap-1", "ap-2"],
+      strandedApprovals: 2,
+      deliveries: [{ node: "n1", kind: "email", status: "pending", detail: "queued" }],
+    });
+    expect(gateApprovalTargets(r)).toEqual([]);
+  });
+
+  it("keeps the top-level pending approvals while only some are stranded", () => {
+    const r = run({ pendingApprovals: ["ap-1", "ap-2"], strandedApprovals: 1 });
+    expect(gateApprovalTargets(r)).toEqual(["ap-1", "ap-2"]);
+  });
+
+  it("treats an absent strandedApprovals as nothing stranded, not everything", () => {
+    // A host predating issue #1189 sends no `strandedApprovals` at all —
+    // absent must read as "not reconciled", never as "all of it".
+    const r = run({ pendingApprovals: ["ap-1"] });
+    expect(gateApprovalTargets(r)).toEqual(["ap-1"]);
+  });
 });

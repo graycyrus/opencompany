@@ -175,4 +175,33 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
     // The gate approval itself IS decidable, so the button must still show.
     expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeTruthy();
   });
+
+  it("treats a fully-stranded gate approval plus a pending delivery as delivery-only", async () => {
+    // CodeRabbit review, PR #2046: `gateApprovalTargets` used to union
+    // `pendingApprovals` in unfiltered, with no check against
+    // `strandedApprovals` (unlike `blockedNodes`, which already dropped a
+    // fully-stranded node's ids). Reachable specifically because the host
+    // does NOT call a run outright `stranded` while it also carries a
+    // pending delivery (workflow_verdict.rs) — so this run reads
+    // `awaiting-approval`, not `stranded`, even though every gate card is
+    // gone. Before the fix this rendered the "mixed" case and offered an
+    // Approvals button pointing at nothing.
+    await render([
+      run({
+        verdict: "awaiting-approval",
+        pendingApprovals: ["ap-1"],
+        strandedApprovals: 1,
+        deliveries: [{ node: "n1", kind: "email", status: "pending", detail: "queued" }],
+      }),
+    ]);
+    const text = container.querySelector(
+      '[data-testid="gate-workflow-awaiting-delivery"]',
+    )?.textContent;
+    expect(
+      text,
+      "a fully-stranded gate approval must not be treated as a live target",
+    ).toBeTruthy();
+    expect(container.querySelector('[data-testid="gate-workflow-waiting-mixed"]')).toBeNull();
+    expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
+  });
 });
