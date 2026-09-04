@@ -1037,23 +1037,32 @@ impl CompanyRuntime {
     /// Every approval still awaiting a decision that was parked **for this
     /// card** (defect B-109), oldest first.
     ///
-    /// Read off the journal's own park stamp rather than off the console
-    /// projection, and that difference matters: `pending_approvals_resolved`
-    /// re-derives a park's card from its attempt row and rewrites the stamped
-    /// link to [`Unlinked`](crate::runtime::journal::TaskLink::Unlinked) when
-    /// the run store cannot name one
-    /// ([`approval_ownership::resolve_owners`](crate::runtime::approval_ownership::resolve_owners)).
-    /// That is a deliberate choice for a *display* — better to show no card
-    /// than the wrong one — but a guard that inherited it would let exactly the
-    /// cards whose link was dropped through, which is the shape of the console
-    /// half of this defect.
+    /// Resolved through [`Self::pending_approvals_resolved`], not the raw
+    /// journal stamp (CodeRabbit review, PR #2054: "Resolve the approval owner
+    /// before guarding redispatch"). This guard and the console's own
+    /// `pending_approvals_resolved` read exist to agree on one owner for the
+    /// same reason #1891 moved that resolution host-side at all: a park's
+    /// stamped [`TaskLink`](crate::runtime::journal::TaskLink) is only the
+    /// *fallback* half of the ownership rule
+    /// ([`approval_ownership::resolve_owners`](crate::runtime::approval_ownership::resolve_owners))
+    /// — the attempt behind `Effect::run_id` outranks it wherever the run
+    /// store can name one. Filtering on the bare stamp here disagreed with
+    /// that: an approval parked under this card's attempt while stamped with
+    /// a *different* card's link read as "no undecided approvals" for the
+    /// actual owner, so a paused-to-in-progress `PATCH` on it passed this
+    /// guard and dispatched duplicate work while the approval was still
+    /// pending — the redispatch B-109 exists to refuse. Reading the same
+    /// resolved projection the console decides from closes that gap, and
+    /// falls back to the stamp in exactly the cases `resolve_owners` already
+    /// documents falling back in (no attempt, or the store could not be
+    /// asked) — never inventing a card the attempt doesn't own.
     ///
     /// [`TaskLink::Unlinked`] and `None` both answer "not this card": the first
     /// is a park with no card behind it, the second a line written before the
     /// link existed, and neither is evidence that *this* card is blocked.
-    pub fn undecided_approvals_for_task(&self, task_id: &str) -> Vec<ApprovalId> {
-        self.journal
-            .pending()
+    pub async fn undecided_approvals_for_task(&self, task_id: &str) -> Vec<ApprovalId> {
+        self.pending_approvals_resolved()
+            .await
             .into_iter()
             .filter(|parked| {
                 parked
@@ -1130,7 +1139,7 @@ impl CompanyRuntime {
         // moving it to In Review or Done, or parking it are all still writable:
         // this is not a lock on the card, it is a refusal to start work twice.
         if dispatch {
-            let undecided = self.undecided_approvals_for_task(&task.id);
+            let undecided = self.undecided_approvals_for_task(&task.id).await;
             if !undecided.is_empty() {
                 return Err(OpenCompanyError::Conflict(format!(
                     "\"{}\" is still waiting on {} decision{} you have not made — \
@@ -2313,6 +2322,11 @@ impl CompanyRuntime {
             verdict,
             answer: answer.unwrap_or_default().to_string(),
             step,
+            // The console approvals card path (issue #2008's doc above): the
+            // answer was typed into the card's own box, not into the DM, so
+            // nothing has been journaled for it yet — `deliver_blocker_answer`
+            // is still the one that has to (CodeRabbit review, PR #2054).
+            journaled_answer_seq: None,
         };
         self.journal
             .record_blocker_resolution(id, &resolution)
@@ -2684,8 +2698,23 @@ impl CompanyRuntime {
             // acknowledged, visible in the queue's history — and the agent that
             // asked never saw it, so the only thing an operator could do next
             // was type the same words again by hand into the same conversation.
+            //
+            // CodeRabbit review, PR #2054: and when the answer was typed
+            // straight into this DM, "carried" must not mean "journaled a
+            // second time". `accept_chat_turn` already appended the operator's
+            // exact words as an `OperatorMessage` before `apply_blocker_reply`
+            // ever banked this resolution — `resolution.journaled_answer_seq`
+            // names that seq. `deliver_blocker_answer` unconditionally
+            // synthesized a *fresh* `OperatorMessage` with the same text
+            // regardless, so every substantive DM answer to a bare agent
+            // question landed twice: once from the chat send, once from this
+            // resume — duplicated in the transcript and in the agent's own
+            // context.
             None => match self.deliverable_answer(resolution, thread) {
-                Some((thread, answer)) => self.deliver_blocker_answer(thread, answer).await,
+                Some((thread, answer)) => match resolution.journaled_answer_seq {
+                    Some(seq) => self.reenter_on_journaled_answer(seq, thread, answer).await,
+                    None => self.deliver_blocker_answer(thread, answer).await,
+                },
                 None => {
                     self.post_blocker_resume_note(
                         thread,
@@ -2791,6 +2820,48 @@ impl CompanyRuntime {
         .map(|_| ())
     }
 
+    /// [`deliver_blocker_answer`](Self::deliver_blocker_answer), for an answer
+    /// that is **already** on the journal (CodeRabbit review, PR #2054:
+    /// "Reuse the already-journaled chat answer").
+    ///
+    /// Reads the event back by `seq` rather than reconstructing one from
+    /// `thread`/`answer` — [`run_journaled_cycle`](Self::run_journaled_cycle)
+    /// exists precisely so a pre-journaled input runs the cycle on the exact
+    /// bytes the transcript already carries, and re-deriving them here would
+    /// be a second, driftable description of a fact one store read already
+    /// answers (`by`, `mentions`, `attachments` — every field this arm cannot
+    /// see from the resolution alone).
+    ///
+    /// Falls back to [`deliver_blocker_answer`](Self::deliver_blocker_answer)
+    /// if the seq cannot be read back — a compacted or otherwise-missing
+    /// journal entry must still deliver the answer the operator already gave
+    /// rather than silently doing nothing with it; the operator's own words,
+    /// still carried on `resolution.answer`, are what that fallback re-sends.
+    #[cfg(feature = "openhuman")]
+    async fn reenter_on_journaled_answer(
+        self: &Arc<Self>,
+        seq: EventSeq,
+        thread: &str,
+        answer: &str,
+    ) -> Result<()> {
+        let found = self.events.read_from(&self.id, seq, 1).await?;
+        match found.into_iter().find(|stored| stored.seq == seq) {
+            Some(stored) => self
+                .run_journaled_cycle(vec![(stored.seq, stored.event)], None)
+                .await
+                .map(|_| ()),
+            None => {
+                tracing::warn!(
+                    company = %self.id,
+                    ?seq,
+                    "[blockers] a chat-answered blocker's journaled message could not be read \
+                     back; delivering the answer as a fresh message instead of losing it"
+                );
+                self.deliver_blocker_answer(thread, answer).await
+            }
+        }
+    }
+
     /// Re-dispatches a board card a blocker had paused, moving it back into In
     /// Progress so its dispatch edge fires (issue #1863).
     ///
@@ -2849,7 +2920,7 @@ impl CompanyRuntime {
         // *this* one is still worth recording, so the note is written and the
         // move is not attempted; the last decision on the card is the one that
         // restarts it.
-        let outstanding = self.undecided_approvals_for_task(task_id).len();
+        let outstanding = self.undecided_approvals_for_task(task_id).await.len();
         if outstanding > 0 {
             if resolution.verdict == BlockerVerdict::Amend && !resolution.answer.trim().is_empty() {
                 card.note = Some(crate::runtime::advance::append_result(
@@ -6255,6 +6326,17 @@ impl CompanyRuntime {
     /// [`spawn_follow_up`](Self::spawn_follow_up)'s blocker fork re-enters the
     /// stopped step carrying the resolution — a resuming verdict re-dispatches
     /// the work, a cancel settles it and starts nothing.
+    ///
+    /// `journaled_answer_seq` names the seq `text` was **already** appended
+    /// under as an `OperatorMessage` — every real caller reaches this only
+    /// after `accept_chat_turn` has journaled the reply that named `intent`,
+    /// so it is `Some` in production. `None` is for a caller with no such
+    /// event (a test driving the resolution machinery directly). Threaded
+    /// onto each id's [`BlockerResolution`] so a bare agent question's resume
+    /// can re-enter the cycle on the event that is already on the journal
+    /// instead of minting a second, identical one (CodeRabbit review, PR
+    /// #2054: "Reuse the already-journaled chat answer") — see
+    /// [`BlockerResolution::journaled_answer_seq`] for the full story.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn apply_blocker_reply(
         self: &Arc<Self>,
@@ -6262,6 +6344,7 @@ impl CompanyRuntime {
         intent: crate::company::task_intent::BlockerReplyIntent,
         text: &str,
         by: Option<&Actor>,
+        journaled_answer_seq: Option<EventSeq>,
     ) -> Result<()> {
         use crate::company::task_intent::BlockerReplyIntent;
         use crate::ports::blockers::{BlockerPayload, BlockerVerdict};
@@ -6305,6 +6388,7 @@ impl CompanyRuntime {
                 verdict,
                 answer: answer.clone(),
                 step: step_of(id),
+                journaled_answer_seq,
             };
             // Bank durably, then arm the side-channel, then resolve — the same
             // journal-before-live ordering `mint_grant` keeps, so a crash
@@ -7359,6 +7443,7 @@ mod tests {
                 verdict,
                 answer: String::new(),
                 step: None,
+                journaled_answer_seq: None,
             }
         }
 
@@ -11023,7 +11108,13 @@ mod tests {
                 _ => panic!("a single group in the DM resolves"),
             };
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "go ahead and retry", None)
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Retry,
+                    "go ahead and retry",
+                    None,
+                    None,
+                )
                 .await
                 .expect("applies");
             assert!(
@@ -11662,7 +11753,7 @@ mod tests {
                 .await
                 .expect("parks");
             assert_eq!(
-                runtime.undecided_approvals_for_task("t-1"),
+                runtime.undecided_approvals_for_task("t-1").await,
                 vec![parked],
                 "the card really is the one the question was asked for",
             );
@@ -11694,6 +11785,94 @@ mod tests {
                 runtime.pending_approvals().len(),
                 1,
                 "and no second copy of the question was filed",
+            );
+        }
+
+        /// CodeRabbit review, PR #2054: "Resolve the approval owner before
+        /// guarding redispatch". A park's stamped [`TaskLink`] can disagree
+        /// with the card its `Effect::run_id` attempt actually belongs to — a
+        /// supported shape [`approval_ownership::resolve_owners`] and the
+        /// task-detail read already correct for — and the redispatch guard
+        /// used to read only the stamp. So an approval parked under `t-1`'s
+        /// own attempt while stamped `t-other` made `t-1` read as having no
+        /// undecided approvals, and a paused-to-in-progress `PATCH` on it
+        /// passed the guard and dispatched duplicate work while the approval
+        /// was still pending — exactly the redispatch B-109 exists to refuse.
+        ///
+        /// [`TaskLink`]: crate::runtime::journal::TaskLink
+        /// [`approval_ownership::resolve_owners`]: crate::runtime::approval_ownership::resolve_owners
+        #[tokio::test]
+        async fn the_guard_resolves_ownership_the_same_way_the_queue_does() {
+            use crate::ports::runs::NewRun;
+            use crate::ports::types::{ApprovalId, Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            seed(&runtime, &card("t-other", COLUMN_TODO)).await;
+
+            // The attempt belongs to `t-1`.
+            runtime
+                .runs()
+                .create_run(runtime.id(), NewRun::for_task("run-1", "t-1", "eng"))
+                .await
+                .expect("create run");
+
+            // Parked under that attempt, but stamped with a *different* card —
+            // the mismatched shape `resolve_owners` corrects for. The attempt
+            // must outrank the stale stamp.
+            let effect = Effect {
+                kind: "filing.submit".into(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: Some("run-1".to_string()),
+            };
+            runtime
+                .journal
+                .record_parked(
+                    &ApprovalId::new("appr-elsewhere"),
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::Task {
+                        id: "t-other".into(),
+                    },
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("record parked");
+
+            assert_eq!(
+                runtime.undecided_approvals_for_task("t-1").await,
+                vec![ApprovalId::new("appr-elsewhere")],
+                "the attempt outranks the stale stamp: t-1 really is waiting",
+            );
+            assert!(
+                runtime
+                    .undecided_approvals_for_task("t-other")
+                    .await
+                    .is_empty(),
+                "and t-other, which only the stale stamp named, is not",
+            );
+
+            let mut resumed = stored(&runtime, "t-1").await;
+            resumed.column = COLUMN_IN_PROGRESS.to_string();
+            let err = runtime
+                .upsert_task(&resumed)
+                .await
+                .expect_err("the real owner's undecided approval refuses the redispatch");
+            assert!(
+                matches!(err, crate::error::OpenCompanyError::Conflict(_)),
+                "{err:?}",
+            );
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_PAUSED,
+                "refused whole — no duplicate work dispatched behind the stale stamp",
             );
         }
 
@@ -11738,7 +11917,7 @@ mod tests {
             let (runtime, _home) = runtime().await;
             seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
             let _parked = park_unlinked(&runtime).await;
-            assert!(runtime.undecided_approvals_for_task("t-1").is_empty());
+            assert!(runtime.undecided_approvals_for_task("t-1").await.is_empty());
 
             let mut resumed = stored(&runtime, "t-1").await;
             resumed.column = COLUMN_IN_PROGRESS.to_string();
@@ -11806,7 +11985,13 @@ mod tests {
                 .collect();
 
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "go ahead and retry", None)
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Retry,
+                    "go ahead and retry",
+                    None,
+                    None,
+                )
                 .await
                 .expect("resumes");
 
@@ -11843,6 +12028,7 @@ mod tests {
                     BlockerReplyIntent::Amend,
                     "use gpt-4o-mini instead",
                     None,
+                    None,
                 )
                 .await
                 .expect("resumes");
@@ -11873,7 +12059,7 @@ mod tests {
                 .collect();
 
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Skip, "skip it", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Skip, "skip it", None, None)
                 .await
                 .expect("resumes");
 
@@ -11898,7 +12084,7 @@ mod tests {
                 .collect();
 
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Cancel, "cancel it", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Cancel, "cancel it", None, None)
                 .await
                 .expect("settles");
 
@@ -11930,7 +12116,7 @@ mod tests {
             let approval_id = ids[0].clone();
 
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None, None)
                 .await
                 .expect("resumes");
 
@@ -11959,7 +12145,7 @@ mod tests {
                 .collect();
 
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None, None)
                 .await
                 .expect("resumes");
 
@@ -11996,7 +12182,7 @@ mod tests {
             assert_eq!(ids.len(), 1, "the parked blocker survived the restart");
 
             second
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None, None)
                 .await
                 .expect("resumes");
 
@@ -12221,6 +12407,7 @@ mod tests {
                     BlockerReplyIntent::Amend,
                     "the 14th, not the 7th",
                     None,
+                    None,
                 )
                 .await
                 .expect("resumes");
@@ -12253,7 +12440,7 @@ mod tests {
                 .collect();
 
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Amend, "the 14th", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Amend, "the 14th", None, None)
                 .await
                 .expect("resumes");
 
@@ -12313,6 +12500,7 @@ mod tests {
                     BlockerReplyIntent::Amend,
                     "the 14th, not the 7th",
                     None,
+                    None,
                 )
                 .await
                 .expect("resumes");
@@ -12323,6 +12511,63 @@ mod tests {
                     .any(|(text, chat)| text.contains("the 14th, not the 7th")
                         && chat.as_deref() == Some("dm:eng")),
                 "the answer reaches the conversation the question was asked in: {sent:?}",
+            );
+        }
+
+        /// CodeRabbit review, PR #2054: "Reuse the already-journaled chat
+        /// answer". In production `accept_chat_turn` journals the operator's
+        /// exact words as an `OperatorMessage` *before* `apply_blocker_reply`
+        /// is ever called — this reproduces that ordering directly rather than
+        /// through the HTTP route, and pins that the resume re-enters the
+        /// cycle on the event already on the journal instead of minting a
+        /// second, identical one.
+        #[tokio::test]
+        async fn a_pre_journaled_chat_answer_is_not_carried_twice() {
+            let (runtime, _home) = runtime().await;
+            let id = park_unlinked(&runtime).await;
+
+            // Stands in for `accept_chat_turn`'s own append: the operator's
+            // message is already durable, with its own seq, before the
+            // blocker machinery ever sees it.
+            let seq = runtime
+                .events
+                .append(
+                    runtime.id(),
+                    crate::ports::types::CompanyEvent::OperatorMessage {
+                        text: "the 14th, not the 7th".to_string(),
+                        by: None,
+                        chat: Some("dm:eng".to_string()),
+                        parent: None,
+                        deliverable: None,
+                        mentions: Vec::new(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journals");
+
+            runtime
+                .apply_blocker_reply(
+                    &[id],
+                    BlockerReplyIntent::Amend,
+                    "the 14th, not the 7th",
+                    None,
+                    Some(seq),
+                )
+                .await
+                .expect("resumes");
+
+            let sent = operator_messages(&runtime).await;
+            let matching: Vec<_> = sent
+                .iter()
+                .filter(|(text, chat)| {
+                    text == "the 14th, not the 7th" && chat.as_deref() == Some("dm:eng")
+                })
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "the answer is carried on the event already journaled, not duplicated: {sent:?}",
             );
         }
 
@@ -12337,7 +12582,7 @@ mod tests {
             let id = park_unlinked(&runtime).await;
 
             runtime
-                .apply_blocker_reply(&[id], BlockerReplyIntent::Retry, "retry", None)
+                .apply_blocker_reply(&[id], BlockerReplyIntent::Retry, "retry", None, None)
                 .await
                 .expect("resumes");
 
@@ -12834,7 +13079,7 @@ to = "draft"
             text: &str,
         ) {
             let ids = vec![crate::ports::types::ApprovalId::from(id.to_string())];
-            rt.apply_blocker_reply(&ids, intent, text, None)
+            rt.apply_blocker_reply(&ids, intent, text, None, None)
                 .await
                 .expect("applies");
         }
@@ -13011,7 +13256,7 @@ to = "draft"
 
             let ids = vec![crate::ports::types::ApprovalId::from(second)];
             let outcome = rt
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None, None)
                 .await;
 
             assert!(
@@ -13042,7 +13287,7 @@ to = "draft"
 
             let ids = vec![crate::ports::types::ApprovalId::from(id)];
             let outcome = rt
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None, None)
                 .await;
 
             assert!(
@@ -13170,7 +13415,7 @@ to = "draft"
                 .await
                 .expect("stashes");
 
-            rt.apply_blocker_reply(&[id], BlockerReplyIntent::Cancel, "cancel that", None)
+            rt.apply_blocker_reply(&[id], BlockerReplyIntent::Cancel, "cancel that", None, None)
                 .await
                 .expect("applies");
 

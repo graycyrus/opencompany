@@ -2951,8 +2951,18 @@ async fn chat_and_emit(
                     accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
                 let message_id = accepted.message_seq.value().to_string();
                 let turn_id = accepted.turn_id.clone();
+                // CodeRabbit review, PR #2054: `accept_chat_turn` just journaled
+                // this exact text as an `OperatorMessage` — hand its seq along so
+                // a bare agent question's resume re-enters on that event instead
+                // of minting a second, identical one.
                 let applied = runtime
-                    .apply_blocker_reply(&ids, intent, &message.text, by.as_ref())
+                    .apply_blocker_reply(
+                        &ids,
+                        intent,
+                        &message.text,
+                        by.as_ref(),
+                        Some(accepted.message_seq),
+                    )
                     .await
                     .map_err(ApiError);
                 settle_chat_turn(&runtime, id, turn_id.as_deref(), applied.as_ref().err()).await;
