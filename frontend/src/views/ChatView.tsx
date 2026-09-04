@@ -1800,15 +1800,33 @@ export function ChatView({
     // cross-company-reused) thread id — see `shouldClearReceipt`.
     // Armed under the same key the reload leg folds runs into, or the two
     // legs describe the same turn under two names and the indicator that
-    // survives a reload is not the one the POST armed. Unthreaded sends key at
-    // the channel exactly as before — `turnStateKey` returns `chatId` for them.
-    // Derived from `openThreadId`, not from `parentId`. A review reply is
-    // anchored to a *reply* (`threadReviewAnchor.anchorId`), not to the thread
-    // root, so keying on the parent would arm a key the panel's own lookup —
-    // which keys on the open thread — could never match. `parentId` stays what
-    // it was: the host's `parent`, for `client.chat` alone.
+    // survives a reload is not the one the POST armed.
+    //
+    // **Unthreaded (`parentId` unset) always keys the channel outright** —
+    // `turnStateKey(chatId)` with no root — regardless of what thread happens
+    // to be open in the panel beside it. The channel composer always sends
+    // `parentId: undefined`, and the channel row's own Retry button lives on
+    // that same top-level transcript, so both a fresh top-level send and a
+    // top-level failure's Retry can fire while an *unrelated* thread in this
+    // channel is open in the panel (`openThreadId` naming that other thread's
+    // root). Keying on `openThreadId` there used to mis-file the whole send —
+    // its receipt and open-turn recovery registered under a thread it never
+    // touched, so the panel showed work it did not start while the channel
+    // that actually ran it showed nothing (codex P2, PR #2052 review). A
+    // threaded retry cannot hit this: its Retry button only renders inside
+    // the thread panel for the thread it belongs to, so `openThreadId`
+    // already names that same thread whenever it is clickable.
+    //
+    // **Threaded (`parentId` set) still keys off `openThreadId`, not
+    // `parentId` itself.** A review reply is anchored to a *reply*
+    // (`threadReviewAnchor.anchorId`), not to the thread root, so keying on
+    // the parent would arm a key the panel's own lookup — which keys on the
+    // open thread — could never match. `parentId` stays what it was: the
+    // host's `parent`, for `client.chat` alone.
     const stateKey = chatId
-      ? turnStateKey(chatId, threadRootOf(openThreadId ?? undefined))
+      ? parentId === undefined
+        ? turnStateKey(chatId)
+        : turnStateKey(chatId, threadRootOf(openThreadId ?? undefined))
       : undefined;
     const gen = stateKey ? onSendStart?.(stateKey) : undefined;
     // Which of the POST's three outcomes actually happened, decided here and
