@@ -40,6 +40,8 @@ import {
   type ConnectionState,
   type CreateDeskInput,
   type DeskDto,
+  type DeskHiveDto,
+  type DeskHiveDeclared,
   type EditAgentInput,
   type FeedbackInput,
   type FeedbackResponse,
