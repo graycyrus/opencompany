@@ -710,6 +710,9 @@ async fn add_member(
         is_orchestrator,
         tools,
         desks,
+        // A console-created teammate delegates nowhere until somebody says so:
+        // `delegates_to` is a manifest field and the overlay carries none.
+        delegates_to: Vec::new(),
         // A brand-new teammate has no inbox until the toggle writes one.
         inbox_enabled: false,
         budget_usd_daily: body.budget_usd_daily,
