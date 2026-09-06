@@ -410,6 +410,25 @@ export function ChatView({
   budgetProximity,
   onDismissBudgetProximity,
 }: Props) {
+  /*
+   * Read straight from the Room store rather than taken as props.
+   *
+   * All five used to be threaded down from `app-shell.tsx`, which held them in
+   * `useState` only because this component unmounts on every trip away from the
+   * Room. They live in `room/store.ts` now, so the shell has nothing to hand
+   * over and this reads them where they are.
+   *
+   * `transcripts` and `hydration` deliberately stay props: `hydration` defaults
+   * to `HISTORY_UNTRACKED` for a `ChatView` mounted with no shell behind it —
+   * resolving every channel to "ready" so a standalone mount does not spin on a
+   * pass that is never coming — and reading the store would replace that with
+   * `HISTORY_UNSTARTED`, which spins forever.
+   */
+  const openTurns = room.useOpenTurns();
+  const liveStepsByThread = room.useLiveStepsByThread();
+  const liveStepsByMessage = room.useLiveStepsByMessage();
+  const receiptByThread = room.useReceiptByThread();
+  const chatChannelByThread = room.useChatChannelByThread();
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [members, setMembers] = useState<TeamMember[]>([]);
