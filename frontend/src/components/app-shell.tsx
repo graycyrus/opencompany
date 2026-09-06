@@ -626,13 +626,6 @@ export function AppShell({
   // would be discarded on every trip away from Chat and back.
   const transcripts = room.useTranscripts();
   const setTranscripts = room.setTranscripts;
-  // The latest transcripts, readable from the stable `refreshMentions`
-  // callback without rebuilding it on every channel that lands a line (the
-  // same reason `mentionFeedRef` and `chatChannelByThreadRef` exist).
-  const transcriptsRef = useRef(transcripts);
-  useEffect(() => {
-    transcriptsRef.current = transcripts;
-  }, [transcripts]);
   // How far each channel's history rehydration has got. Kept beside
   // `transcripts` rather than inside it because an empty transcript is a
   // legitimate final answer, and the timeline has to tell that apart from not
@@ -1590,10 +1583,6 @@ export function AppShell({
    * ignored it would delete the rows of a turn that is still running, on the
    * wide window a history round trip opens (PR #1904 review).
    */
-  const openTurnsRef = useRef(openTurns);
-  useEffect(() => {
-    openTurnsRef.current = openTurns;
-  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1694,7 +1683,7 @@ export function AppShell({
           // whenever its frames arrived while this history read was in flight,
           // which on a round trip is a wide window. The newer turn's own
           // settle clears them when it gets there.
-          if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {
+          if (!hasOtherOpenTurns(room.readRoom().openTurns, liveKey, settledTurnId)) {
             setLiveStepsByThread((prev) =>
               prev[liveKey]?.length ? { ...prev, [liveKey]: [] } : prev,
             );
@@ -1966,7 +1955,7 @@ export function AppShell({
         // nothing to show and the `loadedMessageIds` gate unable to clear it
         // (Codex). Re-read the host thread so the mentioned message lands.
         const loadedByChannel: Record<string, ReadonlySet<string>> = {};
-        for (const [channelId, rows] of Object.entries(transcriptsRef.current)) {
+        for (const [channelId, rows] of Object.entries(room.readRoom().transcripts)) {
           loadedByChannel[channelId] = new Set(rows.map((m) => m.id));
         }
         const { threadIds, subjects } = threadsToReReadForMentions(
@@ -2342,7 +2331,7 @@ export function AppShell({
       // still be listed. That only defers the clear to its own settle, which
       // then runs the re-read above — the conservative direction, and the one
       // that never erases a running turn's rows.
-      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+      if (!hasOtherOpenTurns(room.readRoom().openTurns, event.chatId)) {
         setLiveStepsByThread((prev) =>
           prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
         );
