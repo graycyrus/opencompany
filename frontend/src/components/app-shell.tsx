@@ -805,7 +805,6 @@ export function AppShell({
   // folded steps — lands. `toolCallId` is a transient key for the running→done
   // in-place flip; it is structurally a superset of `TurnStep`, so these render
   // through the same `StepTimeline` as the final steps.
-  const liveStepsByThread = room.useLiveStepsByThread();
   const setLiveStepsByThread = room.setLiveStepsByThread;
   // The same timeline, per **query** rather than per thread, for a frame that
   // says which operator message its turn answers (`messageSeq`). Keyed by that
@@ -824,7 +823,6 @@ export function AppShell({
   //
   // Not a replacement: a frame with no `messageSeq` still keys by thread, which
   // is every turn answering no journaled message and every older host.
-  const liveStepsByMessage = room.useLiveStepsByMessage();
   const setLiveStepsByMessage = room.setLiveStepsByMessage;
   /**
    * Retires the live rows of every message that now has durable steps of its
@@ -865,7 +863,6 @@ export function AppShell({
   // outcome the POST reaches. Its lifecycle mirrors `liveStepsByThread`'s: the
   // reply landing on `onSendEnd` is what clears it, exactly as the reply bubble
   // is appended, so the two swap with no empty frame between them.
-  const receiptByThread = room.useReceiptByThread();
   const setReceiptByThread = room.setReceiptByThread;
   // Roster agent id → display name, so the receipt names the teammate rather
   // than rendering a raw id (issue #1934). Populated by the desks/roster read
