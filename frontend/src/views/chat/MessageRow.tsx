@@ -260,6 +260,7 @@ export function MessageRow({
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
   readOnly,
+  turn,
 }: Props) {
   const { message, sender, continuation, replies, isLatestSettlePill } = entry;
   const chips = reactionChips(message.reactions);
