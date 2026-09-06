@@ -350,6 +350,92 @@ export function MessageTimeline({
     return () => observer.disconnect();
   }, [historyPending]);
 
+  /**
+   * One timeline row.
+   *
+   * Extracted from the `items.map` it used to be inlined in so an
+   * {@link EpisodeBlock} can render the very same rows inside itself. A room's
+   * turns are ordinary messages — same avatar gutter, same hover actions, same
+   * thread affordances — and a second renderer for them would be a second place
+   * for those to drift.
+   */
+  const renderRow = (item: TimelineItem): React.ReactNode => {
+    if (item.kind === "episode") {
+      return (
+        <EpisodeBlock
+          key={item.key}
+          item={item}
+          renderRow={renderRow}
+          onSelectTopic={onSelectTopic}
+        />
+      );
+    }
+    if (item.kind === "message") {
+      return (
+        <div key={item.key}>
+          {item.entry.dayLabel && <DayDivider label={item.entry.dayLabel} />}
+          <MessageRow
+            entry={item.entry}
+            // The turn this message asked for, while it runs. Keyed by the
+            // message's own id, so two questions in one channel each get their
+            // own timeline instead of sharing the foot-of-channel strip (and
+            // clearing each other's rows).
+            liveSteps={liveStepsByMessage?.[item.entry.message.id]}
+            threadOpen={item.entry.message.id === openThreadId}
+            onOpenThread={onOpenThread}
+            onReact={onReact}
+            onDismissCard={onDismissCard}
+            dismissingCardId={dismissingCardId}
+            onReviewCard={onReviewCard}
+            reviewingCardIds={reviewingCardIds}
+            resolveAttachmentUrl={resolveAttachmentUrl}
+            taskStatusByTaskId={taskStatusByTaskId}
+            now={now ?? Date.now()}
+            cognition={cognition}
+            onRedeemBudgetPause={onRedeemBudgetPause}
+            redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+            latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+            // Issue #1986: read off `channel.system` here rather than threaded
+            // down from `ChatView`, because this component already holds the
+            // channel and that flag *is* the predicate `ChatView` derives its
+            // own `readOnly` from — a second prop carrying the same fact through
+            // the same tree is one more thing that can disagree with it. See
+            // `MessageRow`'s `readOnly` doc for what it takes away (adding a
+            // reaction) and what it deliberately leaves (reactions already
+            // there, and the way into a thread).
+            readOnly={Boolean(channel.system)}
+            // What this line did in the room, when it was a turn in one. Absent
+            // for every ordinary reply, which is what keeps a single-responder
+            // desk rendering exactly as it always has.
+            turn={episodeTurn?.[item.entry.message.id]}
+          />
+        </div>
+      );
+    }
+    return (
+      <ApprovalRow
+        key={item.key}
+        approvals={item.approvals}
+        now={now ?? Date.now()}
+        askerNames={askerNames ?? EMPTY_NAMES}
+        chatChannelByThread={chatChannelByThread}
+        variant="compact"
+        thread={
+          item.approvals[0]?.thread
+            ? { channelId: channel.id, label: channelTitle(channel) }
+            : null
+        }
+        /* Narrowed to this card's own items (#842): a decision in flight on
+           another turn's batch is not this card's business, which is the same
+           rule #373 established one level down. */
+        deciding={decidingIn(item.approvals, decidingApprovals)}
+        decided={item.decided}
+        failed={failedApprovals ?? EMPTY_FAILURES}
+        onDecide={(approval, verdict, scope) => onDecideApproval?.(approval, verdict, scope)}
+      />
+    );
+  };
+
   return (
     <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
       {/*
@@ -389,67 +475,7 @@ export function MessageTimeline({
           onAddPeople={onAddPeople}
         />
         {loading && <HistorySkeleton />}
-        {items.map((item) =>
-          item.kind === "message" ? (
-            <div key={item.key}>
-              {item.entry.dayLabel && <DayDivider label={item.entry.dayLabel} />}
-              <MessageRow
-                entry={item.entry}
-                // The turn this message asked for, while it runs. Keyed by the
-                // message's own id, so two questions in one channel each get
-                // their own timeline instead of sharing the foot-of-channel
-                // strip (and clearing each other's rows).
-                liveSteps={liveStepsByMessage?.[item.entry.message.id]}
-                threadOpen={item.entry.message.id === openThreadId}
-                onOpenThread={onOpenThread}
-                onReact={onReact}
-                onDismissCard={onDismissCard}
-                dismissingCardId={dismissingCardId}
-                onReviewCard={onReviewCard}
-                reviewingCardIds={reviewingCardIds}
-                resolveAttachmentUrl={resolveAttachmentUrl}
-                taskStatusByTaskId={taskStatusByTaskId}
-                now={now ?? Date.now()}
-                cognition={cognition}
-                onRedeemBudgetPause={onRedeemBudgetPause}
-                redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-                latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
-                // Issue #1986: read off `channel.system` here rather than
-                // threaded down from `ChatView`, because this component already
-                // holds the channel and that flag *is* the predicate `ChatView`
-                // derives its own `readOnly` from — a second prop carrying the
-                // same fact through the same tree is one more thing that can
-                // disagree with it. See `MessageRow`'s `readOnly` doc for what
-                // it takes away (adding a reaction) and what it deliberately
-                // leaves (reactions already there, and the way into a thread).
-                readOnly={Boolean(channel.system)}
-              />
-            </div>
-          ) : (
-            <ApprovalRow
-              key={item.key}
-              approvals={item.approvals}
-              now={now ?? Date.now()}
-              askerNames={askerNames ?? EMPTY_NAMES}
-              chatChannelByThread={chatChannelByThread}
-              variant="compact"
-              thread={
-                item.approvals[0]?.thread
-                  ? { channelId: channel.id, label: channelTitle(channel) }
-                  : null
-              }
-              /* Narrowed to this card's own items (#842): a decision in flight
-                 on another turn's batch is not this card's business, which is
-                 the same rule #373 established one level down. */
-              deciding={decidingIn(item.approvals, decidingApprovals)}
-              decided={item.decided}
-              failed={failedApprovals ?? EMPTY_FAILURES}
-              onDecide={(approval, verdict, scope) =>
-                onDecideApproval?.(approval, verdict, scope)
-              }
-            />
-          ),
-        )}
+        {items.map(renderRow)}
         {receipt ? (
           // The receipt for our own in-flight send (issue #1934) supersedes the
           // typing dots and carries the live steps itself. It now rides a
