@@ -1520,6 +1520,7 @@ impl RuntimeBuilder {
     fn preserve_pre_upgrade_grant_scope(
         overlay_agents: Vec<OverlayAgent>,
         overlay_agent_edits: Vec<AgentOverride>,
+        overlay_desk_hive: Vec<AgentOverride>,
         previous_manifest: Option<&CompanyManifest>,
         manifest: &CompanyManifest,
     ) -> (Vec<OverlayAgent>, Vec<AgentOverride>) {
@@ -2745,6 +2746,7 @@ impl RuntimeBuilder {
         let desk_record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: self.manifest.clone(),
             ledger: Vec::new(),
@@ -3572,6 +3574,7 @@ impl RuntimeBuilder {
                                 // blueprint gave it.
                                 overlay_retired_agents: overlay_retired_agents.clone(),
                                 overlay_agent_edits: overlay_agent_edits.clone(),
+                                overlay_desk_hive: overlay_desk_hive.clone(),
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
@@ -5125,6 +5128,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -8725,6 +8729,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -8850,6 +8855,7 @@ needs_reason = true
                 overlay_desk_tools: Default::default(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -9078,6 +9084,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: persisted,
                 ledger: Vec::new(),
@@ -9483,6 +9490,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -9609,6 +9617,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -9761,6 +9770,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -9872,6 +9882,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
