@@ -34,10 +34,19 @@ export function EpisodeBlock({
   item,
   renderRow,
   onSelectTopic,
+  deskId,
 }: {
   item: Extract<TimelineItem, { kind: "episode" }>;
   renderRow: (row: TimelineItem) => ReactNode;
   onSelectTopic?: (topic: string) => void;
+  /**
+   * The desk this room sat on, so the block can offer its grammar.
+   *
+   * This is where an operator learns the table is wrong — a seat demoted for a
+   * move it does not hold, or a room that spent its budget with three seats
+   * unable to support anything — so it is where the way to fix it belongs.
+   */
+  deskId?: string;
 }) {
   const { episode } = item;
   const [open, setOpen] = useState(true);
@@ -83,6 +92,14 @@ export function EpisodeBlock({
           {episode.turns.length} {episode.turns.length === 1 ? "turn" : "turns"} ·{" "}
           {speakers.size} {speakers.size === 1 ? "seat" : "seats"}
         </span>
+        {deskId ? (
+          <a
+            href={`#/company/${encodeURIComponent(deskId)}?hive`}
+            className="ml-auto text-[11px] text-muted-foreground underline decoration-dotted hover:text-foreground"
+          >
+            Move grammar
+          </a>
+        ) : null}
       </header>
 
       {open && (

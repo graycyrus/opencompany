@@ -381,6 +381,9 @@ export function MessageTimeline({
           item={item}
           renderRow={renderRow}
           onSelectTopic={onSelectTopic}
+          // A desk channel's id is the desk id, and only a desk ever holds a
+          // room — `#general` and a DM fold to no episodes at all.
+          deskId={channel.kind === "channel" && !channel.system ? channel.id : undefined}
         />
       );
     }
