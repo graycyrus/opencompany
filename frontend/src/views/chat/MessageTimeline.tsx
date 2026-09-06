@@ -6,8 +6,10 @@ import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import type { EpisodeTurn } from "@/lib/hive/episode";
 import { ApprovalRow } from "./ApprovalRow";
 import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
+import { EpisodeBlock } from "./EpisodeBlock";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -112,6 +114,16 @@ interface Props {
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
   failedApprovals?: Record<string, string>;
   onDecideApproval?: DecideApproval;
+  /**
+   * What each line did inside its room, keyed by message id.
+   *
+   * Absent for every ordinary reply — which is what keeps a DM, `#general` and a
+   * single-responder desk rendering exactly as they always have. A room's
+   * affordances are a question about the data, never about the channel.
+   */
+  episodeTurn?: Record<string, EpisodeTurn>;
+  /** Focus one option in the transcript. */
+  onSelectTopic?: (topic: string) => void;
   /**
    * Whether this company's teammates can think (issue #1735). On either echo
    * state every company-side row below is a canned line rather than a
