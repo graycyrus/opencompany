@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { listTasks } from "@/api/tasks";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import { CommsGraphView } from "@/views/comms/CommsGraphView";
 import {
   applyObservations,
@@ -56,6 +57,24 @@ export function CommsView({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
 
+  const [tick, setTick] = useState(0);
+
+  /*
+   * A visible poll rather than an SSE subscription, and deliberately.
+   *
+   * The host now journals every structural change — `TeammateAdded`,
+   * `DeskCreated`, `DeskMembersChanged` — so this view *could* subscribe. But
+   * the Observatory's rule applies with more force here: a frame never merges
+   * into the snapshot, it only means "re-read". Once that is true, a poll and a
+   * subscription do the same job, and the poll needs no state threaded down from
+   * the shell — which is the coupling the room store exists to undo, and not one
+   * worth adding a second instance of.
+   *
+   * `startVisiblePolling` stops while the tab is hidden and re-reads once on the
+   * way back, so a console left open costs nothing.
+   */
+  useEffect(() => startVisiblePolling(() => setTick((n) => n + 1), 15_000), []);
+
   useEffect(() => {
     let live = true;
     setError(null);
@@ -92,7 +111,7 @@ export function CommsView({
     return () => {
       live = false;
     };
-  }, [client, company]);
+  }, [client, company, tick]);
 
   const graph = useMemo(() => {
     if (!agents || !desks) return null;
