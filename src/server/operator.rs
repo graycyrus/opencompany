@@ -7206,6 +7206,295 @@ mode = "full"
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
+    /// A desk that declares no `hive` block still reports the numbers the
+    /// runtime would derive, rather than blanks.
+    ///
+    /// This is the difference the whole DTO exists for: the manifest says
+    /// nothing, so `declared` is empty — but the desk would still run on a
+    /// budget and a quorum, and a console showing an empty form would be
+    /// describing a desk that does not exist.
+    #[tokio::test]
+    async fn desk_hive_reports_derived_numbers_for_an_undeclared_block() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(body["source"], "manifest");
+        assert_eq!(body["deliberates"], true);
+        // Three seats: 3 x members, and a majority that still leaves somebody out.
+        assert_eq!(body["effective"]["turnBudget"], 9);
+        assert_eq!(body["effective"]["quorum"], 2);
+        // Nothing was declared, so the authored block is empty — which is
+        // exactly what distinguishes it from an operator who wrote `9`.
+        assert_eq!(body["declared"], serde_json::json!({}));
+        // Every seat holds every move until a table narrows one.
+        assert_eq!(body["seats"].as_array().unwrap().len(), 3);
+        assert_eq!(body["seats"][0]["governed"], false);
+        assert_eq!(body["seats"][0]["moves"].as_array().unwrap().len(), 9);
+        assert_eq!(body["eligibleSupporters"], 3);
+        assert_eq!(body["reachesQuorum"], true);
+    }
+
+    /// Installing a grammar takes effect, is reported back derived, and is
+    /// undone by a reset — without the manifest ever being rewritten.
+    #[tokio::test]
+    async fn a_move_grammar_installs_and_resets() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let install = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"quorum":2,"moves":{"a":["propose","support"],"b":["object","evidence"],"c":["support"]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(install.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(install.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["source"], "overlay");
+        assert_eq!(body["effective"]["quorum"], 2);
+        // `b` was narrowed to object/evidence, and still keeps the three no
+        // table can take away.
+        let b = body["seats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|seat| seat["agentId"] == "b")
+            .unwrap()
+            .clone();
+        assert_eq!(b["governed"], true);
+        let b_moves: Vec<String> = serde_json::from_value(b["moves"].clone()).unwrap();
+        assert!(b_moves.contains(&"commit".to_string()));
+        assert!(b_moves.contains(&"question".to_string()));
+        assert!(b_moves.contains(&"defer".to_string()));
+        assert!(!b_moves.contains(&"propose".to_string()));
+        // a and c may support or propose; b may not. Two clears a quorum of two.
+        assert_eq!(body["eligibleSupporters"], 2);
+        assert_eq!(body["reachesQuorum"], true);
+
+        let reset = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(reset.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        // Back to the blueprint, which declared nothing.
+        assert_eq!(body["source"], "manifest");
+        assert_eq!(body["declared"], serde_json::json!({}));
+        assert_eq!(body["eligibleSupporters"], 3);
+    }
+
+    /// The runtime refuses exactly what a manifest carrying the same block
+    /// would be refused for — and in the same words.
+    #[tokio::test]
+    async fn installing_an_unreachable_quorum_is_refused() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Only `a` may deposit a supporter, but the quorum asks for two — the
+        // room could never decide anything however much it agreed.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"quorum":2,"moves":{"a":["propose"],"b":["object"],"c":["object"]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // An unknown move kind, and an id that is not on the desk, are refused
+        // for the same reason: both fail *open* at runtime, handing the seat
+        // every move and letting the desk quietly go on voting.
+        for body in [
+            r#"{"moves":{"a":["shrug"]}}"#,
+            r#"{"moves":{"ghost":["propose"]}}"#,
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/company/desks/solvers/hive")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "body {body} was accepted");
+        }
+    }
+
+    /// Deleting a desk takes its installed grammar with it.
+    ///
+    /// Left behind, an overlay desk re-created with the same id silently
+    /// inherits a table nobody installed on it.
+    #[tokio::test]
+    async fn deleting_a_desk_drops_its_installed_grammar() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng","ceo"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let installed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/growth/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"moves":{"eng":["propose","support"]}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(installed.status(), StatusCode::OK);
+
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/growth")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        // Re-create the same id; it must come back ungoverned.
+        let again = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng","ceo"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CREATED);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/desks/growth/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["source"], "default");
+        for seat in body["seats"].as_array().unwrap() {
+            assert_eq!(seat["governed"], false, "a re-created desk inherited a grammar");
+        }
+    }
+
     /// Removing an overlay member drops it from the merged view; a manifest
     /// member cannot be removed (409), and an unknown overlay member is a 404.
     #[tokio::test]
