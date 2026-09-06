@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
 import { foldEpisodes } from "@/lib/hive/episode";
-import { buildTimeline, buildTimelineItems } from "@/views/chat/model";
+import { buildTimeline, buildTimelineItems, type Channel } from "@/views/chat/model";
+
+const CHANNEL: Channel = {
+  id: "solvers",
+  name: "solvers",
+  voice: "Solvers desk",
+  kind: "channel",
+  purpose: "",
+};
 
 /**
  * Collapsing a room's turns into one timeline item.
@@ -27,7 +35,7 @@ function report(text: string): ChatMessage {
 }
 
 function transcript(messages: ChatMessage[]) {
-  return buildTimeline(messages, [], null);
+  return buildTimeline(messages, CHANNEL, []);
 }
 
 describe("a channel with no room", () => {
