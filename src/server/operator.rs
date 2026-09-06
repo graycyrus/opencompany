@@ -7555,8 +7555,16 @@ mode = "full"
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
         for (method, uri, body) in [
-            ("POST", "/api/v1/company/desks", Some(r#"{"name":"Growth","members":["eng"]}"#)),
-            ("POST", "/api/v1/company/desks/growth/members", Some(r#"{"agent_id":"ceo"}"#)),
+            (
+                "POST",
+                "/api/v1/company/desks",
+                Some(r#"{"name":"Growth","members":["eng"]}"#),
+            ),
+            (
+                "POST",
+                "/api/v1/company/desks/growth/members",
+                Some(r#"{"agent_id":"ceo"}"#),
+            ),
             ("DELETE", "/api/v1/company/desks/growth/members/ceo", None),
             ("DELETE", "/api/v1/company/desks/growth", None),
         ] {
