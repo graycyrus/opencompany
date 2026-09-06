@@ -14,6 +14,14 @@ import {
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
+import { MOVE_KINDS } from "@/lib/hive/grammar";
+import { foldEpisodes } from "@/lib/hive/episode";
+import type { ChatMessage } from "@/lib/chat";
+import { BlindRoundBand } from "@/components/hive/BlindRoundBand";
+import { MoveChip } from "@/components/hive/MoveChip";
+import { StandingsRail } from "@/components/hive/StandingsRail";
+import { TopicChip } from "@/components/hive/TopicChip";
+import { VerdictCard } from "@/components/hive/VerdictCard";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -126,6 +134,7 @@ export function StyleguideView() {
           <ElevationSection />
           <RadiusSection />
           <MotionSection />
+          <DeliberationSection />
           <ComponentSection />
         </div>
       </div>
@@ -1163,6 +1172,101 @@ function ComponentSection() {
             </SidebarProvider>
           </CardContent>
         </Card>
+      </div>
+    </Section>
+  );
+}
+
+/**
+ * The deliberation vocabulary.
+ *
+ * Rendered against a fixture rather than a live desk, because `#/styleguide` is
+ * served pre-auth and outside the shell — so the whole room surface can be
+ * designed and reviewed in both themes with no backend, no company and no
+ * episode having actually run. That is the point of prototyping it here first.
+ *
+ * The transcript below is the shape `companies/hive_math_lab` produces: a blind
+ * opening round, evidence cited by later support, an objection aimed at a
+ * message, and a closing report the desk wrote itself.
+ */
+function DeliberationSection() {
+  const episode = useMemo(() => {
+    const rows: ChatMessage[] = [
+      { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
+      { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
+      { id: "h3", from: "company", channel: "critic", at: 2, text: "!propose #ship go straight to production" },
+      { id: "h4", from: "company", channel: "archivist", at: 3, text: "!evidence #stage ^1 the last full rollout took checkout down" },
+      { id: "h5", from: "company", channel: "critic", at: 4, text: "!support #stage ^4 that outage is enough for me" },
+      { id: "h6", from: "company", channel: "skeptic", at: 5, text: "!object >3 ^4 production first ignores the outage" },
+      { id: "h7", from: "company", channel: "planner", at: 6, text: "!commit #stage ^4 the room settled on staging" },
+      {
+        id: "h8",
+        from: "company",
+        channel: "hive-report",
+        at: 7,
+        text: "The desk settled on #stage after 6 turns (backed by planner, critic).",
+      },
+    ];
+    return foldEpisodes(rows, { quorum: 2 })[0];
+  }, []);
+
+  return (
+    <Section
+      title="Deliberation"
+      hint="A desk of two or more answers as a room. These are the marks that make an episode legible — every move is told apart by its icon, never by colour."
+    >
+      <div className="space-y-6">
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">Moves</p>
+          <div className="flex flex-wrap gap-1.5">
+            {MOVE_KINDS.map((kind) => (
+              <MoveChip key={kind} kind={kind} />
+            ))}
+            <MoveChip kind="propose" demoted />
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            The last chip is <em>demoted</em> — a move the speaking seat does not hold.
+            The host records the line with its marker stripped, so it says what its
+            author meant and counts for nothing.
+          </p>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">Topics</p>
+          <div className="flex flex-wrap gap-1.5">
+            <TopicChip topic="stage" standing={episode?.topics.find((t) => t.id === "stage")} quorum={2} />
+            <TopicChip topic="ship" standing={episode?.topics.find((t) => t.id === "ship")} quorum={2} />
+            <TopicChip topic="unsettled" />
+          </div>
+        </div>
+
+        {episode ? (
+          <>
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                The opening round
+              </p>
+              <BlindRoundBand derived={episode.derived}>
+                <ul className="space-y-1 text-sm">
+                  {episode.turns.slice(0, episode.blindCount).map((turn) => (
+                    <li key={turn.messageId} className="flex items-center gap-2">
+                      <span className="w-20 shrink-0 text-xs text-muted-foreground">
+                        {turn.agentId}
+                      </span>
+                      {turn.move ? <MoveChip kind={turn.move.kind} /> : null}
+                      <span className="text-muted-foreground">{turn.move?.body}</span>
+                    </li>
+                  ))}
+                </ul>
+              </BlindRoundBand>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <StandingsRail episode={episode} />
+              <VerdictCard episode={episode} />
+            </div>
+          </>
+        ) : null}
       </div>
     </Section>
   );
