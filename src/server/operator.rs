@@ -594,7 +594,7 @@ fn desk_hive_dto(record: &crate::ports::CompanyRecord, desk_id: &str) -> DeskHiv
             quorum: policy.quorum.threshold,
             blind_round: policy.blind_round,
             dominance_cap: policy.dominance_cap,
-            repetition_cap: policy.quorum.repetition_cap,
+            repetition_cap: policy.repetition_cap,
             require_grounded: policy.quorum.require_grounded,
             require_evidential: policy.quorum.require_evidential,
             refutation_cap: policy.quorum.refutation_cap,
