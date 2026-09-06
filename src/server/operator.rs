@@ -680,7 +680,7 @@ async fn set_desk_hive(
     // implementation, so the runtime cannot accept what a `company.toml` with
     // the same block would be refused for.
     let problems =
-        crate::company::manifest::hive_problems(&format!("desk `{desk_id}`"), &members, &body);
+        crate::company::hive_problems(&format!("desk `{desk_id}`"), &members, &body);
     if !problems.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             problems.join(" "),
