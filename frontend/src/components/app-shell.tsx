@@ -3579,10 +3579,6 @@ export function AppShell({
               onSendFailed={onSendFailed}
               onSendStale={onSendStale}
           scopeRef={scopeRef}
-              openTurns={openTurns}
-              liveStepsByThread={liveStepsByThread}
-              liveStepsByMessage={liveStepsByMessage}
-              receiptByThread={receiptByThread}
               agentNames={agentNames}
               unread={unread}
               onChannelViewed={onChannelViewed}
@@ -3590,7 +3586,6 @@ export function AppShell({
               mentionFeedRevision={mentionFeedVersion}
               mentions={mentionCounts}
               approvals={feed.approvals}
-              chatChannelByThread={chatChannelByThread}
               taskStatusByTaskId={taskStatusByTaskId}
               inflightRuns={inflightRuns}
               onInflightSteered={refreshTaskStatuses}
