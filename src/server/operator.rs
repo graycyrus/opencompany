@@ -7540,6 +7540,55 @@ mode = "full"
         }
     }
 
+    /// The structural rows a console draws its activity graph from.
+    ///
+    /// Before these, "who created this desk" and "who moved this seat" were
+    /// answerable only from a live frame that does not survive a reload.
+    #[tokio::test]
+    async fn desk_lifecycle_is_journaled() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let events = state.runtime_for(&CompanyId::new("acme")).unwrap().events();
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for (method, uri, body) in [
+            ("POST", "/api/v1/company/desks", Some(r#"{"name":"Growth","members":["eng"]}"#)),
+            ("POST", "/api/v1/company/desks/growth/members", Some(r#"{"agentId":"ceo"}"#)),
+            ("DELETE", "/api/v1/company/desks/growth/members/ceo", None),
+            ("DELETE", "/api/v1/company/desks/growth", None),
+        ] {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", &cookie);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
+            }
+            let res = app
+                .clone()
+                .oneshot(req.body(body.map_or(Body::empty(), Body::from)).unwrap())
+                .await
+                .unwrap();
+            assert!(
+                res.status().is_success(),
+                "{method} {uri} answered {}",
+                res.status()
+            );
+        }
+
+        let rows = events.read(&CompanyId::new("acme"), 0, 200).await.unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|row| row.event.kind()).collect();
+        assert!(kinds.contains(&"DeskCreated"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"DeskDeleted"), "kinds: {kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "DeskMembersChanged").count(),
+            2,
+            "one row for the add and one for the remove: {kinds:?}"
+        );
+    }
+
     /// Deleting a desk takes its installed grammar with it.
     ///
     /// Left behind, an overlay desk re-created with the same id silently
