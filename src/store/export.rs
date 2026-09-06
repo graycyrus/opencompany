@@ -31,11 +31,11 @@ use crate::ports::events::EventLog;
 use crate::ports::facts::{FactRecord, FactStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
-use crate::ports::types::{DeskHiveOverride, 
+use crate::ports::types::{
     AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
-    ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
-    OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
-    ToolGrantsOverride,
+    ContextChunk, DeskHiveOverride, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk,
+    OverlayDeskMember, OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent,
+    TemplateProvenance, ToolGrantsOverride,
 };
 use crate::store::select::MemoryScopes;
 
@@ -2103,7 +2103,7 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
-                     overlay_desk_hive: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: budget_manifest(),
             ledger: Vec::new(),

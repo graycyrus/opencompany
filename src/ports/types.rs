@@ -5193,7 +5193,8 @@ impl CompanyRecord {
     /// "there was nothing to reset" without a second read.
     pub fn clear_desk_hive(&mut self, desk_id: &str) -> bool {
         let before = self.overlay_desk_hive.len();
-        self.overlay_desk_hive.retain(|held| held.desk_id != desk_id);
+        self.overlay_desk_hive
+            .retain(|held| held.desk_id != desk_id);
         before != self.overlay_desk_hive.len()
     }
 
@@ -5726,7 +5727,7 @@ mod test {
             automate: "meta ads, order dispatch".into(),
         };
         let mut record = CompanyRecord {
-                             overlay_desk_hive: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),

@@ -566,10 +566,7 @@ fn desk_hive_dto(record: &crate::ports::CompanyRecord, desk_id: &str) -> DeskHiv
                     .unwrap_or_else(|| id.clone()),
                 role: agent.map(|a| a.role.clone()).unwrap_or_default(),
                 moves: config.moves_for(id),
-                governed: config
-                    .moves
-                    .get(id)
-                    .is_some_and(|kinds| !kinds.is_empty()),
+                governed: config.moves.get(id).is_some_and(|kinds| !kinds.is_empty()),
             }
         })
         .collect();
@@ -679,8 +676,7 @@ async fn set_desk_hive(
     // The manifest's own checks, on the manifest's own words — one
     // implementation, so the runtime cannot accept what a `company.toml` with
     // the same block would be refused for.
-    let problems =
-        crate::company::hive_problems(&format!("desk `{desk_id}`"), &members, &body);
+    let problems = crate::company::hive_problems(&format!("desk `{desk_id}`"), &members, &body);
     if !problems.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             problems.join(" "),
@@ -5364,7 +5360,7 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
-                       overlay_desk_hive: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5467,7 +5463,7 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
-                       overlay_desk_hive: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5697,7 +5693,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
-                       overlay_desk_hive: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5808,7 +5804,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
-                       overlay_desk_hive: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5851,7 +5847,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
-                       overlay_desk_hive: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -6637,7 +6633,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
-                       overlay_desk_hive: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),

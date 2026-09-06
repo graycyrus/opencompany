@@ -173,15 +173,13 @@ use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
 pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
+pub(crate) use manifest::hive_problems;
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
 #[cfg(test)]
 pub(crate) use manifest::is_snake_case;
-pub use manifest::{
-    DELEGATES_TO_WILDCARD, LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover,
-};
-pub(crate) use manifest::hive_problems;
+pub use manifest::{DELEGATES_TO_WILDCARD, LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use mcp_file::{MCP_FILE, has_mcp_file, load_dir_mcp_servers};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
