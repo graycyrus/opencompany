@@ -692,6 +692,31 @@ async fn add_member(
         });
     }
     company.runtime.store().save(&record).await?;
+    // The audit row for a teammate coming into existence.
+    //
+    // The orchestrator's `add_agent` tool journals the identical variant, and
+    // that symmetry is the point: two creation paths that answer "was a teammate
+    // added" differently is how the gap this closes opened in the first place.
+    //
+    // Best-effort — the teammate is already durable, and a journal that refuses
+    // the row must not turn a completed mint into a failed request.
+    if let Err(err) = company
+        .runtime
+        .events()
+        .append(
+            company.id(),
+            crate::ports::types::CompanyEvent::TeammateAdded {
+                agent_id: agent.id.clone(),
+                role: agent.role.clone(),
+                // An operator did this from the console, so no agent authored it.
+                by_agent_id: None,
+                by: company.actor.clone(),
+            },
+        )
+        .await
+    {
+        tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
+    }
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
