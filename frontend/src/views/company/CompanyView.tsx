@@ -44,6 +44,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { Overview } from "@/views/Overview";
 import { OrgChartView } from "@/views/company/OrgChartView";
 import { HiveGrammarPanel } from "@/views/company/hive/HiveGrammarPanel";
+import { CommsView } from "@/views/comms/CommsView";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import { TeamView } from "@/views/TeamView";
 
@@ -70,6 +71,18 @@ export const DESKS_SEGMENT = "desks";
  * is documented rather than engineered around.
  */
 export const GRAPH_SEGMENT = "graph";
+
+/**
+ * The company's activity graph — who may reach whom, who has, and who created
+ * whom.
+ *
+ * Reserved exactly as {@link DESKS_SEGMENT} and {@link GRAPH_SEGMENT} are, and
+ * with the same accepted collision: `comms` is a legal desk id, so a company
+ * declaring a desk with that id reaches the graph instead. Checked **before** the
+ * desk arm below, because this component treats any unrecognised `sub` as a desk
+ * id and would otherwise focus a chart on a desk that does not exist.
+ */
+export const COMMS_SEGMENT = "comms";
 
 interface Props {
   client: OpenCompanyClient;
@@ -117,6 +130,10 @@ export function CompanyView({
 }: Props) {
   if (sub === GRAPH_SEGMENT) {
     return <Overview client={client} company={company} companyName={companyName} />;
+  }
+
+  if (sub === COMMS_SEGMENT) {
+    return <CommsView client={client} company={company} />;
   }
 
   if (sub) {
