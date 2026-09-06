@@ -16,7 +16,7 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
-import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
+import { turnStateKey } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
@@ -29,7 +29,6 @@ import {
   type DecideApproval,
   type OperatorChannelDto,
   type TeamMemberDto,
-  type TurnStep,
   type Verdict,
   isDetachedChat,
 } from "@/api/types";
@@ -77,7 +76,6 @@ import {
 } from "./chat/mentions";
 import { echoCause } from "./chat/EchoPlaceholder";
 import { MessageTimeline } from "./chat/MessageTimeline";
-import type { ChatReceipt } from "./chat/ChatLiveReceipt";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import * as room from "@/room/store";
