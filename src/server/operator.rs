@@ -456,11 +456,35 @@ async fn add_desk_member(
         ))));
     }
     record.overlay_desk_members.push(OverlayDeskMember {
-        desk_id,
-        agent_id: body.agent_id,
+        desk_id: desk_id.clone(),
+        agent_id: body.agent_id.clone(),
     });
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added: vec![body.agent_id],
+            removed: Vec::new(),
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+
+/// Append a structural audit row, best-effort.
+///
+/// Best-effort on purpose, and it is the same posture the episode driver takes
+/// with its closing report: the change is already durable on the company record
+/// by the time this runs, so a journal that refuses the row must not turn a
+/// completed write into a failed request. The row is the audit trail, not the
+/// change itself.
+async fn journal_structural(scope: &ScopedCompany, event: CompanyEvent) {
+    if let Err(err) = scope.runtime.events().append(scope.id(), event).await {
+        tracing::warn!(error = %err, "structural audit row could not be journaled");
+    }
 }
 
 /// One desk's move grammar, as the console renders and edits it.
@@ -687,6 +711,15 @@ async fn set_desk_hive(
         hive: body,
     });
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskHiveConfigured {
+            desk_id: desk_id.clone(),
+            reset: false,
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     // The derived result of what was just installed, so the console renders the
     // effective numbers without a second round trip.
     Ok(Json(desk_hive_dto(&record, &desk_id)))
@@ -719,6 +752,15 @@ async fn reset_desk_hive(
     // manifest's grammar and the manifest's grammar is what they now have.
     if record.clear_desk_hive(&desk_id) {
         scope.runtime.store().save(&record).await?;
+        journal_structural(
+            &scope,
+            CompanyEvent::DeskHiveConfigured {
+                desk_id: desk_id.clone(),
+                reset: true,
+                by: scope.actor.clone(),
+            },
+        )
+        .await;
     }
     Ok(Json(desk_hive_dto(&record, &desk_id)))
 }
@@ -1189,6 +1231,14 @@ async fn delete_desk(
     // never wrote, which is the drift the overlay layer exists to prevent.
     record.clear_desk_hive(&desk_id);
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskDeleted {
+            desk_id,
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
