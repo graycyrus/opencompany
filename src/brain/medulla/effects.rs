@@ -489,7 +489,10 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
         } => (
             Role::System,
             "company".to_string(),
-            format!("Created desk {name} ({desk_id}) with {}", members.join(", ")),
+            format!(
+                "Created desk {name} ({desk_id}) with {}",
+                members.join(", ")
+            ),
             "desk.created",
         ),
         CompanyEvent::DeskDeleted { desk_id, .. } => (

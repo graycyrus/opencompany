@@ -473,7 +473,6 @@ async fn add_desk_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-
 /// Append a structural audit row, best-effort.
 ///
 /// Best-effort on purpose, and it is the same posture the episode driver takes
