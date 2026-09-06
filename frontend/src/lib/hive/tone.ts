@@ -97,7 +97,7 @@ export const TOPIC_CHIP_CLASS =
 
 /** The tone a carried topic takes, from the closed status vocabulary. */
 export const TOPIC_CARRIED_CLASS =
-  "inline-flex items-center gap-1 rounded-md border border-status-done-mark/40 bg-status-done-soft px-1.5 py-0.5 font-mono text-[11px] leading-none text-status-done-text";
+  "inline-flex items-center gap-1 rounded-md border border-status-done/40 bg-status-done-soft px-1.5 py-0.5 font-mono text-[11px] leading-none text-status-done-text";
 
 /** The five closed status words. Nothing here may invent a sixth. */
 export type StatusTone = "idle" | "running" | "blocked" | "done" | "failed";
