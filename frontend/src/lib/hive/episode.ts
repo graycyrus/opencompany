@@ -230,7 +230,19 @@ export function parseEndingReport(text: string): EpisodeEnding | null {
 export function foldStandings(turns: EpisodeTurn[], quorum: number): TopicStanding[] {
   const byId = new Map<string, TopicStanding>();
   const authorOfSeq = new Map<number, string>();
-  for (const turn of turns) if (turn.seq !== null) authorOfSeq.set(turn.seq, turn.agentId);
+  // Which option a message was advocating, so an objection aimed at it can be
+  // applied where it belongs. An objection is **local** — it removes one
+  // advocate from one topic — where a refutation is global and caps the option
+  // itself. Silencing an advocate everywhere would quietly make every objection
+  // a refutation, and a room would lose support nobody argued against.
+  const topicOfSeq = new Map<number, string>();
+  for (const turn of turns) {
+    if (turn.seq === null) continue;
+    authorOfSeq.set(turn.seq, turn.agentId);
+    const move = turn.move;
+    if (move?.topic && (move.kind === "propose" || move.kind === "support"))
+      topicOfSeq.set(turn.seq, move.topic);
+  }
 
   const ensure = (id: string): TopicStanding => {
     let standing = byId.get(id);
@@ -275,12 +287,15 @@ export function foldStandings(turns: EpisodeTurn[], quorum: number): TopicStandi
     const move = turn.move;
     if (move?.kind !== "object" || move.target === undefined) continue;
     const silencedAgent = authorOfSeq.get(move.target);
-    if (!silencedAgent) continue;
-    for (const standing of byId.values()) {
-      if (!standing.supporters.includes(silencedAgent)) continue;
-      standing.supporters = standing.supporters.filter((id) => id !== silencedAgent);
-      if (!standing.silenced.includes(silencedAgent)) standing.silenced.push(silencedAgent);
-    }
+    // The topic the targeted line was advocating. An objection at a line that
+    // advocated nothing — a question, a piece of evidence — silences nobody,
+    // because there is no support to withdraw.
+    const topic = topicOfSeq.get(move.target);
+    if (!silencedAgent || !topic) continue;
+    const standing = byId.get(topic);
+    if (!standing || !standing.supporters.includes(silencedAgent)) continue;
+    standing.supporters = standing.supporters.filter((id) => id !== silencedAgent);
+    if (!standing.silenced.includes(silencedAgent)) standing.silenced.push(silencedAgent);
   }
 
   for (const standing of byId.values()) {
