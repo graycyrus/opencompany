@@ -23,6 +23,9 @@ import { StandingsRail } from "@/components/hive/StandingsRail";
 import { TopicChip } from "@/components/hive/TopicChip";
 import { VerdictCard } from "@/components/hive/VerdictCard";
 import { EpisodeBlock } from "@/views/chat/EpisodeBlock";
+import { HiveGrammarPanel } from "@/views/company/hive/HiveGrammarPanel";
+import type { OpenCompanyClient } from "@/api/client";
+import type { DeskHiveDto } from "@/api/types";
 import { MessageRow } from "@/views/chat/MessageRow";
 import { buildTimeline, buildTimelineItems, type Channel, type TimelineItem } from "@/views/chat/model";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -1285,6 +1288,13 @@ function DeliberationSection() {
 
             <div>
               <p className="mb-2 text-xs font-medium text-muted-foreground">
+                Installing a grammar
+              </p>
+              <HiveGrammarPanel client={FIXTURE_HIVE_CLIENT} deskId="solvers" />
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
                 In the transcript
               </p>
               {items.map((item) =>
@@ -1326,3 +1336,60 @@ function DeliberationSection() {
     </Section>
   );
 }
+
+/**
+ * A desk's grammar, as `companies/hive_math_lab` actually ships it.
+ *
+ * Six seats with a real `moves` table and `quorum = 3` — the one company in the
+ * repo that exercises the grammar, and the shape every live run used. Served
+ * from a stub so the editor can be reviewed with no host at all.
+ */
+const FIXTURE_HIVE: DeskHiveDto = {
+  deskId: "solvers",
+  source: "manifest",
+  deliberates: true,
+  declared: {
+    turn_budget: 18,
+    quorum: 3,
+    require_evidential: true,
+    moves: {
+      theorist: ["support", "object", "evidence", "pin"],
+      programmer: ["propose", "evidence", "support"],
+      verifier: ["support", "object", "evidence"],
+      skeptic: ["object", "evidence"],
+      brute_forcer: ["support", "evidence", "object"],
+      archivist: ["evidence", "pin"],
+    },
+  },
+  effective: {
+    turnBudget: 18,
+    quorum: 3,
+    blindRound: true,
+    dominanceCap: 50,
+    repetitionCap: 3,
+    requireGrounded: true,
+    requireEvidential: true,
+  },
+  moveKinds: [
+    "propose", "support", "object", "refute", "evidence",
+    "question", "defer", "commit", "pin",
+  ],
+  ungatedKinds: ["question", "defer", "commit"],
+  seats: [
+    { agentId: "theorist", label: "Theorist", role: "Reduces the problem", moves: [], governed: true },
+    { agentId: "programmer", label: "Programmer", role: "Programs it", moves: [], governed: true },
+    { agentId: "verifier", label: "Verifier", role: "Reads it literally", moves: [], governed: true },
+    { agentId: "skeptic", label: "Skeptic", role: "Looks for the trap", moves: [], governed: true },
+    { agentId: "brute_forcer", label: "Brute forcer", role: "Checks small cases", moves: [], governed: true },
+    { agentId: "archivist", label: "Archivist", role: "Remembers", moves: [], governed: true },
+  ],
+  eligibleSupporters: 4,
+  reachesQuorum: true,
+};
+
+/** Enough of the client for the panel; the styleguide never writes. */
+const FIXTURE_HIVE_CLIENT = {
+  getDeskHive: () => Promise.resolve(FIXTURE_HIVE),
+  putDeskHive: () => Promise.resolve(FIXTURE_HIVE),
+  resetDeskHive: () => Promise.resolve(FIXTURE_HIVE),
+} as unknown as OpenCompanyClient;
