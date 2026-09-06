@@ -2241,6 +2241,18 @@ impl CompanyEvent {
             | Self::WorkflowCreated { .. }
             | Self::WorkflowUpdated { .. }
             | Self::WorkflowDeleted { .. }
+            // The structural audit trail: who created a teammate or a desk, who
+            // moved a seat, and who changed how a desk deliberates. Permanent
+            // for the plainest of the three reasons above — it *is* evidence,
+            // and it is the only record that these things happened at all: the
+            // company record carries current state and nothing carries the
+            // change. Low cardinality by construction (an operator authors these
+            // by hand), so permanence costs almost nothing.
+            | Self::TeammateAdded { .. }
+            | Self::DeskCreated { .. }
+            | Self::DeskDeleted { .. }
+            | Self::DeskMembersChanged { .. }
+            | Self::DeskHiveConfigured { .. }
             | Self::TaskSteered { .. }
             | Self::TaskCardChanged { .. }
             | Self::DeskTaskCompleted { .. }
