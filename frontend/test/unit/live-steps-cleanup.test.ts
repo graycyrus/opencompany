@@ -75,8 +75,14 @@ describe("cleanup is addressed by the message that was answered", () => {
    * a row still marked `running` — a result that never arrived cannot flip it.
    */
   it("retires a failed turn's bucket on the terminal settle, inside the guard", () => {
+    // Located by text, so the string tracks the source. The guard read
+    // `openTurnsRef.current` while the shell mirrored its own state into a ref;
+    // that state moved to `room/store.ts` and the mirror went with it, so the
+    // read is now the store's synchronous one. Same guard, and strictly fresher:
+    // the ref was written in an effect and so lagged a commit behind, which is
+    // the direction that MISSES a turn just added.
     const guardAt = appShell.indexOf(
-      "if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {",
+      "if (!hasOtherOpenTurns(room.readRoom().openTurns, liveKey, settledTurnId)) {",
     );
     expect(guardAt, "the settle guard must be present").toBeGreaterThan(-1);
     // Inside the guard: a queued sibling still running owns its rows.
