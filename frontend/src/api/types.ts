@@ -1215,6 +1215,19 @@ export interface TeamMemberDto {
    */
   isOrchestrator?: boolean;
   /**
+   * The desks this teammate may hand work to (`[[agent]].delegates_to`), as
+   * declared — `["*"]` meaning every desk.
+   *
+   * The company's **delegation address space**: the edges a teammate *could*
+   * traverse, as opposed to the ones it has. The comms graph draws it so a
+   * company that has not run yet still shows its wiring rather than a set of
+   * unconnected dots.
+   *
+   * Absent when the teammate delegates nowhere, and on a host that predates the
+   * field — in which case the graph draws observed traffic only.
+   */
+  delegatesTo?: string[];
+  /**
    * This teammate's tool grants (issue #601) — the **same** three lists, from
    * the same host-side constructor, that `GET .../team/{agentId}` serves.
    *
