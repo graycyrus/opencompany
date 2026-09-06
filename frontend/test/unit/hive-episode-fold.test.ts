@@ -174,6 +174,49 @@ describe("standings", () => {
     expect(stage?.supporters).toEqual([]);
   });
 
+  it("silences an advocate only on the topic the objection's target argued", () => {
+    // An objection is LOCAL where a refutation is global. Applying it to every
+    // topic the advocate touched quietly turns each objection into a refutation,
+    // and the room loses support nobody argued against. Caught by rendering the
+    // fixture: one objection at a #ship proposal was silencing the same member's
+    // separate, evidenced #stage support.
+    seq = 0;
+    const episodes = foldEpisodes(
+      [
+        op("decide the rollout"),
+        turn("planner", "!propose #stage ship to staging first"),
+        turn("critic", "!propose #ship go straight to production"),
+        turn("archivist", "!evidence #stage ^1 the last rollout took checkout down"),
+        turn("critic", "!support #stage ^4 that outage is enough for me"),
+        turn("skeptic", "!object >3 ^4 production first ignores the outage"),
+      ],
+      { quorum: 2 },
+    );
+    const stage = episodes[0].topics.find((t) => t.id === "stage");
+    const ship = episodes[0].topics.find((t) => t.id === "ship");
+    expect(ship?.silenced).toEqual(["critic"]);
+    expect(stage?.silenced).toEqual([]);
+    expect(stage?.supporters).toEqual(["planner", "critic"]);
+    expect(stage?.carried).toBe(true);
+  });
+
+  it("silences nobody when the objection targets a line that advocated nothing", () => {
+    // There is no support to withdraw from a question or a piece of evidence.
+    seq = 0;
+    const episodes = foldEpisodes(
+      [
+        op("go"),
+        turn("planner", "!propose #stage x"),
+        turn("archivist", "!evidence #stage ^1 a fact"),
+        turn("skeptic", "!object >3 ^1 that fact is stale"),
+      ],
+      { quorum: 1 },
+    );
+    const stage = episodes[0].topics.find((t) => t.id === "stage");
+    expect(stage?.silenced).toEqual([]);
+    expect(stage?.supporters).toEqual(["planner"]);
+  });
+
   it("records a refutation without removing the topic", () => {
     // Nothing is removed when a topic is refuted: it keeps its supporters and
     // stays in the standings so a reader can audit the refutation back to the
@@ -296,6 +339,31 @@ describe("the host's closing sentence", () => {
 
   it("is not fooled by a failure note", () => {
     expect(parseEndingReport("@critic's turn did not finish: timed out")).toBeNull();
+  });
+});
+
+describe("agreement with the host", () => {
+  it("reproduces the host's verdict on the canonical transcript", () => {
+    // The shape `companies/hive_math_lab` produces, and the same fixture the
+    // styleguide renders. If the console's fold and the desk's own report can
+    // agree anywhere, it is here — and a disagreement on this one means the
+    // fold has drifted from the room it is describing.
+    seq = 0;
+    const episodes = foldEpisodes(
+      [
+        op("decide the rollout"),
+        turn("planner", "!propose #stage ship to staging first"),
+        turn("critic", "!propose #ship go straight to production"),
+        turn("archivist", "!evidence #stage ^1 the last rollout took checkout down"),
+        turn("critic", "!support #stage ^4 that outage is enough for me"),
+        turn("skeptic", "!object >3 ^4 production first ignores the outage"),
+        turn("planner", "!commit #stage ^4 the room settled on staging"),
+        report("The desk settled on #stage after 6 turns (backed by planner, critic)."),
+      ],
+      { quorum: 2 },
+    );
+    expect(episodes[0].ending?.kind).toBe("converged");
+    expect(episodes[0].disagrees).toBe(false);
   });
 });
 
