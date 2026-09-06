@@ -146,6 +146,21 @@ struct TeamMemberDto {
     /// detail read uses (issue #601). Desks are the company's real grouping —
     /// the overview graph draws its department pillars from these.
     desks: Vec<super::team_agent::AgentDeskDto>,
+    /// The desks this teammate may hand work to (`[[agent]].delegates_to`), as
+    /// declared — `["*"]` meaning every desk.
+    ///
+    /// This is the company's **delegation address space**: the edge set a
+    /// teammate could traverse, as opposed to the ones it has. Carried on the
+    /// roster read for the same reason `desks` and `tier` are — the console's
+    /// graph is built from this list, and a field the list omits is a field the
+    /// graph has to invent. Without it a comms graph can only draw traffic that
+    /// has already happened, so a company that has not run yet draws as a set of
+    /// unconnected agents, which is not what its manifest says.
+    ///
+    /// Omitted when empty: a teammate that delegates to nothing is the default,
+    /// and an empty array on every row is noise on the wire.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    delegates_to: Vec<String>,
     /// Whether this teammate has an enabled inbox, so the Team page's toggle
     /// renders the host's real state instead of a client-side guess.
     inbox_enabled: bool,
@@ -412,6 +427,14 @@ fn member_row(
         is_orchestrator: super::team_agent::is_orchestrator(record, agent_id),
         tools: super::team_agent::agent_tools(record, agent_id),
         desks: super::team_agent::desks_for(record, agent_id),
+        // Read off the effective agent, so an overlay teammate and a manifest
+        // one answer the same way.
+        delegates_to: record
+            .effective_agents()
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+            .map(|agent| agent.delegates_to)
+            .unwrap_or_default(),
         inbox_enabled,
         budget_usd_daily: cap,
         // Paired with the cap: no cap, no spend row.
