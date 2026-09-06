@@ -8296,6 +8296,7 @@ name = "Morning"
 
     fn seeded_record(id: &CompanyId) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -9714,6 +9715,7 @@ name = "Morning"
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: company.clone(),

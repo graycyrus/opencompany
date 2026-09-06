@@ -8829,6 +8829,7 @@ mod tests {
         // exactly as `HarnessBrain` would. Journaling never reads it; it only
         // drives `relay_speaker`.
         let record = crate::ports::types::CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: crate::ports::types::CompanyId::new("acme"),
