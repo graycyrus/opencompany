@@ -143,7 +143,6 @@ struct BundleMeta {
     /// `#[serde(default)]` for back-compat with older bundles.
     #[serde(default)]
     overlay_agent_edits: Vec<AgentOverride>,
-    overlay_desk_hive: Vec<AgentOverride>,
     /// The move grammars installed on desks at export time. Preserved so an
     /// export→import keeps a desk deliberating under the table the operator
     /// installed rather than silently reverting to the manifest's.
@@ -280,7 +279,6 @@ struct BundleContents {
     /// The operator's edits of manifest-declared teammates, carried through the
     /// bundle so export→import preserves a console-shaped roster.
     overlay_agent_edits: Vec<AgentOverride>,
-    overlay_desk_hive: Vec<AgentOverride>,
     /// The move grammars installed on desks, carried through the bundle so
     /// export→import preserves how a desk deliberates.
     overlay_desk_hive: Vec<DeskHiveOverride>,
