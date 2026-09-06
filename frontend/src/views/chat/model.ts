@@ -10,6 +10,7 @@ import {
   type ChatMessage,
   type Reaction,
 } from "@/lib/chat";
+import type { Episode, EpisodeTurn } from "@/lib/hive/episode";
 import {
   deskClaimsGeneralChannel,
   GENERAL_CHANNEL,
@@ -1493,6 +1494,27 @@ export type TimelineItem =
        * every id in {@link approvals} has an entry here.
        */
       decided: Record<string, Verdict>;
+    }
+  | {
+      /**
+       * A desk answering as a room.
+       *
+       * The turns of one episode collapse into a single item so the block can
+       * draw what a flat list cannot: a band around the blind opening round, the
+       * standings the turns added up to, and the desk's own closing verdict.
+       *
+       * The operator message that opened the room is deliberately **not** inside
+       * it. The question is the operator's and the answer is the room's; nesting
+       * the former inside the latter reads as though the desk asked itself.
+       */
+      kind: "episode";
+      key: string;
+      at: number;
+      episode: Episode;
+      /** The rows this room produced, in transcript order. */
+      items: TimelineItem[];
+      /** Each row's folded turn, so a renderer needs no second parse. */
+      turnByMessageId: Record<string, EpisodeTurn>;
     };
 
 /**
@@ -1549,6 +1571,14 @@ export function buildTimelineItems(
   entries: TimelineEntry[],
   approvals: ApprovalSummary[],
   decided: Record<string, DecidedApproval> = {},
+  /**
+   * The rooms this channel held, if any.
+   *
+   * Optional and defaulted, so every existing call site and every test written
+   * before deliberation keeps its exact behaviour: with no episodes this returns
+   * precisely what it always did.
+   */
+  episodes: Episode[] = [],
 ): TimelineItem[] {
   const items: TimelineItem[] = entries.map((entry) => ({
     kind: "message" as const,
@@ -1593,7 +1623,59 @@ export function buildTimelineItems(
   // shares its timestamp should sit after that reply, not shuffle between
   // renders. `sort` is stable in every engine this ships to, so equal `at`
   // keeps insertion order — messages first, then cards.
-  return items.sort((a, b) => a.at - b.at);
+  const ordered = items.sort((a, b) => a.at - b.at);
+  return episodes.length === 0 ? ordered : groupEpisodes(ordered, episodes);
+}
+
+/**
+ * Collapse each episode's rows into one item, leaving everything else alone.
+ *
+ * The block takes the position of its **first** row, so a room stays where the
+ * conversation put it. Rows an episode claims that are not in this window —
+ * history that has not loaded — are simply absent: the block renders what it has,
+ * and `Episode.ambiguous` is what says the rest is missing.
+ */
+function groupEpisodes(items: TimelineItem[], episodes: Episode[]): TimelineItem[] {
+  const owner = new Map<string, Episode>();
+  const turnOf = new Map<string, EpisodeTurn>();
+  for (const episode of episodes) {
+    for (const turn of [...episode.turns, ...episode.referrals, ...episode.failed]) {
+      owner.set(turn.messageId, episode);
+      turnOf.set(turn.messageId, turn);
+    }
+    if (episode.reportId) owner.set(episode.reportId, episode);
+  }
+
+  const out: TimelineItem[] = [];
+  const blocks = new Map<string, Extract<TimelineItem, { kind: "episode" }>>();
+
+  for (const item of items) {
+    const episode = item.kind === "message" ? owner.get(item.entry.message.id) : undefined;
+    if (!episode) {
+      out.push(item);
+      continue;
+    }
+    let block = blocks.get(episode.key);
+    if (!block) {
+      block = {
+        kind: "episode",
+        key: `episode:${episode.key}`,
+        at: item.at,
+        episode,
+        items: [],
+        turnByMessageId: {},
+      };
+      blocks.set(episode.key, block);
+      out.push(block);
+    }
+    block.items.push(item);
+    if (item.kind === "message") {
+      const turn = turnOf.get(item.entry.message.id);
+      if (turn) block.turnByMessageId[item.entry.message.id] = turn;
+    }
+  }
+
+  return out;
 }
 
 /* ---- formatting ---- */
