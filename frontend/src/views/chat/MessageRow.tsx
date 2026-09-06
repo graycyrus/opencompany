@@ -4,6 +4,8 @@ import type { TaskStatus } from "@/api/tasks";
 import type { CognitionState, TurnStep } from "@/api/types";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
+import { MoveChip } from "@/components/hive/MoveChip";
+import type { EpisodeTurn } from "@/lib/hive/episode";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
@@ -153,6 +155,14 @@ interface Props {
    * Absent/false everywhere else, which is every ordinary channel and DM.
    */
   readOnly?: boolean;
+  /**
+   * What this line did inside a desk's deliberation, when it was a turn in one.
+   *
+   * Absent for every ordinary reply, which is the whole of the rule: a room's
+   * affordances follow the data, never the channel kind, so a DM and a
+   * single-responder desk are untouched by this.
+   */
+  turn?: EpisodeTurn;
 }
 
 /**
@@ -326,7 +336,48 @@ export function MessageRow({
             placeholder={echoMarkerFor(message, sender, cognition)}
           />
         )}
-        <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+        {turn?.move ? (
+          /*
+           * A deliberation turn renders as its move plus what the member
+           * actually said, rather than as the raw marker line.
+           *
+           * The host journals ONLY the marker line, so `!support #stage ^4
+           * agreed, staging first` is the entire message — and rendered
+           * verbatim it is punctuation an operator has to decode on every row.
+           * The chip carries the grammar and the prose carries the argument.
+           * The citations stay visible as chips because which message grounds a
+           * claim is the substance of the claim.
+           */
+          <div className="flex flex-wrap items-baseline gap-1.5 text-sm leading-6">
+            <MoveChip kind={turn.move.kind} />
+            {turn.move.topic ? (
+              <span className="font-mono text-[11px] text-muted-foreground">
+                #{turn.move.topic}
+              </span>
+            ) : null}
+            {turn.move.cites.map((cite) => (
+              <span key={cite} className="font-mono text-[11px] text-muted-foreground">
+                ^{cite}
+              </span>
+            ))}
+            <span className="break-words">{turn.move.body}</span>
+          </div>
+        ) : (
+          <>
+            {turn?.demoted ? (
+              /*
+               * A move this seat does not hold. The host records the line with
+               * its marker stripped so it deposits no trace, and showing that is
+               * the difference between a desk whose grammar is wrong and a desk
+               * whose members are unhelpful.
+               */
+              <div className="pb-1">
+                <MoveChip kind={turn.demoted} demoted />
+              </div>
+            ) : null}
+            <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+          </>
+        )}
 
         {message.attachments && message.attachments.length > 0 && (
           <MessageAttachments
