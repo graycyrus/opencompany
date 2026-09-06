@@ -1815,6 +1815,63 @@ fn project_event_for_viewer(
             o["name"] = json!(name);
             o
         }
+        // The structural changes a console draws its activity graph from: who
+        // created a teammate or a desk, who moved a seat, who changed how a desk
+        // deliberates. Before these the graph could only infer a spawn from a
+        // redacted tool-call frame that does not survive a reload.
+        //
+        // `by_agent_id` rides along and `by` does not — the same deny-by-default
+        // actor omission as every arm above. The agent is the company's own
+        // structure and is what the edge is drawn from; the human is not.
+        CompanyEvent::TeammateAdded {
+            agent_id,
+            role,
+            by_agent_id,
+            ..
+        } => {
+            let mut o = envelope("teammate_added");
+            o["agentId"] = json!(agent_id);
+            o["role"] = json!(role);
+            if let Some(by) = by_agent_id {
+                o["byAgentId"] = json!(by);
+            }
+            o
+        }
+        CompanyEvent::DeskCreated {
+            desk_id,
+            name,
+            members,
+            ..
+        } => {
+            let mut o = envelope("desk_created");
+            o["deskId"] = json!(desk_id);
+            o["name"] = json!(name);
+            o["members"] = json!(members);
+            o
+        }
+        CompanyEvent::DeskDeleted { desk_id, .. } => {
+            let mut o = envelope("desk_deleted");
+            o["deskId"] = json!(desk_id);
+            o
+        }
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added,
+            removed,
+            ..
+        } => {
+            let mut o = envelope("desk_members_changed");
+            o["deskId"] = json!(desk_id);
+            o["added"] = json!(added);
+            o["removed"] = json!(removed);
+            o
+        }
+        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => {
+            let mut o = envelope("desk_hive_configured");
+            o["deskId"] = json!(desk_id);
+            o["reset"] = json!(reset);
+            o
+        }
         // Issue #276: a workflow armed or paused, so a console holding the
         // Workflows tab open re-renders the toggle instead of showing a stale
         // one — and so an operator watching the stream sees the disarm rule fire
