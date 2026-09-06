@@ -3228,8 +3228,7 @@ pub(crate) fn hive_problems(
                     .episode
                     .quorum
                     .threshold;
-            let eligible = chat
-                .members
+            let eligible = members
                 .iter()
                 .filter(|member| {
                     hive.may(member, "support") || hive.may(member, "propose")
