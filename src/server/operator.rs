@@ -113,6 +113,13 @@ pub fn router() -> Router<AppState> {
             "/desks/{desk_id}/members/{agent_id}",
             delete(remove_desk_member),
         ))
+        // A desk's move grammar: read the table in force, install or replace it,
+        // or drop the override and fall back to the manifest's own block.
+        // Registered under both scope forms.
+        .merge(scoped(
+            "/desks/{desk_id}/hive",
+            get(desk_hive).put(set_desk_hive).delete(reset_desk_hive),
+        ))
         // Desk member ordering / hierarchy (issue #131): set the operator's
         // explicit member order for a desk. Registered under both scope forms.
         .merge(scoped("/desks/{desk_id}/order", put(set_desk_order)))
@@ -916,6 +923,11 @@ async fn delete_desk(
     }
     // Drop any member-overlay rows that targeted the now-deleted desk.
     record.overlay_desk_members.retain(|m| m.desk_id != desk_id);
+    // And the installed move grammar, for the same reason. Left behind, an
+    // overlay desk re-created with the same id silently inherits a grammar
+    // nobody installed on it — a desk deliberating under a table its operator
+    // never wrote, which is the drift the overlay layer exists to prevent.
+    record.clear_desk_hive(&desk_id);
     scope.runtime.store().save(&record).await?;
     Ok(StatusCode::NO_CONTENT)
 }
