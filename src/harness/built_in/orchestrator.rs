@@ -2517,6 +2517,34 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowDeleted {
             workflow_id, name, ..
         } => format!("workflow deleted: {name} ({workflow_id})"),
+        // The structural rows. Ids and roles only — this is folded into the
+        // orchestrator's recent-activity context and read by a model, so the
+        // same rule the workflow arms follow applies: no free text, no actor
+        // ids, and no configuration.
+        CompanyEvent::TeammateAdded { agent_id, role, .. } => {
+            format!("teammate added: {agent_id} ({role})")
+        }
+        CompanyEvent::DeskCreated { desk_id, name, .. } => {
+            format!("desk created: {name} ({desk_id})")
+        }
+        CompanyEvent::DeskDeleted { desk_id, .. } => format!("desk deleted: {desk_id}"),
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added,
+            removed,
+            ..
+        } => format!(
+            "desk {desk_id} membership: +{} −{}",
+            added.len(),
+            removed.len()
+        ),
+        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => {
+            if *reset {
+                format!("desk {desk_id} move grammar restored")
+            } else {
+                format!("desk {desk_id} move grammar installed")
+            }
+        }
         // Issue #276. This one-liner is folded into the orchestrator's
         // recent-activity context, so it is read by a model — and the arms
         // around it drop free text and actor ids for that reason. Name and id
