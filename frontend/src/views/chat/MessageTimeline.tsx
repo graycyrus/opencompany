@@ -208,6 +208,8 @@ export function MessageTimeline({
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
+  episodeTurn,
+  onSelectTopic,
   cognition,
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
