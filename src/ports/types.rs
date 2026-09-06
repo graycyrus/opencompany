@@ -1238,6 +1238,87 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// A teammate was minted at runtime — by the orchestrator's `add_agent`
+    /// tool, or by the console's `POST {scope}/team`.
+    ///
+    /// Journaled because **no durable row otherwise records that it happened**,
+    /// still less who did it. The record carries the teammate's current
+    /// existence; nothing carries its creation, so "who spawned whom" was
+    /// unanswerable from the journal and the console could only infer it from a
+    /// redacted tool-call frame that does not survive a reload.
+    ///
+    /// Both creation paths journal this, deliberately: two paths that answer
+    /// "was a teammate added" differently is how the first hole got here.
+    ///
+    /// Carries no prompt, no tool grant and no instructions — the same rule
+    /// [`WorkflowUpdated`](Self::WorkflowUpdated) follows, since the journal
+    /// reaches readers with no business holding an agent's configuration. The
+    /// current state is on the record and one read away.
+    ///
+    /// Best-effort and appended **after** the write lands, so it records a
+    /// completed change: a failed audit append must never fail the mint.
+    TeammateAdded {
+        /// The new teammate's roster id.
+        agent_id: String,
+        /// Its role, so a reader need not resolve an id that may later retire.
+        role: String,
+        /// The teammate that created it, when an agent did. `None` when the
+        /// operator did it from the console.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_agent_id: Option<String>,
+        /// Who asked, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// An operator-created desk came into existence.
+    ///
+    /// Journaled for the same reason as [`TeammateAdded`](Self::TeammateAdded):
+    /// a desk's existence is on the record, its creation is nowhere.
+    DeskCreated {
+        desk_id: String,
+        name: String,
+        /// The seats it opened with.
+        members: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// An operator-created desk was removed.
+    DeskDeleted {
+        desk_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A desk gained or lost a seat at runtime.
+    ///
+    /// One variant for both directions rather than two, because a reader
+    /// reconstructing membership over time wants one ordered stream, and a
+    /// move between desks is a removal and an addition that belong together.
+    DeskMembersChanged {
+        desk_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        added: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A desk's move grammar was installed, replaced, or reset to the manifest's.
+    ///
+    /// Carries **no config body**, same rule as
+    /// [`WorkflowUpdated`](Self::WorkflowUpdated): the row answers "who changed
+    /// how this desk thinks, and when", and the table itself is one read away.
+    ///
+    /// Permanent under the retention rule — only the workflow-run kinds and
+    /// `McpCallFailed` may ever be pruned — which is the right trade for an
+    /// audit fact whose lifetime cardinality is "how often does an operator
+    /// re-author a grammar".
+    DeskHiveConfigured {
+        desk_id: String,
+        /// True when the override was dropped and the manifest restored.
+        reset: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
     /// A workflow was switched on or off (issue #276) — from the console's
     /// `PUT …/workflows/{wid}/enabled` route, or from the disarm rule that
     /// forces `false` when a create or an edit arms a schedule. Journaled
@@ -2018,6 +2099,11 @@ impl CompanyEvent {
             Self::WorkflowCreated { .. } => "WorkflowCreated",
             Self::WorkflowUpdated { .. } => "WorkflowUpdated",
             Self::WorkflowDeleted { .. } => "WorkflowDeleted",
+            Self::TeammateAdded { .. } => "TeammateAdded",
+            Self::DeskCreated { .. } => "DeskCreated",
+            Self::DeskDeleted { .. } => "DeskDeleted",
+            Self::DeskMembersChanged { .. } => "DeskMembersChanged",
+            Self::DeskHiveConfigured { .. } => "DeskHiveConfigured",
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
             Self::WorkspaceChanged { .. } => "WorkspaceChanged",
