@@ -7549,7 +7549,7 @@ mode = "full"
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
-        let events = state.runtime_for(&CompanyId::new("acme")).unwrap().events();
+        let events = state.registry().get(&CompanyId::new("acme")).unwrap().events();
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
