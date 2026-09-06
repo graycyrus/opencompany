@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium } from "@playwright/test";
 const out = process.argv[2];
 const theme = process.argv[3] ?? "light";
 const b = await chromium.launch();
