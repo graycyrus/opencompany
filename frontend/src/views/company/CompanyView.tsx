@@ -43,6 +43,8 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { Overview } from "@/views/Overview";
 import { OrgChartView } from "@/views/company/OrgChartView";
+import { HiveGrammarPanel } from "@/views/company/hive/HiveGrammarPanel";
+import { useHashFlag } from "@/hooks/use-hash-flag";
 import { TeamView } from "@/views/TeamView";
 
 /**
@@ -118,14 +120,30 @@ export function CompanyView({
   }
 
   if (sub) {
+    const deskId = sub === DESKS_SEGMENT ? null : sub;
     return (
-      <OrgChartView
-        client={client}
-        company={company}
-        // The reserved segment names the chart, not a desk on it.
-        focusDeskId={sub === DESKS_SEGMENT ? null : sub}
-        onBack={() => onNavigate(null)}
-      />
+      <>
+        {/*
+          The grammar editor rides `?hive` over the chart rather than taking an
+          address of its own (Rule 6, by promotion rather than exemption). The
+          chart is already documented as the one surface that creates a desk,
+          moves somebody between desks and changes a lead — installing the moves
+          those seats may make is that same class of structural change, so it
+          belongs beside them rather than in Settings.
+
+          A query flag, not a `sub` segment: the hash carries only head/sub, and
+          the flag makes the browser's Back button close the panel with no extra
+          wiring.
+        */}
+        {deskId ? <DeskHivePanel client={client} company={company} deskId={deskId} /> : null}
+        <OrgChartView
+          client={client}
+          company={company}
+          // The reserved segment names the chart, not a desk on it.
+          focusDeskId={deskId}
+          onBack={() => onNavigate(null)}
+        />
+      </>
     );
   }
 
@@ -142,5 +160,34 @@ export function CompanyView({
       // same destination as the chart's desk nodes.
       onNavigateToDesk={(deskId) => onNavigate(deskId)}
     />
+  );
+}
+
+/**
+ * The grammar editor, shown over a desk's page when `?hive` is set.
+ *
+ * Its own component because {@link CompanyView} is a routing switch with no
+ * hooks in it, and reading the flag is a hook.
+ */
+function DeskHivePanel({
+  client,
+  company,
+  deskId,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  deskId: string;
+}) {
+  const [open, setOpen] = useHashFlag("hive");
+  if (!open) return null;
+  return (
+    <div className="px-4 pt-4">
+      <HiveGrammarPanel
+        client={client}
+        company={company}
+        deskId={deskId}
+        onClose={() => setOpen(false)}
+      />
+    </div>
   );
 }
