@@ -7,7 +7,6 @@ import {
   type CompanyStatus,
   type GrantScope,
   type NotificationDto,
-  type TurnStep,
   type Verdict,
 } from "@/api/types";
 import {
@@ -64,7 +63,6 @@ import {
   mergeOpenTurns,
   openTurnsFromRuns,
   PendingSyncPosts,
-  type OpenTurn,
 } from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
@@ -134,7 +132,7 @@ import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
-import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
+import { shouldClearReceipt } from "@/views/chat/ChatLiveReceipt";
 import {
   channelForThread,
   channelIdForThread,
@@ -144,9 +142,7 @@ import {
   HISTORY_UNSTARTED,
   isOperatorChannelDto,
   type DecidedApproval,
-  type HistoryHydration,
   type HistoryStatus,
-  type Transcripts,
 } from "@/views/chat/model";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
