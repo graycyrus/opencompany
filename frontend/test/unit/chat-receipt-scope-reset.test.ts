@@ -71,8 +71,14 @@ describe("company-switch reset wires receiptByThread and agentNames", () => {
 
 describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
   it("routes every clear through shouldClearReceipt rather than deleting unconditionally", () => {
-    expect(appShell).toContain(
-      'import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";',
+    // The guard is that clears route through `shouldClearReceipt` — assert the
+    // helper is imported, not the exact shape of the statement importing it.
+    // `ChatReceipt` used to ride the same line because the shell held
+    // `useState<Record<string, ChatReceipt>>`; that state moved to
+    // `room/store.ts`, and pinning the old statement text would have made this
+    // spec fail for a change it has no opinion about.
+    expect(appShell).toMatch(
+      /import \{[^}]*\bshouldClearReceipt\b[^}]*\} from "@\/views\/chat\/ChatLiveReceipt";/,
     );
     // The old body deleted whenever `prev[threadId]` was truthy, with no
     // generation check at all — this is the shape that let a stale
