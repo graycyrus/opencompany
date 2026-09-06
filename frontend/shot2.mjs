@@ -1,0 +1,10 @@
+import { chromium } from "@playwright/test";
+const b = await chromium.launch();
+const p = await b.newPage({ viewport: { width: 1000, height: 1400 } });
+await p.goto("http://localhost:5199/#/styleguide", { waitUntil: "networkidle" });
+await p.waitForTimeout(800);
+const panel = p.locator("section", { has: p.locator("h2", { hasText: "Move grammar" }) }).first();
+await panel.scrollIntoViewIfNeeded();
+await p.waitForTimeout(300);
+await panel.screenshot({ path: process.argv[2] });
+await b.close();
