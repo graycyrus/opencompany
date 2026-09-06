@@ -31,7 +31,7 @@ use crate::ports::events::EventLog;
 use crate::ports::facts::{FactRecord, FactStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
-use crate::ports::types::{
+use crate::ports::types::{DeskHiveOverride, 
     AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
     ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
     OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
@@ -143,6 +143,13 @@ struct BundleMeta {
     /// `#[serde(default)]` for back-compat with older bundles.
     #[serde(default)]
     overlay_agent_edits: Vec<AgentOverride>,
+    overlay_desk_hive: Vec<AgentOverride>,
+    /// The move grammars installed on desks at export time. Preserved so an
+    /// export→import keeps a desk deliberating under the table the operator
+    /// installed rather than silently reverting to the manifest's.
+    /// `#[serde(default)]` for back-compat with older bundles.
+    #[serde(default)]
+    overlay_desk_hive: Vec<DeskHiveOverride>,
     /// The ids of manifest teammates removed from the console at export time.
     /// Preserved so an import does not silently restore a teammate the operator
     /// retired — the blueprint still declares it, so without the tombstone it
@@ -273,6 +280,10 @@ struct BundleContents {
     /// The operator's edits of manifest-declared teammates, carried through the
     /// bundle so export→import preserves a console-shaped roster.
     overlay_agent_edits: Vec<AgentOverride>,
+    overlay_desk_hive: Vec<AgentOverride>,
+    /// The move grammars installed on desks, carried through the bundle so
+    /// export→import preserves how a desk deliberates.
+    overlay_desk_hive: Vec<DeskHiveOverride>,
     /// The ids of manifest teammates the operator removed, carried through the
     /// bundle so an import does not restore them.
     overlay_retired_agents: Vec<String>,
@@ -396,6 +407,7 @@ impl BundleContents {
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
             overlay_agent_edits: record.overlay_agent_edits,
+            overlay_desk_hive: record.overlay_desk_hive,
             overlay_retired_agents: record.overlay_retired_agents,
             overlay_policy: record.overlay_policy,
             overlay_tool_grants: record.overlay_tool_grants,
@@ -472,6 +484,7 @@ impl BundleContents {
             .save_importing(
                 &CompanyRecord {
                     overlay_agent_edits: self.overlay_agent_edits.clone(),
+                    overlay_desk_hive: self.overlay_desk_hive.clone(),
                     overlay_retired_agents: self.overlay_retired_agents.clone(),
                     id: self.id.clone(),
                     manifest,
@@ -541,6 +554,7 @@ impl BundleContents {
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
             overlay_agent_edits: self.overlay_agent_edits.clone(),
+            overlay_desk_hive: self.overlay_desk_hive.clone(),
             overlay_retired_agents: self.overlay_retired_agents.clone(),
             overlay_policy: self.overlay_policy.clone(),
             overlay_tool_grants: self.overlay_tool_grants.clone(),
@@ -716,6 +730,7 @@ impl BundleContents {
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
             overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_desk_hive: meta.overlay_desk_hive,
             overlay_retired_agents: meta.overlay_retired_agents,
             overlay_policy: meta.overlay_policy,
             overlay_tool_grants: meta.overlay_tool_grants,
@@ -1071,6 +1086,7 @@ mod test {
         CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1454,6 +1470,7 @@ mod test {
         s1.save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1541,6 +1558,7 @@ mod test {
         s1.save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1679,6 +1697,7 @@ mod test {
         s1.save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1777,6 +1796,7 @@ mod test {
         s1.save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1915,6 +1935,7 @@ mod test {
         s1.save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -2315,6 +2336,7 @@ mod test {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -2401,6 +2423,7 @@ mod test {
         s1.save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: budget_manifest(),
             ledger: Vec::new(),
@@ -2493,6 +2516,7 @@ mod test {
         s1.save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: budget_manifest(),
             ledger: Vec::new(),
