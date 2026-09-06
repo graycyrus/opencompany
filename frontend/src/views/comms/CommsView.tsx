@@ -3,9 +3,11 @@ import { Loader2 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
+import { listTasks } from "@/api/tasks";
 import { CommsGraphView } from "@/views/comms/CommsGraphView";
 import {
   applyObservations,
+  boardObservations,
   neighbourhood,
   structuralGraph,
   type CommsAgent,
@@ -50,14 +52,25 @@ export function CommsView({
 }) {
   const [agents, setAgents] = useState<CommsAgent[] | null>(null);
   const [desks, setDesks] = useState<CommsDesk[] | null>(null);
+  const [board, setBoard] = useState<CommsObservation[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     setError(null);
-    Promise.all([client.listTeam(company), client.listDesks(company)])
-      .then(([team, deskList]) => {
+    Promise.all([
+      client.listTeam(company),
+      client.listDesks(company),
+      // The board is where a hand-off is durably recorded, so it is read here
+      // rather than reconstructed from the live stream — which arrives redacted
+      // and does not survive a reload. A host without the route simply
+      // contributes no observed edges.
+      listTasks(client, company).catch(() => []),
+    ])
+      .then(([team, deskList, cards]) => {
+        if (!live) return;
+        setBoard(boardObservations(cards));
         if (!live) return;
         setAgents(
           team.map((m) => ({
@@ -83,8 +96,11 @@ export function CommsView({
 
   const graph = useMemo(() => {
     if (!agents || !desks) return null;
-    return applyObservations(structuralGraph(agents, desks), observations);
-  }, [agents, desks, observations]);
+    return applyObservations(structuralGraph(agents, desks), [
+      ...board,
+      ...observations,
+    ]);
+  }, [agents, desks, board, observations]);
 
   const shown = useMemo(
     () => (graph && selected ? neighbourhood(graph, selected) : graph),
