@@ -489,12 +489,11 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
         return None;
     }
     let desk_id = record.resolve_desk_id(chat)?;
-    let declared = record
-        .manifest
-        .group_chats
-        .iter()
-        .find(|group| group.id == desk_id);
-    let config = declared.map(|group| group.hive.clone()).unwrap_or_default();
+    // Through the record's own accessor, not the manifest directly: an operator
+    // may have installed a grammar over the blueprint's, and a desk that
+    // deliberated under one table while the console showed another would make
+    // every standing unreproducible.
+    let config = record.effective_desk_hive(&desk_id);
     let members: Vec<HiveMember> = record
         .effective_desk_members(&desk_id)
         .into_iter()
