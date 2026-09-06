@@ -4153,7 +4153,7 @@ pub fn orchestrator_tools(
         workflow_source_dir,
         store.clone(),
         workflow_revisions,
-        events,
+        events.clone(),
     );
     tools.push(Box::new(
         crate::harness::workflow_admin::ReadWorkflowTool::new(workflow_admin.clone()),
