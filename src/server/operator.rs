@@ -1146,6 +1146,16 @@ async fn create_desk(
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskCreated {
+            desk_id: id.clone(),
+            name: name.clone(),
+            members: members.clone(),
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
 
     let effective = record.effective_desk_members(&id);
     Ok((
