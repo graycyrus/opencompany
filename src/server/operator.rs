@@ -7241,7 +7241,9 @@ mode = "full"
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
 
@@ -7296,7 +7298,9 @@ mode = "full"
             .unwrap();
         assert_eq!(install.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(install.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(install.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(body["source"], "overlay");
@@ -7333,7 +7337,9 @@ mode = "full"
             .unwrap();
         assert_eq!(reset.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(reset.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(reset.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         // Back to the blueprint, which declared nothing.
@@ -7399,7 +7405,11 @@ mode = "full"
                 )
                 .await
                 .unwrap();
-            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "body {body} was accepted");
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "body {body} was accepted"
+            );
         }
     }
 
@@ -7486,12 +7496,17 @@ mode = "full"
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(body["source"], "default");
         for seat in body["seats"].as_array().unwrap() {
-            assert_eq!(seat["governed"], false, "a re-created desk inherited a grammar");
+            assert_eq!(
+                seat["governed"], false,
+                "a re-created desk inherited a grammar"
+            );
         }
     }
 
