@@ -80,6 +80,7 @@ import { MessageTimeline } from "./chat/MessageTimeline";
 import type { ChatReceipt } from "./chat/ChatLiveReceipt";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import * as room from "@/room/store";
 import { foldEpisodes, type EpisodeTurn } from "@/lib/hive/episode";
 import {
   buildChannels,
@@ -236,34 +237,6 @@ interface Props {
    */
   scopeRef: RefObject<{ connection: string; company: string | null; client: OpenCompanyClient }>;
   /**
-   * Turns accepted but not settled, by host thread id — including ones this
-   * console never POSTed, which is what makes the indicator survive a reload.
-   */
-  openTurns?: Record<string, OpenTurn[]>;
-  /**
-   * The in-flight tool timeline the shell folds out of the live turn frames,
-   * keyed by **host thread id** — so this view has to resolve its channel to a
-   * thread to read it (see `activeThreadId`). Covers turns this console never
-   * started, which is most of what issue #367 is about.
-   */
-  liveStepsByThread?: Record<string, TurnStep[]>;
-  /**
-   * Live rows per query, keyed by the asking message's id (see
-   * `MessageTimeline`). Passed straight through — unlike `liveStepsByThread`,
-   * nothing here has to resolve a key for it: the message id is the key, so it
-   * needs neither `activeThreadId` nor the desk map, and cannot be affected by
-   * their load order.
-   */
-  liveStepsByMessage?: Record<string, TurnStep[]>;
-  /**
-   * The live receipt for a synchronous chat turn in flight, keyed by **host
-   * thread id** (issue #1934) — resolved to this channel's thread the same way
-   * `liveStepsByThread` is. Present between the operator's send and the reply
-   * landing; absent otherwise. Drives the "Sent → Picked up → on step" row that
-   * fills the gap the composer used to leave silent.
-   */
-  receiptByThread?: Record<string, ChatReceipt>;
-  /**
    * Roster agent id → display name, captured by the shell's desks/roster read
    * (issue #1934). Lets the receipt name whoever picked the turn up rather than
    * rendering a raw id; a miss falls back to the channel voice.
@@ -332,7 +305,6 @@ interface Props {
    * additive contract.
    */
   approvals?: ApprovalSummary[];
-  chatChannelByThread?: Record<string, string>;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /**
@@ -420,10 +392,6 @@ export function ChatView({
   onSendFailed,
   onSendStale,
   scopeRef,
-  openTurns,
-  liveStepsByThread,
-  liveStepsByMessage,
-  receiptByThread,
   agentNames,
   unread,
   mentions,
@@ -431,7 +399,6 @@ export function ChatView({
   onChannelViewed,
   onChatPaneVisibilityChange,
   approvals,
-  chatChannelByThread,
   taskStatusByTaskId,
   inflightRuns,
   onInflightSteered,
