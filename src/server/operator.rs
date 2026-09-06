@@ -925,6 +925,16 @@ async fn remove_desk_member(
         .overlay_desk_order
         .retain(|o| !(o.desk_id == desk_id && o.ordered.is_empty()));
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added: Vec::new(),
+            removed: vec![agent_id],
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
