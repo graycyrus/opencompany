@@ -7578,7 +7578,10 @@ mode = "full"
             );
         }
 
-        let rows = events.read(&CompanyId::new("acme"), 0, 200).await.unwrap();
+        let rows = events
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), 500)
+            .await
+            .unwrap();
         let kinds: Vec<&str> = rows.iter().map(|row| row.event.kind()).collect();
         assert!(kinds.contains(&"DeskCreated"), "kinds: {kinds:?}");
         assert!(kinds.contains(&"DeskDeleted"), "kinds: {kinds:?}");
