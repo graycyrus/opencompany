@@ -7556,7 +7556,7 @@ mode = "full"
 
         for (method, uri, body) in [
             ("POST", "/api/v1/company/desks", Some(r#"{"name":"Growth","members":["eng"]}"#)),
-            ("POST", "/api/v1/company/desks/growth/members", Some(r#"{"agentId":"ceo"}"#)),
+            ("POST", "/api/v1/company/desks/growth/members", Some(r#"{"agent_id":"ceo"}"#)),
             ("DELETE", "/api/v1/company/desks/growth/members/ceo", None),
             ("DELETE", "/api/v1/company/desks/growth", None),
         ] {
