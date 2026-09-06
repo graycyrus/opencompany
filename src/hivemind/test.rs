@@ -149,6 +149,7 @@ pub(super) fn record(manifest: &str) -> CompanyRecord {
     let manifest: crate::company::CompanyManifest =
         toml::from_str(manifest).expect("test manifest parses");
     CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         id: MemoryLog::company(),

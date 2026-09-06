@@ -2103,6 +2103,7 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+                     overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: budget_manifest(),
             ledger: Vec::new(),

@@ -4789,6 +4789,7 @@ members = ["writer"]
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+                         overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),

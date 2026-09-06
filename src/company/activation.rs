@@ -432,6 +432,7 @@ mod test {
 
     fn record(id: &CompanyId, allow: &[&str]) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest(allow),
             ledger: Vec::new(),

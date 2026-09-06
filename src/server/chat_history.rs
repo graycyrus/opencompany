@@ -2009,6 +2009,7 @@ mod test {
             let manifest: crate::company::CompanyManifest =
                 toml::from_str(src).expect("manifest parses");
             CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: crate::ports::types::CompanyId::new("acme"),
@@ -2873,6 +2874,7 @@ name = "{name}"
         ))
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_tool_grants: None,

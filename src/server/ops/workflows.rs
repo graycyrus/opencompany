@@ -5017,6 +5017,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -5152,6 +5153,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -5479,6 +5481,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     id: id.clone(),
                     manifest: empty_manifest(),
                     ledger: Vec::new(),
@@ -5703,6 +5706,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -7040,6 +7044,7 @@ mod tests {
             .unwrap();
             store
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -8750,6 +8755,7 @@ mod tests {
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.clone())
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -10374,6 +10380,7 @@ mod tests {
             manifest.workflows.enabled.push("legacy".to_string());
             store
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -10675,6 +10682,7 @@ label = "ok"
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.to_path_buf())
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -11509,6 +11517,7 @@ label = "ok"
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.to_path_buf())
                 .save(&CompanyRecord {
+                           overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
