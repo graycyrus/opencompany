@@ -24,6 +24,8 @@ import { TopicChip } from "@/components/hive/TopicChip";
 import { VerdictCard } from "@/components/hive/VerdictCard";
 import { EpisodeBlock } from "@/views/chat/EpisodeBlock";
 import { HiveGrammarPanel } from "@/views/company/hive/HiveGrammarPanel";
+import { CommsGraphView } from "@/views/comms/CommsGraphView";
+import { applyObservations, structuralGraph } from "@/views/comms/model";
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskHiveDto } from "@/api/types";
 import { MessageRow } from "@/views/chat/MessageRow";
@@ -1288,6 +1290,13 @@ function DeliberationSection() {
 
             <div>
               <p className="mb-2 text-xs font-medium text-muted-foreground">
+                Who talks to whom
+              </p>
+              <CommsGraphView graph={FIXTURE_COMMS} />
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
                 Installing a grammar
               </p>
               <HiveGrammarPanel client={FIXTURE_HIVE_CLIENT} deskId="solvers" />
@@ -1393,3 +1402,33 @@ const FIXTURE_HIVE_CLIENT = {
   putDeskHive: () => Promise.resolve(FIXTURE_HIVE),
   resetDeskHive: () => Promise.resolve(FIXTURE_HIVE),
 } as unknown as OpenCompanyClient;
+
+/**
+ * A small company's wiring: declared reach, plus what has actually happened.
+ *
+ * Deliberately mixed — two dashed structural edges an operator has never used,
+ * one solid hand-off that has run four times, and a teammate the orchestrator
+ * created at runtime — because the whole point of the drawing is telling those
+ * three apart.
+ */
+const FIXTURE_COMMS = applyObservations(
+  structuralGraph(
+    [
+      { id: "orchestrator", name: "Orchestrator", role: "Runs the company", isOrchestrator: true, delegatesTo: ["*"] },
+      { id: "planner", name: "Planner", role: "Plans the work", delegatesTo: ["solvers"] },
+      { id: "archivist", name: "Archivist", role: "Remembers", delegatesTo: [] },
+    ],
+    [
+      { id: "solvers", name: "Solvers desk", members: ["planner", "archivist"] },
+      { id: "records", name: "Records desk", members: ["archivist"] },
+    ],
+  ),
+  [
+    { kind: "handed-off", from: "orchestrator", to: "solvers", via: "delegate_to_desk", atMillis: 1 },
+    { kind: "handed-off", from: "orchestrator", to: "solvers", via: "delegate_to_desk", atMillis: 2 },
+    { kind: "handed-off", from: "orchestrator", to: "solvers", via: "delegate_to_desk", atMillis: 3 },
+    { kind: "handed-off", from: "planner", to: "records", via: "spawn_task", atMillis: 4 },
+    { kind: "spawned", by: "orchestrator", agentId: "researcher", atMillis: 5 },
+    { kind: "speaking", agentId: "planner" },
+  ],
+);
