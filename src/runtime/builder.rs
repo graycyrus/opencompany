@@ -1520,7 +1520,6 @@ impl RuntimeBuilder {
     fn preserve_pre_upgrade_grant_scope(
         overlay_agents: Vec<OverlayAgent>,
         overlay_agent_edits: Vec<AgentOverride>,
-        overlay_desk_hive: Vec<AgentOverride>,
         previous_manifest: Option<&CompanyManifest>,
         manifest: &CompanyManifest,
     ) -> (Vec<OverlayAgent>, Vec<AgentOverride>) {

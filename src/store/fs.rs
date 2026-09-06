@@ -1750,7 +1750,12 @@ struct Meta {
     /// which leaves the manifest in charge, exactly as those companies ran.
     #[serde(default)]
     overlay_agent_edits: Vec<crate::ports::types::AgentOverride>,
-    overlay_desk_hive: Vec<crate::ports::types::AgentOverride>,
+    /// The move grammars the operator has installed on desks. Absent on meta
+    /// files written before a grammar could be installed from the console, and
+    /// `#[serde(default)]` reads that absence as "the manifest still decides" —
+    /// exactly how those companies ran.
+    #[serde(default)]
+    overlay_desk_hive: Vec<crate::ports::types::DeskHiveOverride>,
     /// The ids of manifest teammates the operator has removed. Absent on meta
     /// files written before a blueprint teammate could be removed, which
     /// `#[serde(default)]` reads as "nobody was removed" — exactly how those
