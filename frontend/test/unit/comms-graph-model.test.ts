@@ -169,7 +169,14 @@ describe("the neighbourhood filter", () => {
   it("keeps only what touches the selection", () => {
     const g = structuralGraph(AGENTS, DESKS);
     const n = neighbourhood(g, "desk:records");
-    expect(n.nodes.map((x) => x.id).sort()).toEqual(["agent:scribe", "desk:records"]);
+    // The orchestrator's `["*"]` allowlist genuinely reaches this desk, so it
+    // belongs in the neighbourhood — the point of drawing the address space is
+    // that it shows reach nobody has exercised yet.
+    expect(n.nodes.map((x) => x.id).sort()).toEqual([
+      "agent:orchestrator",
+      "agent:scribe",
+      "desk:records",
+    ]);
     expect(n.edges.every((e) => e.from === "desk:records" || e.to === "desk:records")).toBe(true);
   });
 });
