@@ -104,7 +104,14 @@ export function CommsGraphView({
               style={{ left: x, top: y, width: NODE_WIDTH, height: NODE_HEIGHT }}
             >
               {node.kind === "agent" ? (
-                <TeammateAvatar id={node.id.replace(/^agent:/, "")} size="sm" />
+                <TeammateAvatar
+                  name={node.label}
+                  // Seeded on the roster id, not the display name, so a face
+                  // stays the same when somebody is renamed — the same rule the
+                  // rest of the console follows.
+                  tone={node.id.replace(/^agent:/, "")}
+                  className="size-7"
+                />
               ) : (
                 <span className="flex size-7 items-center justify-center rounded-md bg-muted">
                   <Users aria-hidden className="size-3.5 text-muted-foreground" />
