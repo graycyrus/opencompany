@@ -356,6 +356,17 @@ export function MessageRow({
                 #{turn.move.topic}
               </span>
             ) : null}
+            {turn.move.target !== undefined ? (
+              /*
+               * Who the objection is aimed at. The substance of an objection is
+               * which line it answers — an objection with its target dropped
+               * reads as generic disagreement, and the room's cross-inhibition
+               * becomes invisible.
+               */
+              <span className="font-mono text-[11px] text-muted-foreground">
+                &gt;{turn.move.target}
+              </span>
+            ) : null}
             {turn.move.cites.map((cite) => (
               <span key={cite} className="font-mono text-[11px] text-muted-foreground">
                 ^{cite}
