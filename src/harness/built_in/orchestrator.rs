@@ -3679,6 +3679,13 @@ pub struct AddAgentTool {
     /// The minter's **effective** grant — its line already narrowed by the
     /// company `allow`. The ceiling an explicit `tools` argument is clamped to.
     minter_grants: Vec<String>,
+    /// The journal, when this tool is wired with one.
+    ///
+    /// Optional and set through [`AddAgentTool::with_events`] rather than a
+    /// sixth constructor argument, so every test that builds this tool to
+    /// exercise the *mint* keeps compiling unchanged — the audit row is a
+    /// separate concern from the narrowing rules those tests are about.
+    events: Option<Arc<dyn EventLog>>,
 }
 
 impl AddAgentTool {
@@ -3710,7 +3717,18 @@ impl AddAgentTool {
             minter,
             minter_tools,
             minter_grants,
+            events: None,
         }
+    }
+
+    /// Wire the journal, so a mint leaves an audit row naming who did it.
+    ///
+    /// Without this the tool still mints — the row is best-effort and its
+    /// absence costs the console its spawn edges, not the teammate.
+    #[must_use]
+    pub fn with_events(mut self, events: Option<Arc<dyn EventLog>>) -> Self {
+        self.events = events;
+        self
     }
 }
 
@@ -3945,6 +3963,33 @@ impl Tool for AddAgentTool {
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
 
+        // The audit row for one agent creating another.
+        //
+        // The console's activity graph draws its spawn edges from this: before
+        // it, "who made whom" could only be inferred from a tool-call frame
+        // whose arguments arrive redacted and which does not survive a reload.
+        // `POST {scope}/team` journals the identical variant, so the two
+        // creation paths cannot answer the question differently.
+        //
+        // Best-effort, appended after the teammate is durable: a journal that
+        // refuses the row must not undo a mint that already happened.
+        if let Some(events) = &self.events
+            && let Err(err) = events
+                .append(
+                    &self.company,
+                    crate::ports::types::CompanyEvent::TeammateAdded {
+                        agent_id: id.clone(),
+                        role: role.clone(),
+                        by_agent_id: Some(self.minter.clone()),
+                        // An agent did this, not a person.
+                        by: None,
+                    },
+                )
+                .await
+        {
+            tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
+        }
+
         // Issue #619: the mint is observable — the minter, the teammate, and
         // the grant it was given. This was the condition attached to sanctioning
         // the narrowing at all: `add_agent` is `Reach::Nothing` and never asks,
@@ -4119,13 +4164,10 @@ pub fn orchestrator_tools(
     tools.push(Box::new(
         crate::harness::workflow_admin::DeleteWorkflowTool::new(workflow_admin),
     ));
-    tools.push(Box::new(AddAgentTool::new(
-        company,
-        store,
-        minter,
-        minter_tools,
-        minter_grants,
-    )));
+    tools.push(Box::new(
+        AddAgentTool::new(company, store, minter, minter_tools, minter_grants)
+            .with_events(events.clone()),
+    ));
     tools
 }
 
