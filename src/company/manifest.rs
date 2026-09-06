@@ -3222,7 +3222,7 @@ pub(crate) fn hive_problems(
     // `hive.quorum` and `hive.moves` on it describe a room that will
     // never run rather than one that could get stuck.
     if hive.deliberates(members.len()) {
-        let quorum = crate::hivemind::HivePolicy::from_config(&hive, members.len())
+        let quorum = crate::hivemind::HivePolicy::from_config(hive, members.len())
             .episode
             .quorum
             .threshold;
