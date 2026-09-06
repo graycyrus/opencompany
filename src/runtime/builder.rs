@@ -2704,6 +2704,18 @@ impl RuntimeBuilder {
             existing.as_ref().map(|r| &r.manifest),
             &self.manifest,
         );
+        // The move grammars the operator installed on desks, carried across the
+        // rebuild for the same reason every overlay is: they are never written
+        // back to `company.toml`, so the seed manifest this rebuild starts from
+        // still declares whatever `[[group_chat]].hive` it always did. Dropped
+        // here, the `store.save` at the end of this function would silently
+        // revert every desk to the blueprint's table — and a desk quietly
+        // deliberating under a grammar its operator replaced is exactly the
+        // drift the overlay layer exists to prevent.
+        let overlay_desk_hive = existing
+            .as_ref()
+            .map(|r| r.overlay_desk_hive.clone())
+            .unwrap_or_default();
         // The roster edits and removals an operator has made from the console.
         // Carried across the rebuild for the reason the overlay model exists at
         // all: neither is written back to `company.toml`, so the seed manifest
@@ -3876,6 +3888,7 @@ impl RuntimeBuilder {
                 &CompanyRecord {
                     overlay_retired_agents,
                     overlay_agent_edits,
+                    overlay_desk_hive,
                     id: id.clone(),
                     manifest: self.manifest.clone(),
                     ledger,
