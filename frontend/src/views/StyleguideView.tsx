@@ -22,6 +22,9 @@ import { MoveChip } from "@/components/hive/MoveChip";
 import { StandingsRail } from "@/components/hive/StandingsRail";
 import { TopicChip } from "@/components/hive/TopicChip";
 import { VerdictCard } from "@/components/hive/VerdictCard";
+import { EpisodeBlock } from "@/views/chat/EpisodeBlock";
+import { MessageRow } from "@/views/chat/MessageRow";
+import { buildTimeline, buildTimelineItems, type Channel, type TimelineItem } from "@/views/chat/model";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -1190,7 +1193,7 @@ function ComponentSection() {
  * message, and a closing report the desk wrote itself.
  */
 function DeliberationSection() {
-  const episode = useMemo(() => {
+  const { episode, items } = useMemo(() => {
     const rows: ChatMessage[] = [
       { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
       { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
@@ -1207,7 +1210,21 @@ function DeliberationSection() {
         text: "The desk settled on #stage after 6 turns (backed by planner, critic).",
       },
     ];
-    return foldEpisodes(rows, { quorum: 2 })[0];
+    const folded = foldEpisodes(rows, { quorum: 2 });
+    const channel: Channel = {
+      id: "solvers",
+      name: "solvers",
+      voice: "Solvers desk",
+      kind: "channel",
+      purpose: "",
+    };
+    return {
+      episode: folded[0],
+      // Built through the real pipeline rather than hand-assembled, so this
+      // preview exercises the same grouping the Room does — a block that only
+      // looked right against a bespoke fixture would prove nothing.
+      items: buildTimelineItems(buildTimeline(rows, channel, []), [], {}, folded),
+    };
   }, []);
 
   return (
@@ -1264,6 +1281,44 @@ function DeliberationSection() {
             <div className="grid gap-4 md:grid-cols-2">
               <StandingsRail episode={episode} />
               <VerdictCard episode={episode} />
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                In the transcript
+              </p>
+              {items.map((item) =>
+                item.kind === "episode" ? (
+                  <EpisodeBlock
+                    key={item.key}
+                    item={item}
+                    renderRow={(row: TimelineItem) =>
+                      row.kind === "message" ? (
+                        <MessageRow
+                          key={row.key}
+                          entry={row.entry}
+                          threadOpen={false}
+                          onOpenThread={() => {}}
+                          onReact={() => {}}
+                          onDismissCard={() => {}}
+                          dismissingCardId={null}
+                          turn={item.turnByMessageId[row.entry.message.id]}
+                        />
+                      ) : null
+                    }
+                  />
+                ) : item.kind === "message" ? (
+                  <MessageRow
+                    key={item.key}
+                    entry={item.entry}
+                    threadOpen={false}
+                    onOpenThread={() => {}}
+                    onReact={() => {}}
+                    onDismissCard={() => {}}
+                    dismissingCardId={null}
+                  />
+                ) : null,
+              )}
             </div>
           </>
         ) : null}
