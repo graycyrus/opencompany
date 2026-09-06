@@ -80,6 +80,7 @@ import { MessageTimeline } from "./chat/MessageTimeline";
 import type { ChatReceipt } from "./chat/ChatLiveReceipt";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { foldEpisodes, type EpisodeTurn } from "@/lib/hive/episode";
 import {
   buildChannels,
   buildTimeline,
@@ -1214,15 +1215,50 @@ export function ChatView({
 
   const askerNames = useAskerNames(client, company, channelApprovals);
 
+  /**
+   * The rooms this channel held, folded out of its own transcript.
+   *
+   * Derived rather than fetched: a deliberating desk journals nothing but its
+   * turns, so the transcript **is** the episode and there is no episode endpoint
+   * to ask. See `lib/hive/episode.ts`.
+   *
+   * `[]` for every DM, `#general`, the Operator feed and every desk that
+   * answered with one ordinary turn — the fold looks for marker lines and the
+   * reserved `hive-report` author and finds neither. Nothing here consults the
+   * channel's kind, which is what keeps the surface unchanged for every
+   * conversation that is not a room.
+   */
+  const episodes = useMemo(
+    () =>
+      foldEpisodes(
+        entries.map((entry) => entry.message),
+        // The seat count the host derives its quorum and turn budget from. Only
+        // a hint: with no membership the fold falls back to its own default and
+        // reports the number as derived rather than asserting one it cannot know.
+        { members: channel?.memberIds?.length },
+      ),
+    [entries, channel?.memberIds],
+  );
+
   const items = useMemo(
     () =>
       buildTimelineItems(
         entries,
         [...channelApprovals, ...settledApprovals],
         decidedApprovals ?? {},
+        episodes,
       ),
-    [entries, channelApprovals, settledApprovals, decidedApprovals],
+    [entries, channelApprovals, settledApprovals, decidedApprovals, episodes],
   );
+
+  /** Each deliberation turn by the message that carried it, for the rows. */
+  const episodeTurn = useMemo(() => {
+    const out: Record<string, EpisodeTurn> = {};
+    for (const episode of episodes)
+      for (const turn of [...episode.turns, ...episode.referrals])
+        out[turn.messageId] = turn;
+    return out;
+  }, [episodes]);
 
   // Company-wide, not scoped to the open channel — see the function's own
   // doc for why a per-channel version silently redeemed the wrong marker
@@ -2307,6 +2343,7 @@ export function ChatView({
             <MessageTimeline
               channel={channel}
               items={items}
+              episodeTurn={episodeTurn}
               cognition={cognition}
               historyPending={historyPending}
               openThreadId={openThreadId}
