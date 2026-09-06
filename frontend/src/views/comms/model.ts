@@ -221,8 +221,14 @@ export function applyObservations(
     // A hand-off whose target was redacted names no edge. Dropped rather than
     // drawn to a guessed destination.
     if (!ob.to) continue;
-    const to = byId.has(`desk:${ob.to}`) ? `desk:${ob.to}` : `agent:${ob.to}`;
-    const key = `handed-off:agent:${ob.from}->${to}`;
+    // Either endpoint may be a desk or a teammate — work is raised on a desk and
+    // lands on a desk or a seat — so both are resolved the same way, desk first.
+    // A bare id is ambiguous otherwise, and guessing "agent" would draw an edge
+    // to a node that does not exist.
+    const from = resolveNode(byId, ob.from);
+    const to = resolveNode(byId, ob.to);
+    if (from === to) continue;
+    const key = `handed-off:${from}->${to}`;
     const held = edgeByKey.get(key);
     if (held) {
       held.count += 1;
@@ -232,7 +238,7 @@ export function applyObservations(
     }
     const edge: CommsEdge = {
       id: key,
-      from: `agent:${ob.from}`,
+      from,
       to,
       kind: "handed-off",
       count: 1,
@@ -245,6 +251,49 @@ export function applyObservations(
   }
 
   return { nodes, edges };
+}
+
+/**
+ * The node a bare id names.
+ *
+ * Desk first: desk ids and roster ids share one namespace on the wire, and a
+ * desk is the more likely endpoint of a hand-off. An id matching neither still
+ * resolves to an agent, so an endpoint the roster has not caught up with is
+ * drawn rather than dropped.
+ */
+function resolveNode(byId: Map<string, CommsNode>, id: string): string {
+  return byId.has(`desk:${id}`) ? `desk:${id}` : `agent:${id}`;
+}
+
+/**
+ * Fold the board into observations: who raised work, and where it landed.
+ *
+ * A durable read rather than the live stream, deliberately. The host emits no
+ * event naming a delegation's two ends, so the alternative is joining tool-call
+ * frames — which arrive redacted and vanish on reload. The board survives both:
+ * `originChatId` is the desk the raising turn was on and `assignee` is what owns
+ * the card, and a card is exactly a piece of work one part of the company handed
+ * another.
+ *
+ * Cards with no origin (the board's own `+` button) name no hand-off and are
+ * skipped: an operator adding a card is not the company delegating.
+ */
+export function boardObservations(
+  cards: { assignee?: string; originChatId?: string; updatedAt?: number }[],
+): CommsObservation[] {
+  const out: CommsObservation[] = [];
+  for (const card of cards) {
+    if (!card.originChatId || !card.assignee) continue;
+    if (card.originChatId === card.assignee) continue;
+    out.push({
+      kind: "handed-off",
+      from: card.originChatId,
+      to: card.assignee,
+      via: "task",
+      atMillis: card.updatedAt ?? 0,
+    });
+  }
+  return out;
 }
 
 /** Everything reachable from `id` in one hop, for the neighbourhood filter. */
