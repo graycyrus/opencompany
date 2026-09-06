@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyObservations,
+  boardObservations,
   neighbourhood,
   structuralGraph,
   type CommsObservation,
@@ -178,5 +179,55 @@ describe("the neighbourhood filter", () => {
       "desk:records",
     ]);
     expect(n.edges.every((e) => e.from === "desk:records" || e.to === "desk:records")).toBe(true);
+  });
+});
+
+describe("the board as a record of hand-offs", () => {
+  it("reads a card's origin desk and its assignee as an edge", () => {
+    // A card IS one part of the company handing work to another, and unlike a
+    // tool-call frame it survives a reload and is not redacted.
+    expect(
+      boardObservations([
+        { originChatId: "solvers", assignee: "records", updatedAt: 7 },
+      ]),
+    ).toEqual([
+      { kind: "handed-off", from: "solvers", to: "records", via: "task", atMillis: 7 },
+    ]);
+  });
+
+  it("skips a card nobody delegated", () => {
+    // The board's own `+` button has no origin: an operator adding a card is not
+    // the company delegating, and drawing it as one would inflate every graph.
+    expect(boardObservations([{ assignee: "records" }])).toEqual([]);
+    expect(boardObservations([{ originChatId: "solvers" }])).toEqual([]);
+  });
+
+  it("skips a card that landed where it was raised", () => {
+    // A desk opening its own card is work, not a hand-off — and a self-loop is
+    // an edge no layout can draw usefully.
+    expect(
+      boardObservations([{ originChatId: "solvers", assignee: "solvers" }]),
+    ).toEqual([]);
+  });
+
+  it("draws a desk-to-desk hand-off between two desk nodes", () => {
+    // Both endpoints resolve desk-first: guessing "agent" for a bare id would
+    // draw an edge to a node that does not exist.
+    const g = applyObservations(
+      structuralGraph(AGENTS, DESKS),
+      boardObservations([{ originChatId: "solvers", assignee: "records", updatedAt: 1 }]),
+    );
+    const handed = g.edges.find((e) => e.kind === "handed-off");
+    expect(handed?.from).toBe("desk:solvers");
+    expect(handed?.to).toBe("desk:records");
+  });
+
+  it("resolves an assignee that is a teammate, not a desk", () => {
+    const g = applyObservations(
+      structuralGraph(AGENTS, DESKS),
+      boardObservations([{ originChatId: "solvers", assignee: "planner", updatedAt: 1 }]),
+    );
+    const handed = g.edges.find((e) => e.kind === "handed-off");
+    expect(handed?.to).toBe("agent:planner");
   });
 });
