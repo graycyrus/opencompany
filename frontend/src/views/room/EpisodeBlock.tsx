@@ -67,6 +67,11 @@ export function EpisodeBlock({
   const restRows = rows.filter((row) => !blindRows.includes(row));
 
   const speakers = new Set(episode.turns.map((turn) => turn.agentId));
+  // No closing report yet, so the room has not finished. Read off the ending
+  // rather than a live flag: the transcript is the episode, and an episode with
+  // no `hive-report` row in it is one still in progress — which is also true
+  // after a reload, when no live frame is coming.
+  const running = episode.ending === null;
 
   return (
     <section
@@ -88,10 +93,34 @@ export function EpisodeBlock({
           <Users aria-hidden className="size-3.5" />
           The desk deliberated
         </button>
+        {/*
+          Turns against the budget, not a bare count.
+          
+          A room that is still talking is the case this is for: "6 turns" tells a
+          reader nothing about whether the desk is a third of the way through or
+          one turn from spending its budget, so `Exhausted` arrives as a surprise.
+          The budget is the only bound on how long a room can run, and an
+          operator watching one work is watching that number.
+          
+          Once the room has closed the count is the fact and the budget is
+          noise, so the denominator drops away.
+        */}
         <span className="text-[11px] text-muted-foreground">
-          {episode.turns.length} {episode.turns.length === 1 ? "turn" : "turns"} ·{" "}
-          {speakers.size} {speakers.size === 1 ? "seat" : "seats"}
+          {running
+            ? `turn ${episode.turns.length} of ${episode.turnBudget}`
+            : `${episode.turns.length} ${episode.turns.length === 1 ? "turn" : "turns"}`}{" "}
+          · {speakers.size} {speakers.size === 1 ? "seat" : "seats"}
+          {running && episode.turnBudgetDerived ? " · budget derived" : ""}
         </span>
+        {running ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-status-running-soft px-1.5 py-0.5 text-[10px] font-medium text-status-running-text"
+            title="This desk is still deliberating."
+          >
+            <span className="size-1.5 animate-pulse rounded-full bg-status-running" />
+            deliberating
+          </span>
+        ) : null}
         {deskId ? (
           <a
             href={`#/company/${encodeURIComponent(deskId)}?hive`}
