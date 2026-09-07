@@ -361,7 +361,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
 
   /**
    * Company creation is durable structure, so a host without the team write
-   * plane must explain the refusal rather than borrow ChatView's local-only
+   * plane must explain the refusal rather than borrow RoomView's local-only
    * fallback. A local row could not be placed on a desk and would vanish on
    * the next chart read.
    */

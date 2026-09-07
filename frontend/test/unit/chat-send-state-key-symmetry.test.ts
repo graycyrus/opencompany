@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
  * released and the clear landed on the channel's own (CodeRabbit review on
  * #2042).
  *
- * Asserted against the source rather than by mounting `ChatView`: the failure is
+ * Asserted against the source rather than by mounting `RoomView`: the failure is
  * "one of four call sites was not updated", which a behavioural test only
  * catches if it happens to exercise that outcome — and there are three, one of
  * which needs a POST to throw.

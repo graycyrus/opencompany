@@ -132,7 +132,7 @@ interface Props {
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
   /**
    * This row's channel is the read-only Operator feed (issue #1986) — the same
-   * `Boolean(channel.system)` predicate `ChatView` derives `readOnly` from, and
+   * `Boolean(channel.system)` predicate `RoomView` derives `readOnly` from, and
    * that `MessageTimeline`'s channel intro already reads off the channel
    * directly.
    *
@@ -506,7 +506,7 @@ function SystemPill({
   reviewInFlight?: boolean;
   // Issue #1846 review (Codex #3868962374): carries `message.id` alongside
   // the agent id, so the caller can bind the redeem to the SPECIFIC marker
-  // this card was rendered from — see `ChatView.redeemBudgetPause`'s doc for
+  // this card was rendered from — see `RoomView.redeemBudgetPause`'s doc for
   // why a live re-read at click time cannot do that on its own.
   onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
   redeemingBudgetPauseAgent?: string | null;

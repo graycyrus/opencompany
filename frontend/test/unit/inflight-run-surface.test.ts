@@ -61,7 +61,7 @@ describe("the Room carries the in-flight control", () => {
   const appShell = read("components/app-shell.tsx");
   const tasksApi = read("api/tasks.ts");
 
-  it("ChatView renders the in-flight bar", () => {
+  it("RoomView renders the in-flight bar", () => {
     expect(chatView).toContain('import { InflightRunBar } from "./room/InflightRunBar";');
     expect(chatView).toContain("<InflightRunBar");
   });

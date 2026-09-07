@@ -18,7 +18,7 @@ import { buildChannels } from "@/views/room/model";
  *
  * The console used to answer an empty `/desks` list with `defaultDesks()` — a
  * fabricated Strategy desk, Creative studio and Front desk. Three surfaces did
- * it (`ChatView`, `AppShell`, `approval-card`), so a company that had never
+ * it (`RoomView`, `AppShell`, `approval-card`), so a company that had never
  * declared a `[[group_chat]]` showed three channels it did not have, could not
  * open, and whose ids a real channel could later collide with. The overview
  * graph has no such fallback and correctly drew "No desks yet" — the two
@@ -87,7 +87,7 @@ describe("a company with no desks (empty /desks answer)", () => {
 
   it("withholds the link when the desks read failed rather than answered", () => {
     // `null`, not `[]` — an unknown topology must not be guessed at, because
-    // `ChatView` renders no rail behind a failed read and the link would land
+    // `RoomView` renders no rail behind a failed read and the link would land
     // nowhere.
     const approval = {
       id: "a1",
@@ -103,7 +103,7 @@ describe("a company with no desks (empty /desks answer)", () => {
 });
 
 describe("no surface fabricates desks over an answered read", () => {
-  it("ChatView keeps the host's list, and falls back only on a 404", () => {
+  it("RoomView keeps the host's list, and falls back only on a 404", () => {
     const src = read("views/RoomView.tsx");
 
     expect(src).toContain("setDesks(dtos.map(deskFromDto));");

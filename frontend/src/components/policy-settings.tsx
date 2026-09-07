@@ -346,7 +346,7 @@ export function PolicySettings({ client, company }: Props) {
   // drafts with the old company's policy. The effect-driven read is already
   // guarded by its cleanup's `live` flag; this is the same guard for the write
   // path and the manual retry, following the `scopeRef` pattern `app-shell`
-  // hands `ChatView` so sends cannot cross a company switch.
+  // hands `RoomView` so sends cannot cross a company switch.
   const scopeRef = useRef({ client, company });
   useEffect(() => {
     scopeRef.current = { client, company };

@@ -277,7 +277,7 @@ export interface OpenRunRow {
  * names only the channel; a channel has held many threads since #1890, so two
  * concurrent turns in one channel shared a slot. The visible cost was not a
  * mixed-up list but a silent one: unable to tell whose turn was running,
- * `ChatView` suppressed the working indicator for the whole channel whenever
+ * `RoomView` suppressed the working indicator for the whole channel whenever
  * any thread was open, and a turn the host was actively running showed nowhere
  * at all.
  *

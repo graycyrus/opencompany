@@ -45,7 +45,7 @@ import {
  *   swept the whole action bar away would be caught here.
  */
 
-/** The read-only Operator feed: `system` is the flag `ChatView` gates on. */
+/** The read-only Operator feed: `system` is the flag `RoomView` gates on. */
 const OPERATOR: Channel = {
   id: "operator",
   name: "Operator",

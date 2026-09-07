@@ -99,7 +99,7 @@ four spellings into one conversation (`isGeneralChannel`, mirroring
 `is_general_chat`), and every consumer of a live frame already applies that
 fold; routing was the one place that did not, so which of `#/chat/main` and
 `#/chat/general` worked depended on how the company happened to be declared.
-`ChatView` now falls back to `generalChannelId` for a General-spelled segment
+`RoomView` now falls back to `generalChannelId` for a General-spelled segment
 that names no channel outright — exact ids are still asked first, so a real desk
 whose id *is* a General spelling still wins its own channel and nothing that
 already resolved is rerouted. The guided tour's two composer stops depend on
@@ -188,7 +188,7 @@ and the host authorizes it through the very same gate (`chat_actor`,
 harder than saying something"), so a surface that states *there is nothing to
 reply to here* must not offer it either.
 
-`MessageTimeline` reads `channel.system` — the flag `ChatView` derives its own
+`MessageTimeline` reads `channel.system` — the flag `RoomView` derives its own
 `readOnly` from, and the one the channel intro already gates on — and
 `MessageRow` then **removes** the hover toolbar's five quick reactions rather
 than disabling them. The same answer #1984 gave the composer, for the same
@@ -231,7 +231,7 @@ the one place that reads it:
 |---|---|
 | `byChannel[id] === "loading"` | No — the request is in flight. |
 | `byChannel[id] === "ready"` | Yes. Settled, including a host that answered with nothing or failed outright. |
-| No entry, `discovered === false` | No. The shell's pass has not reached this channel yet — `ChatView` resolves its own desk list independently, so it can paint a channel a moment before the shell marks it. |
+| No entry, `discovered === false` | No. The shell's pass has not reached this channel yet — `RoomView` resolves its own desk list independently, so it can paint a channel a moment before the shell marks it. |
 | No entry, `discovered === true` | Yes. The pass ran and did not claim it, so nothing is coming — a console-only teammate, or a host with no `chat/history`. Holding a spinner forever would be a worse lie than the one this prevents. |
 
 `AppShell` owns the map because it owns the fetches. A channel is marked
@@ -306,7 +306,7 @@ chart's desk level, since no desk can name a parent desk. See
 | `MembersPane.tsx` | Who is in this channel, then the rest of the roster. |
 | `AddMemberDialog.tsx` | Define a teammate. |
 
-`../ChatView.tsx` owns the state and composes them.
+`../RoomView.tsx` owns the state and composes them.
 
 ## Grouping rules
 
@@ -348,7 +348,7 @@ which `TeammateAvatar`'s `markOnly` says a mascot is a smudge and the bare
 tone tile is the honest mark.
 
 Your own lines carry your own face too: `buildTimeline` takes a `youAvatar`,
-which `ChatView` reads from the same `auth/me` call that resolves your role.
+which `RoomView` reads from the same `auth/me` call that resolves your role.
 The name stays "You" — in your own transcript the second person is what
 identifies the line, and your name there would read as somebody else — so only
 the face is yours, which is the half you actually pick your lines out by.
@@ -359,13 +359,13 @@ the face is yours, which is the half you actually pick your lines out by.
 four — so a "you" line in a thread had no `avatar`, `TeammateAvatar` seeded on
 the name it was given, and `avatarFor("You")` hashes to the same mascot the
 agent happened to be wearing. Both participants drew one face and the thread
-could not be read. The panel takes a `youAvatar` prop from `ChatView` for
+could not be read. The panel takes a `youAvatar` prop from `RoomView` for
 exactly that reason; a new sender-resolving surface owes the same.
 
 The main timeline's `senderOf(message, channel, members)` carries the same
 seed for a message whose `channel` field names a distinct originating voice:
 it looks that id up against the roster (`members.find`) the same way
-`ChatView` already does elsewhere, and simply leaves the mascot unresolved —
+`RoomView` already does elsewhere, and simply leaves the mascot unresolved —
 falling back to the name seed, never a wrong face — when the id names a desk
 rather than a teammate.
 

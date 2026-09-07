@@ -218,7 +218,7 @@ export function deskFromDto(d: DeskDto): Desk {
 
 /**
  * Every channel's transcript, keyed by channel id. Owned by `AppShell`, not
- * `ChatView`, so a transcript survives `ChatView` unmounting when the operator
+ * `RoomView`, so a transcript survives `RoomView` unmounting when the operator
  * steps into Tasks, Settings, or any other view and comes back.
  */
 export type Transcripts = Record<string, ChatMessage[]>;
@@ -278,7 +278,7 @@ export function latestBudgetPauseMessageIdByAgent(transcripts: Transcripts): Map
 }
 
 /**
- * Folds one `GET …/budget-pause` read into `ChatView`'s
+ * Folds one `GET …/budget-pause` read into `RoomView`'s
  * `budgetPauseMarkerByNotice` cache (issue #1846 review, Codex #3868962374)
  * — the notice-render-time read that replaces redeeming off a live re-read
  * at click time. Pure so it can be pinned directly; there is no
@@ -336,7 +336,7 @@ export interface HistoryHydration {
    * Whether the desks/roster pass has finished marking every channel it is
    * going to hydrate.
    *
-   * Needed because `ChatView` resolves its own desk list independently of the
+   * Needed because `RoomView` resolves its own desk list independently of the
    * shell's, and can therefore render a channel before the shell's pass has
    * reached it. Without this, that window has no entry in `byChannel` and looks
    * exactly like a channel nothing will ever hydrate.
@@ -350,7 +350,7 @@ export interface HistoryHydration {
 export const HISTORY_UNSTARTED: HistoryHydration = { discovered: false, byChannel: {} };
 
 /**
- * No rehydration is happening or ever will — for a `ChatView` mounted without a
+ * No rehydration is happening or ever will — for a `RoomView` mounted without a
  * shell behind it. The distinction from {@link HISTORY_UNSTARTED} is the whole
  * point: this one resolves every channel to "ready", so a caller that does not
  * track hydration renders exactly as it did before, rather than spinning on a
@@ -582,7 +582,7 @@ export function isOperatorChannelDto(value: unknown): value is OperatorChannelDt
  * before reaching here — this function does not re-check, and `operatorChannelFrom`
  * reading `dto.description` off a shape that only satisfied the type assertion
  * (never the runtime one) is exactly the crash `isOperatorChannelDto`'s own doc
- * warns about. `ChatView`'s only production call site holds this invariant by
+ * warns about. `RoomView`'s only production call site holds this invariant by
  * construction: its `operator` state is set from `isOperatorChannelDto(dto) ?
  * dto : null` and this function is only ever called on the non-null branch.
  */
@@ -774,7 +774,7 @@ export function channelIdForThread(
   // A teammate whose id *is* a General spelling cannot be addressed bare — the
   // fold above answers first and the company's line wins, which is deliberate
   // (`chat_responder("main") == None`, "a teammate called `main` does not
-  // inherit the company's line"). `ChatView` therefore addresses that one DM as
+  // inherit the company's line"). `RoomView` therefore addresses that one DM as
   // `dm:<id>`, which the host does answer. The frames it emits carry that
   // prefixed key, so without this arm they resolved to no channel at all and
   // the reply never appeared — the DM was writable and unreadable at once.
@@ -795,7 +795,7 @@ export function channelIdForThread(
  * One place, because two answers to "where does the main line render" is
  * precisely how a message ends up somewhere nothing is listening.
  *
- * Exported because `ChatView` folds a General *address* onto it too: the host
+ * Exported because `RoomView` folds a General *address* onto it too: the host
  * accepts four spellings for this one conversation (`isGeneralChannel`), and
  * every other consumer of that fold — `generalAwareChannel`, `channelForThread`,
  * `mention-badge` — already applies it. Routing was the one place that did not,

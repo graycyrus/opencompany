@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
  * the queued thread first and the channel rendered "Queued…" over live work.
  *
  * Asserted against the source because the value is computed inline in
- * `ChatView`'s render from three pieces of shell state; the alternative is
+ * `RoomView`'s render from three pieces of shell state; the alternative is
  * mounting the view with a hand-built `openTurns` map, which tests React's
  * wiring rather than the precedence rule.
  */

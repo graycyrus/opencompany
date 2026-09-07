@@ -94,7 +94,7 @@ export function generalAwareChannel(
  * frame carries.
  *
  * The console's live-state maps — `liveStepsByThread`, `receiptByThread` — are
- * keyed in the **host-thread** namespace: `ChatView` reads them by
+ * keyed in the **host-thread** namespace: `RoomView` reads them by
  * `dmThreadId(member)` and `onSendStart` arms them under that same id. So the
  * default is to pass the frame's own id through untouched, and only General
  * spellings are resolved.

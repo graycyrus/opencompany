@@ -413,8 +413,8 @@ export function MessageTimeline({
             redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
             latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
             // Issue #1986: read off `channel.system` here rather than threaded
-            // down from `ChatView`, because this component already holds the
-            // channel and that flag *is* the predicate `ChatView` derives its
+            // down from `RoomView`, because this component already holds the
+            // channel and that flag *is* the predicate `RoomView` derives its
             // own `readOnly` from — a second prop carrying the same fact through
             // the same tree is one more thing that can disagree with it. See
             // `MessageRow`'s `readOnly` doc for what it takes away (adding a
@@ -598,9 +598,9 @@ function ChannelIntro({
           of conversation reads as data loss.
 
           Not on the read-only Operator feed (`channel.system`, the same
-          predicate `ChatView` derives `readOnly` from). Neither opening exists
+          predicate `RoomView` derives `readOnly` from). Neither opening exists
           there: "Give the team a brief" prefills a composer that channel does
-          not render, and "Add people" opens a members pane `ChatView` gates
+          not render, and "Add people" opens a members pane `RoomView` gates
           off on the same flag — so both were controls offering an action that
           could not happen, under a notice saying there is nothing to reply to
           here. */}

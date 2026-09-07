@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest";
  * and was removed. The seam button is what survives the switch, and it is what
  * catches the focus.
  *
- * A jsdom render of `ChatView` cannot prove this — it needs the whole client
+ * A jsdom render of `RoomView` cannot prove this — it needs the whole client
  * and every hook. So this guards the *wiring contract* the fix rests on, the
  * same source-contract idiom as `responsive-two-rail-band.test.ts`: the rail
  * fires `onExpand`, and the view hands focus to the one collapse control that

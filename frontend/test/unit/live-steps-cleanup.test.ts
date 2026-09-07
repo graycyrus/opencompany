@@ -35,7 +35,7 @@ describe("a threaded query's rows have somewhere to render", () => {
     expect(threadPanel).toContain("<StepTimeline steps={[...liveSteps]} defaultOpen />");
   });
 
-  it("ChatView supplies it, so the panel is never handed an empty map", () => {
+  it("RoomView supplies it, so the panel is never handed an empty map", () => {
     expect(chatView).toMatch(/<ThreadPanel[\s\S]{0,600}liveStepsByMessage=\{liveStepsByMessage\}/);
   });
 });

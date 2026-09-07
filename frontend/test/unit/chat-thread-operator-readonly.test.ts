@@ -20,7 +20,7 @@ import { operatorChannelFrom } from "@/views/room/model";
  * Issue #1757 rework: the Operator channel is its own surface now (`GET
  * {scope}/operator-channel`), not an entry `list_desks` returns, so the
  * fixture channel is built through `operatorChannelFrom` — the same
- * projection `ChatView` uses — rather than a hand-rolled literal.
+ * projection `RoomView` uses — rather than a hand-rolled literal.
  *
  * # The read-only answer changed: no composer, not a disabled one
  *

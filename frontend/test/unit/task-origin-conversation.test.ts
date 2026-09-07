@@ -79,7 +79,7 @@ describe("where a card's origin conversation lives", () => {
  * The resolved thread id has to actually ride the jump, not just come back
  * from `originConversation` — pinned by source-text, the idiom
  * `chat-general-channel.test.ts` already uses for wiring a full `AppShell` /
- * `ChatView` render is too heavy to stand up.
+ * `RoomView` render is too heavy to stand up.
  */
 describe("the origin thread rides the card → Room jump, not just the channel", () => {
   const here = dirname(fileURLToPath(import.meta.url));

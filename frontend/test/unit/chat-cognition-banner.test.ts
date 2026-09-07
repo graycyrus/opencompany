@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { CapabilityStatusDto, CognitionState } from "@/api/types";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { ChatView } from "@/views/RoomView";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * Issues #1734 / #1735 — chat says so, before the first echo, when this company
@@ -33,7 +33,7 @@ let root: Root;
  * A client that answers the capability read, and answers everything else with
  * an empty list.
  *
- * A `Proxy` rather than an enumerated stub on purpose. `ChatView` boots eight
+ * A `Proxy` rather than an enumerated stub on purpose. `RoomView` boots eight
  * unrelated reads — roster, viewer, people, desks, mentionables, history,
  * read-state, presence — and naming each one here would make this test a
  * standing record of that list, failing on the next read anyone adds for a
@@ -80,7 +80,7 @@ async function render(cognition: CognitionState | undefined | "reject"): Promise
     root.render(
       createElement(ConnectionScopeProvider, {
         scope: { connection: "c1", company: "acme" },
-        children: createElement(ChatView, {
+        children: createElement(RoomView, {
           client,
           company: "acme",
           sub: "main",
@@ -248,7 +248,7 @@ describe("the chat cognition banner", () => {
       root.render(
         createElement(ConnectionScopeProvider, {
           scope: { connection: "c1", company: "acme" },
-          children: createElement(ChatView, {
+          children: createElement(RoomView, {
             client,
             company: "acme",
             sub: "main",
@@ -315,7 +315,7 @@ describe("the chat cognition banner", () => {
    * The answer can go stale under a console doing nothing at all: another admin,
    * or this operator in a second window, configures inference and rebuilds the
    * runtime while this chat sits open (codex, PR #1740). The operator's own trip
-   * to Settings already re-reads — the shell mounts and unmounts `ChatView` per
+   * to Settings already re-reads — the shell mounts and unmounts `RoomView` per
    * route — but nothing covered the cross-session case, and a standing banner
    * insisting that a company which now thinks perfectly well cannot is the same
    * class of wrong claim this surface exists to remove.
@@ -343,7 +343,7 @@ describe("the chat cognition banner", () => {
       root.render(
         createElement(ConnectionScopeProvider, {
           scope: { connection: "c1", company: "acme" },
-          children: createElement(ChatView, {
+          children: createElement(RoomView, {
             client,
             company: "acme",
             sub: "main",
@@ -381,7 +381,7 @@ describe("the chat cognition banner", () => {
    * A company switch must not show the previous company's verdict, not even for
    * the frame before the new read lands (CodeRabbit review of PR #1740).
    *
-   * `ChatView` stays mounted when `company` changes, and its capability read is
+   * `RoomView` stays mounted when `company` changes, and its capability read is
    * a passive effect — which runs *after* React has committed the DOM and the
    * browser has painted. Clearing the state inside that effect is therefore too
    * late by construction: the operator sees company A's "teammates can't think"
@@ -421,7 +421,7 @@ describe("the chat cognition banner", () => {
         createElement(ConnectionScopeProvider, {
           scope: { connection: "c1", company },
           children: createElement(Fragment, null, [
-            createElement(ChatView, {
+            createElement(RoomView, {
               key: "chat",
               client,
               company,

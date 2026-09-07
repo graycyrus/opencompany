@@ -82,7 +82,7 @@ export function ChannelRail({
   // collapsed branch below unmounts every `Section`. Held inside them, folding
   // a section and then collapsing the rail would reopen it on expand — the
   // density toggle must not discard the operator's organization. Absent means
-  // "open": the default is a fully expanded list. `ChatView` passes the state
+  // "open": the default is a fully expanded list. `RoomView` passes the state
   // in so both rail instances share one fold set across the `lg` breakpoint;
   // a standalone rail (tests, other hosts) keeps it local to the instance.
   const [internalOpenSections, setInternalOpenSections] = useState<Record<string, boolean>>({});

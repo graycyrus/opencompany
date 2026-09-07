@@ -121,7 +121,7 @@ const pane = (page: Page) => page.getByRole("complementary").last();
 /**
  * Open the pane if it is shut.
  *
- * Not a plain click: the pane's open state lives in `ChatView`, and switching
+ * Not a plain click: the pane's open state lives in `RoomView`, and switching
  * channels is a hash-only navigation that does not remount it — so a second
  * click would close what the first opened.
  */

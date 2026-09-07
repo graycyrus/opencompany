@@ -56,7 +56,7 @@ export interface NavSection {
   /**
    * Renders in place of `children`, for a section whose contents are live data
    * rather than a fixed list. Room is the only one: its contents are the
-   * channel list, which `ChatView` portals in (`room-rail.tsx`).
+   * channel list, which `RoomView` portals in (`room-rail.tsx`).
    */
   slot?: "room";
 }
@@ -96,7 +96,7 @@ export const NAV_SECTIONS: NavSection[] = [
   // says what they want and where their company answers — the thing they came
   // to do — so it is what opens, and it is first.
   //
-  // Its contents are not a table here: they are the channel list `ChatView`
+  // Its contents are not a table here: they are the channel list `RoomView`
   // already renders, portalled into the slot below. See `room-rail.tsx`.
   { view: "chat", label: "Room", icon: MessagesSquare, slot: "room" },
   // The company itself: who is in it, what they are working on, what it keeps,
@@ -282,9 +282,9 @@ export function SidebarNavigation({
   );
 
   const active = sectionOwning(view);
-  // Room's contents are not a table here, they are whatever `ChatView` portals
-  // in — so they exist only on the view `ChatView` renders on. A Room-owned
-  // view that does not mount `ChatView` would draw the slot with nothing in it.
+  // Room's contents are not a table here, they are whatever `RoomView` portals
+  // in — so they exist only on the view `RoomView` renders on. A Room-owned
+  // view that does not mount `RoomView` would draw the slot with nothing in it.
   const roomContents = active?.slot === "room" && view === "chat";
   const hasContents = Boolean(active && (active.children || roomContents));
 
@@ -395,7 +395,7 @@ export function SidebarNavigation({
             )}
 
             {/* Room's contents. The node is the portal target; what lands in it
-                is `ChatView`'s own `ChannelRail`, unchanged — see
+                is `RoomView`'s own `ChannelRail`, unchanged — see
                 `room-rail.tsx`. It scrolls rather than truncating behind a
                 "show all": a channel list is scanned for a name you already
                 know, and hiding its tail behind a control makes the one thing

@@ -173,7 +173,7 @@ describe("section folds survive a rail collapse/expand (P2 review)", () => {
   });
 
   it("shares one fold set across the desktop and sub-lg rail instances", () => {
-    // `ChatView` renders two `ChannelRail`s (sub-`lg` and desktop) and hands
+    // `RoomView` renders two `ChannelRail`s (sub-`lg` and desktop) and hands
     // both the same controlled disclosure state so crossing the breakpoint
     // keeps the operator's folds (codex P2 review). This harness mirrors that
     // wiring; folding on one rail must fold the same section on the other.

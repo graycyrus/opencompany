@@ -323,7 +323,7 @@ describe("the rendered sidebar", () => {
     render("chat");
     expect(container.querySelectorAll("[data-testid='room-rail-slot']")).toHaveLength(1);
 
-    // The slot is the portal target `ChatView` renders into. Absent while
+    // The slot is the portal target `RoomView` renders into. Absent while
     // another section is open, which is what makes the list Room's contents
     // rather than standing furniture.
     render("company");

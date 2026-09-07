@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
  * A completed background task must not have its toast suppressed by a
  * transcript the operator cannot actually see (#1768 codex review).
  *
- * Below `lg`, selecting the channel rail hides `ChatView`'s transcript
+ * Below `lg`, selecting the channel rail hides `RoomView`'s transcript
  * (`chatPaneVisible === false`) while leaving it mounted — but
  * `activeChatChannelRef` in the shell only updates from `onChannelViewed`,
  * which stops firing the moment the pane hides. So the ref keeps naming
@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
  * A jsdom render of `app-shell` cannot prove this — it needs the whole
  * client and every hook, the same reason `chat-rail-focus.test.ts` and
  * `responsive-two-rail-band.test.ts` fall back to a source-contract check.
- * This guards the wiring the fix rests on: ChatView reports pane visibility
+ * This guards the wiring the fix rests on: RoomView reports pane visibility
  * on its own channel, separate from `onChannelViewed`'s channel-identity
  * report, and the shell's origin check consults it before trusting the
  * remembered channel id.
@@ -33,7 +33,7 @@ describe("a hidden mobile chat pane cannot suppress a completion toast (#1768)",
   const chatView = read("views/RoomView.tsx");
   const appShell = read("components/app-shell.tsx");
 
-  it("ChatView reports chatPaneVisible on its own dedicated channel", () => {
+  it("RoomView reports chatPaneVisible on its own dedicated channel", () => {
     // Not folded into `onChannelViewed`, which only fires — and only ever
     // fired — while the pane is visible, so it cannot report the hide edge.
     expect(chatView).toContain("onChatPaneVisibilityChange?.(chatPaneVisible);");
@@ -50,7 +50,7 @@ describe("a hidden mobile chat pane cannot suppress a completion toast (#1768)",
     );
   });
 
-  it("wires the shell's tracker to ChatView's report", () => {
+  it("wires the shell's tracker to RoomView's report", () => {
     expect(appShell).toContain("onChatPaneVisibilityChange={onChatPaneVisibilityChange}");
   });
 
@@ -86,7 +86,7 @@ describe("a closed thread panel cannot suppress a completion toast (#1890)", () 
 
   it("the shell tracks which thread panel is open", () => {
     expect(appShell).toContain("const openThreadRootRef = useRef<string | null>(null);");
-    // Fed from `onChannelViewed`, whose effect in ChatView lists `openThreadId`
+    // Fed from `onChannelViewed`, whose effect in RoomView lists `openThreadId`
     // — so the ref tracks the panel rather than lagging one open behind it.
     expect(appShell).toContain("openThreadRootRef.current = openThreadId ?? null;");
     expect(chatView).toContain("openThreadId,");

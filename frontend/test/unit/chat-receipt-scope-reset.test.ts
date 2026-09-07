@@ -117,30 +117,30 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     expect(appShell).toContain("const receiptGenRef = useRef(0);");
     expect(appShell).toMatch(/const gen = \+\+receiptGenRef\.current;/);
     // Stamped onto the receipt it arms, and handed back to the caller so
-    // `ChatView.send` can thread it through whichever terminal outcome fires.
+    // `RoomView.send` can thread it through whichever terminal outcome fires.
     expect(appShell).toMatch(/\[threadId\]: \{ startedAt: now, lastFrameAt: now, gen \},/);
     expect(appShell).toMatch(/return gen;\s*\n\s*\}, \[\]\);/);
   });
 });
 
 /**
- * `ChatView`'s send surface (issue #1935 review, codex 3892702774).
+ * `RoomView`'s send surface (issue #1935 review, codex 3892702774).
  *
- * `AppShell` owns `receiptByThread` and hands `ChatView` the
+ * `AppShell` owns `receiptByThread` and hands `RoomView` the
  * `onSendStart`/`onSendEnd`/`onSendDetached`/`onSendFailed` callbacks that
- * write it. The send itself lives in `ChatView`'s `send` callback, which —
+ * write it. The send itself lives in `RoomView`'s `send` callback, which —
  * like `AppShell` — sits inside a large host component this suite declines to
  * mount for a wiring assertion.
  *
  * `shouldClearReceipt`'s own suite in `chat-live-receipt.test.ts` proves the
- * *semantics* directly. What this block locks down is that `ChatView` actually
+ * *semantics* directly. What this block locks down is that `RoomView` actually
  * *wires* into them: captures `onSendStart`'s return value and forwards it to
  * every terminal call, so a settle arriving after a company switch is refused
  * by generation rather than deleting the new company's receipt.
  */
 const chatViewTsx = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
-describe("ChatView's send surface generation-tags its receipt clears", () => {
+describe("RoomView's send surface generation-tags its receipt clears", () => {
   it("captures onSendStart's return value instead of discarding it", () => {
     // The pre-fix shape was a bare `onSendStart?.(stateKey);` statement — the
     // call happened, but nothing captured what it returned, so every terminal

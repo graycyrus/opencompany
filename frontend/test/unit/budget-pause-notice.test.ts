@@ -302,7 +302,7 @@ describe("latestBudgetPauseMessageIdByAgent", () => {
 });
 
 /**
- * Issue #1846 review (Codex #3868962374) — **the regression.** `ChatView`'s
+ * Issue #1846 review (Codex #3868962374) — **the regression.** `RoomView`'s
  * "Add credits & resend" CTA used to re-read the live marker inside its own
  * click handler and send THAT id — which sounds like it binds the click to a
  * specific marker, but the read happens at click time, so the comparison is
@@ -315,7 +315,7 @@ describe("latestBudgetPauseMessageIdByAgent", () => {
  * of the fix: read the marker back once, at render time (the moment a notice
  * becomes the latest for its agent), and send THAT cached id at click time
  * instead of re-reading live. No component-test harness exists in this
- * project to mount `ChatView`'s effect/click-handler directly (see this
+ * project to mount `RoomView`'s effect/click-handler directly (see this
  * file's header doc comment), so these pin the logic they are built from.
  */
 describe("mergeBudgetPauseMarkerRead", () => {
