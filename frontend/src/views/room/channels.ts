@@ -24,8 +24,7 @@ import {
   isGeneralChannel,
   type Desk,
 } from "@/lib/desks";
-import { initials as type TeamMember } from "@/lib/team";
-import type { } from "@/api/tasks";
+import type { TeamMember } from "@/lib/team";
 import type { Transcripts } from "./timeline";
 
 /**
