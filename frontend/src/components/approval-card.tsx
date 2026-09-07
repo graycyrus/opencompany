@@ -80,7 +80,7 @@ import {
   deskFromDto,
   dmChannelId,
   memberForThread,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,

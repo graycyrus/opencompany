@@ -55,7 +55,7 @@ import {
 } from "@/api/runs";
 import { listTasks, type Task } from "@/api/tasks";
 import type { DeskDto } from "@/api/types";
-import { deskFromDto } from "@/views/chat/model";
+import { deskFromDto } from "@/views/room/model";
 import { listWorkflows } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

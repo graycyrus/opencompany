@@ -5,8 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TeamMember } from "@/lib/team";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import { operatorChannelFrom } from "@/views/chat/model";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import { operatorChannelFrom } from "@/views/room/model";
 
 /**
  * Issue #1757 follow-up (codex + CodeRabbit review on the Operator channel

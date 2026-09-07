@@ -31,7 +31,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 let container: HTMLDivElement;
 let root: Root;

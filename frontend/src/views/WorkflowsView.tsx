@@ -92,7 +92,7 @@ import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 // Issue #1002: the run drawer decides a run's parked cards in place, using the
 // same shared approval card the Approvals page and the inline chat card use.
 import { useAskerNames } from "@/components/approval-card";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 import { cn } from "@/lib/utils";
 import { settingsHref } from "@/views/settings-pages";
 import { startVisiblePolling } from "@/lib/visible-poll";

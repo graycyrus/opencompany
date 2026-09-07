@@ -138,7 +138,7 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
  * every terminal call, so a settle arriving after a company switch is refused
  * by generation rather than deleting the new company's receipt.
  */
-const chatViewTsx = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatViewTsx = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 describe("ChatView's send surface generation-tags its receipt clears", () => {
   it("captures onSendStart's return value instead of discarding it", () => {

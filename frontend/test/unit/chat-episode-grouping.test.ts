@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
 import { foldEpisodes } from "@/lib/hive/episode";
-import { buildTimeline, buildTimelineItems, type Channel } from "@/views/chat/model";
+import { buildTimeline, buildTimelineItems, type Channel } from "@/views/room/model";
 
 const CHANNEL: Channel = {
   id: "solvers",

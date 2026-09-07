@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AttachmentDto } from "@/api/types";
-import { MessageComposer } from "@/views/chat/MessageComposer";
+import { MessageComposer } from "@/views/room/MessageComposer";
 
 /**
  * Issue #1682: the composer's paperclip, wired at last.

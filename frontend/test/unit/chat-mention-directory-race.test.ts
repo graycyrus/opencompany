@@ -23,7 +23,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("mention-directory reloads discard stale completions", () => {
-  const chatView = read("views/ChatView.tsx");
+  const chatView = read("views/RoomView.tsx");
 
   it("shares one epoch token between the mount fetch and reloadDirectory", () => {
     // The token lives next to the directory it guards, not inside either

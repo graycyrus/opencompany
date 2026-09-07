@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { liveFrameThreadKey, MAIN_THREAD_ID } from "@/lib/chat";
-import { dmThreadId } from "@/views/chat/model";
+import { dmThreadId } from "@/views/room/model";
 import type { TeamMember } from "@/lib/team";
 
 /**

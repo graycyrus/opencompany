@@ -81,8 +81,8 @@ import {
   type TaskTab,
 } from "@/lib/task-output";
 import { useAskerNames } from "@/components/approval-card";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
-import type { DecidedApproval } from "@/views/chat/model";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
+import type { DecidedApproval } from "@/views/room/model";
 import {
   blockingTaskApprovals,
   decidingForTask,

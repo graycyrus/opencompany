@@ -5,7 +5,7 @@ import {
   HISTORY_UNTRACKED,
   historyReady,
   type HistoryHydration,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * The question issue #934 was filed over: may the timeline say this channel is

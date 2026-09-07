@@ -17,7 +17,7 @@ import type { PresenceStatus } from "@/lib/awareness";
 import { usd } from "@/lib/money";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import { PresenceDot } from "@/views/chat/PresenceDot";
+import { PresenceDot } from "@/views/room/PresenceDot";
 
 interface Props {
   /**

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { CapabilityStatusDto, CognitionState } from "@/api/types";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { ChatView } from "@/views/ChatView";
+import { ChatView } from "@/views/RoomView";
 
 /**
  * Issues #1734 / #1735 — chat says so, before the first echo, when this company

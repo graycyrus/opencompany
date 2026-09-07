@@ -6,7 +6,7 @@ import {
   latestBudgetPauseMessageIdByAgent,
   mergeBudgetPauseMarkerRead,
   type Transcripts,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 const toasts = vi.hoisted(() => ({
   base: vi.fn(),

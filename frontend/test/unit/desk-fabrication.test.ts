@@ -11,7 +11,7 @@ import { GENERAL_CHANNEL } from "@/lib/desks";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { threadsFromDesks } from "@/lib/threads";
-import { buildChannels } from "@/views/chat/model";
+import { buildChannels } from "@/views/room/model";
 
 /**
  * A company with no desks is shown as a company with no desks.
@@ -104,7 +104,7 @@ describe("a company with no desks (empty /desks answer)", () => {
 
 describe("no surface fabricates desks over an answered read", () => {
   it("ChatView keeps the host's list, and falls back only on a 404", () => {
-    const src = read("views/ChatView.tsx");
+    const src = read("views/RoomView.tsx");
 
     expect(src).toContain("setDesks(dtos.map(deskFromDto));");
     expect(src).not.toContain("dtos.length ? dtos.map(deskFromDto) : defaultDesks()");
@@ -139,7 +139,7 @@ describe("no surface fabricates desks over an answered read", () => {
   });
 
   it("buildChannels defaults to no desks rather than to the trio", () => {
-    const src = read("views/chat/model.ts");
+    const src = read("views/room/model.ts");
 
     expect(src).not.toContain("desks: Desk[] = defaultDesks()");
     expect(src).toContain("desks: Desk[] = []");
@@ -156,8 +156,8 @@ describe("defaultDesks itself", () => {
     const imports = (src: string) =>
       /import \{[^}]*\bdefaultDesks\b[^}]*\} from "@\/lib\/desks"/.test(src) ||
       /^\s*defaultDesks,$/m.test(src);
-    const callers = ["views/ChatView.tsx", "components/app-shell.tsx"];
-    const others = ["components/approval-card.tsx", "views/chat/model.ts"];
+    const callers = ["views/RoomView.tsx", "components/app-shell.tsx"];
+    const others = ["components/approval-card.tsx", "views/room/model.ts"];
 
     for (const file of callers) expect(imports(read(file)), file).toBe(true);
     for (const file of others) expect(imports(read(file)), file).toBe(false);

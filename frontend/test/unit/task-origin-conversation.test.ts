@@ -84,7 +84,7 @@ describe("where a card's origin conversation lives", () => {
 describe("the origin thread rides the card → Room jump, not just the channel", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const shell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
-  const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+  const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
   it("the shell carries the resolved thread id into the chat navigation's query", () => {
     expect(shell).toContain('navigate("chat", channelId, { thread: threadId ?? null })');

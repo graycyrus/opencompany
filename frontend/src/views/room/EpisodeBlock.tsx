@@ -5,7 +5,7 @@ import { BlindRoundBand } from "@/components/hive/BlindRoundBand";
 import { StandingsRail } from "@/components/hive/StandingsRail";
 import { VerdictCard } from "@/components/hive/VerdictCard";
 import { cn } from "@/lib/utils";
-import type { TimelineItem } from "@/views/chat/model";
+import type { TimelineItem } from "@/views/room/model";
 
 /**
  * One room, in the transcript.

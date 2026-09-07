@@ -7,7 +7,7 @@ import {
   channelSubtitle,
   channelTitle,
   type Channel,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * The second slot beside a chat title, and what it is allowed to say (issue

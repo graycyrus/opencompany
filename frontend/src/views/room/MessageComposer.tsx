@@ -17,7 +17,7 @@ import type { AttachmentDto } from "@/api/types";
 import { formatBytes } from "@/api/workspace";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { MentionPicker } from "@/views/chat/MentionPicker";
+import { MentionPicker } from "@/views/room/MentionPicker";
 import {
   activeMentionQuery,
   aliasSet,
@@ -31,7 +31,7 @@ import {
   stripCodeRegions,
   type Mention,
   type Mentionable,
-} from "@/views/chat/mentions";
+} from "@/views/room/mentions";
 
 interface Props {
   placeholder: string;

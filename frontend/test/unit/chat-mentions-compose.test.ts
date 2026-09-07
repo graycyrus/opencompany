@@ -16,7 +16,7 @@ import {
   utf8ByteLength,
   type Mention,
   type Mentionable,
-} from "@/views/chat/mentions";
+} from "@/views/room/mentions";
 
 /**
  * The composer half of @-mentions.

@@ -30,7 +30,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("a hidden mobile chat pane cannot suppress a completion toast (#1768)", () => {
-  const chatView = read("views/ChatView.tsx");
+  const chatView = read("views/RoomView.tsx");
   const appShell = read("components/app-shell.tsx");
 
   it("ChatView reports chatPaneVisible on its own dedicated channel", () => {
@@ -81,7 +81,7 @@ describe("a hidden mobile chat pane cannot suppress a completion toast (#1768)",
  * A source-contract check for the same reason the block above is one.
  */
 describe("a closed thread panel cannot suppress a completion toast (#1890)", () => {
-  const chatView = read("views/ChatView.tsx");
+  const chatView = read("views/RoomView.tsx");
   const appShell = read("components/app-shell.tsx");
 
   it("the shell tracks which thread panel is open", () => {

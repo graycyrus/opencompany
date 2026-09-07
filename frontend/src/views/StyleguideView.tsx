@@ -22,14 +22,14 @@ import { MoveChip } from "@/components/hive/MoveChip";
 import { StandingsRail } from "@/components/hive/StandingsRail";
 import { TopicChip } from "@/components/hive/TopicChip";
 import { VerdictCard } from "@/components/hive/VerdictCard";
-import { EpisodeBlock } from "@/views/chat/EpisodeBlock";
+import { EpisodeBlock } from "@/views/room/EpisodeBlock";
 import { HiveGrammarPanel } from "@/views/company/hive/HiveGrammarPanel";
 import { CommsGraphView } from "@/views/comms/CommsGraphView";
 import { applyObservations, structuralGraph } from "@/views/comms/model";
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskHiveDto } from "@/api/types";
-import { MessageRow } from "@/views/chat/MessageRow";
-import { buildTimeline, buildTimelineItems, type Channel, type TimelineItem } from "@/views/chat/model";
+import { MessageRow } from "@/views/room/MessageRow";
+import { buildTimeline, buildTimelineItems, type Channel, type TimelineItem } from "@/views/room/model";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,

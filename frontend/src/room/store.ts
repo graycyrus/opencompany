@@ -38,12 +38,12 @@ import { useSyncExternalStore } from "react";
 
 import type { TurnStep } from "@/api/types";
 import type { OpenTurn } from "@/lib/live-reply";
-import type { ChatReceipt } from "@/views/chat/ChatLiveReceipt";
+import type { ChatReceipt } from "@/views/room/ChatLiveReceipt";
 import {
   HISTORY_UNSTARTED,
   type HistoryHydration,
   type Transcripts,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /** A live tool row: a `TurnStep` plus the transient id its running→done flip uses. */
 export type LiveStep = TurnStep & { toolCallId?: string };

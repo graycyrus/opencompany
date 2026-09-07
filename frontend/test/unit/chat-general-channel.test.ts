@@ -22,7 +22,7 @@ import {
   directMessageForId,
   dmThreadId,
   memberForThread,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * The built-in `#general` channel (issue #1743).
@@ -320,7 +320,7 @@ describe("resolving a host thread to the general channel", () => {
    */
   it("addresses that one DM prefixed, and leaves every other bare", () => {
     const view = readFileSync(
-      new URL("../../src/views/ChatView.tsx", import.meta.url),
+      new URL("../../src/views/RoomView.tsx", import.meta.url),
       "utf8",
     );
     expect(view).toContain("dmThreadId(active.member)");
@@ -485,7 +485,7 @@ describe("isGeneralChannel", () => {
  */
 describe("ChatView offers no desk affordance on the built-in channel", () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+  const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
   // Collapsed so an assertion pins the wiring rather than the line wrapping
   // Prettier happens to choose for it.
   const source = chatView.replace(/\s+/g, " ");

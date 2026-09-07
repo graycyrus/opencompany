@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const appShell = readFileSync("src/components/app-shell.tsx", "utf8");
-const threadPanel = readFileSync("src/views/chat/ThreadPanel.tsx", "utf8");
-const chatView = readFileSync("src/views/ChatView.tsx", "utf8");
+const threadPanel = readFileSync("src/views/room/ThreadPanel.tsx", "utf8");
+const chatView = readFileSync("src/views/RoomView.tsx", "utf8");
 
 /**
  * The four gaps the Codex review on #2069 found in per-query live rows, each

@@ -22,7 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../", rel), "utf8");
 
 const appShell = read("src/components/app-shell.tsx");
-const messageTimeline = read("src/views/chat/MessageTimeline.tsx");
+const messageTimeline = read("src/views/room/MessageTimeline.tsx");
 
 /** Slice a `const <name> = useCallback(` body up to its dependency array. */
 function callbackBody(source: string, name: string, depsMarker: string): string {

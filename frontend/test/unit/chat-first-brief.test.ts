@@ -4,10 +4,10 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageComposer } from "@/views/chat/MessageComposer";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
+import { MessageComposer } from "@/views/room/MessageComposer";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
 import type { MessageIntent } from "@/api/tasks";
-import type { Channel } from "@/views/chat/model";
+import type { Channel } from "@/views/room/model";
 
 /**
  * First-run chat has one job: get an operator to make a request.

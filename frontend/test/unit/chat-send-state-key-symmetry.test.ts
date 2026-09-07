@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
  * which needs a POST to throw.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 describe("the send's live-state key is symmetric (CodeRabbit review on #2042)", () => {
   it("arms on stateKey", () => {

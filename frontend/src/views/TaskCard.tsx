@@ -60,8 +60,8 @@ import {
 } from "@/lib/task-approvals";
 import { extraOutputCount, primaryLink, type TaskLink } from "@/lib/task-output";
 import { cn } from "@/lib/utils";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
-import { approvalBatchKey } from "@/views/chat/model";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
+import { approvalBatchKey } from "@/views/room/model";
 import { tallyPrerequisites } from "./TaskPlanBrief";
 
 function priorityStyle(priority: string): string {

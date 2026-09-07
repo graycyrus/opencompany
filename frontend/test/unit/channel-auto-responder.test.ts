@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { DeskDto } from "@/api/types";
 import { buildOrgTree } from "@/lib/org";
 import type { TeamMember } from "@/lib/team";
-import { buildChannels, deskFromDto } from "@/views/chat/model";
+import { buildChannels, deskFromDto } from "@/views/room/model";
 
 /**
  * The console half of the `auto` channel (issue #1835).
@@ -128,8 +128,8 @@ describe("buildOrgTree", () => {
 describe("channel creation guards (#1872 review)", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
-  const dialog = () => read("views/chat/ChannelCreateDialog.tsx");
-  const chatView = () => read("views/ChatView.tsx");
+  const dialog = () => read("views/room/ChannelCreateDialog.tsx");
+  const chatView = () => read("views/RoomView.tsx");
 
   it("refuses to submit an auto channel with no members, with a field-level reason", () => {
     const src = dialog();

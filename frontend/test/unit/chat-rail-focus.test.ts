@@ -30,9 +30,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("expanding the compact rail preserves focus (issue #1340)", () => {
-  const rail = read("views/chat/ChannelRail.tsx");
-  const chatView = read("views/ChatView.tsx");
-  const chatHeader = read("views/chat/ChatHeader.tsx");
+  const rail = read("views/room/ChannelRail.tsx");
+  const chatView = read("views/RoomView.tsx");
+  const chatHeader = read("views/room/ChatHeader.tsx");
   const controls = read("components/sidebar-controls.tsx");
 
   it("keeps the compact rail's expand button the only expand affordance in the collapsed branch", () => {

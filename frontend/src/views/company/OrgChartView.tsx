@@ -81,7 +81,7 @@ import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
 import {
   AddMemberDialog,
   type NewMemberFields,
-} from "@/views/chat/AddMemberDialog";
+} from "@/views/room/AddMemberDialog";
 
 const SEAT_MIME = "application/x-opencompany-seat";
 

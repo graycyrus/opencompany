@@ -131,8 +131,8 @@ import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
-import { ChatView } from "@/views/ChatView";
-import { shouldClearReceipt } from "@/views/chat/ChatLiveReceipt";
+import { ChatView } from "@/views/RoomView";
+import { shouldClearReceipt } from "@/views/room/ChatLiveReceipt";
 import {
   channelForThread,
   channelIdForThread,
@@ -143,7 +143,7 @@ import {
   isOperatorChannelDto,
   type DecidedApproval,
   type HistoryStatus,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";

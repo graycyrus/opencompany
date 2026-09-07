@@ -11,7 +11,7 @@ import { fromHistory, mergeHistoryInOrder, type ChatMessage } from "@/lib/chat";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appShell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 describe("chat channel history polling", () => {
   it("wires each resolved channel fan-out to a disposable 5s visible-tab poll", () => {

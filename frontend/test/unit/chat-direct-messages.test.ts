@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TeamMember } from "@/lib/team";
-import { buildChannels, directMessageForId } from "@/views/chat/model";
+import { buildChannels, directMessageForId } from "@/views/room/model";
 
 function member(id: string, name: string): TeamMember {
   return {

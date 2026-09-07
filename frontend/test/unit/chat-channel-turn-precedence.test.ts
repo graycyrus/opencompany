@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
  * wiring rather than the precedence rule.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 describe("the channel's working row prefers a running turn", () => {
   it("selects a non-queued turn before falling back to a queued one", () => {
