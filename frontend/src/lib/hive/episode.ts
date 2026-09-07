@@ -134,6 +134,18 @@ export interface Episode {
   /** The quorum used to decide `carried`, and where it came from. */
   quorum: number;
   quorumDerived: boolean;
+  /**
+   * The turns this room may spend before it reports itself exhausted.
+   *
+   * What makes a *running* episode legible: without it a reader watching turns
+   * land has no idea whether the room is a third of the way through or about to
+   * run out, and "exhausted" arrives as a surprise. The host derives it from the
+   * membership when the manifest names none, and so does this — flagged, because
+   * a derived budget is a guess about a desk whose `hive` block the console may
+   * not have read.
+   */
+  turnBudget: number;
+  turnBudgetDerived: boolean;
   /** True while any of this was parsed rather than received as typed frames. */
   derived: boolean;
   /**
@@ -318,7 +330,7 @@ export function foldStandings(turns: EpisodeTurn[], quorum: number): TopicStandi
  */
 export function foldEpisodes(
   messages: ChatMessage[],
-  options: { quorum?: number; members?: number } = {},
+  options: { quorum?: number; members?: number; turnBudget?: number } = {},
 ): Episode[] {
   const rows = messages.filter((m) => !m.parentId);
   const hasRoom = rows.some(
@@ -330,6 +342,10 @@ export function foldEpisodes(
   if (!hasRoom) return [];
 
   const derivedQuorum = options.quorum === undefined;
+  const derivedBudget = options.turnBudget === undefined;
+  // Three turns per member, the host's own default: an opening position, a reply
+  // to the room, and a commit.
+  const turnBudget = options.turnBudget ?? Math.max(2, options.members ?? 3) * 3;
   const quorum =
     options.quorum ??
     Math.max(1, Math.min(Math.floor(Math.max(2, options.members ?? 3) / 2) + 1, Math.max(2, options.members ?? 3) - 1));
@@ -384,6 +400,8 @@ export function foldEpisodes(
       referrals: open.referrals,
       quorum,
       quorumDerived: derivedQuorum,
+      turnBudget,
+      turnBudgetDerived: derivedBudget,
       derived: true,
       disagrees: ending !== null && ending.kind !== ourKind,
       ambiguous: !open.sawOperator,
