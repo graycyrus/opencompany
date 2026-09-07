@@ -1290,6 +1290,25 @@ function DeliberationSection() {
 
             <div>
               <p className="mb-2 text-xs font-medium text-muted-foreground">
+                A room still talking
+              </p>
+              {/*
+                The same transcript with its closing report removed, so the block
+                renders the state an operator actually watches: turns landing
+                against a budget, with no verdict yet.
+              */}
+              {RUNNING_EPISODE ? (
+                <div className="rounded-lg border border-border bg-muted/20 p-3">
+                  <StandingsRail episode={RUNNING_EPISODE} />
+                  <div className="mt-2">
+                    <VerdictCard episode={RUNNING_EPISODE} />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
                 Who talks to whom
               </p>
               <CommsGraphView graph={FIXTURE_COMMS} />
@@ -1432,3 +1451,14 @@ const FIXTURE_COMMS = applyObservations(
     { kind: "speaking", agentId: "planner" },
   ],
 );
+
+/** The same desk, mid-argument: three turns in, nothing carried, no report. */
+const RUNNING_EPISODE = foldEpisodes(
+  [
+    { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
+    { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
+    { id: "h3", from: "company", channel: "critic", at: 2, text: "!propose #ship go straight to production" },
+    { id: "h4", from: "company", channel: "archivist", at: 3, text: "!evidence #stage ^1 the last rollout took checkout down" },
+  ] as ChatMessage[],
+  { quorum: 2, members: 6 },
+)[0];
