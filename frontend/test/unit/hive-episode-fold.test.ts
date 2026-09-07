@@ -367,6 +367,28 @@ describe("agreement with the host", () => {
   });
 });
 
+describe("the budget a running room is spending", () => {
+  it("derives three turns per member and says the number is derived", () => {
+    // What makes a room that is still talking legible: a bare turn count cannot
+    // say whether the desk is a third of the way through or one turn from
+    // reporting itself exhausted.
+    seq = 0;
+    const episodes = foldEpisodes([op("go"), turn("a", "!propose #x y")], { members: 6 });
+    expect(episodes[0].turnBudget).toBe(18);
+    expect(episodes[0].turnBudgetDerived).toBe(true);
+  });
+
+  it("honours a budget it was told, and stops calling it derived", () => {
+    seq = 0;
+    const episodes = foldEpisodes([op("go"), turn("a", "!propose #x y")], {
+      members: 6,
+      turnBudget: 9,
+    });
+    expect(episodes[0].turnBudget).toBe(9);
+    expect(episodes[0].turnBudgetDerived).toBe(false);
+  });
+});
+
 describe("honesty about the fold", () => {
   it("marks every parsed episode derived", () => {
     seq = 0;

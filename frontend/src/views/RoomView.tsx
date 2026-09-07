@@ -1219,7 +1219,9 @@ export function RoomView({
         // The seat count the host derives its quorum and turn budget from. Only
         // a hint: with no membership the fold falls back to its own default and
         // reports the number as derived rather than asserting one it cannot know.
-        { members: channel?.memberIds?.length },
+        {
+          members: channel?.memberIds?.length,
+        },
       ),
     [entries, channel?.memberIds],
   );
