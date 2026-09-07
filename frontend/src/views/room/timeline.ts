@@ -28,6 +28,8 @@ import {
 } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 import type { TaskStatus } from "@/api/tasks";
+import type { Channel } from "./channels";
+import { latestSettlePillIdByTaskId } from "./review";
 
 /**
  * A host desk (`GET .../desks`), shaped into the console's `Desk`. The host

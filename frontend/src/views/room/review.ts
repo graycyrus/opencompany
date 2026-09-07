@@ -27,6 +27,7 @@ import {
 } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 import type { TaskStatus } from "@/api/tasks";
+import type { Transcripts } from "./timeline";
 
 /**
  * A host desk (`GET .../desks`), shaped into the console's `Desk`. The host
@@ -49,7 +50,7 @@ import type { TaskStatus } from "@/api/tasks";
  * latest-pill gate to a reply anchor, not just to the row's Approve button) —
  * one definition of "latest" for both surfaces.
  */
-function latestSettlePillIdByTaskId(messages: readonly ChatMessage[]): Map<string, string> {
+export function latestSettlePillIdByTaskId(messages: readonly ChatMessage[]): Map<string, string> {
   const latest = new Map<string, string>();
   for (const m of messages) {
     if (m.from === "system" && m.taskId !== undefined) latest.set(m.taskId, m.id);
