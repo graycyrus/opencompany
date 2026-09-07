@@ -77,7 +77,7 @@ const HAND_ROLLED: Record<string, { count: number; why: string }> = {
       "act-on-it are different questions. It names the open workflow, not the page — " +
       "the page's own header is the index's, and that one is a `PageHeader`.",
   },
-  "chat/ChatHeader.tsx": {
+  "room/ChatHeader.tsx": {
     count: 1,
     why:
       "The channel bar. It names the open channel and changes as you switch, and its " +

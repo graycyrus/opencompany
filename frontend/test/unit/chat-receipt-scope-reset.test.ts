@@ -78,7 +78,7 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     // `room/store.ts`, and pinning the old statement text would have made this
     // spec fail for a change it has no opinion about.
     expect(appShell).toMatch(
-      /import \{[^}]*\bshouldClearReceipt\b[^}]*\} from "@\/views\/chat\/ChatLiveReceipt";/,
+      /import \{[^}]*\bshouldClearReceipt\b[^}]*\} from "@\/views\/room\/ChatLiveReceipt";/,
     );
     // The old body deleted whenever `prev[threadId]` was truthy, with no
     // generation check at all — this is the shape that let a stale
