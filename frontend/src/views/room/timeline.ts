@@ -10,24 +10,15 @@
 // The chat workspace's data model: channels, direct messages, and the grouping
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
-import type { ApprovalSummary, DeskDto, OperatorChannelDto, Verdict } from "@/api/types";
-import { isAnyBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
+import type { ApprovalSummary, Verdict } from "@/api/types";
 import {
   clearTaskCard,
-  generalAwareChannel,
-  MAIN_THREAD_ID,
   type ChatMessage,
   type Reaction,
 } from "@/lib/chat";
 import type { Episode, EpisodeTurn } from "@/lib/hive/episode";
-import {
-  deskClaimsGeneralChannel,
-  GENERAL_CHANNEL,
-  isGeneralChannel,
-  type Desk,
-} from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
-import type { TaskStatus } from "@/api/tasks";
+import type { } from "@/api/tasks";
 import type { Channel } from "./channels";
 import { latestSettlePillIdByTaskId } from "./review";
 
