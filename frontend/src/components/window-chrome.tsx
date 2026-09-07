@@ -38,20 +38,22 @@ export const WINDOW_CHROME_HEIGHT = 28;
 /**
  * Height of the console's own title row, in px.
  *
- * Not a taste value — it is derived from where macOS draws the traffic lights,
- * because the row centres its contents on the lights' centre line and the
- * lights are the one item in it this code cannot move.
+ * **A layout choice now, and it did not used to be.** While the shell drew its
+ * own chrome this number was derived: the traffic lights floated *inside* this
+ * row, the row centres its contents with `align-items: center`, and the lights
+ * were the one item in it this code could not move — so the height had to be
+ * exactly twice their centre line (`2 * (trafficLightPosition.y + 6)`) or they
+ * sat off it. Change one, change the other.
  *
- * `trafficLightPosition.y` in `tauri.conf.json` is 16 and the buttons are the
- * standard 12px, so they occupy y ∈ [16, 28] and their centre line is at 22.
- * A row of height H laid out with `align-items: center` centres its contents
- * at H/2, so H = 44 is the height — and the only height — at which the
- * switcher, the profile control and the lights share one centre line.
+ * The window is natively decorated again, so the lights are in the OS title bar
+ * above this row and that constraint is gone. 52 is kept because it is a good
+ * height for what the row actually carries — comfortably clear of the 36px
+ * switcher trigger, which the 28px sidebar strip this row replaced was not —
+ * and no longer because any pixel of it is owed to the OS.
  *
- * The two therefore move together: change `trafficLightPosition.y` to Y and
- * this must become `2 * (Y + 6)`, or the lights sit off the row's centre. It is
- * also comfortably taller than the 36px switcher trigger it carries, which
- * 28px — the height of the sidebar strip this row replaced — was not.
+ * The derivation is recorded rather than deleted because restoring
+ * `titleBarStyle: "Overlay"` restores the constraint with it: this must go back
+ * to `2 * (trafficLightPosition.y + 6)` in the same change.
  */
 export const WINDOW_TITLE_BAR_HEIGHT = 52;
 
