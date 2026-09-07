@@ -139,7 +139,10 @@ describe("no surface fabricates desks over an answered read", () => {
   });
 
   it("buildChannels defaults to no desks rather than to the trio", () => {
-    const src = read("views/room/model.ts");
+    // `channels.ts`, not `model.ts`: the model was split into three focused
+    // modules and `model.ts` is now only a barrel re-exporting them, so the
+    // declaration this asserts on lives with the rest of the channel code.
+    const src = read("views/room/channels.ts");
 
     expect(src).not.toContain("desks: Desk[] = defaultDesks()");
     expect(src).toContain("desks: Desk[] = []");
@@ -157,7 +160,7 @@ describe("defaultDesks itself", () => {
       /import \{[^}]*\bdefaultDesks\b[^}]*\} from "@\/lib\/desks"/.test(src) ||
       /^\s*defaultDesks,$/m.test(src);
     const callers = ["views/RoomView.tsx", "components/app-shell.tsx"];
-    const others = ["components/approval-card.tsx", "views/room/model.ts"];
+    const others = ["components/approval-card.tsx", "views/room/channels.ts"];
 
     for (const file of callers) expect(imports(read(file)), file).toBe(true);
     for (const file of others) expect(imports(read(file)), file).toBe(false);
