@@ -1,4 +1,10 @@
-# Chat — the workspace
+# Room — the workspace
+
+The console calls this surface **Room**; the view id and every minted address
+stay `chat`, because a view id is an address and renaming a row is not a reason
+to break `#/chat/<channelId>` links (`docs/spec/runtime/console-sections.md`,
+"Labels and view ids are allowed to differ"). The directory and the components
+took the label; the URLs did not.
 
 `#/chat` is a channel-and-DM workspace: a channel rail, a threaded timeline, a
 composer, an optional thread panel, and an optional member pane. It replaces
@@ -224,7 +230,7 @@ start of your direct message with …" — while the first was true, so reloadin
 DM with months of history rendered it as brand new for as long as the fetch took
 (issue #934). Nothing was lost; it just read exactly like it had been.
 
-`HistoryHydration` in `model.ts` is the missing fact, and `historyReady()` is
+`HistoryHydration` in `timeline.ts` is the missing fact, and `historyReady()` is
 the one place that reads it:
 
 | State | May the intro claim "this is the start"? |
@@ -296,7 +302,11 @@ chart's desk level, since no desk can name a parent desk. See
 
 | | |
 |---|---|
-| `model.ts` | Channels, senders, timeline grouping, formatting. All pure. |
+| `channels.ts` | What a channel is: desks, DMs, `#general`, the Operator feed, and the id grammar. Pure. |
+| `timeline.ts` | Senders, hydration, grouping, the timeline items (messages, approvals, episodes), reactions. Pure. |
+| `review.ts` | A card's lifecycle inside a conversation: the settle pill a verdict hangs off, and the budget-pause markers. Pure. |
+| `model.ts` | A barrel re-exporting the three above, so one import address still reaches all of it. Declares nothing. |
+| `EpisodeBlock.tsx` | One deliberation: the blind round, the turns, the standings, the verdict. |
 | `ChannelRail.tsx` | The channel/DM list, with collapsible sections. |
 | `ChatHeader.tsx` | The bar above the timeline. |
 | `MessageTimeline.tsx` | The scroll body: day dividers, channel intro, loading skeleton, typing row. |
@@ -340,7 +350,7 @@ image.
 A DM is where seeding it wrong bites hardest: the rail row and `ChatHeader`
 sit on screen together, and seeding them differently would put two faces on
 one teammate — worse than the generic glyph the header drew before issue #1170.
-Both go through `dmFace(channel)` in `model.ts`, which reads
+Both go through `dmFace(channel)` in `channels.ts`, which reads
 `channel.member.avatar`; a channel and a DM with no roster entry get `null`
 there and wear a glyph (`#`, `Lock`, `CircleDot`) instead, because neither has
 one person behind it. The header draws its tile at 24px, the floor below
