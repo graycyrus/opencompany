@@ -4,7 +4,7 @@ const p = await b.newPage({ viewport: { width: 1000, height: 1400 } });
 const errs=[]; p.on("pageerror", e=>errs.push(String(e)));
 await p.goto("http://localhost:5199/#/styleguide", { waitUntil: "networkidle" });
 await p.waitForTimeout(900);
-const label = p.locator("p", { hasText: "In the transcript" }).first();
+const label = p.locator("p", { hasText: "A room still talking" }).first();
 await label.scrollIntoViewIfNeeded();
 await p.waitForTimeout(300);
 await label.locator("xpath=..").screenshot({ path: process.argv[2] });
