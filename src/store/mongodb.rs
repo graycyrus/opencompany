@@ -877,6 +877,11 @@ impl CompanyStore for MongoStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_agent_edits: overlay.agent_edits,
+            // Off the blob, for the reason the filesystem and SQLite backends
+            // read it that way: the write side persists it, so defaulting here
+            // would drop an installed move grammar on every load — and on this
+            // backend that is a hosted tenant losing it.
+            overlay_desk_hive: overlay.desk_hive,
             overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_tool_grants: overlay.tool_grants,
