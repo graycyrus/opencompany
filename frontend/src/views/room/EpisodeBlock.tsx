@@ -91,7 +91,8 @@ export function EpisodeBlock({
             <ChevronRight aria-hidden className="size-3.5" />
           )}
           <Users aria-hidden className="size-3.5" />
-          The desk deliberated
+          {/* Present tense while the room is still talking. */}
+          {running ? "The desk is deliberating" : "The desk deliberated"}
         </button>
         {/*
           Turns against the budget, not a bare count.
