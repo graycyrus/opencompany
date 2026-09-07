@@ -1297,14 +1297,28 @@ function DeliberationSection() {
                 renders the state an operator actually watches: turns landing
                 against a budget, with no verdict yet.
               */}
-              {RUNNING_EPISODE ? (
-                <div className="rounded-lg border border-border bg-muted/20 p-3">
-                  <StandingsRail episode={RUNNING_EPISODE} />
-                  <div className="mt-2">
-                    <VerdictCard episode={RUNNING_EPISODE} />
-                  </div>
-                </div>
-              ) : null}
+              {RUNNING_ITEMS.map((item) =>
+                item.kind === "episode" ? (
+                  <EpisodeBlock
+                    key={item.key}
+                    item={item}
+                    renderRow={(row: TimelineItem) =>
+                      row.kind === "message" ? (
+                        <MessageRow
+                          key={row.key}
+                          entry={row.entry}
+                          threadOpen={false}
+                          onOpenThread={() => {}}
+                          onReact={() => {}}
+                          onDismissCard={() => {}}
+                          dismissingCardId={null}
+                          turn={item.turnByMessageId[row.entry.message.id]}
+                        />
+                      ) : null
+                    }
+                  />
+                ) : null,
+              )}
             </div>
 
             <div>
@@ -1453,7 +1467,26 @@ const FIXTURE_COMMS = applyObservations(
 );
 
 /** The same desk, mid-argument: three turns in, nothing carried, no report. */
-const RUNNING_EPISODE = foldEpisodes(
+const RUNNING_ROWS: ChatMessage[] = [
+  { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
+  { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
+  { id: "h3", from: "company", channel: "critic", at: 2, text: "!propose #ship go straight to production" },
+  { id: "h4", from: "company", channel: "archivist", at: 3, text: "!evidence #stage ^1 the last rollout took checkout down" },
+];
+const RUNNING_FOLD = foldEpisodes(RUNNING_ROWS, { quorum: 2, members: 6 });
+const RUNNING_ITEMS = buildTimelineItems(
+  buildTimeline(RUNNING_ROWS, {
+    id: "solvers",
+    name: "solvers",
+    voice: "Solvers desk",
+    kind: "channel",
+    purpose: "",
+  }, []),
+  [],
+  {},
+  RUNNING_FOLD,
+);
+const UNUSED_RUNNING_EPISODE = foldEpisodes(
   [
     { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
     { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
