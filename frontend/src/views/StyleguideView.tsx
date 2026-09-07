@@ -1486,12 +1486,3 @@ const RUNNING_ITEMS = buildTimelineItems(
   {},
   RUNNING_FOLD,
 );
-const UNUSED_RUNNING_EPISODE = foldEpisodes(
-  [
-    { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
-    { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
-    { id: "h3", from: "company", channel: "critic", at: 2, text: "!propose #ship go straight to production" },
-    { id: "h4", from: "company", channel: "archivist", at: 3, text: "!evidence #stage ^1 the last rollout took checkout down" },
-  ] as ChatMessage[],
-  { quorum: 2, members: 6 },
-)[0];
