@@ -6,7 +6,7 @@ import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { WINDOW_TITLE_BAR_HEIGHT, WINDOW_CONTROLS_WIDTH } from "@/components/window-chrome";
+import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { TITLE_BAR_LADDER, WindowTitleBar } from "@/components/window-title-bar";
 
 /**
