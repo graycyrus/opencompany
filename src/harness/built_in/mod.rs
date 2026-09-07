@@ -12438,6 +12438,7 @@ budget_usd_daily = 0.0
             }
             fn reply(&self, chat_id: &str, text: &str) {
                 self.push(CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     chat_id: chat_id.to_string(),
                     agent_id: "ceo".to_string(),
                     text: text.to_string(),

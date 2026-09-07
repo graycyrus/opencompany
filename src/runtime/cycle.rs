@@ -9307,6 +9307,7 @@ members = ["writer"]
                 origin_parent: None,
             },
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: None,
@@ -11564,6 +11565,7 @@ timeout)",
             seq: EventSeq::new(seq),
             company: CompanyId::new("acme"),
             event: CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 chat_id: chat.to_string(),
                 agent_id: "ceo".to_string(),
                 text: "an answer".to_string(),
