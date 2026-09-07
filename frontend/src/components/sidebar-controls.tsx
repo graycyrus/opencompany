@@ -300,6 +300,31 @@ export function SidebarCollapseButton() {
               // One size in both states, which is what a control on the seam
               // wants: it does not live in the 3rem rail and has no rhythm of
               // nav icons to land on.
+              //
+              // A round 24px puck rather than `icon-sm`'s 28px soft square.
+              //
+              // Straddling the seam is what decides the shape. A rounded square
+              // sitting on a vertical border reads as a panel corner — two of
+              // its own edges run parallel to the seam a few pixels away, and
+              // the eye joins them — so it looked like a torn piece of the rail
+              // rather than a control. A circle has no edge to align with the
+              // border it sits on, which is why every affordance that floats on
+              // a boundary is one.
+              //
+              // 24px is below the 44px touch target, and deliberately: the
+              // `md:block` gate at its mount site means this control only ever
+              // exists on a pointer device — below `md` the sidebar is a sheet
+              // with its own reserved row (issue #1265). The icon steps down to
+              // 14px with it, or a 16px glyph in a 24px puck leaves 4px of
+              // padding and reads as a cramped square again.
+              "size-6 rounded-full [&_svg:not([class*='size-'])]:size-3.5",
+              // A ring and a shadow because it belongs to NEITHER surface it
+              // covers: the rail is one rung and the content card another, and
+              // a flat fill on the border between them takes its contrast from
+              // whichever side happens to be lighter. The ring gives it its own
+              // edge on both, and the shadow says it floats above the seam
+              // rather than being cut into it.
+              "ring-1 ring-sidebar-border shadow-sm",
             )}
           />
         }
