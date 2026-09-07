@@ -5570,6 +5570,7 @@ mod test {
 
         for id in [&owned, &orphan] {
             let record = CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
@@ -5651,6 +5652,7 @@ mod test {
 
         for (id, tenant) in [(&id_a, "tenant-a"), (&id_b, "tenant-b")] {
             let record = CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),

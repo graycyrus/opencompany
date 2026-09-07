@@ -5093,6 +5093,7 @@ mod test {
         let id = CompanyId::new("acme");
         company
             .save(&CompanyRecord {
+                       overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: toml::from_str(
