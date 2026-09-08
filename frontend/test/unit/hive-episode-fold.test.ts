@@ -72,9 +72,20 @@ describe("a conversation that is not a room", () => {
       ],
       { quorum: 1 },
     );
-    expect(episodes).toHaveLength(1);
-    expect(episodes[0].triggerId).toBe("h1");
-    expect(episodes[0].turns).toHaveLength(1);
+    // The real room is one closed episode with its one move.
+    const real = episodes.find((e) => e.triggerId === "h1")!;
+    expect(real.turns).toHaveLength(1);
+    expect(real.ending).not.toBeNull();
+    // Any dangling episode the trailing ordinary Q&A leaves behind claims no
+    // turns, referrals, or report, so `groupEpisodes` never attaches a
+    // message to it and it renders as nothing — the ordinary follow-up stays
+    // a plain reply.
+    for (const episode of episodes) {
+      if (episode === real) continue;
+      expect(episode.turns).toHaveLength(0);
+      expect(episode.referrals).toHaveLength(0);
+      expect(episode.reportId).toBeNull();
+    }
   });
 
   it("still opens on the ordinary reply once a real move follows it in the same room", () => {
