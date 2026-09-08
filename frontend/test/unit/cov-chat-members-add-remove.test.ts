@@ -182,7 +182,7 @@ describe("AddMemberDialog, when the write is refused", () => {
       description: "",
       inbox: false,
     });
-    // Not closed on a failed write — the caller's own toast (ChatView.addMember)
+    // Not closed on a failed write — the caller's own toast (RoomView.addMember)
     // is the visible error; this dialog's honest half is staying open and
     // retryable rather than claiming the write landed.
     expect(onOpenChange).not.toHaveBeenCalledWith(false);

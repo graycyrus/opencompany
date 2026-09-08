@@ -14,7 +14,7 @@ import { RoomView } from "@/views/RoomView";
 /**
  * `POST {scope}/agents/{agent_id}/budget-pause/redeem`
  * (`server/ops/budget_pause.rs`) is `ScopedCompany` — any company member, not
- * `AdminScopedCompany` — and `ChatView` wires `onRedeemBudgetPause`
+ * `AdminScopedCompany` — and `RoomView` wires `onRedeemBudgetPause`
  * unconditionally, with no `isAdmin` check anywhere near it. That is the
  * opposite gate from the daily-budget menu item a few rows away in the same
  * pane (`canEditBudget={isAdmin && fromHost}`,
@@ -79,7 +79,7 @@ afterEach(() => {
 /** Owns `transcripts` state itself, the way `AppShell` does for the real view. */
 function Harness({ client }: { client: OpenCompanyClient }) {
   const [transcripts, setTranscripts] = useState<Transcripts>({ main: [NOTICE] });
-  return createElement(ChatView, {
+  return createElement(RoomView, {
     client,
     company: "acme",
     sub: "main",

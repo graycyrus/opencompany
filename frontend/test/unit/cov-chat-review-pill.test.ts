@@ -10,7 +10,7 @@ import type { TimelineEntry } from "@/views/room/model";
 import type { TaskStatus } from "@/api/tasks";
 
 /**
- * The settle pill's Approve control (`ChatView.reviewCard`, `POST
+ * The settle pill's Approve control (`RoomView.reviewCard`, `POST
  * …/chat/review`). The backend route is `ScopedCompany` (`operator.rs`),
  * not admin-only — any company member may settle a card they are reviewing
  * — so the console rightly offers Approve to every viewer; what it must not

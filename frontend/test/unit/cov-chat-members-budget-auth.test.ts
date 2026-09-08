@@ -9,7 +9,7 @@ import type { TeamMember } from "@/lib/team";
 
 /**
  * `MemberRow`'s budget menu is gated `canEditBudget={isAdmin && fromHost}`
- * (`ChatView.tsx`) — a member with no admin session must not see "Set daily
+ * (`RoomView.tsx`) — a member with no admin session must not see "Set daily
  * budget…" at all, since `PUT …/team/{id}/budget` is admin-only on the host.
  */
 
@@ -71,7 +71,7 @@ function menuAt(testid: string): HTMLElement | null {
   return document.body.querySelector(`[data-testid="${testid}"]`);
 }
 
-describe("MembersPane budget menu, by canEditBudget (ChatView's isAdmin && fromHost)", () => {
+describe("MembersPane budget menu, by canEditBudget (RoomView's isAdmin && fromHost)", () => {
   it("offers no budget entry point to a member", async () => {
     await act(async () => {
       root.render(createElement(MembersPane, baseProps(false)));
@@ -93,7 +93,7 @@ describe("MembersPane budget menu, by canEditBudget (ChatView's isAdmin && fromH
   });
 
   it("still withholds the budget entry point from an admin viewing a starter-roster teammate (fromHost false)", async () => {
-    // `canEditBudget` is computed as `isAdmin && fromHost` in ChatView — a
+    // `canEditBudget` is computed as `isAdmin && fromHost` in RoomView — a
     // starter-roster row has no budget record on the host to edit.
     await act(async () => {
       root.render(createElement(MembersPane, baseProps(false)));

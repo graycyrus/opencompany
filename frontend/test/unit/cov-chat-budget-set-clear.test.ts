@@ -19,7 +19,7 @@ vi.mock("sonner", () => ({
 }));
 
 /**
- * `ChatView.applyBudget`/`resetBudget` — reached only through
+ * `RoomView.applyBudget`/`resetBudget` — reached only through
  * `MembersPane`'s `canEditBudget={isAdmin && fromHost}` gate
  * (`cov-chat-members-budget-auth.test.ts` pins that gate itself) — had no
  * test for what they actually do once opened: `client.setTeamBudget` and
@@ -87,7 +87,7 @@ afterEach(() => {
 });
 
 function tree(client: OpenCompanyClient): ReactNode {
-  const view = createElement(ChatView, {
+  const view = createElement(RoomView, {
     client,
     company: "acme",
     sub: "main",

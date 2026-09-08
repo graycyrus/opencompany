@@ -17,7 +17,7 @@ vi.mock("sonner", () => ({
 }));
 
 /**
- * `ChatView.react` is optimistic — the chip flips before the
+ * `RoomView.react` is optimistic — the chip flips before the
  * round trip — and rolls back only on a refusal it can actually read. The
  * idempotent `on` write itself is straightforward; what had no test is the
  * rollback: a host with no reactions route (`404`) has to leave the chip
@@ -74,7 +74,7 @@ afterEach(() => {
 /** Owns `transcripts` state itself, the way `AppShell` does for the real view. */
 function Harness({ client }: { client: OpenCompanyClient }) {
   const [transcripts, setTranscripts] = useState<Transcripts>({ main: [MESSAGE] });
-  return createElement(ChatView, {
+  return createElement(RoomView, {
     client,
     company: "acme",
     sub: "main",

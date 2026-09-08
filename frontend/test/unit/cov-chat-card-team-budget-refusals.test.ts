@@ -14,7 +14,7 @@ import type { Transcripts } from "@/views/room/model";
 import type { TaskStatus } from "@/api/tasks";
 
 /**
- * `ChatView` wires several inline actions with their own host round trip and
+ * `RoomView` wires several inline actions with their own host round trip and
  * their own catch block — dismissing a card, removing a teammate, redeeming a
  * budget pause. Every one of those catch blocks was written and never driven
  * end to end: this file mounts the real view, triggers each control, and has
@@ -128,7 +128,7 @@ function Harness({
   taskStatusByTaskId?: Record<string, TaskStatus>;
 }) {
   const [transcripts, setTranscripts] = useState<Transcripts>(initialTranscripts);
-  const view = createElement(ChatView, {
+  const view = createElement(RoomView, {
     client,
     company: "acme",
     sub: "main",
