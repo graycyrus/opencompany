@@ -298,6 +298,26 @@ function ProgressLine({
             "gate-workflow-blocked-unparkable",
           );
         }
+        // Codex review, PR #2046, round 3: the mirror of the mixed case the
+        // `awaiting-approval` arm below already names. A blocked run can carry
+        // a live gate approval AND a pending report from a parallel branch at
+        // once, and this sentence's "decide the approval, then run it again"
+        // silently speaks for both — while deciding the delivery only sends
+        // the report and moves nothing. Same distinction, same reason, drawn
+        // for `blocked` because `verdictOf` reaches it first.
+        if (pendingCount(progress.run?.deliveries ?? []) > 0) {
+          return shell(
+            <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
+            <>
+              <span className="font-medium text-foreground">{name}</span> ran and stopped to
+              ask you something, so this step hasn&apos;t ticked. It also produced a report
+              still waiting on a separate approval to send. Deciding either one is worth
+              doing, but neither continues this run — it stopped on a step that can&apos;t
+              be re-entered, so run the workflow again to finish.
+            </>,
+            "gate-workflow-blocked-mixed",
+          );
+        }
         return shell(
           <UserCheck aria-hidden className="mt-0.5 size-4 shrink-0" />,
           <>

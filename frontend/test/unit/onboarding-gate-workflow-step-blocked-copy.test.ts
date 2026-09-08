@@ -185,6 +185,44 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
     expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
   });
 
+  it("names both decisions when a blocked run has a live approval and a pending report", async () => {
+    // Codex review, PR #2046, round 3: the mirror of the mixed case the
+    // `awaiting-approval` arm already draws. With a live gate target present,
+    // `gateApprovalTargets` is non-empty, so the delivery-aware branches are
+    // bypassed and the generic "decide the approval, then run it again"
+    // spoke for the pending report too — which deciding does not move.
+    await render([
+      run({
+        verdict: "blocked",
+        blockedNodes: [{ nodeId: "escalate_to_human", tools: ["ask"], approvalIds: ["ap-1"] }],
+        deliveries: [{ node: "send_report", kind: "email", status: "pending", detail: "" }],
+      }),
+    ]);
+    const text = container.querySelector('[data-testid="gate-workflow-blocked-mixed"]')?.textContent;
+    expect(text, "a blocked run carrying both decisions needs its own sentence").toBeTruthy();
+    expect(text).toContain("report still waiting");
+    expect(
+      text,
+      "the run stopped on a node that cannot be re-entered — a rerun is still required",
+    ).toContain("run the workflow again");
+    // A live gate approval DOES have an id, so Approvals stays reachable here.
+    expect(
+      container.querySelector('[data-testid="gate-workflow-open-approvals"]'),
+      "a live gate approval id is linkable, unlike a delivery",
+    ).toBeTruthy();
+  });
+
+  it("keeps the plain blocked sentence when a live approval has no pending report", async () => {
+    await render([
+      run({
+        verdict: "blocked",
+        blockedNodes: [{ nodeId: "escalate_to_human", tools: ["ask"], approvalIds: ["ap-1"] }],
+      }),
+    ]);
+    expect(container.querySelector('[data-testid="gate-workflow-blocked"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="gate-workflow-blocked-mixed"]')).toBeNull();
+  });
+
   it("keeps the plain unparkable sentence when no report is pending", async () => {
     await render([
       run({
