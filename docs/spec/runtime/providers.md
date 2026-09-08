@@ -137,12 +137,24 @@ the wrong one fails (`inference::model_for_tier`, `inference::TierVocabulary`):
 | vocabulary | wire value | why |
 |---|---|---|
 | `tiers` | the tier name (`chat-v1`) | the endpoint publishes the tier ids and resolves them itself, pinning each tier to a sub-provider so its rate card stays exact |
-| `concrete` | a concrete slug (`anthropic/claude-sonnet-5`) | the endpoint publishes OpenRouter's catalog and has never heard of `chat-v1` |
+| `concrete` | a concrete slug (`anthropic/claude-sonnet-5`) — **per tier, and only where the catalog publishes that slug** | the endpoint publishes OpenRouter's catalog and has never heard of `chat-v1` |
 | `unknown` | the tier name, unchanged | the catalog was read and publishes neither, so `DEFAULT_TIER_MODELS` are ids we already know are absent. Both answers fail; only one names a string the operator configured |
 
 The vocabulary is **discovered, not assumed**. Every OpenAI-compatible endpoint
 publishes `GET {base_url}/models`, so a catalog containing `agentic-v1` is the
 endpoint telling us it resolves tiers. Nothing keys off a hostname.
+
+**Classification is `any`; substitution is per tier.** One shipped id present is
+enough to call an endpoint `concrete` — it speaks OpenRouter's vocabulary — but
+`TierVocabulary::Concrete` carries a `ConcreteTiers` mask of *which* shipped ids
+that catalog actually listed, and `model_for_tier` substitutes only those. A
+gateway mirroring `anthropic/claude-sonnet-5` and nothing else was once handed
+`openai/gpt-5.6-sol-pro` for `reasoning-v1` — an id that same catalog had just
+said it does not serve, which is this page's whole argument one level down. Its
+unpublished tiers go out as tiers instead. The un-discovered fallback assumes
+all four (`ConcreteTiers::all()`), which is what shipped before and is true of
+OpenRouter itself; narrowing only ever happens on evidence from a catalog that
+was read.
 
 It used to be read off `is_proxied()` — true only for the `openrouter` kind with
 no tenant key. That conflated **who pays** with **what vocabulary is spoken**,
@@ -224,6 +236,7 @@ partition nothing needs.
 |---|---|
 | cache lifetime | 1 hour (`MODEL_CATALOG_TTL`) |
 | failure lifetime | 1 minute (`MODEL_CATALOG_FAILURE_TTL`) — a failure used to store nothing, so an unreachable provider cost a fresh timeout on every status read and every turn that consulted the vocabulary |
+| credential failures | **never remembered.** A `401`/`403` is an answer about the key that was presented, not about the endpoint the memo is keyed on: remembering one company's rejection would hand it to the next company reaching the same endpoint with a different key, and would make a company that has just rotated a bad key wait the memo out before its good one is tried. Not memoizing them is cheap in the way that matters — an auth rejection is a fast round trip, not the timeout the memo exists to stop paying repeatedly |
 | fetch timeout | 10 seconds (`MODEL_CATALOG_TIMEOUT`) — a console page-load waits at most this long on a cold cache, whatever its position in a `fetch_lock` queue |
 | concurrent misses | coalesced onto a single upstream fetch (`ModelCatalogCache::fetch_lock`), per endpoint. The lock wait and the fetch share one timeout budget per caller, so a caller queued behind others during an outage is not left waiting `N × MODEL_CATALOG_TIMEOUT` for its turn to fail too |
 | malformed entries | skipped individually rather than failing the whole response, so one bad record does not hide every valid model the endpoint returned |

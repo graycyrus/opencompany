@@ -45,13 +45,22 @@ function status(
 const CATALOG_BASE_URL = "https://provider.example/v1";
 
 function catalogBody(models: InferenceModel[]) {
-  // Mirrors the host: a catalog with no models carries no vocabulary and no
-  // defaults, because there is nothing to have classified. (The host never
-  // actually answers that shape — an empty catalog is reported as an `error` —
-  // but a double that supplied defaults for an empty list would let a test
-  // assert behaviour the host cannot produce.)
+  // Mirrors the host exactly, the empty case included: an empty catalog is
+  // reported as a *failure*, so it arrives as a 200 carrying `error`, with no
+  // vocabulary and no defaults.
+  //
+  // This used to answer `{models: [], tierDefaults: {}}` with no `error`, under
+  // a comment conceding the host cannot produce that shape — and the concession
+  // turned out to matter. `{}` and "no catalog was read" are now different facts
+  // to `presetFor`, so a double reporting a confirmed-empty mapping where the
+  // host would report a failure asserts behaviour nothing real can reach.
   if (models.length === 0) {
-    return { baseUrl: CATALOG_BASE_URL, models, tierDefaults: {} };
+    return {
+      baseUrl: CATALOG_BASE_URL,
+      models,
+      tierDefaults: {},
+      error: `Could not list models from ${CATALOG_BASE_URL}: it published an empty model catalog. Enter model ids directly.`,
+    };
   }
   return {
     baseUrl: CATALOG_BASE_URL,
@@ -1010,5 +1019,104 @@ describe("typing a passthrough id one keystroke at a time while proxied (issue #
     }
 
     expect(input).toHaveProperty("value", target);
+  });
+});
+
+/**
+ * The catalog route answers for the endpoint this company is **saved** against.
+ * Two consequences the console had wrong, both found by Codex review on #2045.
+ */
+describe("the catalog belongs to the saved endpoint, not to the draft", () => {
+  async function selectProvider(label: string) {
+    const trigger = container.querySelector("#inference-provider") as HTMLButtonElement;
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger.click();
+    });
+    await act(async () => {});
+    const item = Array.from(document.body.querySelectorAll('[data-slot="select-item"]')).find(
+      (el) => el.textContent?.includes(label),
+    ) as HTMLElement | undefined;
+    expect(item).not.toBeUndefined();
+    await act(async () => {
+      item?.click();
+    });
+    await act(async () => {});
+  }
+
+  it("does not offer another provider's models under the OpenRouter picker", async () => {
+    // A company saved on a custom endpoint, whose operator is drafting a switch
+    // to OpenRouter. The route still resolves the *saved* endpoint, so its
+    // catalog is not OpenRouter's — offering it here let the operator pick a
+    // model the console had shown and save a foreign id against OpenRouter.
+    const { client } = clientFor(
+      status("openai_compatible", {}, true),
+      [{ id: "local/only-here", name: "Local Only" }],
+    );
+
+    await mount(client);
+    await selectProvider("OpenRouter");
+
+    expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).toBeNull();
+    expect(container.querySelector("input#inference-model-chat-v1")).not.toBeNull();
+    expect(container.textContent).not.toContain("Local Only");
+    expect(container.textContent).toContain("saved against a different endpoint");
+  });
+
+  it("still reads a catalog for an unconfigured company, which resolves to the same endpoint", async () => {
+    // `managed` is the host's legacy alias for `openrouter` and resolves onto
+    // the same platform endpoint an `openrouter` draft with no base URL reaches,
+    // so first-run setup must keep asking for a real catalog rather than being
+    // refused. (Whether the *picker* renders is a separate question the
+    // proxied-save guard answers — an unkeyed company gets free text either
+    // way — so this asserts the request and the absence of the refusal.)
+    const { client, calls } = clientFor(status("managed", {}, true), [
+      { id: "anthropic/claude-sonnet-5", name: "Sonnet" },
+    ]);
+
+    await mount(client);
+    await selectProvider("OpenRouter");
+
+    expect(calls.some((path) => path.endsWith("/inference/models"))).toBe(true);
+    expect(container.textContent).not.toContain("saved against a different endpoint");
+  });
+
+  it("keeps a confirmed-empty tier mapping empty instead of falling back to OpenRouter's ids", async () => {
+    // An `unknown` vocabulary means the endpoint's catalog was read and implies
+    // no defaults. Treating that `{}` as "no catalog loaded" repopulated the
+    // four shipped ids the catalog had just been seen not to publish, and Save
+    // persisted them — the defect this whole change exists to remove, reached
+    // through the switch-away-and-back path.
+    const { client } = clientFor(
+      status("openrouter", {}, true, {
+        "chat-v1": "anthropic/claude-sonnet-5",
+        "reasoning-v1": "openai/gpt-5.6-sol-pro",
+        "agentic-v1": "anthropic/claude-opus-5",
+        "vision-v1": "qwen/qwen3.8-max",
+      }),
+      [],
+    );
+    const raw = client as unknown as { get: (path: string) => Promise<unknown> };
+    const inner = raw.get.bind(raw);
+    raw.get = async (path: string) => {
+      const body = await inner(path);
+      if (path.endsWith("/inference/models")) {
+        return {
+          baseUrl: "https://gateway.example/v1",
+          models: [{ id: "gateway/one" }],
+          tierVocabulary: "unknown" as const,
+          tierDefaults: {},
+        };
+      }
+      return body;
+    };
+
+    await mount(client);
+    await selectProvider("Ollama");
+    await selectProvider("OpenRouter");
+
+    const chat = container.querySelector("#inference-model-chat-v1");
+    const shown = chat?.textContent ?? (chat as HTMLInputElement | null)?.value ?? "";
+    expect(shown).not.toContain("anthropic/claude-sonnet-5");
   });
 });

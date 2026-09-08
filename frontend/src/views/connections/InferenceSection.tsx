@@ -195,24 +195,37 @@ const METERING_NOTES: Record<UsageMetering, string> = {
   none: "no model runs on this path, so Usage stays at zero",
 };
 
-/** Per-provider form defaults applied when the operator picks a provider. */
+/**
+ * Per-provider form defaults applied when the operator picks a provider.
+ *
+ * `catalogTierDefaults` is `null` when **no** catalog has been read yet, and an
+ * object — possibly `{}` — once one has. The two are not interchangeable, and
+ * collapsing them was a defect (Codex review on #2045): a catalog classified
+ * `unknown` legitimately implies **no** defaults, and testing only the key count
+ * read that confirmed emptiness as "nothing loaded" and fell through to
+ * OpenRouter's ids. Switching provider away and back then repopulated four ids
+ * the endpoint's own catalog had just proved absent, and Save persisted them —
+ * the exact failure the vocabulary work exists to remove.
+ */
 function presetFor(
   provider: InferenceProvider,
   defaultTierModels?: Partial<Record<Tier, string>>,
-  catalogTierDefaults?: Partial<Record<Tier, string>>,
+  catalogTierDefaults?: Partial<Record<Tier, string>> | null,
 ): {
   baseUrl: string;
   models: Partial<Record<Tier, string>>;
 } {
   const preset = PROVIDERS[provider].preset;
   if (provider !== "openrouter") return preset;
-  // The *endpoint's own* defaults win when a catalog has actually been read.
+  // A catalog has been read: its answer is the whole answer, including when
+  // that answer is "this endpoint implies no defaults".
+  //
   // `status.defaultTierModels` is OpenRouter's vocabulary and nothing wider, so
   // prefilling from it against an endpoint that publishes `chat-v1` writes four
   // ids that endpoint has already told us it does not serve — an explicit,
   // saved, silently unusable mapping, which is worse than the unmapped case the
   // host now resolves correctly on its own.
-  if (catalogTierDefaults && Object.keys(catalogTierDefaults).length > 0) {
+  if (catalogTierDefaults) {
     return { ...preset, models: catalogTierDefaults };
   }
   // No catalog yet: the host's own `defaultTierModels` (from `GET …/inference`)
@@ -427,8 +440,16 @@ export function InferenceSection({
    * defaults straight off `modelCatalog` would fall back to OpenRouter's ids on
    * exactly the switch-away-and-back path an operator takes while comparing
    * providers.
+   *
+   * `null` means **no catalog has been read**, which is a different fact from a
+   * catalog that was read and implies no defaults (`{}`, the `unknown`
+   * vocabulary). `presetFor` needs to tell them apart: treating a confirmed-empty
+   * mapping as "not loaded" repopulated four OpenRouter ids the endpoint had
+   * just been seen not to publish.
    */
-  const [catalogTierDefaults, setCatalogTierDefaults] = useState<Record<string, string>>({});
+  const [catalogTierDefaults, setCatalogTierDefaults] = useState<Record<string, string> | null>(
+    null,
+  );
 
   // Switch form.
   const [provider, setProvider] = useState<InferenceProvider>("managed");
@@ -524,10 +545,54 @@ export function InferenceSection({
     void refresh();
   }, [refresh]);
 
+  /**
+   * Whether the endpoint `GET …/inference/models` will answer for is the one an
+   * `openrouter` draft would actually reach.
+   *
+   * The route resolves the **saved** config, so this is the only thing that
+   * makes its answer applicable to the form. `managed` is included because the
+   * host treats it as a legacy alias for `openrouter` and resolves it onto the
+   * same platform endpoint, so an unconfigured company — the first-run case —
+   * still gets a real catalog rather than a refusal. `undefined` (status not
+   * loaded yet) is excluded: the effect re-runs when it arrives.
+   */
+  const storedProviderIsOpenRouter =
+    status?.provider === "openrouter" || status?.provider === "managed";
+
   useEffect(() => {
     let current = true;
     if (provider !== "openrouter") {
       setModelCatalog({ kind: "idle" });
+      return () => {
+        current = false;
+      };
+    }
+
+    // The route answers for the endpoint this company is **saved** against, and
+    // has no way to be asked about an unsaved draft. So a form whose provider
+    // select has been moved somewhere the stored config is not must not present
+    // that catalog as this provider's (Codex review on #2045): switching a saved
+    // Ollama or custom company to OpenRouter used to list the *old* endpoint's
+    // models under an OpenRouter picker, and choosing one saved a foreign model
+    // id against OpenRouter — a configuration that cannot work. Naming the
+    // source endpoint on screen does not stop the picker writing it into the
+    // wrong provider's mapping.
+    //
+    // `managed` counts as OpenRouter here because the host does: it is a legacy
+    // alias (`LEGACY_MANAGED`), and an unconfigured company resolves to the same
+    // platform endpoint an `openrouter` draft with no base URL would reach. That
+    // keeps first-run setup — the common case — showing a real catalog.
+    if (!storedProviderIsOpenRouter) {
+      setModelCatalog({
+        kind: "error",
+        message:
+          "This company is saved against a different endpoint, so its model list is not " +
+          "OpenRouter's. Save the provider first to pick from OpenRouter's catalog, or enter " +
+          "model ids directly.",
+      });
+      // Nothing was read *for this provider*, so the tier prefill must stay on
+      // its pre-catalog fallback rather than inherit the other endpoint's.
+      setCatalogTierDefaults(null);
       return () => {
         current = false;
       };
@@ -568,7 +633,7 @@ export function InferenceSection({
     return () => {
       current = false;
     };
-  }, [client, company, provider]);
+  }, [client, company, provider, storedProviderIsOpenRouter]);
 
   /**
    * Whether saving right now would ride the platform's subscription proxy

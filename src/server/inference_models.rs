@@ -112,6 +112,53 @@ fn parse_models(payload: RegistryResponse) -> Vec<InferenceModel> {
     models
 }
 
+/// Why a catalog read failed, and — the part that matters to the cache —
+/// whether the answer was about the **endpoint** or about the **credential**.
+///
+/// The negative memo in [`catalog_models`] is keyed on the endpoint alone, the
+/// same as the positive one. That is right for "this endpoint did not answer":
+/// every caller reaching it gets the same result, and remembering it turns an
+/// outage into one attempt a minute instead of one per request. It is *wrong*
+/// for a `401`/`403`, which is a fact about the key that was presented and not
+/// about the endpoint — on a multi-company host, memoizing one company's bad
+/// key would make a second company on the same endpoint read the first's
+/// rejection back out of the cache and fall to the pre-discovery guess without
+/// ever presenting its own valid credential. It would also make a company that
+/// has just rotated a bad key wait out the memo before its good one is tried.
+///
+/// So credential-specific failures are reported and **not** remembered. The
+/// cost of not memoizing them is small in exactly the way that matters: an
+/// auth rejection is a fast round trip, not the [`MODEL_CATALOG_TIMEOUT`] hang
+/// the memo exists to stop paying for repeatedly.
+#[derive(Debug)]
+pub(crate) struct DiscoveryError {
+    message: String,
+    /// `true` for `401`/`403` — an answer about the presented key.
+    credential_specific: bool,
+}
+
+impl DiscoveryError {
+    fn endpoint(message: String) -> Self {
+        Self {
+            message,
+            credential_specific: false,
+        }
+    }
+
+    fn credential(message: String) -> Self {
+        Self {
+            message,
+            credential_specific: true,
+        }
+    }
+}
+
+impl std::fmt::Display for DiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Fetch every model from an OpenAI-compatible `{base_url}/models` endpoint.
 ///
 /// `bearer` is the credential the endpoint expects — the company's stored key
@@ -120,7 +167,7 @@ fn parse_models(payload: RegistryResponse) -> Vec<InferenceModel> {
 pub(crate) async fn discover_models(
     base_url: &str,
     bearer: Option<&str>,
-) -> Result<Vec<InferenceModel>, String> {
+) -> Result<Vec<InferenceModel>, DiscoveryError> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     // Bounded here, not left to each caller: reqwest's async client has no
     // default timeout, so an endpoint that accepts the connection but never
@@ -131,7 +178,11 @@ pub(crate) async fn discover_models(
     let client = reqwest::Client::builder()
         .timeout(MODEL_CATALOG_TIMEOUT)
         .build()
-        .map_err(|error| format!("failed to build the model-discovery client: {error}"))?;
+        .map_err(|error| {
+            DiscoveryError::endpoint(format!(
+                "failed to build the model-discovery client: {error}"
+            ))
+        })?;
     let mut request = client.get(&url);
     if let Some(bearer) = bearer.filter(|bearer| !bearer.trim().is_empty()) {
         request = request.bearer_auth(bearer);
@@ -139,13 +190,22 @@ pub(crate) async fn discover_models(
     let response = request
         .send()
         .await
-        .map_err(|error| format!("request to {url} failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("request to {url} failed: {error}"))?;
-    let payload = response
-        .json::<RegistryResponse>()
-        .await
-        .map_err(|error| format!("model catalog from {url} was invalid: {error}"))?;
+        .map_err(|error| DiscoveryError::endpoint(format!("request to {url} failed: {error}")))?;
+    let status = response.status();
+    let response = response.error_for_status().map_err(|error| {
+        let message = format!("request to {url} failed: {error}");
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            DiscoveryError::credential(message)
+        } else {
+            DiscoveryError::endpoint(message)
+        }
+    })?;
+    let payload = response.json::<RegistryResponse>().await.map_err(|error| {
+        DiscoveryError::endpoint(format!("model catalog from {url} was invalid: {error}"))
+    })?;
     Ok(parse_models(payload))
 }
 
@@ -283,9 +343,13 @@ pub(crate) async fn catalog_models(
             return Err(FetchError::Failed(failure));
         }
 
-        let mut models = discover_models(base_url, bearer)
-            .await
-            .map_err(FetchError::Failed)?;
+        let mut models = discover_models(base_url, bearer).await.map_err(|error| {
+            if error.credential_specific {
+                FetchError::Credential(error.to_string())
+            } else {
+                FetchError::Failed(error.to_string())
+            }
+        })?;
         if models.is_empty() {
             return Err(FetchError::Failed(format!(
                 "{endpoint} published an empty model catalog"
@@ -302,6 +366,13 @@ pub(crate) async fn catalog_models(
 
     let result = match outcome {
         Ok(Ok(models)) => return Ok(models),
+        // An answer about the key that was presented, not about the endpoint.
+        // Reported, never remembered — see [`DiscoveryError`]: memoizing it on
+        // an endpoint key would hand one company's rejection to the next
+        // company reaching the same endpoint with a different credential, and
+        // would make a company that has just rotated a bad key wait the memo
+        // out before its good one is ever tried.
+        Ok(Err(FetchError::Credential(message))) => return Err(message),
         Ok(Err(FetchError::Failed(message))) => message,
         Err(_elapsed) => format!(
             "{endpoint} did not answer within {} seconds",
@@ -340,6 +411,9 @@ pub(crate) async fn discovered_vocabulary(
 /// message must win regardless of which inner step it interrupted.
 enum FetchError {
     Failed(String),
+    /// A `401`/`403` — about the credential presented, not the endpoint, so it
+    /// is reported to this caller and never written to the endpoint's memo.
+    Credential(String),
 }
 
 #[cfg(test)]
@@ -511,6 +585,41 @@ mod tests {
         assert_eq!(
             discovered_vocabulary(ENDPOINT, None).await,
             Some(TierVocabulary::Tiers)
+        );
+    }
+
+    /// A credential-specific rejection is reported and **not** remembered.
+    ///
+    /// The negative memo is keyed on the endpoint, which is right for "this
+    /// endpoint did not answer" and wrong for "this key was rejected". On a
+    /// multi-company host the second would let one company's bad key answer for
+    /// the next company reaching the same endpoint with a valid one, and would
+    /// make a company that has just rotated a bad key wait the memo out before
+    /// its good key is ever presented (Codex review on #2045).
+    ///
+    /// Asserted at the seam rather than over the network: the classification
+    /// lives in [`DiscoveryError`], and [`catalog_models`] is what must not
+    /// write a `Credential` failure into the endpoint's memo.
+    #[test]
+    fn a_credential_rejection_is_not_written_to_the_endpoints_failure_memo() {
+        const ENDPOINT: &str = "https://rejects-one-key.example/v1";
+        let cache = catalog_cache(ENDPOINT);
+        let now = Instant::now();
+        assert_eq!(cache.lookup_failure(now), None, "nothing remembered yet");
+
+        // What an endpoint-level failure does: it is remembered, so an outage
+        // costs one attempt a minute rather than one per request.
+        cache.store_failure(format!("{ENDPOINT} did not answer within 10 seconds"), now);
+        assert!(cache.lookup_failure(now).is_some());
+
+        // And the classification that keeps a 401 out of that path.
+        assert!(
+            DiscoveryError::credential("401 Unauthorized".to_string()).credential_specific,
+            "a 401 is an answer about the key, not about the endpoint"
+        );
+        assert!(
+            !DiscoveryError::endpoint("connection refused".to_string()).credential_specific,
+            "a transport failure is an answer about the endpoint, and is memoized"
         );
     }
 
