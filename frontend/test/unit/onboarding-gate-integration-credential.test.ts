@@ -2,7 +2,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { ComposioCredentialSource, ComposioStatus } from "@/api/composio";
@@ -133,6 +133,55 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
       container.textContent,
       "the footer explaining the (not-yet-offered) waiver must also stay hidden",
     ).not.toContain("Skipping is remembered");
+  });
+
+  it("retries a failed credential read instead of withholding the waiver forever", async () => {
+    // Codex review, PR #2046: the rejection handler was a permanent no-op, so
+    // one transient failure left `credentialConfirmed` false — and with it the
+    // durable waiver, the only escape a credential-less founder has — withheld
+    // for the whole life of the mount, long after the outage ended.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      const client = {
+        scopeFor: () => "/api/v1/company",
+        get: (path: string) => {
+          if (!path.includes("/composio")) throw new Error(`unexpected path: ${path}`);
+          calls += 1;
+          if (calls === 1) return Promise.reject(new Error("network blip"));
+          return Promise.resolve(status("none"));
+        },
+      } as unknown as OpenCompanyClient;
+
+      await act(async () => {
+        root.render(
+          createElement(IntegrationStep, {
+            client,
+            company: null,
+            onOpenApps: () => {},
+            onWaive: () => {},
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(
+        container.querySelector('[data-testid="gate-integration-waive"]'),
+        "a failed read is not a confirmed 'no credential' — the waiver stays withheld for now",
+      ).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+
+      expect(calls, "the failed read must be retried").toBeGreaterThan(1);
+      expect(
+        container.querySelector('[data-testid="gate-integration-waive"]'),
+        "once a read succeeds the escape must become available",
+      ).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not name a credential route the Apps page it links to has hidden", async () => {

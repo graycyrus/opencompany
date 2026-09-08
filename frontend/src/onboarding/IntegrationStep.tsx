@@ -75,6 +75,24 @@ import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
  */
 const REVALIDATE_TIMEOUT_MS = 20000;
 
+/**
+ * How soon a failed credential read is retried (Codex review, PR #2046).
+ *
+ * The mount read's rejection handler used to do nothing at all. That was
+ * defensible for the COPY — the card stays on the safe "no credential"
+ * wording — but `credentialConfirmed` also gates the durable waiver, so one
+ * transient failure withheld the only escape a credential-less founder has
+ * for the rest of the mount, and going on withholding it long after the
+ * outage ended. Silence is the right answer to "we do not know yet"; it is
+ * the wrong answer to "we could not find out, ever".
+ *
+ * Retrying is preferable to a retry button: the founder has no way to know
+ * that a background read failed, so asking them to press something to fix a
+ * problem they cannot see is not an affordance. Mirrors
+ * `ACTIVATION_READ_RETRY_MS`, the same treatment on the gate's own poll.
+ */
+const CREDENTIAL_RETRY_MS = 3000;
+
 export function IntegrationStep({
   client,
   company,
@@ -112,19 +130,34 @@ export function IntegrationStep({
 
   useEffect(() => {
     let live = true;
-    void getComposioStatus(client, company).then(
-      (status) => {
-        if (!live) return;
-        setHasCredential(status.credentialSource !== "none");
-        setCredentialConfirmed(true);
-      },
-      () => {
-        /* transient failure — stay on the safe "no credential" default, and
-         * leave `credentialConfirmed` false so the waiver stays withheld too */
-      },
-    );
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const read = () => {
+      // Bounded for the same reason the revalidation is: the transport has no
+      // timeout of its own, and a request that is accepted and never answered
+      // would otherwise mean this read never settles and the retry below never
+      // gets scheduled — the hang and the old permanent no-op being the same
+      // thing from the founder's side.
+      void withReadTimeout(getComposioStatus(client, company), REVALIDATE_TIMEOUT_MS).then(
+        (status) => {
+          if (!live) return;
+          setHasCredential(status.credentialSource !== "none");
+          setCredentialConfirmed(true);
+        },
+        () => {
+          /* Stay on the safe "no credential" default and leave
+           * `credentialConfirmed` false — the waiver must not be offered
+           * against an answer we do not have. But try again: this used to be
+           * a permanent no-op, which withheld the founder's only escape for
+           * the life of the mount over a blip. */
+          if (!live) return;
+          retry = setTimeout(read, CREDENTIAL_RETRY_MS);
+        },
+      );
+    };
+    read();
     return () => {
       live = false;
+      if (retry !== undefined) clearTimeout(retry);
     };
   }, [client, company]);
 
