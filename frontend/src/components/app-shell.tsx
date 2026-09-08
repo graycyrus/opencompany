@@ -1157,11 +1157,33 @@ export function AppShell({
       integration: status.integrationConnected,
       workflow: status.workflowRunSucceeded,
     };
+    for (const step of waivedGateSteps(scope)) {
+      if (done[step]) clearGateStepWaiver(scope, step);
+    }
+    // Codex review, PR #2046, round 4: and THIS is where a deferred cross-tab
+    // removal is finally applied.
+    //
+    // The `storage` listener below refuses to act on another tab's removal on
+    // that tab's word alone — it asks for a refresh and keeps what it has. Its
+    // round-2 reasoning still holds, but it assumed every removal meant "some
+    // tab saw `isActivated`", which is monotonic on the host and so always
+    // arrives here eventually. The per-step clearing above broke that
+    // assumption: a removal can now mean "some tab saw THIS STEP complete",
+    // and step completion is not monotonic — an integration can be revoked.
+    // So the deferral had no end condition any more. `gateWaived` kept a step
+    // whose `localStorage` key was already gone, and went on masking it for
+    // the life of the tab.
+    //
+    // Reading storage back here ends it. This line only runs when THIS tab's
+    // own `status` has just changed, which only happens on a read that
+    // actually succeeded — so an outage still defers indefinitely, which is
+    // the half of the round-2 protection that was always the real one. What
+    // it no longer does is defer forever against a first-hand answer.
     setGateWaived((previous) => {
-      const settled = previous.filter((step) => done[step]);
-      if (settled.length === 0) return previous;
-      for (const step of settled) clearGateStepWaiver(scope, step);
-      return previous.filter((step) => !done[step]);
+      const stored = waivedGateSteps(scope);
+      const same =
+        previous.length === stored.length && stored.every((step, i) => previous[i] === step);
+      return same ? previous : stored;
     });
   }, [activationGate.status, scope]);
 
