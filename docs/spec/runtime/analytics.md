@@ -158,7 +158,7 @@ than from its docs.
 
 Two consequences of it shape everything below and are worth stating here:
 **there is no batch endpoint**, so the transport issues one request per event
-(see [the drain](#failure-is-silent-and-the-drain-gives-up-early)); and the
+(see [the drain](analytics-wire.md#failure-is-silent-and-the-drain-gives-up-early)); and the
 credential travels in headers rather than in the body, so there is no longer a
 code path by which it could reach a rendered payload.
 
@@ -427,43 +427,16 @@ that already fills the budget leaves zero and the flush is skipped, and a flush
 that does not finish is abandoned. A dropped event costs a line in a dashboard;
 an overrun costs a half-finished turn.
 
-### Failure is silent, and the drain gives up early
+### Failure is silent
 
 `Tracker::track` is synchronous, infallible and returns nothing, so a call site
 cannot await a network or branch on a telemetry error. A dead collector drops
-events after one `debug!` line.
-
-The queue is what makes that possible without batching. Losing the batch
-endpoint invites the obvious simplification — drop the queue and fire a request
-from `track` itself — and it is the wrong trade twice over: `track` is on a
-turn's hot path and cannot await, so firing from it means spawning a task per
-event, which is unbounded concurrency against a collector this process does not
-control, with no back-pressure and no ceiling on memory. The queue bounds both.
-At most 500 events exist at once — if the collector is unreachable long enough
-to fill it, the right outcome is losing telemetry, not a tenant container — and
-at most one drain runs at a time.
-
-**A transport failure abandons the rest of the drain.** Each request has its own
-5s timeout, so a full queue against a black-holing collector would be
-`500 × 5s`: over forty minutes of proving the same thing five hundred times,
-during which the shutdown flush is blocked behind the same lock and the
-container's `SIGTERM` budget is long gone. The collector is down, the remaining
-events are going nowhere, and the next interval tries again with whatever has
-accumulated since. `an_unreachable_collector_costs_one_timeout_for_the_whole_drain`
-asserts it on connections a black-hole listener actually accepted — one, not
-three — rather than on elapsed time, which would be a flaky test.
-
-**An HTTP status failure does not.** That is a per-event answer — a rejected
-name, a body the collector will not take — and the events behind it may be fine;
-treating the two alike would let one malformed event silence a whole drain.
-
-**A `401` is the one failure said out loud.** Every other failure here is
-transient and deserves the `debug!` #1739 settled on. A refused credential
-resolves itself never: every event for the rest of the process's life is
-dropped, boot said "reporting to …", and the only trace is a line nobody has
-enabled. So it is a `warn!` — said **once**, because the condition is permanent
-and repeating it would drown a busy tenant's log — naming the two variables to
-fix and the UUIDv4 requirement on the client id, and never the credential.
+events after one `debug!` line, the queue is bounded at 500 events, and a drain
+that cannot reach the collector abandons the rest of itself rather than paying a
+5s timeout per queued event. The full reasoning — including why the queue
+survived the loss of batching, and why a `401` is treated differently from every
+other refusal — is in
+[analytics-wire.md](analytics-wire.md#failure-is-silent-and-the-drain-gives-up-early).
 
 ## What is deliberately not instrumented yet
 

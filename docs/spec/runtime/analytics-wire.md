@@ -82,3 +82,52 @@ knowing and neither applies to this client, which sends no `Origin` header:
 requests with `ip`, `origin` and a client id are de-duplicated by content hash
 inside a 100 ms window, and a verified secret exempts a request from bot
 detection.
+
+## Failure is silent, and the drain gives up early
+
+`Tracker::track` is synchronous, infallible and returns nothing, so a call site
+cannot await a network or branch on a telemetry error. A dead collector drops
+events after one `debug!` line.
+
+The queue is what makes that possible without batching. Losing the batch
+endpoint invites the obvious simplification — drop the queue and fire a request
+from `track` itself — and it is the wrong trade twice over: `track` is on a
+turn's hot path and cannot await, so firing from it means spawning a task per
+event, which is unbounded concurrency against a collector this process does not
+control, with no back-pressure and no ceiling on memory. The queue bounds both.
+At most 500 events exist at once — if the collector is unreachable long enough
+to fill it, the right outcome is losing telemetry, not a tenant container — and
+at most one drain runs at a time.
+
+**A transport failure abandons the rest of the drain.** Each request has its own
+5s timeout, so a full queue against a black-holing collector would be
+`500 × 5s`: over forty minutes of proving the same thing five hundred times,
+during which the shutdown flush is blocked behind the same lock and the
+container's `SIGTERM` budget is long gone. The collector is down, the remaining
+events are going nowhere, and the next interval tries again with whatever has
+accumulated since. `an_unreachable_collector_costs_one_timeout_for_the_whole_drain`
+asserts it on connections a black-hole listener actually accepted — one, not
+three — rather than on elapsed time, which would be a flaky test.
+
+**An HTTP status failure does not.** That is a per-event answer — a rejected
+name, a body the collector will not take — and the events behind it may be fine;
+treating the two alike would let one malformed event silence a whole drain.
+
+**A `401` is the exception on both counts.** It is not a per-event answer at
+all: it is the collector's verdict on this process's credential, so every event
+behind it in the queue gets the same one. Carrying on would fire up to 500
+requests every thirty seconds for the life of a misconfigured tenant — a
+thousand a minute at the operator's own collector — to learn something already
+known, so it abandons the drain like a transport failure does.
+
+It is also the one failure said out loud. Every other failure here is transient
+and deserves the `debug!` #1739 settled on. A refused credential resolves itself
+never: every event for the rest of the process's life is dropped, boot said
+"reporting to …", and the only trace is a line nobody has enabled. So it is a
+`warn!` — said **once**, because the condition is permanent and repeating it
+would drown a busy tenant's log — naming the two variables to fix and the
+UUIDv4 requirement on the client id, and never the credential.
+
+`a_refused_credential_stops_the_drain` and `a_refused_event_does_not_stop_the_drain`
+are the same collector, the same three events and one status code apart, with
+opposite outcomes. Neither means much without the other.

@@ -378,6 +378,15 @@ mod http {
         /// answer — a rejected event name, a payload the collector will not
         /// accept — and the events behind it may well be fine. Treating the two
         /// alike would let one malformed event silence a whole drain.
+        ///
+        /// **A `401` is the exception, because it is not a per-event answer at
+        /// all.** It is the collector's verdict on this process's credential,
+        /// so every event behind it in the queue will get the same one. Carrying
+        /// on would fire up to [`MAX_QUEUED`] requests, every
+        /// [`FLUSH_INTERVAL`], for the life of a misconfigured tenant — a
+        /// thousand pointless requests a minute at the operator's own
+        /// collector, to learn something already known. So it abandons the drain
+        /// like a transport failure, and says so once.
         async fn drain(&self) {
             let _sending = self.sending.lock().await;
             let events = {
@@ -392,8 +401,11 @@ mod http {
             for (sent, event) in events.into_iter().enumerate() {
                 match self.client.post(&self.endpoint).json(&event).send().await {
                     Ok(response) if response.status().is_success() => {}
+                    // Not a per-event answer: the credential is wrong for every
+                    // event behind this one too.
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                        self.report_refused_credential();
+                        self.report_refused_credential(total - sent);
+                        return;
                     }
                     Ok(response) => tracing::debug!(
                         status = %response.status(),
@@ -415,13 +427,14 @@ mod http {
 
         /// Says once, out loud, that the collector will not accept this
         /// process's credential. Never quotes it.
-        fn report_refused_credential(&self) {
+        fn report_refused_credential(&self, dropped: usize) {
             use std::sync::atomic::Ordering;
             if self.credential_refused.swap(true, Ordering::Relaxed) {
                 return;
             }
             tracing::warn!(
                 endpoint = %crate::analytics::boot::loggable_endpoint(&self.endpoint),
+                dropped,
                 "[analytics] the collector refused this instance's credential (401). \
                  Every event will be dropped until OPENCOMPANY_ANALYTICS_CLIENT_ID and \
                  OPENCOMPANY_ANALYTICS_CLIENT_SECRET name a write client on that \
@@ -495,14 +508,19 @@ mod test {
     }
 
     async fn spawn_collector() -> Collector {
-        spawn_collector_with(Duration::ZERO, 0).await
+        spawn_collector_with(Duration::ZERO, 0, axum::http::StatusCode::BAD_REQUEST).await
     }
 
     /// A collector that takes `delay` to answer and refuses the first
-    /// `refuse_first` requests with a 400, so a test can observe both what
-    /// happens while a request is in flight and what happens after one event is
-    /// rejected.
-    async fn spawn_collector_with(delay: Duration, refuse_first: usize) -> Collector {
+    /// `refuse_first` requests with `refusal`, so a test can observe what
+    /// happens while a request is in flight, what happens after one event is
+    /// rejected, and what happens when the refusal is about the credential
+    /// rather than about the event.
+    async fn spawn_collector_with(
+        delay: Duration,
+        refuse_first: usize,
+        refusal: axum::http::StatusCode,
+    ) -> Collector {
         let hits = Arc::new(AtomicUsize::new(0));
         let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
         let headers = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -536,7 +554,7 @@ mod test {
                                 .collect(),
                         );
                         if seen < refuse_first {
-                            axum::http::StatusCode::BAD_REQUEST
+                            refusal
                         } else {
                             axum::http::StatusCode::OK
                         }
@@ -769,7 +787,8 @@ mod test {
     /// every other failure is already silent.
     #[tokio::test]
     async fn a_refused_event_does_not_stop_the_drain() {
-        let collector = spawn_collector_with(Duration::ZERO, 1).await;
+        let collector =
+            spawn_collector_with(Duration::ZERO, 1, axum::http::StatusCode::BAD_REQUEST).await;
         let env = env(&collector.url, &[(DEPLOYMENT_ENV, "hosted-tenant")]);
         let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
 
@@ -786,6 +805,46 @@ mod test {
             collector.hits.load(Ordering::SeqCst),
             3,
             "the two events behind a refused one must still be attempted"
+        );
+        collector.stop().await;
+    }
+
+    /// **A refused *credential* does stop the drain, unlike a refused event.**
+    ///
+    /// A `401` is not the collector's verdict on one event; it is its verdict on
+    /// this process, so every event behind it in the queue gets the same answer.
+    /// Carrying on would fire up to 500 requests every thirty seconds for the
+    /// life of a misconfigured tenant — a thousand a minute at the operator's
+    /// own collector — to learn something already known.
+    ///
+    /// The contrast with `a_refused_event_does_not_stop_the_drain` is the point:
+    /// same collector, same three events, one status code changed, opposite
+    /// behaviour. Neither test means much without the other.
+    #[tokio::test]
+    async fn a_refused_credential_stops_the_drain() {
+        let collector = spawn_collector_with(
+            Duration::ZERO,
+            usize::MAX,
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+        .await;
+        let env = env(&collector.url, &[(DEPLOYMENT_ENV, "hosted-tenant")]);
+        let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+
+        for _ in 0..3 {
+            tracker.track(Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            });
+        }
+        tracker.flush().await;
+
+        assert_eq!(
+            collector.hits.load(Ordering::SeqCst),
+            1,
+            "a 401 is about the credential, not about the event, so the two behind it \
+             must not be attempted"
         );
         collector.stop().await;
     }
@@ -977,7 +1036,8 @@ mod test {
     /// microseconds).
     #[tokio::test]
     async fn a_flush_waits_for_a_send_already_in_flight() {
-        let collector = spawn_collector_with(Duration::from_millis(600), 0).await;
+        let collector =
+            spawn_collector_with(Duration::from_millis(600), 0, axum::http::StatusCode::OK).await;
         let env = env(&collector.url, &[(DEPLOYMENT_ENV, "hosted-tenant")]);
         let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
 
