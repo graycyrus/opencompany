@@ -142,31 +142,37 @@ export function HiveGrammarPanel({
   };
 
   const save = async () => {
+    const issuedFor = deskId;
     setBusy(true);
     setSaveError(null);
     try {
       const dto = await client.putDeskHive(deskId, draft, company);
+      if (currentDeskId.current !== issuedFor) return;
       setState(dto);
       setDraft(dto.declared ?? {});
     } catch (e: unknown) {
+      if (currentDeskId.current !== issuedFor) return;
       // The host's own sentence, verbatim.
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      if (currentDeskId.current === issuedFor) setBusy(false);
     }
   };
 
   const reset = async () => {
+    const issuedFor = deskId;
     setBusy(true);
     setSaveError(null);
     try {
       const dto = await client.resetDeskHive(deskId, company);
+      if (currentDeskId.current !== issuedFor) return;
       setState(dto);
       setDraft(dto.declared ?? {});
     } catch (e: unknown) {
+      if (currentDeskId.current !== issuedFor) return;
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      if (currentDeskId.current === issuedFor) setBusy(false);
     }
   };
 
