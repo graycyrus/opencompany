@@ -109,6 +109,51 @@ describe("WorkflowStep's continuous run-history poll", () => {
     expect(container.querySelector('[data-testid="gate-workflow-running"]')).toBeNull();
   });
 
+  it("does not stack a read error on top of the last good answer", async () => {
+    // tinysweeper review, PR #2046: `fetchRuns` sets `failed` without clearing
+    // `progress`, so once an initial read has landed, a transient poll failure
+    // left BOTH set — the card rendered "Couldn't read this company's run
+    // history just now" directly above a ProgressLine describing that history,
+    // for up to one poll interval. The existing failure test only covers the
+    // initial-read-fails case, where `progress` is still `null` and the two
+    // cannot overlap.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    const client = fakeClient(async () => {
+      calls += 1;
+      // The mount read lands; every poll after it fails.
+      if (calls === 1) return { runs: [runningRun], hasMore: false };
+      throw new Error("network blip");
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(WorkflowStep, {
+          client,
+          company: null,
+          onOpenWorkflows: () => {},
+          onOpenApprovals: () => {},
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(container.querySelector('[data-testid="gate-workflow-running"]')).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(calls, "the poll must have run and failed").toBeGreaterThan(1);
+    expect(
+      container.textContent,
+      "a blip must not stack an error on top of the answer still on screen",
+    ).not.toContain("Couldn't read this company's run history");
+    expect(
+      container.querySelector('[data-testid="gate-workflow-running"]'),
+      "the last good answer stays visible while the poll retries",
+    ).toBeTruthy();
+  });
+
   it("does not start an overlapping poll while a request is still in flight", async () => {
     // Codex review, PR #2046: a host consistently slower than the poll
     // interval used to have EVERY response arrive already stale — each tick

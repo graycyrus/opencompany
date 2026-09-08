@@ -168,7 +168,16 @@ export function WorkflowStep({
         </p>
       )}
 
-      {failed && (
+      {/* tinysweeper review, PR #2046: gated on `!progress`, not `failed`
+          alone. `fetchRuns` sets `failed` without clearing `progress`, so once
+          an initial read has landed, a single transient poll failure would
+          otherwise render THIS sentence and the `ProgressLine` below it at the
+          same time — telling the founder both that the run history could not
+          be read and what the latest run came to, for up to one poll interval.
+          A blip is not new information: the last good answer is still the best
+          one we have, and the poll is already retrying. This sentence is for
+          the case where there is nothing else to show. */}
+      {failed && !progress && (
         <p className="text-sm text-muted-foreground">
           Couldn&apos;t read this company&apos;s run history just now. Open Workflows to run
           one and watch it there.
