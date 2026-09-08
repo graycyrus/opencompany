@@ -122,7 +122,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/desktop-updates.md](runtime/desktop-updates.md) | Desktop auto-update: the silent-until-actionable prompt, the signed release artifacts, and the keypair an operator must generate before any of it works |
 | [runtime/connectors.md](runtime/connectors.md) | Connectors: choosing where the runtime runs — this computer, TinyHumans Cloud, a remote gateway, or over SSH |
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
-| [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, and the switch that turns it off |
+| [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, a self-hosted OpenPanel collector, and the switch that turns it off |
+| [runtime/analytics-wire.md](runtime/analytics-wire.md) | The OpenPanel `POST /track` contract that transport speaks: the two auth headers, the union body, the names the collector refuses, and where an event time goes |
 | [runtime/crash-reporting.md](runtime/crash-reporting.md) | Errors and panics to the operator's own Sentry: the two DSNs, what a report carries, the credential scrubber, and how to prove it works |
 | [runtime/tracing.md](runtime/tracing.md) | Performance tracing and the request timeline: the sample-rate knobs and what they cost, the console-to-host distributed trace, transaction scrubbing, and why Session Replay is not shipped |
 | [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
