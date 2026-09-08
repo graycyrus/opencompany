@@ -33,7 +33,7 @@ export function StandingsRail({
         <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           On the floor
         </h3>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-2xs text-muted-foreground">
           quorum {episode.quorum}
           {episode.quorumDerived ? " (derived)" : ""}
         </span>
@@ -53,13 +53,13 @@ export function StandingsRail({
                   quorum={episode.quorum}
                   onSelect={onSelectTopic}
                 />
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-2xs text-muted-foreground">
                   {standingSummary(grounded.length, episode.quorum, standing.carried)}
                 </span>
               </div>
 
               {grounded.length > 0 && (
-                <p className="pl-1 text-[11px] text-muted-foreground">
+                <p className="pl-1 text-2xs text-muted-foreground">
                   Backed by {grounded.join(", ")}
                 </p>
               )}
@@ -70,19 +70,19 @@ export function StandingsRail({
                 reason the rail exists rather than a supporter count.
               */}
               {standing.ungrounded.length > 0 && (
-                <p className="flex items-center gap-1 pl-1 text-[11px] text-muted-foreground">
+                <p className="flex items-center gap-1 pl-1 text-2xs text-muted-foreground">
                   <EyeOff aria-hidden className="size-3" />
                   {standing.ungrounded.join(", ")} backed it without citing anything
                 </p>
               )}
               {standing.silenced.length > 0 && (
-                <p className="flex items-center gap-1 pl-1 text-[11px] text-muted-foreground">
+                <p className="flex items-center gap-1 pl-1 text-2xs text-muted-foreground">
                   <Hand aria-hidden className="size-3" />
                   {standing.silenced.join(", ")} silenced by an objection
                 </p>
               )}
               {standing.refuters.length > 0 && (
-                <p className="flex items-center gap-1 pl-1 text-[11px] text-muted-foreground">
+                <p className="flex items-center gap-1 pl-1 text-2xs text-muted-foreground">
                   <ShieldX aria-hidden className="size-3" />
                   Refuted by {standing.refuters.join(", ")}
                 </p>

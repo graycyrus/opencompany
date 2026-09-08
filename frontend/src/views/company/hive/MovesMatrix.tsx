@@ -60,7 +60,7 @@ export function MovesMatrix({
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <span className="text-[11px] font-medium text-muted-foreground underline decoration-dotted" />
+                    <span className="text-2xs font-medium text-muted-foreground underline decoration-dotted" />
                   }
                 >
                   always
@@ -83,7 +83,7 @@ export function MovesMatrix({
               <tr key={seat.agentId} className="border-t border-border">
                 <td className="sticky left-0 bg-background py-2 pr-3">
                   <div className="font-medium">{seat.label}</div>
-                  <div className="text-[11px] text-muted-foreground">
+                  <div className="text-2xs text-muted-foreground">
                     {governed ? seat.role : "every move — not narrowed"}
                   </div>
                 </td>
@@ -107,7 +107,7 @@ export function MovesMatrix({
                     />
                   </td>
                 ))}
-                <td className="px-2 py-2 text-center text-[11px] text-muted-foreground">
+                <td className="px-2 py-2 text-center text-2xs text-muted-foreground">
                   on
                 </td>
               </tr>
@@ -128,7 +128,7 @@ function MoveHeader({ kind }: { kind: MoveKind }) {
         render={<span className={cn("flex flex-col items-center gap-0.5")} />}
       >
         <Icon aria-hidden className="size-3.5 text-muted-foreground" />
-        <span className="text-[10px] text-muted-foreground">{mark.label}</span>
+        <span className="text-3xs text-muted-foreground">{mark.label}</span>
       </TooltipTrigger>
       <TooltipContent>{mark.hint}</TooltipContent>
     </Tooltip>

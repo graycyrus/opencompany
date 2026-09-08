@@ -32,7 +32,7 @@ export function BlindRoundBand({
         className,
       )}
     >
-      <p className="flex items-center gap-1.5 pb-1 text-[11px] text-muted-foreground">
+      <p className="flex items-center gap-1.5 pb-1 text-2xs text-muted-foreground">
         <EyeOff aria-hidden className="size-3" />
         {derived
           ? "Opening round — each seat appears to have written before reading the others"

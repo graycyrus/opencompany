@@ -106,7 +106,7 @@ export function EpisodeBlock({
           Once the room has closed the count is the fact and the budget is
           noise, so the denominator drops away.
         */}
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-2xs text-muted-foreground">
           {running
             ? `turn ${episode.turns.length} of ${episode.turnBudget}`
             : `${episode.turns.length} ${episode.turns.length === 1 ? "turn" : "turns"}`}{" "}
@@ -115,7 +115,7 @@ export function EpisodeBlock({
         </span>
         {running ? (
           <span
-            className="inline-flex items-center gap-1 rounded-full bg-status-running-soft px-1.5 py-0.5 text-[10px] font-medium text-status-running-text"
+            className="inline-flex items-center gap-1 rounded-full bg-status-running-soft px-1.5 py-0.5 text-3xs font-medium text-status-running-text"
             title="This desk is still deliberating."
           >
             <span className="size-1.5 animate-pulse rounded-full bg-status-running" />
@@ -125,7 +125,7 @@ export function EpisodeBlock({
         {deskId ? (
           <a
             href={`#/company/${encodeURIComponent(deskId)}?hive`}
-            className="ml-auto text-[11px] text-muted-foreground underline decoration-dotted hover:text-foreground"
+            className="ml-auto text-2xs text-muted-foreground underline decoration-dotted hover:text-foreground"
           >
             Move grammar
           </a>

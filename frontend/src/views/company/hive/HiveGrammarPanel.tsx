@@ -192,7 +192,7 @@ export function HiveGrammarPanel({
           <label className="flex items-center justify-between gap-3">
             <span>
               <span className="text-sm font-medium">Answer as a room</span>
-              <span className="block text-[11px] text-muted-foreground">
+              <span className="block text-2xs text-muted-foreground">
                 Off keeps the desk on one responder, exactly as it behaved before
                 deliberation existed.
               </span>
@@ -230,7 +230,7 @@ export function HiveGrammarPanel({
 
         <div>
           <h3 className="text-sm font-medium">Who may make which move</h3>
-          <p className="mb-2 text-[11px] text-muted-foreground">
+          <p className="mb-2 text-2xs text-muted-foreground">
             A room whose members may all propose is a room that votes — a proposal
             already counts as its own author&rsquo;s support, so agreement is reached
             without anybody engaging with anybody else&rsquo;s reasoning.
@@ -287,7 +287,7 @@ export function HiveGrammarPanel({
               Restore the blueprint&rsquo;s
             </Button>
           )}
-          <span className="ml-auto text-[11px] text-muted-foreground">
+          <span className="ml-auto text-2xs text-muted-foreground">
             {state.source === "overlay"
               ? "installed from the console"
               : state.source === "manifest"
@@ -296,7 +296,7 @@ export function HiveGrammarPanel({
           </span>
         </div>
 
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-2xs text-muted-foreground">
           A room already deliberating keeps the grammar it opened with — the change
           takes effect on the next message that opens one.
         </p>
@@ -308,8 +308,8 @@ export function HiveGrammarPanel({
 /** Full class strings, never assembled — Tailwind scans source text. */
 function cnState(ok: boolean): string {
   return ok
-    ? "text-[11px] text-muted-foreground"
-    : "text-[11px] font-medium text-status-failed-text";
+    ? "text-2xs text-muted-foreground"
+    : "text-2xs font-medium text-status-failed-text";
 }
 
 function Panel({

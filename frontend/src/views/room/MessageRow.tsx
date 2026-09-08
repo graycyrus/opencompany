@@ -361,7 +361,7 @@ export function MessageRow({
           <div className="flex flex-wrap items-baseline gap-1.5 text-sm leading-6">
             <MoveChip kind={turn.move.kind} />
             {turn.move.topic ? (
-              <span className="font-mono text-[11px] text-muted-foreground">
+              <span className="font-mono text-2xs text-muted-foreground">
                 #{turn.move.topic}
               </span>
             ) : null}
@@ -372,12 +372,12 @@ export function MessageRow({
                * reads as generic disagreement, and the room's cross-inhibition
                * becomes invisible.
                */
-              <span className="font-mono text-[11px] text-muted-foreground">
+              <span className="font-mono text-2xs text-muted-foreground">
                 &gt;{turn.move.target}
               </span>
             ) : null}
             {turn.move.cites.map((cite) => (
-              <span key={cite} className="font-mono text-[11px] text-muted-foreground">
+              <span key={cite} className="font-mono text-2xs text-muted-foreground">
                 ^{cite}
               </span>
             ))}

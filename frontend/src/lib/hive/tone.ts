@@ -89,15 +89,15 @@ export const MOVE_MARKS: Record<MoveKind, MoveMark> = {
  * One treatment, deliberately. See the header: the icon is what separates them.
  */
 export const MOVE_CHIP_CLASS =
-  "inline-flex items-center gap-1 rounded-md border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] leading-none text-muted-foreground";
+  "inline-flex items-center gap-1 rounded-md border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-2xs leading-none text-muted-foreground";
 
 /** The chip a `#topic` takes — the third form, shared by the rail and the rows. */
 export const TOPIC_CHIP_CLASS =
-  "inline-flex items-center gap-1 rounded-md border border-dashed border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-none text-foreground";
+  "inline-flex items-center gap-1 rounded-md border border-dashed border-border bg-background px-1.5 py-0.5 font-mono text-2xs leading-none text-foreground";
 
 /** The tone a carried topic takes, from the closed status vocabulary. */
 export const TOPIC_CARRIED_CLASS =
-  "inline-flex items-center gap-1 rounded-md border border-status-done/40 bg-status-done-soft px-1.5 py-0.5 font-mono text-[11px] leading-none text-status-done-text";
+  "inline-flex items-center gap-1 rounded-md border border-status-done/40 bg-status-done-soft px-1.5 py-0.5 font-mono text-2xs leading-none text-status-done-text";
 
 /** The five closed status words. Nothing here may invent a sixth. */
 export type StatusTone = "idle" | "running" | "blocked" | "done" | "failed";

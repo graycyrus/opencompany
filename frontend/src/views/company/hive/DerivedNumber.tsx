@@ -51,7 +51,7 @@ export function DerivedNumber({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-auto px-1 py-0 text-[11px]"
+            className="h-auto px-1 py-0 text-2xs"
             disabled={disabled}
             onClick={() => onChange(undefined)}
           >
@@ -82,13 +82,13 @@ export function DerivedNumber({
         >
           <span>
             <span className="text-foreground">{derived}</span>{" "}
-            <span className="text-[11px]">({formula})</span>
+            <span className="text-2xs">({formula})</span>
           </span>
-          <span className="text-[11px]">override</span>
+          <span className="text-2xs">override</span>
         </button>
       )}
 
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-2xs text-muted-foreground">
         {invalid ? `Must be at least ${min}. ${hint}` : hint}
       </p>
     </div>

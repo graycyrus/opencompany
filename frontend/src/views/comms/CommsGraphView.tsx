@@ -131,7 +131,7 @@ export function CommsGraphView({
                     />
                   ) : null}
                 </span>
-                <span className="block truncate text-[10px] text-muted-foreground">
+                <span className="block truncate text-3xs text-muted-foreground">
                   {node.spawned ? "created at runtime" : node.detail}
                 </span>
               </span>
@@ -158,7 +158,7 @@ const EDGE_CLASS: Record<CommsEdge["kind"], string> = {
 
 function Legend() {
   return (
-    <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+    <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-2xs text-muted-foreground">
       <li>
         <Dash className="stroke-border" /> on the desk
       </li>
