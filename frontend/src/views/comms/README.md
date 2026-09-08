@@ -90,3 +90,13 @@ field and a delegate shares its parent's run sink, so the `from → to` edge of 
 `originChatId → assignee`, which is desk-level. Closing that is a host change —
 a `WorkHandedOff` row, which needs a `delegator` threaded through
 `DelegationRunner` — not a console one.
+
+The **structural `CompanyEvent`s themselves are unconsumed here.** `TeammateAdded`,
+`DeskCreated`, `DeskDeleted`, `DeskMembersChanged`, and `DeskHiveConfigured` are
+journaled durably (host side), but the only production call site of `CommsView`
+supplies no `observations`, and `use-events.ts`'s `handleEvent` types these events
+without converting any of them into the `spawned`/creator-edge observations this
+graph draws. Polling `/team`, `/desks`, and `/tasks` recovers current structure,
+but none of those responses carries `byAgentId`, so "who created whom" stays
+undrawn even though it is now a durable fact. Wiring that derivation is a
+separable follow-up, not a defect in what shipped.
