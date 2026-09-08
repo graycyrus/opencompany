@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { ComposioCredentialSource, ComposioStatus } from "@/api/composio";
 import { IntegrationStep } from "@/onboarding/IntegrationStep";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
  * Codex review, PR #2046. `src/company/activation.rs` derives
@@ -132,6 +133,23 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
       container.textContent,
       "the footer explaining the (not-yet-offered) waiver must also stay hidden",
     ).not.toContain("Skipping is remembered");
+  });
+
+  it("does not name a credential route the Apps page it links to has hidden", async () => {
+    // `product-scope.ts` hides the OpenHuman-managed route (`OAuthView` drops
+    // `CompanyCredentialCard` behind the same flag), so this sentence must not
+    // send the founder after a TinyHumans account key that page won't take.
+    await render("none");
+    const copy = container.textContent ?? "";
+    expect(copy).toContain("needs a credential to connect it with");
+    if (COMPOSIO_MANAGED_HIDDEN) {
+      expect(copy, "the managed route is hidden — do not offer it").not.toContain(
+        "TinyHumans account key",
+      );
+      expect(copy).toContain("Composio API key of your own");
+    } else {
+      expect(copy).toContain("TinyHumans account key");
+    }
   });
 
   it("withholds the durable waiver when the credential read fails outright", async () => {

@@ -4,6 +4,7 @@ import { ArrowRight, KeyRound, Loader2 } from "lucide-react";
 import type { OpenCompanyClient } from "@/api/client";
 import { getComposioStatus } from "@/api/composio";
 import { Button } from "@/components/ui/button";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
  * Step 2 of the first-run gate, built for the card it is drawn in (bug B-001).
@@ -173,8 +174,16 @@ export function IntegrationStep({
         <div className="space-y-2 text-sm text-muted-foreground">
           <p>
             Teammates reach Gmail, Slack and GitHub through a connected account. Before any
-            provider can be connected, this company needs a credential to connect it with — a
-            TinyHumans account key, or a Composio token of your own.
+            provider can be connected, this company needs a credential to connect it with —{" "}
+            {/* `COMPOSIO_MANAGED_HIDDEN` took the OpenHuman-managed route out of Apps
+                (`OAuthView` hides `CompanyCredentialCard` behind the same flag), so
+                naming a TinyHumans account key here sent the founder after a credential
+                the page this card links to no longer accepts. Reading the flag rather
+                than restating its current value keeps re-enabling that surface the
+                single edit `product-scope.ts` promises it is. */}
+            {COMPOSIO_MANAGED_HIDDEN
+              ? "a Composio API key of your own."
+              : "a TinyHumans account key, or a Composio token of your own."}
           </p>
           <p className="flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2">
             <KeyRound aria-hidden className="mt-0.5 size-4 shrink-0" />
