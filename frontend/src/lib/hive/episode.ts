@@ -449,9 +449,15 @@ export function foldEpisodes(
     const move = moveOf(message.text);
     const referral = message.channel === HIVE_REFERRAL_AUTHOR;
     if (!move && !referral) {
-      // Ordinary prose from a teammate. Inside an open room it is a turn that
-      // deposited no trace; outside one it is just a reply and starts nothing.
-      if (!open) continue;
+      // Ordinary prose from a teammate. Inside a room that has already
+      // produced a real move or referral, it is a turn that deposited no
+      // trace. Before that, `open` only records that an operator spoke in a
+      // channel that has hosted a room *at some point* — it is not yet
+      // evidence that *this* exchange is one, so an ordinary reply must not
+      // commit the pending trigger. Without this guard, any plain follow-up
+      // question on a desk that has ever deliberated would sprout a
+      // misleading "still deliberating" block around its ordinary reply.
+      if (!open || open.turns.length === 0) continue;
     }
     open ??= start(null);
     const turn: EpisodeTurn = {
