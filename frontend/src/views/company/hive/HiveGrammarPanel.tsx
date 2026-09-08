@@ -54,6 +54,13 @@ export function HiveGrammarPanel({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The `deskId` an in-flight save/reset was issued for. An `await` on
+  // `putDeskHive`/`resetDeskHive` can resolve after the operator has already
+  // switched desks; comparing against the current `deskId` when it settles is
+  // what stops that stale response from overwriting the newly loaded desk's
+  // state, error, or `busy` lock.
+  const inFlightDeskId = useRef(deskId);
+  inFlightDeskId.current = deskId;
 
   useEffect(() => {
     let live = true;
