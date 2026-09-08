@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { openHostMenu } from "./host-switcher";
+
 
 /**
  * What the desktop opens on, driven against a real host.
@@ -36,6 +36,21 @@ interface BridgeConfig {
    * and it is a real window on a cold start, when the host is still binding.
    */
   discoveryDelayMs?: number;
+  /**
+   * What `oc_local_instances` answers, for a case that needs a **roster-capable**
+   * shell.
+   *
+   * Omitted — the default, and what every case here wanted before the roster
+   * existed — leaves the command unimplemented, which `localInstances()` reads
+   * as `null`: "a shell predating the roster". That is a real shape several
+   * cases below depend on, so it stays the default rather than becoming a silent
+   * upgrade for the whole file.
+   *
+   * A current desktop does answer it, and `canStartHere` is exactly
+   * `embedded.roster`, so the one case about being offered a start has to opt in
+   * or it asserts against a shell too old to offer one.
+   */
+  instances?: { id: string; label: string; dataDir: string; running: boolean }[];
 }
 
 /** One `oc_connect` the console made, as the test reads them back. */
@@ -120,6 +135,14 @@ async function asDesktop(page: Page, config: BridgeConfig) {
             case "oc_disconnect": {
               hosts.delete(args.connectionId as string);
               return undefined;
+            }
+            case "oc_local_instances": {
+              // `undefined` is what an unimplemented command answers, and
+              // `localInstances()` turns anything that is not an array into
+              // `null` on purpose. Returning `[]` instead would claim a
+              // roster-capable shell that runs nothing, which is a different
+              // state with a different screen.
+              return cfg.instances;
             }
             case "oc_embedded": {
               if (cfg.discoveryDelayMs) {
@@ -273,18 +296,18 @@ test("a remembered host does not take the launch just by being older", async ({
   });
   await expect(page.getByTestId("connection-error")).toHaveCount(0);
 
-  // Said directly, rather than inferred from what rendered: the remembered host
-  // is present and not current, and whatever is current is live.
-  await openHostMenu(page);
-  await expect(page.getByTestId("host-row-conn-remembered-remote")).toHaveAttribute(
-    "aria-current",
-    "false",
-  );
-  await expect(page.locator('[data-testid^="host-row-"][aria-current="true"]')).toHaveAttribute(
-    "data-status",
-    "live",
-  );
-  await page.keyboard.press("Escape");
+  // Said off the closed trigger. The per-row `aria-current` this used to read is
+  // hidden with the roster (`src/product-scope.ts`), so what survives is the
+  // count — the remembered host is still held, not dropped — and the worst
+  // status across the set, which is what the rows would have had to agree with.
+  // Only the count survives off the closed trigger: the remembered host is still
+  // held rather than dropped. Which row is current, and that the current one is
+  // live, were per-row facts — the trigger reports the WORST status across the
+  // set, which is `down` here precisely because the remembered host is dead, so
+  // it cannot stand in for them. The assertion above (no connection error, and
+  // the embedded host's console on screen) is what still says the launch went to
+  // the right one.
+  await expect(page.getByTestId("host-switcher")).toHaveAttribute("data-host-count", /[2-9]/);
 });
 
 test("a desktop waits for its own host rather than borrowing a remembered one", async ({
@@ -372,13 +395,11 @@ test("a paired host on plain http is refused, and says why", async ({ page, base
     timeout: 30_000,
   });
 
-  await openHostMenu(page);
-  const refused = page.getByTestId("host-row-conn-paired-cleartext");
-  await expect(refused).toHaveAttribute("data-status", "down");
-  // THE assertion. Before this, the row read "cannot reach the company host at
-  // http://192.168.1.20:8080" — indistinguishable from a host that is simply
-  // switched off, and it sends the operator to look at a network that works.
-  await expect(refused).toHaveAttribute("title", /not encrypted/);
+  // The row that carried the refusal — and its "not encrypted" title, which is
+  // what told the operator not to go looking at a working network — is hidden
+  // with the roster (`src/product-scope.ts`). The refusal itself is unchanged
+  // and is still asserted where it matters most: nothing was sent.
+  await expect(page.getByTestId("host-switcher")).toHaveAttribute("data-worst-status", "down");
 
   // And nothing was sent there. The status is not a label applied after a round
   // trip; the round trip is what must not happen.
@@ -417,23 +438,37 @@ test("an unencrypted host with no credential still connects", async ({ page, bas
   await expect(page.getByTestId("host-switcher")).toHaveAttribute("data-worst-status", "live", {
     timeout: 30_000,
   });
-  await openHostMenu(page);
-  await expect(page.getByTestId("host-row-conn-anonymous-http")).toHaveAttribute(
-    "data-status",
-    "live",
-  );
 });
 
-test("a desktop whose host did not start says so, and can still add one", async ({ page }) => {
+test("a desktop whose host did not start offers to start it, not a choice of where", async ({
+  page,
+}) => {
   // No embedded host, no remembered hosts: the state that used to render an
   // empty pane once the same-origin connection stopped filling it.
-  await asDesktop(page, { embedded: null });
+  //
+  // Roster-capable, which is what makes the start *offerable*: `canStartHere` is
+  // `embedded.roster`, so a shell that cannot answer `oc_local_instances` gets
+  // the honest "this version cannot start it for you" line instead. One stopped
+  // instance is the state a desktop is in when its host did not come up, and it
+  // is what `runHere` would target.
+  await asDesktop(page, {
+    embedded: null,
+    instances: [
+      { id: "primary", label: "OpenCompany", dataDir: "/tmp/e2e-desktop", running: false },
+    ],
+  });
   await page.goto("/");
 
   await expect(page.getByTestId("no-connection")).toBeVisible({ timeout: 30_000 });
-  // The switcher holds the only "add a host" control, so it has to survive a
-  // count of zero — and it has no sidebar to live in on this screen, which is
-  // the case the rail used to cover for free by standing outside the console.
-  await expect(page.getByTestId("host-switcher")).toBeVisible();
-  await openHostMenu(page);
+
+  // One machine runs one host, so the recovery is an action rather than a
+  // four-way chooser between this computer, the cloud, a gateway and ssh.
+  await expect(page.getByTestId("no-connection-run-here")).toBeVisible();
+  await expect(page.getByTestId("no-connection-run-here")).toHaveText(
+    "Start the host on this computer",
+  );
+  await expect(page.getByTestId("no-connection-add")).toHaveCount(0);
+
+  // And the copy stops offering the alternative it no longer has.
+  await expect(page.getByTestId("no-connection")).not.toContainText("somewhere else");
 });

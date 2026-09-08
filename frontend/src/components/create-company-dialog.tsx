@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { COMPANY_SWITCHING_HIDDEN } from "@/product-scope";
 import {
   Select,
   SelectContent,
@@ -81,9 +82,35 @@ const POLICY_MODES: { value: string; label: string }[] = [
 export const CREATE_UNAVAILABLE_NOTE =
   "Creating a company needs a platform credential, which a person signed in here doesn't hold.";
 
-/** Whether this client can reach the provisioning + archive routes at all. */
+/**
+ * Whether this client can reach the provisioning + archive routes at all.
+ *
+ * A fact about the caller, not about the product: it answers "may this
+ * principal create a company", and the dialog's own preflight and submit read
+ * it for exactly that. It must stay free of product scope — a scope flag that
+ * reached in here would make the shipped dialog inert while its tests went on
+ * passing against logic nothing could run.
+ */
 export function canCreateCompanies(client: OpenCompanyClient): boolean {
   return client.carriesPlatformBearer;
+}
+
+/**
+ * Whether a company-creation entry point should render.
+ *
+ * The presentation half, asked once where every trigger already asks: creation
+ * is reachable from the switcher's "New company", the picker's own button, the
+ * picker's per-card Reset, the no-company screen, and Settings' "Reset / Start
+ * clean" — which archives and re-provisions through this same dialog. Gating
+ * them one at a time is how four stayed live after the first was hidden.
+ *
+ * Separate from {@link canCreateCompanies} on purpose. "Do we offer this in
+ * this product configuration" and "may this caller do it" are different
+ * questions, and answering both with one predicate is what turned a hidden
+ * button into a disabled code path.
+ */
+export function offersCompanyCreation(client: OpenCompanyClient): boolean {
+  return !COMPANY_SWITCHING_HIDDEN && canCreateCompanies(client);
 }
 
 interface Props {
@@ -204,11 +231,8 @@ export function CreateCompanyDialog({
     setWallet("");
     setAuthMode("email");
     setPreflightFailed(false);
-    // Re-armed on every open, gated the same way the fetch effect below is:
-    // a client with no platform bearer never runs that fetch (its trigger
-    // is already disabled per `canCreateCompanies`), so nothing will ever
-    // resolve this — leaving it `true` would refuse every submit forever.
-    setPreflightPending(canCreateCompanies(client));
+    // Re-armed on every open, gated the same way the fetch effect below is.
+    setPreflightPending(client.carriesPlatformBearer);
     setPolicyMode(DEFAULT_POLICY_MODE);
     // Reset pre-seeds a fresh id rather than leaving this blank: the name
     // field above is pre-filled with the archived company's own name, and an
@@ -235,10 +259,11 @@ export function CreateCompanyDialog({
   // Read the host's sign-in mode on open, so the form asks for a wallet address
   // on a wallet-mode host and an admin email otherwise — and so a wallet-mode
   // refusal is caught in `submit` BEFORE the reset's archive leg, not after it.
-  // Only a platform bearer can reach the preflight; the triggers are already
-  // gated on that, so a client without one keeps the default email behaviour.
+  // Gated on the raw bearer, not `canCreateCompanies`: whether this client can
+  // reach the preflight route is independent of whether the product currently
+  // offers company creation at all.
   useEffect(() => {
-    if (!request || !canCreateCompanies(client)) return;
+    if (!request || !client.carriesPlatformBearer) return;
     let cancelled = false;
     client
       .provisioningInfo()

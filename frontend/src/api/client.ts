@@ -13,6 +13,7 @@ import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type BlockerVerdict,
   type BoardComment,
   type BoardDetail,
   type BoardItem,
@@ -92,12 +93,21 @@ export interface RequestOptions {
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * The `/spec` capability a host advertises when `blocker_verdict` reaches a
+ * blocker resume rather than being ignored. Mirrors the string pushed in
+ * `AppState::capabilities` (`src/app/types.rs`); a host that does not name it
+ * lowers every four-way answer to its two-way form.
+ */
+const BLOCKER_VERDICT_CAPABILITY = "blocker-verdict";
+
 export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
   private readonly token: string | null;
   private readonly session: string | null;
   private readonly transport: Transport;
+  private capabilityProbe: Promise<string[] | undefined> | null = null;
 
   constructor(
     config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader">,
@@ -190,6 +200,11 @@ export class OpenCompanyClient {
           headers,
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: controller.signal,
+          // Carried so a transport with a deadline of its own can honour this
+          // one. `null` here means "no bound", which no transport can express,
+          // so it is sent as `undefined` and each transport falls back to its
+          // own default — see `TransportRequest.timeoutMs`.
+          timeoutMs: timeoutMs ?? undefined,
         }),
         controller.signal,
       );
@@ -253,6 +268,31 @@ export class OpenCompanyClient {
   /** A typed GET, for surfaces that live outside this class (e.g. auth). */
   get<T>(path: string, options?: RequestOptions): Promise<T> {
     return this.request<T>("GET", path, undefined, undefined, options);
+  }
+
+  /**
+   * What this host advertises at `/spec`, read once and shared by every
+   * caller after that.
+   *
+   * `undefined` is the meaningful answer, not an error case: a host predating
+   * the field omits it, and that must read as "assume REST only" rather than
+   * as "supports nothing". A `/spec` that cannot be reached at all answers the
+   * same way — an unreachable capability is one this client must not rely on,
+   * and the request the caller actually wanted still gets to fail on its own
+   * terms rather than being masked by a probe failure.
+   */
+  private hostCapabilities(): Promise<string[] | undefined> {
+    this.capabilityProbe ??= this.get<Record<string, unknown>>("/spec")
+      .then((spec) =>
+        Array.isArray(spec.capabilities) ? (spec.capabilities as string[]) : undefined,
+      )
+      .catch(() => undefined);
+    return this.capabilityProbe;
+  }
+
+  /** Whether this host names `capability` in its `/spec`. */
+  async supports(capability: string): Promise<boolean> {
+    return (await this.hostCapabilities())?.includes(capability) ?? false;
   }
 
   /**
@@ -418,9 +458,42 @@ export class OpenCompanyClient {
     );
   }
 
-  /** A typed POST, for surfaces that live outside this class (e.g. auth). */
-  post<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>("POST", path, body);
+  /**
+   * A typed POST, for surfaces that live outside this class (e.g. auth).
+   *
+   * `options` carries the same per-call deadline and cancellation every other
+   * method takes. A mutation is not normally cancellable — the host has already
+   * been told to do the thing — but a POST that only *computes* is, and one of
+   * them runs a model for up to ninety seconds: `POST {scope}/team/design`.
+   * Dropping that connection drops the handler future with it, so the pass is
+   * abandoned before `record_profile_draft_usage` ever runs and the company is
+   * not charged for a design nobody is waiting for.
+   */
+  post<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("POST", path, body, undefined, options);
+  }
+
+  /**
+   * Whether cancelling a request through this client actually stops the work at
+   * the host, or only stops this side waiting for it.
+   *
+   * `Transport.cancelsInFlight`, surfaced here so a view can ask without
+   * knowing which transport it is on — the same reason {@link carriesOwnSession}
+   * lives on the client. `false` on the desktop app, where an in-flight Tauri
+   * `invoke` cannot be cancelled.
+   *
+   * The one caller that must ask is the Add-teammate dialog. It lets the
+   * operator walk away from a running design pass *because* closing tears the
+   * request down and the host stops early; where that is not true, the gesture
+   * would run the pass to completion and throw the answer away, so the dialog
+   * holds itself open and says it is working instead.
+   *
+   * "Stops early" is the whole claim. Work a provider had already done when the
+   * disconnect arrived is not accounted for either way — see
+   * `Transport.cancelsInFlight`.
+   */
+  get cancelsInFlightRequests(): boolean {
+    return this.transport.cancelsInFlight;
   }
 
   /**
@@ -939,15 +1012,40 @@ export class OpenCompanyClient {
     verdict: Verdict,
     _note?: string,
     company?: string | null,
-    options: { detach?: boolean; scope?: GrantScope } = {},
+    options: {
+      detach?: boolean;
+      scope?: GrantScope;
+      /**
+       * The four-way answer to a parked blocker (#2028). It narrows `verdict`
+       * rather than replacing it — the host refuses a pair that disagrees — and
+       * `answer` is mandatory and non-blank on `amend`, refused on the rest.
+       *
+       * Negotiated before it is sent: `skip` and `amend` are the two whose
+       * lowered form asks an unaware host for a different action, so both are
+       * refused against a host that does not advertise `blocker-verdict`. See
+       * {@link refuseUnperformableBlockerVerdict}.
+       */
+      blocker?: { verdict: BlockerVerdict; answer?: string };
+    } = {},
   ): Promise<ChatResponse | ResolveReceipt> {
     const body: {
       verdict: Verdict;
       detach?: boolean;
       scope?: "once" | "tool";
       expires_in_millis?: number;
+      blocker_verdict?: BlockerVerdict;
+      blocker_answer?: string;
     } = { verdict };
     if (options.detach) body.detach = true;
+    // Sent as nothing at all when absent, for the reason `once` is: the
+    // omitted-field form is what a host predating the field understands.
+    if (options.blocker) {
+      await this.refuseUnperformableBlockerVerdict(options.blocker.verdict);
+      body.blocker_verdict = options.blocker.verdict;
+      if (options.blocker.verdict === "amend") {
+        body.blocker_answer = options.blocker.answer ?? "";
+      }
+    }
     // Issue #374. The `once` scope is sent as *nothing at all*, not as
     // `scope: "once"`: the omitted-field form is what an old host understands,
     // so a new console against an old host keeps working instead of 400ing on a
@@ -963,6 +1061,32 @@ export class OpenCompanyClient {
       body,
     );
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
+  }
+
+  /**
+   * Refuses a blocker verdict this host would carry out as a different action.
+   *
+   * A host predating `blocker_verdict` ignores the unknown field and resolves
+   * from the lowered two-way `verdict` alone. Two of the four survive that:
+   * `retry` rides an `approve` and `cancel` rides a `deny`, and an unaware host
+   * retries and cancels exactly as asked, so both are still sent. The other two
+   * do not. `skip` rides an `approve`, so an unaware host **re-runs the step it
+   * was asked to leave out**; `amend` rides one too, so it re-runs the step
+   * **without the operator's words**. Either way the console would report the
+   * four-way result it asked for while the host performed something else.
+   *
+   * Refusing is the point: a request that never leaves is a failure the
+   * operator can see and act on, where a lowered one is a wrong action nobody
+   * is told about.
+   */
+  private async refuseUnperformableBlockerVerdict(verdict: BlockerVerdict): Promise<void> {
+    if (verdict !== "skip" && verdict !== "amend") return;
+    if (await this.supports(BLOCKER_VERDICT_CAPABILITY)) return;
+    throw new Error(
+      `This host cannot ${verdict === "skip" ? "skip a stopped step" : "answer a stopped step in words"}: ` +
+        "it is running a version that would run the step again instead. " +
+        "Retry or Cancel it here, or update the host.",
+    );
   }
 
   /**
@@ -1363,12 +1487,34 @@ export class OpenCompanyClient {
    * Deliberately untyped in `variables`/return shape: the caller (a page
    * author, indirectly) supplies an arbitrary document, so there is no fixed
    * response type to declare here the way every other method has one.
+   *
+   * Routed through {@link scope} like every REST call, so the company travels
+   * in the path. A document's own company argument is invisible to the host's
+   * auth layer, which runs before the body is read; naming it in the URL is
+   * what lets a browser holding a session per company on one origin be matched
+   * to the right one.
    */
   graphqlRequest(
     query: string,
     variables?: Record<string, unknown>,
+    company?: string | null,
   ): Promise<{ data?: unknown; errors?: unknown }> {
-    return this.request("POST", "/graphql", { query, variables });
+    return this.request<{ data?: unknown; errors?: unknown }>(
+      "POST",
+      `${this.scope(company)}/graphql`,
+      { query, variables },
+    ).catch((err) => {
+      // A host predating the company-scoped route only serves bare `/graphql`
+      // and 404s on the scoped path — relevant to a hub/desktop console, whose
+      // hosts redeploy independently of it.
+      if (err instanceof ApiError && err.status === 404) {
+        return this.request<{ data?: unknown; errors?: unknown }>("POST", "/graphql", {
+          query,
+          variables,
+        });
+      }
+      throw err;
+    });
   }
 
   /**

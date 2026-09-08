@@ -32,7 +32,7 @@ enum Command {
         /// `bind` key of `config.toml`, then `127.0.0.1:8080`.
         #[arg(long)]
         bind: Option<String>,
-        /// Optional OpenHuman checkout path to report in `/spec`.
+        /// Optional OpenHuman checkout path. `/spec` reports only that one is set.
         #[arg(long)]
         openhuman_root: Option<PathBuf>,
         /// A company to load and register at boot (a manifest file or a
@@ -52,7 +52,7 @@ enum Command {
     },
     /// Print a JSON runtime specification.
     Spec {
-        /// Optional OpenHuman checkout path to report.
+        /// Optional OpenHuman checkout path. Reported as a boolean, not a path.
         #[arg(long)]
         openhuman_root: Option<PathBuf>,
     },
@@ -105,6 +105,25 @@ enum Command {
         /// Print the report as JSON instead of aligned text.
         #[arg(long)]
         json: bool,
+    },
+    /// Send one deliberate error to Sentry, to prove crash reporting works.
+    ///
+    /// The way to answer "is my DSN wired up?" without waiting for something to
+    /// break. Prints the event id to stdout — and nothing else, so it pipes —
+    /// with every diagnostic on stderr, then flushes and reports whether the
+    /// event actually left. It **fails** when reporting is off rather than
+    /// printing a plausible id: a verification tool that succeeds while nothing
+    /// is configured is worse than none, because it retires the question.
+    ///
+    /// See `docs/spec/runtime/crash-reporting.md`.
+    SentryTest {
+        /// The message body. Defaults to `opencompany sentry-test ping`.
+        #[arg(long)]
+        message: Option<String>,
+        /// Panic afterwards, exercising the panic hook as well as the direct
+        /// capture path. The process aborts; that is the point.
+        #[arg(long)]
+        panic: bool,
     },
     /// Issue a sign-in password for a company, from the host (#1718).
     ///
@@ -783,6 +802,17 @@ fn spawn_lifecycle_scheduler(
 fn spawn_presence_sweeper(state: &AppState, shutdown: &Arc<Notify>) -> tokio::task::JoinHandle<()> {
     opencompany::server::presence::PresenceSweeper::new(state.presence_handle())
         .spawn(shutdown.clone())
+}
+
+/// Starts the process-wide ACP-session sweep: reclaims sessions idle past
+/// their TTL. Mirrors [`spawn_presence_sweeper`] — host-global state, not
+/// scoped to a registered company.
+#[cfg(feature = "acp")]
+fn spawn_acp_session_sweeper(
+    state: &AppState,
+    shutdown: &Arc<Notify>,
+) -> tokio::task::JoinHandle<()> {
+    opencompany::server::acp::SessionSweeper::new(state.acp_sessions()).spawn(shutdown.clone())
 }
 
 /// Starts a company's IMAP mailbox poller as a background task, if the
@@ -1841,11 +1871,87 @@ fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
     }
 }
 
+/// Resolves a base-URL env var (`TINYHUMANS_API_URL`, `TINYPLACE_API_URL`)
+/// for `serve`'s manual `AppConfig` build. Mirrors
+/// `opencompany::app::config::resolve_base_url`'s precedence — kept as a
+/// small local twin because `serve` builds `AppConfig` field-by-field rather
+/// than through `app::config::resolve` — including the `config.toml`
+/// candidate, so `doctor` (which goes through `resolve_base_url`) and `serve`
+/// agree on whether a hosted tenant's backend URL counts as set.
+///
+/// A hosted tenant is handed its whole environment by the platform that
+/// provisions it, so a value named by neither the env var nor `config.toml`
+/// refuses to boot instead of silently applying `default_val` — which for
+/// both callers is a production base URL. Every other deployment kind keeps
+/// the default: the operator running it owns the choice, and no-override *is*
+/// that choice.
+fn resolve_serve_base_url(
+    var_name: &str,
+    deployment: opencompany::app::deployment::Deployment,
+    toml_val: Option<String>,
+    default_val: String,
+) -> Result<String> {
+    if let Some(value) = std::env::var(var_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(value);
+    }
+    if let Some(value) = toml_val.filter(|value| !value.trim().is_empty()) {
+        return Ok(value);
+    }
+    if deployment == opencompany::app::deployment::Deployment::HostedTenant {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "{var_name} is not set. This is a hosted-tenant deployment, which is handed its \
+             whole environment by the platform that provisions it — so this refuses to boot \
+             rather than silently default to production. Set {var_name} explicitly (the \
+             production hub, or the staging hub for a staging tenant)."
+        )));
+    }
+    Ok(default_val)
+}
+
 async fn async_main() -> Result<()> {
+    // Crash reporting first, before the subscriber and before any other work.
+    // The panic hook is installed inside `init`, so anything that panics ahead
+    // of this panics unobserved — and the two things most likely to panic early
+    // (a malformed data root, a home that cannot be locked) are exactly the
+    // ones an operator would want reported.
+    //
+    // Bound to a NAMED local so the client lives as long as the process. A bare
+    // `_` would drop it here and close the client while the process carried on
+    // running, which reports nothing for the rest of its life and reads as a
+    // DSN that does not work. Silent by default: without
+    // `OPENCOMPANY_SENTRY_DSN` this resolves to `Silent` and installs nothing.
+    //
+    // The decision is NOT printed here. `spec` and `doctor --json` write
+    // machine-readable output to stdout, so a boot line at this point would be
+    // a line in front of their JSON; the `serve` arm prints it beside the
+    // analytics one, which is the only place it belongs.
+    let (crash_reporting, crash_guard) = opencompany::observability::init(
+        opencompany::app::deployment::Deployment::from_env(&ProcessEnv),
+        &ProcessEnv,
+    );
+
     let rust_log = std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(log_filter(rust_log.as_deref()))
-        .init();
+    // A layered subscriber rather than `fmt()`, so the Sentry bridge can sit
+    // beside the formatter. The `EnvFilter` is added to the registry itself —
+    // ahead of both layers — so it keeps filtering the process exactly as
+    // `fmt().with_env_filter()` did, and the bridge sees the same events the
+    // terminal does rather than enabling INFO-level call sites process-wide for
+    // the benefit of an install that may not be reporting at all. See
+    // `observability::tracing_layer` for what that costs (no breadcrumbs at the
+    // default `error` filter) and how to buy them back (`RUST_LOG=info`).
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+
+        tracing_subscriber::registry()
+            .with(log_filter(rust_log.as_deref()))
+            .with(tracing_subscriber::fmt::layer())
+            .with(opencompany::observability::tracing_layer())
+            .init();
+    }
 
     match Cli::parse().command {
         Some(Command::Serve {
@@ -1965,13 +2071,22 @@ async fn async_main() -> Result<()> {
                     );
                 }
             }
+            // Which kind of install this process is — a hosted tenant gets its
+            // whole environment from the platform that provisions it, so the
+            // production defaults below are refused rather than silently
+            // applied for that kind alone. See `resolve_serve_base_url`.
+            let deployment = opencompany::app::deployment::Deployment::from_env(&ProcessEnv);
             // tiny.place economy + public-card configuration resolved from the
             // environment (with built-in defaults); the a2a routes and boot
             // going-public flow read these off `AppConfig`.
-            let tinyplace_api_url = std::env::var("TINYPLACE_API_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| opencompany::app::config::DEFAULT_TINYPLACE_API_URL.to_string());
+            let tinyplace_api_url = resolve_serve_base_url(
+                "TINYPLACE_API_URL",
+                deployment,
+                config_file
+                    .as_ref()
+                    .and_then(|c| c.tinyplace_api_url.clone()),
+                opencompany::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
+            )?;
             let public_url = std::env::var("OPENCOMPANY_PUBLIC_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
@@ -2020,10 +2135,12 @@ async fn async_main() -> Result<()> {
             // Honor TINYHUMANS_API_URL (e.g. staging) — the config layer reads
             // it, but this manual AppConfig build otherwise falls to the prod
             // default, so a staging credential could never reach staging.
-            let api_url = std::env::var("TINYHUMANS_API_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| AppConfig::default().api_url);
+            let api_url = resolve_serve_base_url(
+                "TINYHUMANS_API_URL",
+                deployment,
+                config_file.as_ref().and_then(|c| c.api_url.clone()),
+                AppConfig::default().api_url,
+            )?;
             // The listener address, across every layer that may name it. Until
             // issue #425 only the flag reached this struct, so the manager's
             // injected `OPENCOMPANY_BIND` (and any `config.toml` `bind`) moved
@@ -2388,6 +2505,21 @@ async fn async_main() -> Result<()> {
                 ))
             );
 
+            // The same moment is when this host can name itself to crash
+            // reporting: the instance id and the storage backend are what an
+            // operator triaging a report needs first, and neither is known
+            // before the companies are registered. The decision itself was
+            // taken at the top of `async_main` — a report from a panic during
+            // boot has to be possible — so this only enriches the scope, and it
+            // is a no-op when nothing is reporting.
+            //
+            // Deliberately not a Sentry `user`: see `observability::scope`.
+            opencompany::observability::scope::identify(
+                state.instance_id(),
+                state.storage_kind().as_str(),
+            );
+            println!("{}", crash_reporting.describe());
+
             // One workflow scheduler for the whole process, started even with no
             // companies loaded: it re-reads the registry each minute, so a
             // company registered later is picked up without a restart.
@@ -2399,6 +2531,8 @@ async fn async_main() -> Result<()> {
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
             scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
+            #[cfg(feature = "acp")]
+            scheduler_handles.push(spawn_acp_session_sweeper(&state, &shutdown));
 
             // Issue #1845: the week-1 nudge, process-wide and always started —
             // same reasoning as the workflow scheduler and maintenance ticker
@@ -2451,6 +2585,17 @@ async fn async_main() -> Result<()> {
             {
                 tracing::debug!("analytics: flush did not finish inside the shutdown budget");
             }
+            // And the crash queue, for the same reason and on the same terms:
+            // the error that took the host down is queued at the moment the
+            // host stops, so a shutdown that does not drain loses precisely the
+            // report worth having. Bounded by `observability::FLUSH_TIMEOUT`
+            // (2s) inside the client rather than by a `tokio::time::timeout`,
+            // because `Guard::flush` is synchronous and already takes its own
+            // deadline. `true` when nothing was queued, so this says nothing on
+            // an install that is not reporting.
+            if !crash_guard.flush(opencompany::observability::FLUSH_TIMEOUT) {
+                tracing::debug!("crash reporting: flush did not finish inside the shutdown budget");
+            }
             served
         }
         Some(Command::Spec { openhuman_root }) => {
@@ -2492,6 +2637,58 @@ async fn async_main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report).unwrap());
             } else {
                 print!("{}", report.to_text());
+            }
+            Ok(())
+        }
+        Some(Command::SentryTest { message, panic }) => {
+            // The client, if any, was installed at the top of `async_main`.
+            // Every diagnostic goes to stderr so that stdout carries the event
+            // id and nothing else.
+            eprintln!("{}", crash_reporting.describe());
+            let message = message.unwrap_or_else(|| "opencompany sentry-test ping".to_string());
+            let Some(event_id) = opencompany::observability::capture_test_event(&message) else {
+                // An error, not a warning. "I could not send anything" and "I
+                // sent something" must not both exit zero, or a CI step that
+                // runs this proves nothing.
+                //
+                // The reason is quoted rather than a fix prescribed, because
+                // the fix differs per reason and the wrong one is worse than
+                // none: "set OPENCOMPANY_SENTRY_DSN" is actively misleading to
+                // the operator who already set it and is running a build
+                // without the feature.
+                return Err(opencompany::error::OpenCompanyError::Config(format!(
+                    "crash reporting is not active in this process, so there is nothing to \
+                     test — {}. See docs/spec/runtime/crash-reporting.md.",
+                    match &crash_reporting {
+                        opencompany::observability::Decision::Silent(reason) => reason.as_str(),
+                        // Unreachable: a `Report` decision installs a client,
+                        // and `capture_test_event` only declines without one.
+                        opencompany::observability::Decision::Report { .. } =>
+                            "no client was installed",
+                    }
+                )));
+            };
+            // A flush that times out means the round trip is unconfirmed.
+            // Exiting zero anyway would be a lie, and this command exists
+            // precisely to be believed: automation runs it to decide whether
+            // reporting works, and an unconfirmed send is not a working one.
+            //
+            // The id still goes to stdout first — it is the one thing that
+            // makes the failure investigable, since the event may well have
+            // arrived and only the acknowledgement was late.
+            let drained = crash_guard.flush(std::time::Duration::from_secs(5));
+            println!("{event_id}");
+            if !drained {
+                return Err(opencompany::error::OpenCompanyError::Config(
+                    "the crash-reporting queue did not drain within 5s, so delivery of this \
+                     event is unconfirmed. Check network egress to the ingest endpoint. See \
+                     docs/spec/runtime/crash-reporting.md."
+                        .to_string(),
+                ));
+            }
+            if panic {
+                eprintln!("opencompany: panicking on request, to exercise the panic hook");
+                panic!("opencompany sentry-test intentional panic");
             }
             Ok(())
         }
@@ -3040,5 +3237,74 @@ mod test {
             matches!(&err, opencompany::error::OpenCompanyError::Config(_)),
             "expected a Config refusal, got: {err:?}"
         );
+    }
+
+    // These use a var name no environment (local or CI) ever sets, so the
+    // env-var branch of `resolve_serve_base_url` never fires here — no
+    // `std::env::set_var` needed, and so nothing to race against the rest of
+    // this binary's tests.
+    const UNSET_VAR: &str = "OPENCOMPANY_TEST_RESOLVE_SERVE_BASE_URL_UNSET_PROBE";
+
+    /// Codex review finding on PR #2141: `doctor` (via
+    /// `app::config::resolve_base_url`) accepts a hosted tenant's backend URL
+    /// from `config.toml`, but `serve`'s manual `AppConfig` build checked only
+    /// the process environment — so a tenant configured entirely through
+    /// `config.toml` passed `doctor` and then refused to boot.
+    #[test]
+    fn serve_base_url_accepts_config_toml_for_a_hosted_tenant() {
+        let resolved = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::HostedTenant,
+            Some("https://toml.example".to_string()),
+            "https://default.example".to_string(),
+        )
+        .expect("a config.toml value must satisfy the hosted-tenant gate");
+
+        assert_eq!(resolved, "https://toml.example");
+    }
+
+    #[test]
+    fn serve_base_url_still_refuses_a_hosted_tenant_with_neither_env_nor_toml() {
+        let err = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::HostedTenant,
+            None,
+            "https://default.example".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            opencompany::error::OpenCompanyError::Config(_)
+        ));
+    }
+
+    #[test]
+    fn serve_base_url_ignores_a_blank_config_toml_value() {
+        let err = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::HostedTenant,
+            Some("   ".to_string()),
+            "https://default.example".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            opencompany::error::OpenCompanyError::Config(_)
+        ));
+    }
+
+    #[test]
+    fn serve_base_url_self_hosted_still_defaults_when_neither_env_nor_toml() {
+        let resolved = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::SelfHosted,
+            None,
+            "https://default.example".to_string(),
+        )
+        .expect("self-hosted must not refuse to boot");
+
+        assert_eq!(resolved, "https://default.example");
     }
 }

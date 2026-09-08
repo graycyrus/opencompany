@@ -36,7 +36,15 @@ GET    /api/v1/companies/{id}/approvals        pending approvals
 GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
 PUT    /api/v1/companies/{id}/notifications  mark notifications read (`{ "ids": [...] }`; empty body or null ids marks all)
 POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
-                                               "detach": false }
+                                               "detach": false,
+                                               // a parked blocker only: which of the four
+                                               // things the stopped step should do. Narrows
+                                               // `verdict` (retry/amend/skip approve, cancel
+                                               // denies) — a pair that disagrees is a 400.
+                                               // `blocker_answer` is mandatory and non-blank
+                                               // with "amend", refused with the rest.
+                                               "blocker_verdict": "retry"|"amend"|"skip"|"cancel",
+                                               "blocker_answer": "…" }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
 GET    /api/v1/companies/{id}/feedback         past reports (no operator words)
 GET    /api/v1/companies/{id}/feedback/board   the shared board, one page
@@ -239,8 +247,13 @@ under a name disambiguated from the upload's own id rather than surfacing the
 `/chat`'s `attachments` field is **node ids only**. The host re-resolves each
 id against the sending company's own workspace tree and takes the name / mime
 / size from the store — never the client's claim — the same discipline a
-`parent` thread reference gets; an id that resolves to no binary node in this
-company is a `400`, on the same terms a bad `parent` is. Server-side, the host
+`parent` thread reference gets. **Any file in the tree may be attached**,
+however it was written (issue #2029): an upload through `…/chat/upload`, a
+text upload the workspace route stored as a note, a seeded note, one an agent
+wrote. A prose note's `mime` is guessed from the stored name and its `size` is
+the body's byte length, both read at resolve time. An id naming a folder, or
+naming nothing in this company, is a `400`, on the same terms a bad `parent`
+is. Server-side, the host
 also extracts each attachment's text where the format and size allow it (PDF,
 DOCX, PPTX, XLSX, plain text — the same `ingest::extract` pipeline
 `POST …/memory/ingest` runs; see [memory.md](../company-brain/memory.md)) and
@@ -414,6 +427,25 @@ accepted inbound; it is outbound-only ([config.md](config.md)).
 JSON error envelope `{ "error": string, "code": string }` with stable `code`
 values; 4xx for caller mistakes, 402 reserved for x402 challenges, 409 for
 lifecycle-state conflicts (e.g. chatting with an archived company).
+
+`409` is the most overloaded status here, so **the `code` carries the meaning,
+not the status**. Three of its codes are permanent states rather than failures,
+and a caller that retries them retries forever:
+
+| `code` | Means | What clears it |
+|---|---|---|
+| `not_in_build` | the binary was compiled without this surface | a different build |
+| `not_configured` | the surface is here; this company has not set it up | an operator setting it, elsewhere |
+| `restart_required` | saved config the running runtime booted without | restarting the company |
+
+Everything else on `409` — `conflict`, `lifecycle_conflict` — is an ordinary
+conflict a caller clears by retrying or by sending something else. Clients must
+branch on `code` and never infer permanence from the status: the console's
+`classifyLoadFailure` does exactly this, and read `409` as transient across the
+board until it did (issue #2081).
+
+`not_in_build` is `501` on the finance routes and `409` elsewhere. The status
+differs; the code does not, which is why the code is the thing to read.
 
 ## Platform webhooks (Phase 5)
 
