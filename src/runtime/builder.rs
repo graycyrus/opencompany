@@ -296,6 +296,10 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
         return crate::company::grants_search_explicit(allow)
             && crate::company::grants_search_explicit(&[tool.to_string()]);
     }
+    if literal == "mcp_registry" || literal.starts_with("mcp_registry.") {
+        return crate::company::grants_mcp_registry_explicit(allow)
+            && crate::company::grants_mcp_registry_explicit(&[tool.to_string()]);
+    }
 
     // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
     // an agent asking for all company servers. A bare `*` must not confer it.
@@ -5446,6 +5450,9 @@ mod test {
                 "search.web",
                 "mcp:*",
                 "mcp*",
+                "mcp_registry",
+                "mcp_registry.*",
+                "mcp_registry.notion",
             ] {
                 assert!(
                     !allow_covers(&allow, grant),
@@ -5475,6 +5482,7 @@ mod test {
                 "paypal",
                 "search",
                 "mcp:*",
+                "mcp_registry",
                 "workspace",
             ]);
             for grant in [
@@ -5497,6 +5505,9 @@ mod test {
                 "search.*",
                 "search.web",
                 "mcp:*",
+                "mcp_registry",
+                "mcp_registry.*",
+                "mcp_registry.notion",
                 "workspace",
                 "workspace.write",
             ] {
@@ -5538,6 +5549,10 @@ mod test {
             assert!(allow_covers(&strings(&["search"]), "search.web"));
             assert!(allow_covers(&strings(&["media"]), "media.image"));
             assert!(allow_covers(&strings(&["chargebee"]), "chargebee.read"));
+            assert!(allow_covers(
+                &strings(&["mcp_registry"]),
+                "mcp_registry.notion"
+            ));
             assert!(
                 !allow_covers(&strings(&["docs"]), "docs.read"),
                 "ordinary namespaces keep the unstarred-grant exact-match rule"
@@ -5563,6 +5578,7 @@ mod test {
                 "hosting",
                 "paypal",
                 "mcp:*",
+                "mcp_registry",
             ]);
             for grant in [
                 "search*",
@@ -5574,6 +5590,7 @@ mod test {
                 "hosting*",
                 "paypal*",
                 "mcp*",
+                "mcp_registry*",
             ] {
                 assert!(
                     !allow_covers(&allow, grant),
@@ -5589,13 +5606,14 @@ mod test {
         /// exact write token, and `mcp:notion*` is a colon-scoped prefix.
         #[test]
         fn a_separator_broken_opt_in_request_stays_covered() {
-            let allow = strings(&["search", "workspace", "media", "mcp:*"]);
+            let allow = strings(&["search", "workspace", "media", "mcp:*", "mcp_registry"]);
             assert!(allow_covers(&allow, "search.*"));
             assert!(allow_covers(&allow, "search.web*"));
             assert!(allow_covers(&allow, "workspace.write"));
             assert!(allow_covers(&allow, "media.*"));
             assert!(allow_covers(&allow, "media.image*"));
             assert!(allow_covers(&allow, "mcp:notion*"));
+            assert!(allow_covers(&allow, "mcp_registry.notion*"));
         }
 
         /// Runs the three-level narrowing over `&str` slices, so each case below
