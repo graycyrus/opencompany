@@ -97,7 +97,12 @@ export function MovesMatrix({
                       // ticked — but the row says the table has not narrowed it,
                       // which is the fact the ticks alone cannot carry.
                       checked={governed ? held.has(kind) : true}
-                      disabled={disabled}
+                      // An ungoverned seat's checked=true is not a value the
+                      // operator can toggle away from here — the row does not
+                      // narrow it — so the box must not accept a click that
+                      // would fire `onToggle` for a seat this table does not
+                      // govern.
+                      disabled={disabled || !governed}
                       onChange={(e) => onToggle(seat.agentId, kind, e.target.checked)}
                     />
                   </td>
