@@ -1041,10 +1041,67 @@ pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
 /// the whole message falls through to [`BlockerReplyIntent::Amend`] instead of
 /// silently discarding it.
 fn cancel_is_the_whole_ask(lower: &str) -> bool {
-    let carries_a_fact = |clause: &&str| clause.chars().any(|c| c.is_ascii_digit());
     clauses(lower)
         .filter(|clause| !mentions_any(clause, CANCEL_WORDS) || carries_a_fact(clause))
         .all(is_pure_social)
+}
+
+/// Nouns that name **which** parked thing a cancel is aimed at. A number sitting
+/// directly beside one of these is that thing's identifier, not a second fact
+/// the message is adding.
+///
+/// Deliberately short, and deliberately only words that are nouns here. Every
+/// entry widens the set of messages that read as a pure cancel, which is the
+/// destructive direction, so a word that is commonly a *verb* — "order 200
+/// units", "run 3 batches", "draft 3 emails", "request 500 more" — is left out
+/// even though "cancel order 3" would read fine. Losing a real fact is
+/// unrecoverable; failing to spot a numbered target costs a re-run.
+const CANCEL_TARGET_NOUNS: &[&str] = &[
+    "task", "tasks", "option", "options", "item", "items", "card", "cards", "step", "steps",
+    "number", "ticket", "job", "approval", "blocker",
+];
+
+/// Whether `clause` states a fact of its own, as opposed to only naming which
+/// thing is being cancelled (Codex review, P1).
+///
+/// A digit is the tell that a clause carries something the cancel word is not
+/// covering — an amount, a count, a size. But a cancellation that identifies its
+/// target numerically carries a digit too: `cancel task 123` and `drop option 2`
+/// kept the clause merely because it contained one, `is_pure_social` then failed
+/// it, and the message fell through to [`Amend`](BlockerReplyIntent::Amend) —
+/// re-entering work the operator had explicitly cancelled.
+///
+/// So the target designator is removed before the residue is tested. A number is
+/// a designator when it sits directly beside a [`CANCEL_TARGET_NOUNS`] entry on
+/// either side, which covers both `task 123` and `the 2nd option`; `#` is
+/// normalised to the word it stands for, so `cancel #4` reads as `cancel number
+/// 4`. Everything else a digit appears in — "budget is $500", "use 500 units" —
+/// still counts, and still turns the message into an amendment.
+///
+/// Adjacency, rather than "anywhere in the clause", is what keeps the two apart:
+/// in "scrap the reminder, use 500 units for the final order" the 500 is beside
+/// `use` and `units`, not beside a target noun.
+fn carries_a_fact(clause: &str) -> bool {
+    // `#4` is "number 4" — the hash is the noun, so spell it as one.
+    let normalized = clause.replace('#', " number ");
+    let tokens: Vec<&str> = normalized
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens.iter().enumerate().any(|(i, token)| {
+        token.chars().any(|c| c.is_ascii_digit()) && !designates_a_target(&tokens, i)
+    })
+}
+
+/// Whether the number at `i` names the thing being cancelled rather than a fact
+/// — it sits directly beside a [`CANCEL_TARGET_NOUNS`] entry, either side.
+fn designates_a_target(tokens: &[&str], i: usize) -> bool {
+    let is_target = |j: usize| {
+        tokens
+            .get(j)
+            .is_some_and(|token| CANCEL_TARGET_NOUNS.contains(token))
+    };
+    (i > 0 && is_target(i - 1)) || is_target(i + 1)
 }
 
 /// Whether any whole word of `lower` is in `words` and is not negated by a
@@ -1823,6 +1880,51 @@ mod blocker_reply_tests {
         for reply in [
             "scrap the reminder card, budget is $500",
             "scrap the reminder, use 500 units for the final order",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Amend,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    /// Codex review of PR #2054, P1: a cancellation that names its target by
+    /// number is still a cancel.
+    ///
+    /// The digit carve-out above kept the clause because it contained a digit,
+    /// `is_pure_social` then failed it, and the message fell through to `Amend`
+    /// — re-entering work the operator had explicitly cancelled, which is the
+    /// exact failure the whole-ask guard exists to prevent in the other
+    /// direction.
+    #[test]
+    fn a_cancel_that_names_its_target_by_number_still_cancels() {
+        for reply in [
+            "cancel task 123",
+            "drop option 2",
+            "scrap card 7",
+            "abandon step 3",
+            "cancel #4",
+            "drop the 2nd option",
+            "cancel ticket 88, thanks",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Cancel,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    /// The target carve-out is adjacency, not "any digit near a cancel": a
+    /// number that is not beside a target noun is still a fact, and a clause
+    /// naming both a target and a fact is still an amendment.
+    #[test]
+    fn a_numbered_target_does_not_swallow_a_fact_beside_it() {
+        for reply in [
+            "cancel task 123, budget is $500",
+            "drop option 2, use 500 units instead",
+            "scrap the card, order 200 more",
         ] {
             assert_eq!(
                 classify_blocker_reply(reply),
