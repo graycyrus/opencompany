@@ -1462,6 +1462,7 @@ fn external_authority_router_files_have_no_unclassified_paths() {
         &string_set(&[
             "/desks",
             "/desks/{desk_id}",
+            "/desks/{desk_id}/hive",
             "/desks/{desk_id}/members",
             "/desks/{desk_id}/members/{agent_id}",
             "/desks/{desk_id}/order",
