@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MembersPane } from "@/views/chat/MembersPane";
+import { MembersPane } from "@/views/room/MembersPane";
 import type { TeamMember } from "@/lib/team";
 
 /**

@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { TeamMember } from "@/lib/team";
-import { AddMemberDialog } from "@/views/chat/AddMemberDialog";
-import { MembersPane } from "@/views/chat/MembersPane";
+import { AddMemberDialog } from "@/views/room/AddMemberDialog";
+import { MembersPane } from "@/views/room/MembersPane";
 
 /**
  * Add/remove a teammate from chat's member pane. `POST {scope}/team`

@@ -8,7 +8,7 @@ import type { Task } from "@/api/tasks";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { taskApprovalRows } from "@/lib/task-approvals";
 import { TaskItem } from "@/views/TaskCard";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 
 /**
  * Deciding a blocked approval from the board card.

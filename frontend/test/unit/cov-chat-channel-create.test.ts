@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto } from "@/api/types";
 import type { TeamMember } from "@/lib/team";
-import { ChannelCreateDialog } from "@/views/chat/ChannelCreateDialog";
+import { ChannelCreateDialog } from "@/views/room/ChannelCreateDialog";
 
 /**
  * `POST {scope}/desks` (`create_desk`, `operator.rs`) is `scoped(…)` — any

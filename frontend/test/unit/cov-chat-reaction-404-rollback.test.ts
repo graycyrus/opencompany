@@ -8,8 +8,8 @@ import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import type { ChatMessage } from "@/lib/chat";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import type { Transcripts } from "@/views/chat/model";
-import { ChatView } from "@/views/ChatView";
+import type { Transcripts } from "@/views/room/model";
+import { RoomView } from "@/views/RoomView";
 
 const toasts = vi.hoisted(() => ({ base: vi.fn(), success: vi.fn(), error: vi.fn() }));
 vi.mock("sonner", () => ({

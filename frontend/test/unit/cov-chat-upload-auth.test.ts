@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentDto } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { ChatView } from "@/views/ChatView";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * `POST {scope}/chat/upload` (`workspace.rs`) sits under the same `scoped(…)`

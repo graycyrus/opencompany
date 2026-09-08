@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { ChatView } from "@/views/ChatView";
+import { RoomView } from "@/views/RoomView";
 
 const toasts = vi.hoisted(() => ({
   base: vi.fn(),

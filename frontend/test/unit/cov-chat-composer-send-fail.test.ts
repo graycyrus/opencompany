@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import type { Transcripts } from "@/views/chat/model";
-import { ChatView } from "@/views/ChatView";
+import type { Transcripts } from "@/views/room/model";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * `ChatView.send`'s own `catch`: a host that refuses

@@ -4,9 +4,9 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageRow } from "@/views/chat/MessageRow";
+import { MessageRow } from "@/views/room/MessageRow";
 import { makeMessage } from "@/lib/chat";
-import type { TimelineEntry } from "@/views/chat/model";
+import type { TimelineEntry } from "@/views/room/model";
 import type { TaskStatus } from "@/api/tasks";
 
 /**

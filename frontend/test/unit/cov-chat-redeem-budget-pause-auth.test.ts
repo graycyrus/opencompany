@@ -8,8 +8,8 @@ import { BUDGET_PAUSE_NOTICE_PREFIX } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
 import type { ChatMessage } from "@/lib/chat";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import type { Transcripts } from "@/views/chat/model";
-import { ChatView } from "@/views/ChatView";
+import type { Transcripts } from "@/views/room/model";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * `POST {scope}/agents/{agent_id}/budget-pause/redeem`

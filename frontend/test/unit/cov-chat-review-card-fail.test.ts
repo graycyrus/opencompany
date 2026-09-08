@@ -9,8 +9,8 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { ChatMessage } from "@/lib/chat";
 import type { TaskStatus } from "@/api/tasks";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import type { Transcripts } from "@/views/chat/model";
-import { ChatView } from "@/views/ChatView";
+import type { Transcripts } from "@/views/room/model";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * `ChatView.reviewCard` — the settle pill's Approve, `POST {scope}/chat/review`

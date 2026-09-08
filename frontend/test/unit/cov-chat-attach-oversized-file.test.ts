@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/api/types";
-import { MessageComposer } from "@/views/chat/MessageComposer";
+import { MessageComposer } from "@/views/room/MessageComposer";
 
 /**
  * `uploadChatAttachment` (`api/chat.ts`) enforces no size cap of its own —

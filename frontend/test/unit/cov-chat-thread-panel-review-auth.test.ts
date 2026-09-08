@@ -5,8 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { makeMessage } from "@/lib/chat";
-import type { Channel } from "@/views/chat/model";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
+import type { Channel } from "@/views/room/model";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
 
 /**
  * `ThreadPanel`'s own inline Approve — the settle pill's twin for a card

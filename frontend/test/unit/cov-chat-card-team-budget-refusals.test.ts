@@ -8,9 +8,9 @@ import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { BUDGET_PAUSE_NOTICE_PREFIX } from "@/hooks/use-events";
-import { ChatView } from "@/views/ChatView";
+import { RoomView } from "@/views/RoomView";
 import type { ChatMessage } from "@/lib/chat";
-import type { Transcripts } from "@/views/chat/model";
+import type { Transcripts } from "@/views/room/model";
 import type { TaskStatus } from "@/api/tasks";
 
 /**
