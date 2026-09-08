@@ -61,6 +61,7 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
 import {
   hasOtherOpenTurns,
+  isDuplicateLiveReply,
   mergeOpenTurns,
   openTurnsFromRuns,
   PendingSyncPosts,
@@ -157,7 +158,8 @@ import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import * as room from "@/room/store";
-import { canCreateCompanies } from "@/components/create-company-dialog";
+import { forgetSession } from "@/connections/registry";
+import { offersCompanyCreation } from "@/components/create-company-dialog";
 
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
@@ -2269,6 +2271,14 @@ export function AppShell({
   // resolves, instead of the shell needing a second copy of this logic.
   const renderAgentReply = useCallback(
     (event: AgentReplyEvent) => {
+      // `replyVoice`, not a literal: a live frame attributed to the runtime
+      // itself — `SYSTEM_AUTHOR` on the Rust side, which covers both B-101's
+      // mention-ambiguity note and the iteration-cap pause notice (issue
+      // #2068) — renders as the centred system pill `fromHistory` already
+      // gives it on reload, never as a named teammate's bubble with an
+      // avatar and reply/reaction controls, which is what unconditionally
+      // passing `"company"` here used to produce (Codex review, PR #2052).
+      const from = replyVoice(event.agentId);
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op:
       // better silent than in the wrong place.
@@ -2308,20 +2318,32 @@ export function AppShell({
         // history's own order rather than appending to the recent tail this
         // scans. Live-then-hydrate was the one route neither guard covered,
         // and it doubled every reply that arrived while its channel was closed.
-        const dup = existing
-          .slice(-8)
-          .some((m) => m.from === "company" && m.text === event.text);
+        //
+        // **The content check alone is too broad** (Codex review, PR #2052):
+        // two genuinely different events can carry identical text — an
+        // operator repeating the same ambiguous `@name` produces two
+        // B-101 notices with the same wording — and content matching then
+        // suppressed the second one outright, not merely deduped it.
+        // `isDuplicateLiveReply` checks this event's own durable identity
+        // first (`event.seq`) and only falls back to content for a row that
+        // has not yet been reconciled to a durable id — see its own doc for
+        // why that scoping is what keeps two same-text-but-different events
+        // from being conflated. Named and extracted for the same reason
+        // every rule in `live-reply.ts` is: this is exactly the kind of
+        // regression that shows up nowhere but a repeated-mention screenshot.
+        const dup = isDuplicateLiveReply(existing.slice(-8), event, from);
         if (dup) return t;
         return {
           ...t,
           [channelId]: [
             ...existing,
-            // `replyVoice`, not a literal: a host-authored line (the
-            // iteration-cap pause) is projected with `agentId: "system"` and
-            // must render as the same centred row `fromHistory` gives it, or
-            // whoever watched the turn live keeps an agent-style bubble that
-            // hydration will never correct.
-            makeMessage(replyVoice(event.agentId), event.text, {
+            // `from` is `replyVoice(event.agentId)`, computed once above and
+            // reused by the `dup` check too — a host-authored line (B-101's
+            // ambiguity note, the iteration-cap pause notice) must render as
+            // the same centred row `fromHistory` gives it, or whoever watched
+            // the turn live keeps an agent-style bubble hydration never
+            // corrects.
+            makeMessage(from, event.text, {
               channel: event.agentId,
               taskId: event.taskId,
               mentions: event.mentions,
@@ -2358,7 +2380,20 @@ export function AppShell({
       // still be listed. That only defers the clear to its own settle, which
       // then runs the re-read above — the conservative direction, and the one
       // that never erases a running turn's rows.
-      if (!hasOtherOpenTurns(room.readRoom().openTurns, event.chatId)) {
+      //
+      // Also guarded on `from !== "system"` (Codex review, PR #2052). A
+      // system-attributed frame — B-101's mention-ambiguity note among them —
+      // is emitted mid-turn, before the cycle that answers has even run, and
+      // is never itself the turn's completion. `onSendFailed` can release such
+      // a frame (held while the POST was in flight) before its own async
+      // `/runs` lookup below has had a chance to install the still-running
+      // turn into the Room store — so at the instant this runs, `openTurns`
+      // legitimately knows nothing about it yet, `hasOtherOpenTurns` reads
+      // `false`, and treating the advisory as "the end of that turn" would
+      // erase the live tool trace of a turn that is, per the very lookup
+      // racing it, still running. Only the actual reply — never an advisory
+      // interleaved before it — is a completion signal.
+      if (from !== "system" && !hasOtherOpenTurns(room.readRoom().openTurns, event.chatId)) {
         setLiveStepsByThread((prev) =>
           prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
         );
@@ -2492,8 +2527,15 @@ export function AppShell({
     return gen;
   }, []);
   const onSendEnd = useCallback(
-    (threadId: string, gen?: number) => {
-      pendingPostThreadsRef.current.ended(threadId);
+    (threadId: string, gen?: number, responseTexts?: readonly string[]) => {
+      // `ended` hands back any held system-attributed frame the settled
+      // response did NOT already carry (issue #101 review, PR #2052) — B-101's
+      // mention-ambiguity note, never returned in the response body by design.
+      // Rendered here rather than discarded: see `ended`'s own doc for why the
+      // response's own text, only available at this call site, is what makes
+      // this safe without double-rendering the frames the response DOES carry.
+      const released = pendingPostThreadsRef.current.ended(threadId, responseTexts);
+      released.forEach((frame) => renderAgentReply(frame));
       if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
       setLiveStepsByThread((prev) => {
         if (!prev[threadId]?.length) return prev;
@@ -2501,7 +2543,7 @@ export function AppShell({
       });
       clearReceipt(threadId, gen);
     },
-    [clearReceipt],
+    [clearReceipt, renderAgentReply],
   );
   /**
    * A chat POST that resolved for a company the operator has since left
@@ -3395,7 +3437,7 @@ export function AppShell({
             onSwitchCompany={onSwitchCompany}
             onBackToPicker={onBackToPicker}
             onCreateCompany={onCreateCompany}
-            canCreateCompany={canCreateCompanies(client)}
+            canCreateCompany={offersCompanyCreation(client)}
           />
         }
         overview={
@@ -3441,7 +3483,12 @@ export function AppShell({
           // Who you are signed in as, and nothing else. It renders nothing
           // where there is nobody to name — a host with no sign-in, or a
           // session that has just gone — and the row simply closes up.
-          <ProfileRow variant="titlebar" client={client} company={company} />
+          <ProfileRow
+            variant="titlebar"
+            client={client}
+            company={company}
+            onSignedOut={() => void forgetSession(scope.connection)}
+          />
         }
       />
 
