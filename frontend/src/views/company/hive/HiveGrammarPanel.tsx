@@ -59,6 +59,9 @@ export function HiveGrammarPanel({
     let live = true;
     setState(null);
     setLoadError(null);
+    // A save/reset refusal from the desk this panel just left must not go on
+    // being shown under the desk it switched to.
+    setSaveError(null);
     client
       .getDeskHive(deskId, company)
       .then((dto) => {
