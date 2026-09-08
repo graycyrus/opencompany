@@ -113,6 +113,39 @@ describe("a channel with a room", () => {
     expect(block.turnByMessageId["h4"]?.move?.cites).toEqual([3]);
   });
 
+  it("does not wrap a later ordinary exchange on the same desk in an episode block", () => {
+    // The desk deliberated once, then answered a plain follow-up question
+    // ordinarily. `hasRoom` is true for the whole channel, but the second
+    // exchange must still render as two bare messages, not a second
+    // "still deliberating" block around an ordinary reply (regression for
+    // the false positive Codex flagged on foldEpisodes' segmentation).
+    seq = 0;
+    const rows = [
+      ...(() => {
+        const opened = [
+          op("decide the rollout"),
+          turn("planner", "!propose #stage ship to staging first"),
+          report("The desk settled on #stage after 1 turn (backed by planner)."),
+        ];
+        return opened;
+      })(),
+      op("what time did that ship?"),
+      turn("planner", "Around 9am."),
+    ];
+    const items = buildTimelineItems(
+      transcript(rows),
+      [],
+      {},
+      foldEpisodes(rows, { members: 1, quorum: 1 }),
+    );
+    expect(items.map((i) => i.kind)).toEqual([
+      "message",
+      "episode",
+      "message",
+      "message",
+    ]);
+  });
+
   it("keeps two rooms in two blocks", () => {
     seq = 0;
     const rows = [
