@@ -44,8 +44,8 @@ Supporting docs:
     structurally carry content, and where each event is raised
     - [analytics-configuration.md](analytics-configuration.md) — which installs
       report at all: the five conditions, the environment variables that decide
-      them, why the container image compiles the transport, and how to turn
-      reporting off
+      them, why the transport stays a build arg rather than a default, and
+      how to turn reporting off
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress

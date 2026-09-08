@@ -14,19 +14,15 @@ The short version, and the only four points most readers need:
   Getting one out of that state takes a **recompile**: `--features analytics`
   *and* an explicit `OPENCOMPANY_ANALYTICS=on`, both deliberate, and neither
   reachable from anything a shipped binary reads at runtime.
-- A **self-hosted install sends nothing**, and since 2026-08-29 how strong that
-  sentence is depends on how the install was built. Built from source with the
-  default feature set it is the desktop's *cannot*. Built from this
-  repository's `Dockerfile` — whose `ARG FEATURES` now defaults to `analytics`,
-  because that image is the hosted tenant workload — the transport is compiled
-  and the guarantee is a **will not**: `analytics::config::resolve` still
-  requires a hosted tenant, or an explicit `OPENCOMPANY_ANALYTICS=on`, **and** a
-  token, and `OPENCOMPANY_ANALYTICS=off` still outranks both. An operator who
-  runs that image with no tenant namespace and no token sends exactly what they
-  sent before: nothing.
+- A **self-hosted install sends nothing, and cannot** on anything this
+  repository builds by default: `cargo build` with no `--features` does not
+  compile the transport, and `Dockerfile`'s `ARG FEATURES` defaults to empty, so
+  an image built from this repository inherits the same silence. The hosted
+  tenant image is the one exception, and it is an exception only because
+  whoever builds it passes `FEATURES` in explicitly — a deliberate act on the
+  platform's side of the seam, not a default this repository ships to strangers.
   [analytics-configuration.md](analytics-configuration.md) has the five
-  conditions in full, and says why the weaker promise is the right trade for
-  that one artifact.
+  conditions in full.
 - A **hosted tenant** — a container the OpenCompany platform provisioned and
   operates — reports **shape and outcome only**, under an **opaque id**.
 - Nothing an operator or an agent wrote ever leaves the process this way. Not

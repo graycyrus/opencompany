@@ -33,12 +33,14 @@ settled this rule for a different call site: it must be *the same* parser
 `reqwest` uses, because a second hand-rolled reader is a bypass waiting to be
 found.
 
-Condition 1 is met in two places, both of them the container image: the
-`ARG FEATURES="analytics"` default in `Dockerfile`, and `TENANT_FEATURES` in
-`.github/workflows/deploy-staging.yml`, which passes the hosted tenant's full
-feature set as a build arg and overrides that default. Nothing else compiles the
-feature — not the desktop (`src-tauri/Cargo.toml`), not `cargo build` with no
-`--features`, not any CI lane but the scoped analytics one.
+Condition 1 is met by the builder of the hosted tenant image, and nowhere in a
+default build: `TENANT_FEATURES` in `.github/workflows/deploy-staging.yml`
+passes the hosted tenant's full feature set as a build arg, and the hosting
+manager passes the same arg for the images it builds itself. Nothing in this
+repository compiles the feature on its own — not the desktop
+(`src-tauri/Cargo.toml`), not `cargo build` with no `--features`, not
+`Dockerfile`'s `ARG FEATURES=""` default, not any CI lane but the scoped
+analytics one.
 
 `OPENCOMPANY_TENANT_ID` implies `hosted-tenant` when `OPENCOMPANY_DEPLOYMENT`
 says **nothing at all** — the control plane injects it and nothing else does.
@@ -65,11 +67,7 @@ Silence is the answer to "I cannot tell what you asked for", and the boot line
 names the reason. A **blank** value is treated as absent rather than unreadable,
 so a launcher that exports an empty variable changes nothing.
 
-## Why the image compiles the transport
-
-The `Dockerfile` default was empty until 2026-08-29, and it made the promise at
-the top of the [main document](analytics.md) stronger by making the hosted image
-itself unreliable.
+## Why the build arg, and not a default
 
 Condition 1 is the only one of the five that cannot be satisfied at runtime, and
 a build that misses it fails **silently and permanently**: the manager injects a
@@ -80,14 +78,21 @@ Boot says nothing is wrong, the dashboard stays empty forever, and nothing
 anywhere says why. Every other condition announces itself in a boot line an
 operator can read.
 
-So the default moved into the artifact that *is* the hosted workload, rather
-than living only in a CI variable that a differently-built image quietly misses.
-**Compiling the transport in is not reporting**: the other four conditions are
-unchanged and every one of them is a runtime decision. What changes is the kind
-of guarantee this one artifact carries — a **will not** where it used to be a
-**cannot** — and that is the trade, made deliberately, in exchange for the
-failure above becoming impossible. The desktop build, which is where the
-stronger promise is made and kept, still compiles no transport at all.
+That is a real hazard, and the tempting fix — default `Dockerfile`'s
+`ARG FEATURES` to `analytics`, so the artifact that *is* the hosted workload
+always carries the transport — was tried and rejected. This repository is
+GPL-3.0 and self-hostable, and its `Dockerfile` is the obvious way a stranger
+builds it. Defaulting that file to `analytics` would downgrade the promise at
+the top of the [main document](analytics.md) from **cannot report** to **will
+not report** for every one of them, to spare one operator a build-arg they
+already pass.
+
+So the feature stays a build arg, set by whoever builds the hosted image:
+`TENANT_FEATURES` in `.github/workflows/deploy-staging.yml`, and the hosting
+manager's own compose file, which passes `FEATURES` for every tenant container
+it builds. The failure above is then an operator-side omission on a line that
+already exists and is already read, rather than a guarantee weakened for people
+who never asked for the feature at all.
 
 ## How to turn it off
 
