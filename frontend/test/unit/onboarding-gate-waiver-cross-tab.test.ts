@@ -10,7 +10,7 @@ import { AppShell } from "@/components/app-shell";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
 import type { Connection, ConnectionId, LocalScope } from "@/connections/types";
-import { clearGateStepWaivers, markGateStepWaived } from "@/onboarding/state";
+import { clearGateStepWaivers, markGateStepWaived, waivedGateSteps } from "@/onboarding/state";
 
 /**
  * Codex review, PR #2046.
@@ -131,6 +131,85 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   localStorage.clear();
+});
+
+/**
+ * Codex review, PR #2046, round 3: a waiver must be dropped when ITS OWN step
+ * completes, not only when the whole funnel activates. Otherwise a founder who
+ * waives `integration`, then genuinely connects one while another step is
+ * still outstanding (so `isActivated` never latches), keeps a stale waiver that
+ * silently comes back into force if the connection is later revoked — masking
+ * a step the host still considers owed and that a credential now makes
+ * ordinarily completable.
+ */
+describe("AppShell drops a waiver once the host reports that step complete", () => {
+  it("clears the integration waiver when integration connects, without waiting for activation", async () => {
+    const client = new Proxy(
+      {
+        baseUrl: "",
+        scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
+        subscribeToEvents: () => () => {},
+        get: (path: string) => {
+          if (path.endsWith("/auth/me")) return Promise.resolve({ role: "admin" });
+          if (path.endsWith("/activation")) {
+            // The waived step is now genuinely done — but `workflow` is not,
+            // so the funnel as a whole has NOT activated and the
+            // clear-everything branch never runs.
+            return Promise.resolve({
+              nameConfirmed: true,
+              integrationConnected: true,
+              workflowRunSucceeded: false,
+              isActivated: false,
+            });
+          }
+          return hang();
+        },
+        status: hang,
+        approvals: hang,
+        listDesks: hang,
+        listTeam: async () => [
+          { id: "operations", role: "Analyst", inboxEnabled: false, global: true },
+          { id: "ada", role: "Operations", inboxEnabled: false },
+        ],
+      },
+      {
+        get(target, prop, receiver) {
+          if (prop in target) return Reflect.get(target, prop, receiver);
+          return hang;
+        },
+      },
+    ) as unknown as OpenCompanyClient;
+
+    markGateStepWaived(SCOPE, "integration");
+    expect(waivedGateSteps(SCOPE)).toContain("integration");
+
+    await act(async () => {
+      root.render(
+        createElement(HostsProvider, {
+          value: HOSTS,
+          children: createElement(ConnectionScopeProvider, {
+            scope: SCOPE,
+            children: createElement(AppShell, {
+              client,
+              company: STATUS.id,
+              initialStatus: STATUS,
+              companies: [STATUS],
+              onSwitchCompany: () => {},
+            }),
+          }),
+        }),
+      );
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+
+    expect(
+      waivedGateSteps(SCOPE),
+      "a waiver for a step the host now reports complete must not survive to speak for a later incomplete one",
+    ).not.toContain("integration");
+    // And the gate is still up, because `workflow` is genuinely outstanding —
+    // clearing the waiver must not be mistaken for finishing the funnel.
+    expect(container.querySelector('[data-testid="gate-step-workflow"]')).toBeTruthy();
+  });
 });
 
 describe("AppShell notices a waiver written by another tab", () => {

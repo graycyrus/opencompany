@@ -43,6 +43,7 @@ import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
 import {
   clearGateSkipped,
+  clearGateStepWaiver,
   clearGateStepWaivers,
   type GateStepId,
   gateSkippedThisSession,
@@ -1126,15 +1127,43 @@ export function AppShell({
       previous === null || previous.connection !== scope.connection || previous.company !== scope.company;
     lastGateWaiverScopeRef.current = scope;
     if (scopeJustChanged) return;
-    if (!activationGate.status?.isActivated) return;
-    clearGateSkipped(scope);
-    // Same housekeeping, one step down: a waiver cannot matter once the funnel
-    // has actually completed, and leaving one behind would let it speak for a
-    // later incomplete funnel the founder never answered (see
-    // `clearGateStepWaivers`).
-    clearGateStepWaivers(scope);
-    setGateWaived([]);
-  }, [activationGate.status?.isActivated, scope]);
+    const status = activationGate.status;
+    if (!status) return;
+    if (status.isActivated) {
+      clearGateSkipped(scope);
+      // Same housekeeping, one step down: a waiver cannot matter once the funnel
+      // has actually completed, and leaving one behind would let it speak for a
+      // later incomplete funnel the founder never answered (see
+      // `clearGateStepWaivers`).
+      clearGateStepWaivers(scope);
+      setGateWaived([]);
+      return;
+    }
+    // Codex review, PR #2046, round 3: the same housekeeping PER STEP, because
+    // waiting for the whole funnel leaves a window where a stale waiver does
+    // real harm. Waive `integration`; the integration then genuinely connects
+    // while some other step is still outstanding, so `isActivated` never
+    // latches and the branch above never runs; the connection is later revoked
+    // or expires. The waiver — an answer to a step that could not be finished —
+    // silently comes back into force against a step a credential now makes
+    // ordinarily completable, and this browser stops showing a gate the host
+    // still considers owed.
+    //
+    // `outstandingGateSteps`' own doc already claims this rule ("a stale
+    // waiver must never be able to mask a step going incomplete again later");
+    // ignoring the waiver while the step reads done was only half of it.
+    const done: Record<GateStepId, boolean> = {
+      name: status.nameConfirmed,
+      integration: status.integrationConnected,
+      workflow: status.workflowRunSucceeded,
+    };
+    setGateWaived((previous) => {
+      const settled = previous.filter((step) => done[step]);
+      if (settled.length === 0) return previous;
+      for (const step of settled) clearGateStepWaiver(scope, step);
+      return previous.filter((step) => !done[step]);
+    });
+  }, [activationGate.status, scope]);
 
   // Codex review, PR #2046: a waiver is durably scoped and meant to survive a
   // FRESH tab (see `markGateStepWaived`'s own doc) — but a tab that was

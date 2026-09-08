@@ -136,6 +136,33 @@ export function markGateStepWaived(scope: LocalScope, step: GateStepId): void {
 }
 
 /**
+ * Drops the waiver for one step — called the moment the HOST reports that step
+ * complete, without waiting for the whole funnel (Codex review, PR #2046).
+ *
+ * [`outstandingGateSteps`]'s own doc already states the rule this enforces: a
+ * waiver is only ever consulted for a step the host reports incomplete, and "a
+ * stale waiver must never be able to mask a step going incomplete again
+ * later". Ignoring the waiver while the step is done was only half of that.
+ * The other half is this: a founder waives `integration`, the integration then
+ * genuinely connects while some other step is still outstanding — so
+ * `isActivated` never latches and [`clearGateStepWaivers`] never runs — and
+ * the connection is later revoked or expires. Without this, the months-old
+ * waiver comes back into force against a step that a credential now makes
+ * ordinarily completable, and this browser stops showing a gate the host still
+ * considers owed.
+ *
+ * Clearing at completion rather than at activation makes the waiver mean what
+ * it says: an answer to the step as it stood when it could not be finished.
+ */
+export function clearGateStepWaiver(scope: LocalScope, step: GateStepId): void {
+  try {
+    localStorage.removeItem(WAIVED_STEP_KEY(scope, step));
+  } catch {
+    /* nothing to clear */
+  }
+}
+
+/**
  * Drops every waiver — called once the funnel genuinely completes, for the same
  * housekeeping reason [`clearGateSkipped`] exists: a waiver cannot matter once
  * `isActivated` is true, and a stale one left behind would silently speak for a
