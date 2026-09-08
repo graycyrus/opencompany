@@ -186,10 +186,21 @@ test("OpenRouter models are selected from the registry and persist through reloa
   await page.route("**/inference/models", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify([
-        { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
-        { id: "provider/catalog-reasoning", name: "Catalog Reasoning" },
-      ]),
+      // `GET …/inference/models` answers with the configured endpoint's own
+      // catalog — `{baseUrl, models, tierVocabulary, tierDefaults}` — not the
+      // bare array it used to return. These ids are neither the tier names nor
+      // the shipped concrete ids, so a real host classifies this endpoint
+      // `unknown` and supplies no tier defaults; the console then keeps
+      // prefilling from `status.defaultTierModels`, as it does here.
+      body: JSON.stringify({
+        baseUrl: "https://catalog.example.test/v1",
+        models: [
+          { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
+          { id: "provider/catalog-reasoning", name: "Catalog Reasoning" },
+        ],
+        tierVocabulary: "unknown",
+        tierDefaults: {},
+      }),
     });
   });
   await openConnections(page);
@@ -245,9 +256,13 @@ test("a saved OpenRouter tier override can be cleared back to the tier default (
   await page.route("**/inference/models", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify([
-        { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
-      ]),
+      // Same catalog shape as the spec above: an object, not a bare array.
+      body: JSON.stringify({
+        baseUrl: "https://catalog.example.test/v1",
+        models: [{ id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 }],
+        tierVocabulary: "unknown",
+        tierDefaults: {},
+      }),
     });
   });
   await openConnections(page);

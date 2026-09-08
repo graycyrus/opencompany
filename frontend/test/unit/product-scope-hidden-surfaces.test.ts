@@ -286,7 +286,17 @@ function inferenceClient(status: InferenceStatus) {
   return {
     scopeFor: (company: string | null) =>
       company ? `/api/v1/companies/${company}` : "/api/v1/company",
-    get: async (path: string) => (path.endsWith("/inference/models") ? [] : status),
+    // `InferenceModelCatalog` — an object naming the endpoint read, not the
+    // bare array this route used to answer with.
+    get: async (path: string) =>
+      path.endsWith("/inference/models")
+        ? {
+            baseUrl: status.baseUrl,
+            models: [],
+            tierVocabulary: "unknown",
+            tierDefaults: {},
+          }
+        : status,
     put: async () => ({ status, note: "" }),
     del: async () => ({ status, note: "" }),
     post: async () => ({ status, note: "" }),

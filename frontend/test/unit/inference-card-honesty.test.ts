@@ -51,7 +51,19 @@ function stubClient(replies: InferenceStatus[], mutation?: InferenceStatus) {
   return {
     scopeFor: (company: string | null) =>
       company ? `/api/v1/companies/${company}` : "/api/v1/company",
-    get: async (path: string) => (path.endsWith("/inference/models") ? [] : read()),
+    // The catalog route answers with an object naming the endpoint that was
+    // read, not a bare array (`InferenceModelCatalog`). This card asserts
+    // nothing about the picker, so an empty catalog for the resolved endpoint
+    // is the honest stub — but it has to be the *shape* the console parses.
+    get: async (path: string) =>
+      path.endsWith("/inference/models")
+        ? {
+            baseUrl: "https://openrouter.ai/api/v1",
+            models: [],
+            tierVocabulary: "unknown",
+            tierDefaults: {},
+          }
+        : read(),
     put: async () => ({ status: settled(), note: "" }),
     del: async () => ({ status: settled(), note: "" }),
     post: async () => ({ status: settled(), note: "" }),
