@@ -621,6 +621,7 @@ mod tests {
                 overlay_policy: None,
                 overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
+                overlay_desk_hive: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
