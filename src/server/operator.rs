@@ -10715,36 +10715,68 @@ mode = "full"
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    /// The keystone (issue #1805): extending a parked approval pushes its
-    /// deadline out to a fresh full window, and the receipt names the new one —
-    /// the console can redraw the countdown without re-fetching the list.
+    /// The keystone (issue #1805): extending a parked approval buys it another
+    /// full window, and the receipt names the new deadline — the console can
+    /// redraw the countdown without re-fetching the list.
+    ///
+    /// Pressed twice in quick succession it moves twice. Re-anchoring to `now`
+    /// instead moved the deadline by however long the request took — tens of
+    /// milliseconds on a fresh card — while the route still answered
+    /// `200 {"extended":true}` and the countdown read the same before and after,
+    /// which is what an operator who pressed it twice was actually looking at.
     #[tokio::test]
     async fn extending_a_parked_approval_moves_its_deadline() {
         let home_dir = home();
         let state = state_with_company(home_dir.path(), "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-        // Parked long ago, so its original deadline is `1_000 + ttl`.
-        let id = park_for_extend(&runtime, "appr-ext", 1_000).await;
+        // Parked a moment ago — the case an operator is actually in when they
+        // decide they want longer, and the one re-anchoring was a no-op for. A
+        // park dated 1970 would instead hit the floor that keeps an
+        // already-expired entry from being handed a deadline still in the past,
+        // which is not what this test is about.
+        let parked_at = crate::ports::now_millis().saturating_sub(1_000);
+        let id = park_for_extend(&runtime, "appr-ext", parked_at).await;
+        let ttl = runtime.approval_gate.ttl_millis();
         let before = runtime.pending_approvals()[0]
             .expires_at_millis
             .expect("a deadline is projected");
 
         let app = router(state);
-        let response = app.oneshot(extend_request(&id)).await.unwrap();
+        let response = app.clone().oneshot(extend_request(&id)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_json(response).await;
 
         let after = runtime.pending_approvals()[0]
             .expires_at_millis
             .expect("a deadline is still projected");
-        assert!(
-            after > before,
-            "the deadline moved out: before={before} after={after}"
+        assert_eq!(
+            after,
+            before + ttl,
+            "Extend buys another full window: before={before} after={after} ttl={ttl}"
         );
         assert!(body["extended"].as_bool().unwrap());
         assert_eq!(
             body["expiresAtMillis"].as_f64().unwrap() as u64,
             after,
+            "the receipt's deadline is the one the card now projects"
+        );
+
+        // Pressed again straight away — no waiting between the two, which is
+        // the case that used to buy nothing.
+        let second = app.oneshot(extend_request(&id)).await.unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = body_json(second).await;
+        let after_twice = runtime.pending_approvals()[0]
+            .expires_at_millis
+            .expect("a deadline is still projected");
+        assert_eq!(
+            after_twice,
+            before + 2 * ttl,
+            "the second press bought a second window: {after_twice} vs {after}"
+        );
+        assert_eq!(
+            second_body["expiresAtMillis"].as_f64().unwrap() as u64,
+            after_twice,
             "the receipt's deadline is the one the card now projects"
         );
     }
