@@ -287,14 +287,19 @@ function inferenceClient(status: InferenceStatus) {
     scopeFor: (company: string | null) =>
       company ? `/api/v1/companies/${company}` : "/api/v1/company",
     // `InferenceModelCatalog` — an object naming the endpoint read, not the
-    // bare array this route used to answer with.
+    // bare array this route used to answer with. These tests are about which
+    // surfaces the card hides, not about the picker, so the stub answers the
+    // host's unreadable-catalog reply: a 200 carrying `error`, with no
+    // `tierVocabulary`. The host never pairs an empty `models` with a
+    // vocabulary — an empty catalog is reported as a failure — so answering
+    // one would be a shape nothing real can produce.
     get: async (path: string) =>
       path.endsWith("/inference/models")
         ? {
             baseUrl: status.baseUrl,
             models: [],
-            tierVocabulary: "unknown",
             tierDefaults: {},
+            error: `Could not list models from ${status.baseUrl}: connection refused. Enter model ids directly.`,
           }
         : status,
     put: async () => ({ status, note: "" }),
