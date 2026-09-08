@@ -54,6 +54,46 @@ describe("a conversation that is not a room", () => {
       foldEpisodes([op("explain"), turn("analyst", "You would !propose #x to start.")]),
     ).toEqual([]);
   });
+
+  it("does not sprout deliberation furniture around an ordinary exchange on a desk that has deliberated before", () => {
+    // A channel earns `hasRoom` the moment it has hosted one real room, but
+    // that must not turn every later plain Q&A on the same desk into a
+    // "still deliberating" block — the operator's question here gets an
+    // ordinary reply with no move, so it renders as a plain exchange even
+    // though the desk deliberated earlier in the same transcript.
+    seq = 0;
+    const episodes = foldEpisodes(
+      [
+        op("decide the rollout"),
+        turn("planner", "!propose #stage ship to staging first"),
+        report("The desk settled on #stage after 1 turn (backed by planner)."),
+        op("what time did that ship?"),
+        turn("planner", "Around 9am."),
+      ],
+      { quorum: 1 },
+    );
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0].triggerId).toBe("h1");
+    expect(episodes[0].turns).toHaveLength(1);
+  });
+
+  it("still opens on the ordinary reply once a real move follows it in the same room", () => {
+    seq = 0;
+    const episodes = foldEpisodes(
+      [
+        op("decide the rollout"),
+        turn("planner", "let me think about this"),
+        turn("planner", "!propose #stage ship to staging first"),
+        report("The desk settled on #stage after 1 turn (backed by planner)."),
+      ],
+      { quorum: 1 },
+    );
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0].triggerId).toBe("h1");
+    // The pre-move ordinary line deposited no trace of its own.
+    expect(episodes[0].turns).toHaveLength(1);
+    expect(episodes[0].turns[0].move).not.toBeNull();
+  });
 });
 
 describe("segmentation", () => {
