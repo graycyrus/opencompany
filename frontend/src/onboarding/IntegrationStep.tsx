@@ -4,6 +4,7 @@ import { ArrowRight, KeyRound, Loader2 } from "lucide-react";
 import type { OpenCompanyClient } from "@/api/client";
 import { getComposioStatus } from "@/api/composio";
 import { Button } from "@/components/ui/button";
+import { withReadTimeout } from "@/lib/read-timeout";
 import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
@@ -59,6 +60,21 @@ import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
  * offering a durable waiver for a step that has since become completable. The
  * waive click therefore re-reads before it persists anything — see [`waive`].
  */
+/**
+ * How long the waive-time credential re-read may hang before it is treated as
+ * a failure (Codex review, PR #2046).
+ *
+ * `revalidating` disables the waive button while the re-read is out, and only
+ * a settled promise re-enables it. `OpenCompanyClient` has no timeout anywhere
+ * in its request path (`lib/read-timeout.ts`), so a request that is accepted
+ * and never answered would leave the one control a credential-less founder
+ * has disabled for the rest of the mount — the same trap this whole component
+ * exists to remove, reached through a stalled read instead of a missing
+ * escape. On timeout the failure branch runs: nothing is persisted, the
+ * button is re-enabled, and the retry line explains why.
+ */
+const REVALIDATE_TIMEOUT_MS = 20000;
+
 export function IntegrationStep({
   client,
   company,
@@ -135,7 +151,7 @@ export function IntegrationStep({
   const waive = useCallback(() => {
     setRevalidating(true);
     setRevalidateFailed(false);
-    void getComposioStatus(client, company).then(
+    void withReadTimeout(getComposioStatus(client, company), REVALIDATE_TIMEOUT_MS).then(
       (status) => {
         if (!mounted.current) return;
         setRevalidating(false);

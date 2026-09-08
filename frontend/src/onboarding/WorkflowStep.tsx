@@ -9,6 +9,7 @@ import {
   type WorkflowSummary,
 } from "@/api/workflows";
 import { Button } from "@/components/ui/button";
+import { withReadTimeout } from "@/lib/read-timeout";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import {
   gateApprovalTargets,
@@ -24,6 +25,26 @@ import { pendingCount } from "@/views/workflows/run-health";
  * less responsive than the funnel step beside it.
  */
 const RUNNING_POLL_MS = 5000;
+
+/**
+ * How long a single run-history read may sit with no response at all before
+ * it is treated as a failure (Codex review, PR #2046).
+ *
+ * `runsInFlight` is what stops a slow host from piling requests up, and it
+ * only clears when the request it guards SETTLES. `OpenCompanyClient` has no
+ * timeout anywhere in its request path (`lib/read-timeout.ts`'s own doc: the
+ * browser transport calls bare `fetch` with no `AbortSignal`), so a request
+ * that is accepted and then never answered leaves that flag true for the life
+ * of the mount — every later tick is skipped, and the card sits on "Checking
+ * your runs…" or on stale progress forever, with the `failed` path it has for
+ * exactly this situation unreachable.
+ *
+ * Generous relative to `RUNNING_POLL_MS` on purpose: this is the "this will
+ * never answer" bound, not a latency budget, and a read slower than one tick
+ * is already handled by the in-flight guard. Mirrors
+ * `ACTIVATION_READ_TIMEOUT_MS`, the same fix on the poll beside this one.
+ */
+const RUNS_READ_TIMEOUT_MS = 20000;
 
 /**
  * Step 3 of the first-run gate, built for the card it is drawn in (bugs
@@ -90,7 +111,7 @@ export function WorkflowStep({
     if (runsInFlight.current) return;
     runsInFlight.current = true;
     const requestId = ++latestRunsRequest.current;
-    void listWorkflowRuns(client, company, { limit: 5 })
+    void withReadTimeout(listWorkflowRuns(client, company, { limit: 5 }), RUNS_READ_TIMEOUT_MS)
       .then(
         (page) => {
           if (requestId !== latestRunsRequest.current) return;

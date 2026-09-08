@@ -154,6 +154,56 @@ describe("WorkflowStep's continuous run-history poll", () => {
     ).toBeTruthy();
   });
 
+  it("recovers from a run-history read that hangs and never answers", async () => {
+    // Codex review, PR #2046: `runsInFlight` only clears when the request it
+    // guards SETTLES, and `OpenCompanyClient` has no timeout anywhere in its
+    // request path (`lib/read-timeout.ts`). A request accepted and never
+    // answered pinned that flag for the life of the mount — every later tick
+    // skipped, the card frozen on "Checking your runs…", and the `failed`
+    // path it has for exactly this situation unreachable.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    const client = fakeClient(() => {
+      calls += 1;
+      // The first read never answers. Anything after it succeeds — which can
+      // only happen if the timeout released the in-flight guard.
+      if (calls === 1) return new Promise(() => {});
+      return Promise.resolve({ runs: [succeededRun], hasMore: false });
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(WorkflowStep, {
+          client,
+          company: null,
+          onOpenWorkflows: () => {},
+          onOpenApprovals: () => {},
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(calls).toBe(1);
+
+    // A poll interval passes and the in-flight guard correctly suppresses a
+    // second request — this is the state that used to last forever.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(calls, "the in-flight guard must still hold before the timeout").toBe(1);
+
+    // Past the read timeout the hang becomes a rejection, the guard clears,
+    // and the next tick actually reaches the host.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25_000);
+    });
+
+    expect(calls, "the timeout must let the poll resume").toBeGreaterThan(1);
+    expect(
+      container.querySelector('[data-testid="gate-workflow-succeeded"]'),
+      "and the card must recover rather than sit frozen for the life of the mount",
+    ).toBeTruthy();
+  });
+
   it("does not start an overlapping poll while a request is still in flight", async () => {
     // Codex review, PR #2046: a host consistently slower than the poll
     // interval used to have EVERY response arrive already stale — each tick

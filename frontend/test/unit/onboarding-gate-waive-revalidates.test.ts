@@ -126,6 +126,60 @@ describe("the durable waiver is revalidated against a fresh credential read", ()
     expect(waiveButton(), "and withdraw the waiver it can no longer honestly offer").toBeNull();
   });
 
+  it("recovers when the revalidating read hangs instead of answering", async () => {
+    // Codex review, PR #2046: `revalidating` disables the waive button and is
+    // only cleared by a SETTLED promise, and `OpenCompanyClient` has no
+    // timeout anywhere in its request path (`lib/read-timeout.ts`). A request
+    // accepted and never answered therefore left the one control a
+    // credential-less founder has disabled for the rest of the mount — the
+    // same trap this component exists to remove, reached through a stalled
+    // read.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const onWaive = vi.fn();
+      let call = 0;
+      const client = {
+        scopeFor: () => "/api/v1/company",
+        get: (path: string) => {
+          if (!path.includes("/composio")) throw new Error(`unexpected path: ${path}`);
+          call += 1;
+          // The mount read answers; the revalidation never does.
+          if (call === 1) return Promise.resolve(status("none"));
+          return new Promise(() => {});
+        },
+      } as unknown as OpenCompanyClient;
+
+      await act(async () => {
+        root.render(
+          createElement(IntegrationStep, {
+            client,
+            company: null,
+            onOpenApps: () => {},
+            onWaive,
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      await act(async () => {
+        waiveButton()!.click();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(waiveButton()!.disabled, "the button is disabled while the re-read is out").toBe(true);
+
+      // Past the read timeout the hang becomes an ordinary failure.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+
+      expect(onWaive, "a hung read is not a confirmed 'no credential'").not.toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="gate-integration-waive-failed"]')).toBeTruthy();
+      expect(waiveButton()!.disabled, "and the founder can try again").toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("persists nothing and says so when the revalidating read fails", async () => {
     const onWaive = vi.fn();
     const { client } = scriptedClient(["none", "fail"]);
