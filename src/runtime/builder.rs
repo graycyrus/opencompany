@@ -1191,7 +1191,7 @@ impl RuntimeBuilder {
     /// what a desktop or self-hosted instance keeps: the whole hosted-only
     /// posture is that a builder nobody called this on reports nothing. The
     /// `serve` path calls it once, with the process-wide tracker chosen by
-    /// [`analytics::mixpanel::build`](crate::analytics::mixpanel::build).
+    /// [`analytics::openpanel::build`](crate::analytics::openpanel::build).
     pub fn with_analytics(mut self, tracker: Arc<dyn crate::analytics::Tracker>) -> Self {
         self.tracker = Some(tracker);
         self
