@@ -1016,6 +1016,100 @@ mod test {
         collector.stop().await;
     }
 
+    /// **The end-to-end check against a real OpenPanel instance.**
+    ///
+    /// `#[ignore]` because it needs a collector, a credential and a network,
+    /// none of which CI has. Everything above proves this transport does what
+    /// this repository believes OpenPanel wants; only this proves OpenPanel
+    /// agrees. Every failure mode in this module is silent, so "the unit suite
+    /// is green" and "events are landing" are genuinely different claims.
+    ///
+    /// ```text
+    /// OPENCOMPANY_ANALYTICS_ENDPOINT=https://<host>/api/track \
+    /// OPENCOMPANY_ANALYTICS_CLIENT_ID=<uuid> \
+    /// OPENCOMPANY_ANALYTICS_CLIENT_SECRET=<secret> \
+    ///   cargo test --features analytics -- --ignored --nocapture \
+    ///   analytics::openpanel::test::a_real_collector_accepts_an_event
+    /// ```
+    ///
+    /// Credentials come from the environment and are never written anywhere:
+    /// not to a fixture, not to a log line, and not to this test's output,
+    /// which prints only the `profileId` it sent and the ids the collector
+    /// returned — enough to find the event in the dashboard and nothing more.
+    ///
+    /// It asserts a `2xx` **and** that the body names a `deviceId`, because a
+    /// collector fronted by a proxy that swallows the request can answer `200`
+    /// with something else entirely, and a status-only assertion would call
+    /// that a pass.
+    #[tokio::test]
+    #[ignore = "needs a real OpenPanel instance and a credential from the environment"]
+    async fn a_real_collector_accepts_an_event() {
+        use crate::app::config::EnvSource;
+
+        let os_env = crate::app::config::ProcessEnv;
+        let endpoint = os_env
+            .get(ENDPOINT_ENV)
+            .expect("set OPENCOMPANY_ANALYTICS_ENDPOINT");
+        let credentials = match resolve(
+            Deployment::HostedTenant,
+            &MapEnv::new([
+                (
+                    CLIENT_ID_ENV,
+                    os_env.get(CLIENT_ID_ENV).expect("set the client id"),
+                ),
+                (
+                    CLIENT_SECRET_ENV,
+                    os_env
+                        .get(CLIENT_SECRET_ENV)
+                        .expect("set the client secret"),
+                ),
+                (ENDPOINT_ENV, endpoint.clone()),
+            ]),
+        ) {
+            crate::analytics::config::Decision::Report { credentials, .. } => credentials,
+            other => panic!("the environment does not resolve to reporting: {other:?}"),
+        };
+
+        // A run-specific id, so the event is findable and no real instance's
+        // numbers are disturbed.
+        let id = OpaqueId::instance(&format!("{:032x}", crate::ports::now_millis()));
+        println!("posting as profileId {}", id.as_str());
+
+        let body = crate::analytics::payload(
+            &Envelope::new(id, Deployment::HostedTenant, Cognition::default()),
+            &Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            },
+        );
+
+        let response = reqwest::Client::builder()
+            .default_headers(super::http::request_headers(&credentials))
+            .build()
+            .expect("a client")
+            .post(&endpoint)
+            .json(&body)
+            .send()
+            .await
+            .expect("the collector is reachable");
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        assert!(
+            status.is_success(),
+            "the collector refused the event with {status}: {text}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        assert!(
+            parsed.get("deviceId").is_some(),
+            "a 2xx with no deviceId is a proxy answering, not OpenPanel accepting: \
+             {status} {text}"
+        );
+        println!("collector accepted it: {status} {text}");
+    }
+
     /// **The header-safety check in `config` really is a subset of what a
     /// header value accepts.**
     ///
