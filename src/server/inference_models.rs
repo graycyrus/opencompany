@@ -11,6 +11,13 @@
 //! follows the configured base URL, so the cache is a registry keyed on it: one
 //! entry per endpoint, each with its own single-flight lock, so two tenants on
 //! two providers neither share a catalog nor queue behind each other.
+//!
+//! An **authenticated** read is additionally partitioned by the company it was
+//! made for, because an endpoint may publish an entitlement-scoped catalog and a
+//! base-URL-only key would then hand one company's model list to the next. A
+//! keyless read stays shared: it is a public property of the endpoint. Neither
+//! path ever puts the credential, or anything derived from it, in the key. See
+//! [`catalog_registry`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -263,15 +270,29 @@ impl ModelCatalogCache {
     }
 }
 
-/// The per-endpoint cache registry.
+/// The catalog cache registry.
 ///
-/// Keyed on the normalized base URL and **not** on the credential. A model
-/// catalog is a public property of an endpoint rather than of the key used to
-/// read it, and a credential must not become a map key — hashing one to key a
-/// cache would put a derivative of it in process memory next to the data it
-/// guards, for a partition nothing here needs. The cost is that two tenants
-/// sharing one endpoint share its catalog; the benefit is that a credential
-/// never leaves the paths that already handle it.
+/// **Never keyed on the credential.** A credential must not become a map key:
+/// hashing one to key a cache would put a derivative of it in process memory
+/// next to the data it guards.
+///
+/// It *is* keyed on who asked, whenever a credential was presented. An
+/// unauthenticated read is a public property of the endpoint and is shared by
+/// every caller reaching it. An **authenticated** read is not: an endpoint may
+/// publish an entitlement-scoped catalog, in which case a base-URL-only key
+/// hands one company's model list to the next company on the same endpoint for
+/// the rest of the hour (CodeRabbit security review on #2045). That only ever
+/// happens inside a single process serving several companies — a local
+/// multi-company host, or hosted shared-single-DB mode; database-per-tenant
+/// gives each tenant its own container and so its own registry — but it is a
+/// real cross-company disclosure in a supported mode, so the partition is the
+/// safe side to err on.
+///
+/// The scope is the **company id**: already non-secret, already the unit of
+/// isolation everywhere else, and it changes when the answer should change. The
+/// cost is one catalog fetch per company per endpoint per hour rather than one
+/// per endpoint — a bounded trade for not sharing an authenticated answer across
+/// a trust boundary.
 fn catalog_registry() -> &'static Mutex<HashMap<String, Arc<ModelCatalogCache>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<ModelCatalogCache>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -282,9 +303,18 @@ fn cache_key(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
 }
 
-/// This endpoint's cache, created on first use.
-pub(crate) fn catalog_cache(base_url: &str) -> Arc<ModelCatalogCache> {
-    let key = cache_key(base_url);
+/// The cache slot for an endpoint read within `scope`.
+///
+/// `scope` is `None` for a read that presented no credential — a public catalog,
+/// shared by everyone — and `Some(company_id)` for an authenticated one. The
+/// separator is a control character no company id or URL can contain, so no
+/// scope-plus-endpoint pair can be spelled two ways.
+pub(crate) fn catalog_cache_scoped(base_url: &str, scope: Option<&str>) -> Arc<ModelCatalogCache> {
+    let endpoint = cache_key(base_url);
+    let key = match scope {
+        Some(scope) => format!("{scope}\u{1}{endpoint}"),
+        None => endpoint,
+    };
     let mut registry = match catalog_registry().lock() {
         Ok(registry) => registry,
         // A poisoned registry must not take the catalog offline for the rest of
@@ -293,6 +323,12 @@ pub(crate) fn catalog_cache(base_url: &str) -> Arc<ModelCatalogCache> {
         Err(_) => return Arc::new(ModelCatalogCache::default()),
     };
     Arc::clone(registry.entry(key).or_default())
+}
+
+/// The unscoped (public, keyless) cache for an endpoint.
+#[cfg(test)]
+pub(crate) fn catalog_cache(base_url: &str) -> Arc<ModelCatalogCache> {
+    catalog_cache_scoped(base_url, None)
 }
 
 /// Return the cached catalog for `base_url`, fetching it on a miss.
@@ -317,11 +353,25 @@ pub(crate) fn catalog_cache(base_url: &str) -> Arc<ModelCatalogCache> {
 /// A failure is remembered for [`MODEL_CATALOG_FAILURE_TTL`] and replayed to
 /// callers within it, so an unreachable provider costs one attempt a minute
 /// rather than one per request.
+///
+/// `scope` is the company this read is on behalf of. It partitions the cache
+/// whenever a `bearer` is presented, so an authenticated answer is never handed
+/// to a different company — see [`catalog_registry`]. A keyless read carries
+/// `None` and is shared, because an unauthenticated catalog is a public property
+/// of the endpoint.
 pub(crate) async fn catalog_models(
     base_url: &str,
     bearer: Option<&str>,
+    scope: Option<&str>,
 ) -> Result<Vec<InferenceModel>, String> {
-    let cache = catalog_cache(base_url);
+    // The partition follows the credential, not the caller: a read that presents
+    // nothing has nothing company-specific to leak, and sharing it keeps one
+    // fetch serving every company on a public endpoint.
+    let authenticated_scope = bearer
+        .filter(|bearer| !bearer.trim().is_empty())
+        .and(scope)
+        .filter(|scope| !scope.trim().is_empty());
+    let cache = catalog_cache_scoped(base_url, authenticated_scope);
     let now = Instant::now();
     if let Some(models) = cache.lookup(now) {
         return Ok(models);
@@ -398,8 +448,9 @@ pub(crate) async fn catalog_models(
 pub(crate) async fn discovered_vocabulary(
     base_url: &str,
     bearer: Option<&str>,
+    scope: Option<&str>,
 ) -> Option<TierVocabulary> {
-    let models = catalog_models(base_url, bearer).await.ok()?;
+    let models = catalog_models(base_url, bearer, scope).await.ok()?;
     Some(TierVocabulary::from_catalog_ids(
         models.iter().map(|model| model.id.as_str()),
     ))
@@ -583,8 +634,54 @@ mod tests {
         const ENDPOINT: &str = "https://vocabulary.example/v1";
         catalog_cache(ENDPOINT).store(vec![model("agentic-v1"), model("chat-v1")], Instant::now());
         assert_eq!(
-            discovered_vocabulary(ENDPOINT, None).await,
+            discovered_vocabulary(ENDPOINT, None, None).await,
             Some(TierVocabulary::Tiers)
+        );
+    }
+
+    /// An authenticated catalog is not shared across companies.
+    ///
+    /// The positive cache is keyed on the endpoint, which is right for a public
+    /// catalog and wrong for one read with a company's own credential: an
+    /// endpoint may publish an entitlement-scoped list, and a base-URL-only key
+    /// would serve one company's answer to the next for the rest of the hour
+    /// (CodeRabbit security review on #2045). A keyless read stays shared,
+    /// because there is nothing company-specific in it to leak.
+    #[test]
+    fn an_authenticated_catalog_is_partitioned_per_company_and_a_keyless_one_is_not() {
+        const ENDPOINT: &str = "https://shared-gateway.example/v1";
+        let now = Instant::now();
+
+        let acme = catalog_cache_scoped(ENDPOINT, Some("acme"));
+        let other = catalog_cache_scoped(ENDPOINT, Some("other"));
+        acme.store(vec![model("acme/entitled-only")], now);
+
+        assert_eq!(acme.lookup(now), Some(vec![model("acme/entitled-only")]));
+        assert_eq!(
+            other.lookup(now),
+            None,
+            "one company's authenticated catalog must not answer for another on the same endpoint"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, None).lookup(now),
+            None,
+            "nor must it answer a keyless read of the same endpoint"
+        );
+
+        // The same company reaching the same endpoint does reuse its own entry,
+        // so the partition costs one fetch per company rather than one per call.
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some("acme")).lookup(now),
+            Some(vec![model("acme/entitled-only")])
+        );
+
+        // A keyless catalog is a public property of the endpoint, and stays
+        // shared by everyone reading it that way.
+        const PUBLIC: &str = "https://public-registry.example/v1";
+        catalog_cache_scoped(PUBLIC, None).store(vec![model("vendor/public")], now);
+        assert_eq!(
+            catalog_cache_scoped(PUBLIC, None).lookup(now),
+            Some(vec![model("vendor/public")])
         );
     }
 

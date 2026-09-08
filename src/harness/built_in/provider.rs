@@ -1925,6 +1925,7 @@ impl TenantProvider {
         let vocabulary = crate::server::inference_models::discovered_vocabulary(
             &decl.base_url,
             bearer.as_deref(),
+            Some(self.company.as_ref()),
         )
         .await;
         Ok(decl.with_vocabulary(vocabulary))

@@ -227,10 +227,22 @@ hand.
 
 The cache is a registry keyed on the normalized base URL — one entry per
 endpoint, each with its own single-flight lock, so two tenants on two providers
-neither share a catalog nor queue behind each other. It is **not** keyed on the
-credential: a catalog is a public property of an endpoint, and hashing a
-credential to key a cache would put a derivative of it in process memory for a
-partition nothing needs.
+neither share a catalog nor queue behind each other. It is **never** keyed on the
+credential: hashing one to key a cache would put a derivative of it in process
+memory next to the data it guards.
+
+It **is** keyed on the reading company whenever a credential was presented. A
+keyless read is a public property of the endpoint and stays shared by everyone;
+an authenticated one is not, because an endpoint may publish an
+entitlement-scoped catalog, and a base-URL-only key would then hand one
+company's model list to the next company on that endpoint for the rest of the
+hour. That can only happen inside a single process serving several companies — a
+local multi-company host, or hosted shared-single-DB mode; database-per-tenant
+gives each tenant its own container and so its own registry — but it is a real
+cross-company disclosure in a supported mode. The scope is the company id:
+non-secret, already the unit of isolation everywhere else, and it changes when
+the answer should. The cost is one fetch per company per endpoint per hour
+instead of one per endpoint.
 
 | property | value |
 |---|---|

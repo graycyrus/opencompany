@@ -174,7 +174,16 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
         }));
     };
 
-    match crate::server::inference_models::catalog_models(&base_url, bearer.as_deref()).await {
+    // Scoped to this company: an authenticated catalog read is not a public
+    // property of the endpoint, so its cache entry must not be handed to another
+    // company on the same URL (CodeRabbit security review on #2045).
+    match crate::server::inference_models::catalog_models(
+        &base_url,
+        bearer.as_deref(),
+        Some(runtime.id().as_ref()),
+    )
+    .await
+    {
         Ok(models) => {
             let vocabulary = inference::TierVocabulary::from_catalog_ids(
                 models.iter().map(|model| model.id.as_str()),
@@ -996,6 +1005,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                 let vocabulary = crate::server::inference_models::discovered_vocabulary(
                     &decl.base_url,
                     bearer.as_deref(),
+                    Some(runtime.id().as_ref()),
                 )
                 .await;
                 decl.with_vocabulary(vocabulary)
@@ -1418,8 +1428,13 @@ base_url = "https://byo.example/v1"
     /// deterministically: each test uses a base URL of its own, because the
     /// registry is process-wide and a shared key would let one test's positive
     /// entry decide another's outcome.
+    ///
+    /// Seeded in **`acme`'s** scope, because an authenticated read is
+    /// partitioned per company — every route test here drives the `acme`
+    /// company from [`state_with_company`], and a seed in the shared/keyless
+    /// slot would no longer be the entry the route reads.
     fn seed_catalog(base_url: &str, ids: &[&str]) {
-        crate::server::inference_models::catalog_cache(base_url).store(
+        crate::server::inference_models::catalog_cache_scoped(base_url, Some("acme")).store(
             ids.iter()
                 .map(|id| crate::server::inference_models::InferenceModel {
                     id: (*id).to_string(),
