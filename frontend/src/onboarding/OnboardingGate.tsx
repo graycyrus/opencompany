@@ -27,8 +27,6 @@ function isKnownConsoleRoute(href: string): boolean {
   return (VIEWS as readonly string[]).includes(head);
 }
 
-// Same reason `app-shell.tsx` lazy-loads it: React Flow is heavy, and it
-// should not tax a screen an operator only sees once.
 // PR #1875 review finding: the name entered here is embedded verbatim into
 // every agent's system prompt (`persona_prompt`, `src/company/prompt.rs`),
 // so an unbounded paste can inflate every model request past its context
@@ -90,10 +88,14 @@ const APPROVALS_ROUTE = "#/approvals";
  * through ordered pages and does not fit this shape; this renders its own
  * checklist instead.
  *
- * Reuses the console's own flows for steps 2 and 3 rather than re-implementing
- * a connect or a run: [`OAuthView`] and [`WorkflowsView`] are embedded
- * whole, so this component owns none of that logic and cannot drift from the
- * page an operator would otherwise reach through the sidebar.
+ * Steps 2 and 3 used to embed the console's own [`OAuthView`] and
+ * [`WorkflowsView`] whole, on the reasoning that reusing the real flows could
+ * never drift from the pages the sidebar reaches. Both are now purpose-built
+ * for the card instead ([`IntegrationStep`], [`WorkflowStep`]): a route-level
+ * view needs a route and a full-height container, and given neither it renders
+ * dead controls and clipped canvases rather than degrading. Each component's
+ * own doc carries the measurements. What replaced the reuse is `onLeave`,
+ * which hands the founder to the real page rather than trying to be it.
  */
 export function OnboardingGate({
   client,
