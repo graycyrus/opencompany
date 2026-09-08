@@ -152,6 +152,56 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
     expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
   });
 
+  it("names a pending report even when the blocked node could not be queued", async () => {
+    // Codex review, PR #2046, round 3. `verdictOf` reaches `blocked`
+    // (run-health.ts: `isBlocked` sits above `awaitingCount`) before it ever
+    // looks at deliveries, so a run whose gate branch could not be parked
+    // while a PARALLEL branch already produced a pending report lands in the
+    // blocked arm — and the unparkable sentence above flatly told that
+    // founder there was "nothing here to decide" while a report sat waiting
+    // on them.
+    await render([
+      run({
+        verdict: "blocked",
+        blockedNodes: [{ nodeId: "escalate_to_human", tools: ["ask"] }],
+        deliveries: [{ node: "send_report", kind: "email", status: "pending", detail: "" }],
+      }),
+    ]);
+    const text = container.querySelector(
+      '[data-testid="gate-workflow-blocked-unparkable-delivery"]',
+    )?.textContent;
+    expect(
+      text,
+      "a blocked run that also has a pending delivery needs its own sentence",
+    ).toBeTruthy();
+    expect(
+      text,
+      "the old copy's blanket 'nothing here to decide' is what this fixes",
+    ).not.toContain("nothing here to decide");
+    expect(text).toContain("report still waiting");
+    expect(text).toContain("run the workflow again");
+    // `DeliveryReport` carries no id, so there is still nothing for Approvals
+    // to deep-link to — the button stays hidden, as in the delivery-only arm.
+    expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
+  });
+
+  it("keeps the plain unparkable sentence when no report is pending", async () => {
+    await render([
+      run({
+        verdict: "blocked",
+        blockedNodes: [{ nodeId: "escalate_to_human", tools: ["ask"] }],
+        deliveries: [{ node: "send_report", kind: "email", status: "sent", detail: "" }],
+      }),
+    ]);
+    expect(
+      container.querySelector('[data-testid="gate-workflow-blocked-unparkable"]'),
+      "a blocked run with nothing pending keeps the original sentence",
+    ).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="gate-workflow-blocked-unparkable-delivery"]'),
+    ).toBeNull();
+  });
+
   it("does NOT claim a pending delivery carries the run on, even alongside a live gate approval", async () => {
     // Codex review on #2046: a run can carry BOTH a live gate approval and a
     // pending delivery at once (a parallel branch already reached an output

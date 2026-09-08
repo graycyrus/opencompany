@@ -250,6 +250,34 @@ function ProgressLine({
         // it does, there is nothing to "decide" at all, so the sentence must
         // not invite the founder to decide a card that was never queued.
         if (gateApprovalTargets(progress.run).length === 0) {
+          // Codex review, PR #2046, round 3: "nothing here to decide" is a
+          // claim about the WHOLE run, and `verdictOf` reaches `blocked`
+          // (run-health.ts, `isBlocked` above `awaitingCount`) before it ever
+          // looks at deliveries — so a run whose gate branch could not be
+          // parked while a parallel branch already produced a pending report
+          // lands here with something genuinely waiting on the founder. The
+          // delivery-only arm below already had to make this distinction; the
+          // blocked arm inherited the older, unqualified sentence and told
+          // that founder there was nothing to decide.
+          //
+          // The Approvals button stays hidden either way, and deliberately:
+          // `DeliveryReport` carries no id, so there is nothing for
+          // `gateApprovalTargets` to link to — the same reason the
+          // delivery-only arm names the report in prose rather than offering
+          // a button that would land on a page it cannot deep-link.
+          if (pendingCount(progress.run?.deliveries ?? []) > 0) {
+            return shell(
+              <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />,
+              <>
+                <span className="font-medium text-foreground">{name}</span> stopped on a
+                step that couldn&apos;t be queued for approval at all, so there&apos;s
+                nothing to decide about that part. It did produce a report still waiting on
+                a separate approval to send — deciding that only sends the report, so this
+                step won&apos;t tick until you run the workflow again.
+              </>,
+              "gate-workflow-blocked-unparkable-delivery",
+            );
+          }
           return shell(
             <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />,
             <>
