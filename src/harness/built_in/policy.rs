@@ -5315,6 +5315,189 @@ mod tests {
         );
     }
 
+    /// An agent-scoped standing deny, for the four cases below. `scope`
+    /// mirrors the URL a `web_fetch` call to `docs.rs` computes through
+    /// `standing_scope_of`, so a call with a different (or absent) `url`
+    /// argument does not fall under it.
+    fn agent_standing_deny(
+        id: &str,
+        agent: &str,
+        expires_at_millis: u64,
+    ) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new(id),
+            agent: agent.to_string(),
+            workflow: None,
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        }
+    }
+
+    /// INPUT-axis (TOOL-006): `standing_deny_applies` derives the call's own
+    /// scope from its arguments (`standing_scope_of`) before matching it
+    /// against the grant's stored scope. A call with no `url` at all — a
+    /// malformed shape relative to what `web_fetch` normally carries —
+    /// resolves to no scope, and a scoped denial requires an EXACT match
+    /// (`admits_scope`), so it must not apply to a scope-less call rather
+    /// than being (mis)treated as a wildcard match either way.
+    #[tokio::test]
+    async fn a_scoped_standing_deny_does_not_apply_to_a_call_with_no_url_argument() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+
+        let p = policy("full", &[], None)
+            .with_requests(queue)
+            .with_agent("engineer");
+        let decision = p.check(&request("web_fetch", serde_json::json!({}))).await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a scoped denial must not match a call whose scope could not be computed at all: \
+             {decision:?}"
+        );
+    }
+
+    /// CONC-axis (TOOL-006): unlike a single-use grant, a standing denial is
+    /// never consumed — two concurrent calls against the SAME live denial
+    /// must both see it, with no race letting one slip through as if the
+    /// first call had "used it up". Driven from real worker threads and a
+    /// barrier, not `tokio::join!` — `check` has no suspension point here to
+    /// interleave two joined futures on, so they would just run serially and
+    /// prove nothing about a race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_calls_against_the_same_standing_deny_are_both_refused() {
+        use std::sync::{Arc, Barrier};
+
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+        let p = Arc::new(
+            policy("full", &[], None)
+                .with_requests(queue)
+                .with_agent("engineer"),
+        );
+        let gate = Arc::new(Barrier::new(2));
+        let call = |p: Arc<ApprovalPolicy>, gate: Arc<Barrier>| {
+            tokio::task::spawn_blocking(move || {
+                gate.wait();
+                tokio::runtime::Handle::current().block_on(p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://docs.rs/x" }),
+                )))
+            })
+        };
+        let a = call(p.clone(), gate.clone());
+        let b = call(p, gate);
+        let (a, b) = (a.await.expect("joins"), b.await.expect("joins"));
+        assert!(matches!(a, ToolPolicyDecision::Deny { .. }), "{a:?}");
+        assert!(matches!(b, ToolPolicyDecision::Deny { .. }), "{b:?}");
+    }
+
+    /// FAIL-axis (TOOL-006): a standing denial past its own TTL is stale data
+    /// — the mint side's sweep may not have gotten to it yet — and must not
+    /// keep enforcing a refusal the operator's decision no longer covers.
+    #[tokio::test]
+    async fn an_expired_standing_deny_no_longer_applies() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis().saturating_sub(1_000),
+        ));
+
+        let p = policy("full", &[], None)
+            .with_requests(queue)
+            .with_agent("engineer");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "an expired standing denial must not still be enforced: {decision:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-006): the expiry boundary is strictly `<`
+    /// (`StandingGrant::is_live_at`) — live comfortably before its deadline,
+    /// already expired exactly AT it. Pinned through the policy entry point,
+    /// not just the grant set directly, so a change to either side of that
+    /// `<` is caught where it is actually consulted.
+    ///
+    /// The "live" side uses a generous window rather than the deadline minus
+    /// one millisecond: `check` calls `now_millis()` again internally, so a
+    /// one-millisecond margin captured before the call is not guaranteed to
+    /// survive the dispatch to `standing_deny_applies` and would make this
+    /// test flaky on nothing but scheduling noise. The "expired" side has no
+    /// such problem — real time only moves forward, so a deadline equal to a
+    /// `now` captured strictly before the call is guaranteed to have already
+    /// passed by the time `check` reads the clock again.
+    #[tokio::test]
+    async fn a_standing_deny_expires_exactly_at_its_deadline_not_after() {
+        let live_grants = GrantSet::default();
+        live_grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+        let live = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(live_grants))
+            .with_agent("engineer");
+        assert!(
+            matches!(
+                live.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://docs.rs/x" })
+                ))
+                .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "comfortably before its deadline the denial must still be live"
+        );
+
+        let now = crate::ports::now_millis();
+        let expired_grants = GrantSet::default();
+        expired_grants.grant_standing(agent_standing_deny("deny-1", "engineer", now));
+        let expired = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(expired_grants))
+            .with_agent("engineer");
+        assert!(
+            !matches!(
+                expired
+                    .check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/x" })
+                    ))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "at the deadline instant itself (now already >= expires_at_millis by the time \
+             `check` reads the clock) the denial must already read as expired"
+        );
+    }
+
     // --- The per-agent daily spend cap (issue #304) ---------------------------
 
     use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
