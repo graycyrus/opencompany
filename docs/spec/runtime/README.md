@@ -47,7 +47,9 @@ Supporting docs:
     and the CI lane that executes the claim inside a network namespace
   - [analytics.md](analytics.md) — what the product reports about its own use:
     hosted tenants only, an opaque id, shape-and-outcome payloads that cannot
-    structurally carry content, and how to turn it off
+    structurally carry content, a collector the operator self-hosts, and how to
+    turn it off, with the HTTP contract and the transport's own failure
+    behaviour split into [analytics-wire.md](analytics-wire.md)
   - [crash-reporting.md](crash-reporting.md) — errors and panics sent to a
     Sentry project the **operator** owns: the two DSNs, what a report carries,
     the credential scrubber that runs in every build (not only in a reporting
