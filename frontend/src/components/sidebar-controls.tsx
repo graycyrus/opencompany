@@ -41,142 +41,22 @@ export const RESTING_ROW =
 const DISCORD_BLURPLE =
   "text-(--brand-discord-on-light) dark:text-(--brand-discord-on-dark)";
 
-/**
- * The utility bar: Settings, Feedback and Discord, at the foot of the column.
+/*
+ * `SidebarUtilityBar` used to live here — Settings, Feedback and Discord as
+ * three labelled rows in the sidebar's footer, plus an Overview row drawn
+ * `md:hidden` to cover the width at which the title row dropped its glyph.
  *
- * **Rows, not an icon strip.** These were three icon-only buttons — the shape
- * OpenHuman's shell uses in its own sidebar header — chosen when they sat
- * *above* the destinations, where three labelled rows would have pushed the
- * company's own state further down the column every time the nav list grew.
- * That argument died with the move to the footer: below the destinations there
- * is nothing left for them to push, and the cost of the strip was that three
- * unlabelled glyphs floated at the bottom of a column whose every other entry
- * says what it is. Naming them costs a column that is already scrolled to its
- * end nothing, and it puts them on the same rhythm as the nav rows they sit
- * under rather than reading as a separate object bolted on.
+ * All four are in the window's title row now, as glyphs
+ * (`components/title-bar-utilities.tsx`, and `OverviewButton` beside them).
+ * None of the three is a place inside the company, which is what this column
+ * enumerates; a footer under the destinations was saying "not one of these" by
+ * position, inside the one region whose whole job is to list destinations.
  *
- * They use the nav's own row primitive for that reason: one shape, one hover,
- * one active treatment, and the tooltip on the collapsed rail comes free. What
- * keeps them from reading as destinations is position — after the list, in the
- * footer — rather than a different shape. Settings keeps its `data-tour`
- * anchor, so the guided tour's "Connect your tools" stop still has something to
- * spotlight.
+ * Deleted rather than left exported and unrendered: an unused export is a third
+ * state — not drawn, not gone, and free to be re-added by someone who does not
+ * know why it left. `DISCORD_BLURPLE` and `DISCORD_INVITE_URL` went with it and
+ * now live beside the control that draws them.
  */
-export function SidebarUtilityBar({
-  view,
-  onNavigate,
-}: {
-  /** The active view, so Settings and Feedback can show as current. */
-  view: View;
-  onNavigate: (view: View) => void;
-}) {
-  const { isMobile, setOpenMobile } = useSidebar();
-
-  const navigate = (next: View) => {
-    onNavigate(next);
-    // The sheet is the whole screen on a phone; leaving it open would hide the
-    // page just navigated to. Same rule the nav rows follow.
-    if (isMobile) setOpenMobile(false);
-  };
-
-  return (
-    // `role="group"` so the bar has a name of its own. It sits in the sidebar's
-    // footer, under the `Main navigation` landmark's destinations on purpose —
-    // the landmark is the places an operator works out of, and these are the
-    // utilities that act on the console itself.
-    <SidebarMenu role="group" aria-label="Console utilities" data-testid="sidebar-utilities">
-      {/* Overview, and ONLY where the window's title row has dropped it.
-
-          `TITLE_BAR_LADDER.overview` is `hidden md:inline-flex`: below 768px
-          the title row drops Overview first, deliberately, because it is a
-          destination you choose while a pending count is one that chooses you
-          (#1980). That reasoning was sound while the sidebar still carried an
-          Overview row — and this change is what removed it. The intersection of
-          the two left phone-sized viewports with no path to the page at all:
-          the title-row button is `display: none` and the sheet held only the
-          four sections, so an operator had to know to type `#/overview`
-          (codex P1 review on #1987). Confirmed in a browser at 390px before
-          this: zero controls named Overview anywhere on the page.
-
-          `md:hidden` is the exact complement of the ladder's `hidden
-          md:inline-flex`, so the two are one decision rather than two: Overview
-          is on screen at every width, in exactly one place, and there is no
-          width at which it is in both or in neither. `overview-reachable.test.ts`
-          pins that complementarity rather than either class on its own.
-
-          Here rather than as a fifth nav row because the four are a fixed
-          block — always four, always contiguous — and a row that appears only
-          on a phone would break the thing this restructure exists to establish. */}
-      <SidebarMenuItem className="md:hidden">
-        <SidebarMenuButton
-          isActive={view === "overview"}
-          aria-current={view === "overview" ? "page" : undefined}
-          data-testid="sidebar-overview-fallback"
-          tooltip="Overview"
-          onClick={() => navigate("overview")}
-          className={RESTING_ROW}
-        >
-          <LayoutDashboard />
-          <span>Overview</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-      <SidebarMenuItem>
-        <SidebarMenuButton
-          isActive={view === "settings"}
-          // `aria-current`, not just `isActive`: the row primitive renders
-          // `data-active` for its styling and announces nothing. These are
-          // destinations, so a reader is told which one is open — absent, not
-          // `false`, because `aria-current="false"` is announced by some.
-          aria-current={view === "settings" ? "page" : undefined}
-          data-tour="nav-settings"
-          tooltip="Settings"
-          onClick={() => navigate("settings")}
-          className={RESTING_ROW}
-        >
-          <Settings />
-          <span>Settings</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-      <SidebarMenuItem>
-        <SidebarMenuButton
-          isActive={view === "feedback"}
-          // `aria-current`, not just `isActive`: the row primitive renders
-          // `data-active` for its styling and announces nothing. These are
-          // destinations, so a reader is told which one is open — absent, not
-          // `false`, because `aria-current="false"` is announced by some.
-          aria-current={view === "feedback" ? "page" : undefined}
-          tooltip="Feedback"
-          onClick={() => navigate("feedback")}
-          className={RESTING_ROW}
-        >
-          <MessageSquareWarning />
-          <span>Feedback</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-      <SidebarMenuItem>
-        {/* Deliberately NOT dimmed with the others.
-
-            `RESTING_ROW` dims by opacity, which is safe for near-white text and
-            destroys a mid-tone hue: the blurple measures 6.36:1 at full strength
-            and 3.04:1 dimmed. Recovering that inside the dim would mean
-            lightening the blurple until it is a pale lavender that no longer
-            reads as Discord's colour. The hue already sets this row apart
-            without help from the property doing the damage. */}
-        <SidebarMenuButton
-          tooltip="Join our Discord"
-          className={cn(
-            DISCORD_BLURPLE,
-            "hover:text-(--brand-discord-on-light) dark:hover:text-(--brand-discord-on-dark)",
-          )}
-          render={<a href={DISCORD_INVITE_URL} target="_blank" rel="noreferrer" />}
-        >
-          <DiscordIcon className="size-4" />
-          <span>Join our Discord</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-    </SidebarMenu>
-  );
-}
 
 /**
  * Show or hide the sidebar. A button on the content card's leading seam.
