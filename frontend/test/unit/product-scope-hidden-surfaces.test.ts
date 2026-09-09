@@ -324,12 +324,12 @@ async function mountInference(status: InferenceStatus) {
   });
 }
 
-describe("inference asks the operator to name a provider", () => {
-  it("does not offer the managed provider in the list", async () => {
+describe("inference offers the managed route, because it can now be finished", () => {
+  it("offers the managed provider in the list", async () => {
     await mountInference(inferenceStatus());
 
-    // The list is portalled and only mounts once the select is opened — asserted
-    // without this the test passes against a tree that still offers managed.
+    // The list is portalled and only mounts once the select is opened — without
+    // opening it this passes against a tree that offers nothing at all.
     const trigger = document.querySelector("#inference-provider") as HTMLElement | null;
     expect(trigger, "no provider select").toBeTruthy();
     await act(async () => {
@@ -343,19 +343,20 @@ describe("inference asks the operator to name a provider", () => {
       o.textContent?.trim(),
     );
     expect(options.length, "the provider list did not open").toBeGreaterThan(0);
-    expect(options).not.toContain("Managed (TinyHumans)");
+    // Hidden while choosing it meant leaving to mint a key by hand, which made
+    // OpenRouter the honestly easier option. The key grant removes that errand.
+    expect(options).toContain("Managed (TinyHumans)");
     expect(options).toContain("OpenRouter");
   });
 
   it("shows a value that is a real member of its own option set", async () => {
-    // The bug in one line: the trigger rendered a label out of the full
-    // descriptor table while the list was filtered, so the control displayed a
-    // provider none of its options matched.
+    // The property that outlived the hide: the trigger's label and the list's
+    // rows come from one table, so the control can never display a provider
+    // none of its options match.
     await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
 
     const trigger = document.querySelector("#inference-provider") as HTMLElement;
     const shown = trigger.textContent ?? "";
-    expect(shown).not.toContain("Managed (TinyHumans)");
 
     await act(async () => {
       trigger.click();
@@ -368,44 +369,39 @@ describe("inference asks the operator to name a provider", () => {
       (o) => o.textContent?.trim() ?? "",
     );
     expect(options.length, "the list did not open").toBeGreaterThan(0);
-    expect(options).not.toContain("Managed (TinyHumans)");
-    // Whatever the trigger shows has to be one of the rows below it.
     expect(options.some((label) => shown.includes(label))).toBe(true);
   });
-  it("brands nothing on the card for a route it does not offer", async () => {
+
+  it("reports a company already on the managed route by name", async () => {
+    // The other half of the pair the hide had to balance: a company on this
+    // route must be legible. It always was; now it is selectable too.
     await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
 
-    expect(find("inference-current-provider")!.textContent).toBe("Not configured");
-    expect(find("inference-not-configured")).not.toBeNull();
-    // No brand, no source word naming the route, and not the platform endpoint.
-    expect(container.textContent).not.toContain("Managed (TinyHumans)");
-    expect(container.textContent).not.toContain("api.tinyhumans.ai");
+    expect(find("inference-current-provider")!.textContent).toContain("Managed (TinyHumans)");
   });
 
-  it("leads an unconfigured company into a provider it can actually finish", async () => {
-    // Not an inert placeholder: the resting state has to be completable, or
-    // onboarding dead-ends on a row nobody can act on. The header still reports
-    // the company's real state, so proposing a provider in the form is an offer
-    // rather than a claim about what is configured.
+  it("offers no connect button on a host with no hub to grant a key", async () => {
+    // The status client here answers every GET with an `InferenceStatus`, so
+    // `hubLink` is undefined — which is what a host predating the field, and a
+    // host with no hub, both look like. Either way the button must not appear:
+    // it could only lead to a 404.
     await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
 
-    expect(find("inference-current-provider")!.textContent).toBe("Not configured");
-    expect(document.querySelector("#inference-provider")?.textContent).toContain("OpenRouter");
+    expect(find("connect-tinyhumans")).toBeNull();
+    // ...and the paste field is still there, so the page still works.
     expect(document.querySelector("#inference-key")).not.toBeNull();
-    expect((find("inference-save") as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
-describe("the wizard's model step asks the operator to name a provider too", () => {
-  it("does not offer the managed endpoint as the thing to think with", () => {
+describe("the wizard's model step offers the managed endpoint too", () => {
+  it("offers the managed endpoint as a thing to think with", () => {
     // The wizard has its own provider list, and it is the FIRST screen of a
-    // first run — hiding the option only on the settings card would leave the
-    // managed route selectable at the one moment every operator passes through.
+    // first run. Offering the route only on the settings card would hide the
+    // one-click option at the one moment every operator passes through.
     const offered = SETUP_INFERENCE_OPTIONS.map((option) => option.id);
 
-    expect(offered).not.toContain("managed");
+    expect(offered).toContain("managed");
     expect(offered).toContain("openrouter");
-    // Still resolvable, so a host already reporting it keeps its label.
     expect(INFERENCE_PROVIDERS.find((p) => p.id === "managed")?.label).toBe("TinyHumans");
   });
 });
