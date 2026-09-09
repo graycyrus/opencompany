@@ -67,7 +67,6 @@ interface Props {
    * from the roster (`member.inboxEnabled`), never guessed client-side, so this
    * pane and the Inbox page agree on the same host state (issue #173).
    */
-  onToggleInbox: (member: TeamMember) => void;
   onRemove: (id: string) => void;
   onAdd: () => void;
   onMessage: (member: TeamMember) => void;
@@ -90,12 +89,7 @@ interface Props {
    * teammate — a starter-roster row is a local placeholder with no budget
    * record to edit.
    */
-  canEditBudget: boolean;
-  onEditBudget: (member: TeamMember) => void;
-  onRemoveCap: (member: TeamMember) => void;
-  onResetBudget: (member: TeamMember) => void;
   /** Who set a teammate's cap override, resolved to a display label. */
-  setByLabel: (member: TeamMember) => string | undefined;
 }
 
 /**
@@ -121,16 +115,10 @@ export function MembersPane({
   presence,
   loading,
   fromHost,
-  onToggleInbox,
   onRemove,
   onAdd,
   onMessage,
   onManageDesk,
-  canEditBudget,
-  onEditBudget,
-  onRemoveCap,
-  onResetBudget,
-  setByLabel,
 }: Props) {
   const total = (channelMembers?.length ?? 0) + others.length;
   // Both scopes on one line, so the pane never leaves you guessing which of the
@@ -177,14 +165,8 @@ export function MembersPane({
                       member={m}
                       lead={m.id === leadId}
                       inboxOn={m.inboxEnabled}
-                      onToggleInbox={() => onToggleInbox(m)}
                       onRemove={() => onRemove(m.id)}
                       onMessage={() => onMessage(m)}
-                      canEditBudget={canEditBudget}
-                      onEditBudget={() => onEditBudget(m)}
-                      onRemoveCap={() => onRemoveCap(m)}
-                      onResetBudget={() => onResetBudget(m)}
-                      setByLabel={setByLabel(m)}
                     />
                   </li>
                 ))}
@@ -296,27 +278,15 @@ function MemberRow({
   member,
   lead,
   inboxOn,
-  onToggleInbox,
   onRemove,
   onMessage,
-  canEditBudget,
-  onEditBudget,
-  onRemoveCap,
-  onResetBudget,
-  setByLabel,
 }: {
   member: TeamMember;
   /** The desk's lead — badged, since this channel routes to them. */
   lead?: boolean;
   inboxOn: boolean;
-  onToggleInbox: () => void;
   onRemove: () => void;
   onMessage: () => void;
-  canEditBudget: boolean;
-  onEditBudget: () => void;
-  onRemoveCap: () => void;
-  onResetBudget: () => void;
-  setByLabel?: string;
 }) {
   const capped = member.budgetUsdDaily !== undefined;
   const overridden = member.budgetSetBy !== undefined;
@@ -355,7 +325,6 @@ function MemberRow({
           {roleLine && (
             <span className="block truncate text-xs text-muted-foreground">{roleLine}</span>
           )}
-          <DailyBudgetLine member={member} setByLabel={setByLabel} />
         </span>
       </button>
 
@@ -376,28 +345,6 @@ function MemberRow({
           <DropdownMenuItem onClick={onMessage}>
             <MessageSquare className="size-4" /> Message
           </DropdownMenuItem>
-          <DropdownMenuCheckboxItem checked={inboxOn} onCheckedChange={onToggleInbox}>
-            Give this teammate an inbox
-          </DropdownMenuCheckboxItem>
-          {canEditBudget && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={onEditBudget} data-testid="team-budget-edit">
-                <Wallet className="size-4" />
-                {capped ? "Change daily budget…" : "Set daily budget…"}
-              </DropdownMenuItem>
-              {capped && (
-                <DropdownMenuItem onClick={onRemoveCap} data-testid="team-budget-remove">
-                  Remove cap
-                </DropdownMenuItem>
-              )}
-              {overridden && (
-                <DropdownMenuItem onClick={onResetBudget} data-testid="team-budget-reset">
-                  Reset to company default
-                </DropdownMenuItem>
-              )}
-            </>
-          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={onRemove}>
             Remove from roster
@@ -408,40 +355,3 @@ function MemberRow({
   );
 }
 
-/**
- * The teammate's daily spend line, ported from the retired Team page (issue
- * #360). Renders nothing at all for an uncapped teammate: the host omits the
- * fields entirely rather than sending zeros, so absence means "spends freely"
- * and must not be drawn as "$0.00/day". Once spend reaches the cap the line
- * turns destructive — that teammate's dispatch is paused until 00:00 UTC.
- */
-function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabel?: string }) {
-  const cap = member.budgetUsdDaily;
-  const attribution =
-    setByLabel && member.budgetSetAtMillis !== undefined ? (
-      <span data-testid="team-budget-attribution" className="block truncate text-3xs text-muted-foreground">
-        {cap === undefined ? "Uncapped by" : "Set by"} {setByLabel} ·{" "}
-        {new Date(member.budgetSetAtMillis).toLocaleDateString()}
-      </span>
-    ) : null;
-
-  // No cap: render nothing but the attribution, if a human deliberately
-  // removed one. "Uncapped by Ana" and "nobody ever capped this" are
-  // different facts, and only the first has a line.
-  if (cap === undefined) return attribution;
-
-  const spent = member.spentTodayUsd ?? 0;
-  const overBudget = spent >= cap;
-  return (
-    <span className="block">
-      <span
-        data-testid="team-budget"
-        className={cn("block truncate text-3xs", overBudget ? "text-destructive" : "text-muted-foreground")}
-      >
-        {usd(cap)}/day · {usd(spent)} spent today
-        {overBudget && " · paused"}
-      </span>
-      {attribution}
-    </span>
-  );
-}
