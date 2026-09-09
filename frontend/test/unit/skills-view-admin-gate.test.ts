@@ -95,6 +95,10 @@ function buttons(): string[] {
 }
 
 beforeEach(() => {
+  // The tab a page opens on rides the address (`useHashTab`), so a test that
+  // opened one leaves it set for the next. Reset it here rather than in each
+  // test: the leak is invisible — the page renders, just on the wrong tab.
+  window.location.hash = "";
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
