@@ -679,7 +679,7 @@ function CompactApprovalRow({
             {!busy && (
               <a
                 href={detailsHref}
-                className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
+                className="text-xs text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:underline"
               >
                 View details
               </a>
@@ -824,7 +824,7 @@ function BoardApprovalRow({
           // Stops at the row: the card's own click handler opens the task
           // detail, and this goes somewhere else.
           onClick={(e) => e.stopPropagation()}
-          className="mt-1 block text-2xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
+          className="mt-1 block text-2xs text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:underline"
         >
           View details
         </a>

@@ -2161,7 +2161,7 @@ export function AwaitingApprovalRow({
             the feed has delivered none of this card's rows yet. */}
         <a
           href={href}
-          className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
+          className="shrink-0 font-medium text-status-blocked-text transition-opacity hover:opacity-80"
           aria-label={
             pending.count === 1
               ? "Review this task's pending approval on the Approvals page"

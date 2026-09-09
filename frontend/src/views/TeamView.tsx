@@ -732,7 +732,7 @@ function MemberCard({
               // Issue #1810: stretch the title's native button over the card,
               // instead of turning a container with nested controls into a
               // button. The menu and desk links sit above this layer below.
-              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left after:absolute after:inset-0 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left after:absolute after:inset-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-opacity hover:opacity-80"
               data-testid="team-card-open"
             >
               <span className="block truncate font-medium">{member.name}</span>

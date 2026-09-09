@@ -210,7 +210,7 @@ export function TaskItem({
         <button
           type="button"
           onClick={onOpen}
-          className="-m-1 min-w-0 rounded-sm p-1 text-left text-sm font-medium leading-snug hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="-m-1 min-w-0 rounded-sm p-1 text-left text-sm font-medium leading-snug focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-opacity hover:opacity-80"
           data-testid="task-card-open"
         >
           {task.title}
@@ -511,7 +511,7 @@ function OutputLinkRow({ task }: { task: Task }) {
       <a
         href={link.href}
         title={link.hint}
-        className="flex min-w-0 items-center gap-1.5 text-muted-foreground hover:text-foreground hover:underline"
+        className="flex min-w-0 items-center gap-1.5 text-muted-foreground hover:text-foreground"
       >
         <LinkIcon kind={link.kind} />
         <span className="truncate">{link.label}</span>
@@ -520,7 +520,7 @@ function OutputLinkRow({ task }: { task: Task }) {
         <a
           href={consoleHref("tasks", task.id)}
           title="Open the task to see everything it produced."
-          className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
         >
           +{extra} more
         </a>

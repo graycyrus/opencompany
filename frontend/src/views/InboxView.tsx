@@ -191,7 +191,7 @@ export function InboxView({ client, company }: Props) {
             <p className="font-medium text-foreground">No inboxes yet</p>
             <p className="max-w-sm text-sm">
               Give a teammate its own inbox from the{" "}
-              <a className="font-medium text-foreground underline-offset-4 hover:underline" href="#/company">
+              <a className="font-medium text-foreground transition-opacity hover:opacity-80" href="#/company">
                 Company page
               </a>{" "}
               — open a teammate to flip on the inbox toggle for anyone who needs to receive email.

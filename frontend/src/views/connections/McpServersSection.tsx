@@ -810,7 +810,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                             <button
                               type="button"
                               data-testid="mcp-server-open"
-                              className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                              className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none transition-opacity hover:opacity-80"
                               onClick={() => setOpened(server.name)}
                               aria-label={`Open ${server.name}`}
                             >

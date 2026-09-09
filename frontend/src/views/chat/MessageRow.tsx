@@ -584,7 +584,7 @@ function SystemPill({
       {taskId ? (
         <a
           href={consoleHref("tasks", taskId)}
-          className={cn(className, "transition-opacity hover:opacity-80 hover:underline")}
+          className={cn(className, "transition-opacity hover:opacity-80")}
         >
           {message.text}
         </a>
@@ -629,7 +629,7 @@ function AuthorLine({
     <button
       type="button"
       onClick={() => openProfile(agentId)}
-      className="truncate rounded-sm text-sm font-semibold tracking-tight hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="truncate rounded-sm text-sm font-semibold tracking-tight focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring transition-opacity hover:opacity-80"
     >
       {sender.name}
     </button>

@@ -1504,7 +1504,7 @@ export function InferenceSection({
                                 {manualEntry && modelCatalog.kind === "ready" && (
                                   <button
                                     type="button"
-                                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                                    className="text-xs text-muted-foreground transition-opacity hover:opacity-80"
                                     data-testid={`inference-model-back-to-catalog-${tier}`}
                                     onClick={() =>
                                       setManualEntryTiers((prev) => {

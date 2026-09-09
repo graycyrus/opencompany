@@ -436,7 +436,7 @@ function BoardRows({ board }: { board: WorkflowRunBoardRow[] }) {
             {row.taskId ? (
               <a
                 href={consoleHref("tasks", row.taskId)}
-                className="flex w-fit items-center gap-1 text-2xs font-medium text-accent-foreground underline-offset-2 hover:underline"
+                className="flex w-fit items-center gap-1 text-2xs font-medium text-accent-foreground transition-opacity hover:opacity-80"
               >
                 <SquareKanban className="size-3 shrink-0" />
                 {label}

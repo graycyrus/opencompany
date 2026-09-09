@@ -2230,7 +2230,7 @@ function Breadcrumb({
             <button
               type="button"
               onClick={() => onOpenFolder(crumb.id)}
-              className="truncate rounded-sm hover:text-foreground hover:underline"
+              className="truncate rounded-sm hover:text-foreground"
             >
               {crumb.name}
             </button>
@@ -2840,7 +2840,7 @@ function NoteMarkdown({
                   className={cn(
                     "rounded px-0.5 font-medium no-underline",
                     exists
-                      ? "text-primary hover:underline"
+                      ? "text-primary transition-opacity hover:opacity-80"
                       : "text-muted-foreground underline decoration-dashed underline-offset-2",
                   )}
                 >

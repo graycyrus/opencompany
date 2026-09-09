@@ -1462,7 +1462,7 @@ function EntryCard({
           {onOpen ? (
             <a
               href={detailHref}
-              className="min-w-0 flex-1 text-left font-medium hover:underline"
+              className="min-w-0 flex-1 text-left font-medium transition-opacity hover:opacity-80"
               data-testid="ledger-entry-title"
             >
               {entry.title}

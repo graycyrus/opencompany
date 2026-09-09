@@ -507,7 +507,7 @@ function ArtifactDetail({
           // navigate prop is threaded down for one link.
           <button
             type="button"
-            className="mt-2 inline-flex items-center gap-1.5 text-2xs font-medium text-primary hover:underline"
+            className="mt-2 inline-flex items-center gap-1.5 text-2xs font-medium text-primary transition-opacity hover:opacity-80"
             onClick={() => {
               window.location.hash = `/workspace/${shown.workspaceNodeId}`;
             }}

@@ -537,7 +537,7 @@ export function ApprovalMeta({
               // that does not exist. Every channel id is a slug or `dm:<uuid>`,
               // which the hash already allows unescaped.
               href={`#/chat/${thread.channelId}`}
-              className="font-medium text-foreground underline-offset-2 hover:underline"
+              className="font-medium text-foreground transition-opacity hover:opacity-80"
             >
               {thread.label}
             </a>

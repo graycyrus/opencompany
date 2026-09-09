@@ -274,7 +274,7 @@ function ManageDeskLink({
       type="button"
       onClick={onClick}
       className={cn(
-        "text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline",
+        "text-xs text-muted-foreground hover:text-foreground",
         inline ? "underline" : "shrink-0 px-2 pb-1",
       )}
     >

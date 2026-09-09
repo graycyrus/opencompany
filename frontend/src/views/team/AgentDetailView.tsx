@@ -771,7 +771,7 @@ export function AgentDetailView({
                 type="button"
                 onClick={onBack}
                 data-testid="agent-breadcrumb-company"
-                className="rounded-sm text-muted-foreground transition-colors hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                className="rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
                 Company
               </button>
@@ -1394,7 +1394,7 @@ function OpenTasks({ tasks }: { tasks: Task[] | null }) {
           <a
             key={task.id}
             href={consoleHref("tasks", task.id)}
-            className="text-sm text-primary underline-offset-4 hover:underline"
+            className="text-sm text-primary transition-opacity hover:opacity-80"
             data-testid={`agent-open-task-${task.id}`}
           >
             {task.title}

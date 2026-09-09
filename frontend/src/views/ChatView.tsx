@@ -3000,7 +3000,7 @@ export function ChatView({
                           conversation come from the offline echo brain rather than the teammate
                           they appear under. Choose a provider in{" "}
                           <a
-                            className="font-medium text-foreground underline-offset-4 hover:underline"
+                            className="font-medium text-foreground transition-opacity hover:opacity-80"
                             href={connectionsHref("inference")}
                           >
                             Connections → Inference
@@ -3025,7 +3025,7 @@ export function ChatView({
                           offline echo brain rather than the teammate they appear under. Finish
                           the switch in{" "}
                           <a
-                            className="font-medium text-foreground underline-offset-4 hover:underline"
+                            className="font-medium text-foreground transition-opacity hover:opacity-80"
                             href={connectionsHref("inference")}
                           >
                             Connections → Inference

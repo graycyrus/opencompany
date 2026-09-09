@@ -1312,7 +1312,7 @@ function RunFilesSection({
                 by — no new routing, the Tasks view reads it and focuses the
                 card + artifact at the run's version. */}
             <a
-              className="truncate text-2xs text-primary hover:underline"
+              className="truncate text-2xs text-primary transition-opacity hover:opacity-80"
               href={artifactHref(file.taskId, file.artifactId, file.latestVersion)}
             >
               {file.title}
@@ -1326,7 +1326,7 @@ function RunFilesSection({
                 <>
                   {" · "}
                   <a
-                    className="hover:underline"
+                    className="transition-opacity hover:opacity-80"
                     href={consoleHref("workspace", file.workspaceNodeId)}
                     data-testid="workflow-run-file-workspace"
                   >

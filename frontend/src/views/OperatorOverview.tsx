@@ -303,7 +303,7 @@ export function OperatorOverview({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Looking for the company&apos;s structure? <a className="underline-offset-2 hover:underline" href="#/company/graph">Open the knowledge graph</a>.
+        Looking for the company&apos;s structure? <a className="transition-opacity hover:opacity-80" href="#/company/graph">Open the knowledge graph</a>.
       </p>
       </div>
     </div>
@@ -320,7 +320,7 @@ function ApprovalSummary({ feed }: { feed: Pick<CompanyFeed, "approvals" | "queu
   return (
     <div className="mt-5 flex items-center justify-between gap-3">
       <p className="text-sm font-medium">{count === 1 ? "1 decision is waiting" : `${count} decisions are waiting`}</p>
-      <a href="#/approvals" className="inline-flex shrink-0 items-center gap-1 text-sm font-medium underline-offset-2 hover:underline">Review approvals <ArrowRight className="size-4" aria-hidden /></a>
+      <a href="#/approvals" className="inline-flex shrink-0 items-center gap-1 text-sm font-medium transition-opacity hover:opacity-80">Review approvals <ArrowRight className="size-4" aria-hidden /></a>
     </div>
   );
 }
@@ -350,13 +350,13 @@ function RunRows({
             <p className="text-xs text-muted-foreground">{RUN_STATUS_LABEL[run.status]}{run.error ? ` — ${run.error}` : ""}</p>
           </div>
           {run.taskId ? (
-            <a href={`${consoleHref("tasks", run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
+            <a href={`${consoleHref("tasks", run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium transition-opacity hover:opacity-80">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
           ) : run.chatId ? (
             // A paused or failed operator-chat turn is investigated from the
             // thread it was raised in — the icon alone hid it (issue #1643).
             // The desk/DM form is the run-source rule: a known desk addresses
             // by id, anything else is a roster member's DM.
-            <a href={chatHref(run.chatId, !deskIds?.has(run.chatId))} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
+            <a href={chatHref(run.chatId, !deskIds?.has(run.chatId))} className="shrink-0 text-sm font-medium transition-opacity hover:opacity-80">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
           ) : (
             <CircleAlert className="size-4 shrink-0 text-muted-foreground" aria-label="No task or conversation is attached to this attempt" />
           )}

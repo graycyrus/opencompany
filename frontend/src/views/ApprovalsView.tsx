@@ -495,7 +495,7 @@ export function ApprovalsView({
             </span>
             <a
               href="#/approvals"
-              className="shrink-0 font-medium underline-offset-2 hover:underline"
+              className="shrink-0 font-medium transition-opacity hover:opacity-80"
             >
               Show all
             </a>
