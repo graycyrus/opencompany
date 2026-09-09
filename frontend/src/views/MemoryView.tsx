@@ -27,6 +27,7 @@ import { VirtualList } from "@/components/virtual-list";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { DropZone } from "@/views/memory/DropZone";
 import { EngineSection } from "@/views/memory/EngineSection";
+import { resolveBrainPage } from "@/views/memory/brain-pages";
 import { Markdown } from "@/components/markdown";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -57,6 +58,13 @@ import { cn } from "@/lib/utils";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * The third hash segment — `upload` in `#/company/brain/upload`.
+   *
+   * Unvalidated here, as every sub-dispatching view takes it: only this view
+   * knows which of its pages exist, so `resolveBrainPage` does that check.
+   */
+  sub?: string | null;
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -112,7 +120,11 @@ function formatUpdated(ms: number): string {
  * Operators add and delete facts; a create is mirrored server-side into the
  * agents' recallable context so a note reaches an agent on its next turn.
  */
-export function MemoryView({ client, company }: Props) {
+export function MemoryView({ client, company, sub }: Props) {
+  // Which of the three this address names. Overview for a bare `#/company/brain`
+  // and for any segment that names nothing — a stale bookmark lands on the page
+  // the section is for rather than on an error.
+  const page = resolveBrainPage(sub);
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
   // The truncation metadata that rode in with the last list read, kept beside
@@ -310,6 +322,9 @@ export function MemoryView({ client, company }: Props) {
         className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6"
       >
 
+        {/* Settings. The engine is chosen once and then almost never, so it
+            sat on top of the browser that is read constantly. */}
+        {page === "settings" && (
         <EngineSection
           client={client}
           company={company}
@@ -321,13 +336,19 @@ export function MemoryView({ client, company }: Props) {
             void load({ silent: true });
           }}
         />
+        )}
 
+        {/* Upload. Its own page rather than a target above the list: dropping a
+            document is something an operator does when one arrives, not on the
+            way to reading what is already remembered. */}
+        {page === "upload" && (
         <DropZone
           client={client}
           company={company}
           discarding={discarding}
           onIngested={() => void load({ silent: true })}
         />
+        )}
 
         {error && (
           <Alert variant="destructive">
@@ -335,6 +356,10 @@ export function MemoryView({ client, company }: Props) {
           </Alert>
         )}
 
+        {/* Overview: the health strip, the filters and the list — what the
+            section is for, and what a bare `#/company/brain` lands on. */}
+        {page === "overview" && (
+        <>
         <HealthStrip loading={loading} stats={stats} perType={perType} />
         {contextTruncated && (
           <Alert>
@@ -387,6 +412,8 @@ export function MemoryView({ client, company }: Props) {
             renderItem={(e) => <MemoryCard entry={e} onDelete={() => void remove(e)} />}
             data-testid="memory-list"
           />
+        )}
+        </>
         )}
       </div>
 
