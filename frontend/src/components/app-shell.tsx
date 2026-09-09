@@ -28,6 +28,7 @@ import { TitleBarUtilities } from "@/components/title-bar-utilities";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { TITLE_BAR_ICON_BUTTON, WindowTitleBar } from "@/components/window-title-bar";
+import { cn } from "@/lib/utils";
 import { SidebarCollapseButton } from "@/components/sidebar-controls";
 import { SectionContentRail } from "@/components/section-rail";
 import { SidebarNavigation } from "@/components/sidebar-navigation";
