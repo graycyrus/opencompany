@@ -542,13 +542,13 @@ function ChannelIntro({
   onAddPeople?: () => void;
 }) {
   return (
-    {/* `pt-8` on an empty channel, not `pt-16`. The taller lead-in was there to
-        push the intro down into the middle of a pane with nothing under it, but
-        the transcript grows from the bottom, so on a channel with one message
-        the intro has already been pushed up by the message — and on a brand new
-        one 64px of nothing above the title read as the pane failing to load
-        rather than as breathing room. Still more than the `pt-6` a channel with
-        history gets, because the intro IS the content there. */}
+    // `pt-8` on an empty channel, not `pt-16`. The taller lead-in was there to
+    // push the intro down into a pane with nothing under it — but the
+    // transcript grows from the bottom, so the moment a channel has one message
+    // the intro is pushed up by the message anyway, and on a brand new one 64px
+    // of nothing above the title read as the pane failing to load rather than
+    // as breathing room. Still more than the `pt-6` a channel with history
+    // gets, because on an empty channel the intro IS the content.
     <div className={cn("px-4 pb-3", empty ? "pt-8" : "pt-6")}>
       <IntroMark channel={channel} />
       <h2 className="text-xl font-semibold tracking-tight">{channelTitle(channel)}</h2>
