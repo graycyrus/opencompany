@@ -1509,22 +1509,87 @@ function Tools({
       }
     >
       {editing && (
-        <div className="grid gap-2" data-testid="agent-tools-editor">
-          <Label htmlFor="agent-tools-field">Tool grants</Label>
-          <Input
-            id="agent-tools-field"
-            value={field}
-            onChange={(event) => setField(event.target.value)}
-            placeholder="workspace.read, docs.*, files.*"
-            className="font-mono text-xs"
-            data-testid="agent-tools-field"
-          />
+        <div className="grid gap-3" data-testid="agent-tools-editor">
+          {/* One row per grant the ceiling actually offers. Switching one off
+              narrows this teammate; there is no row for a tool the company
+              does not allow, because granting it here would confer nothing. */}
+          {ceiling.length > 0 ? (
+            <div className="divide-y rounded-lg border" data-testid="agent-tools-toggles">
+              {ceiling.map((glob) => (
+                <div key={glob} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <Label
+                    htmlFor={`agent-tool-${glob}`}
+                    className="min-w-0 truncate font-mono text-xs font-normal"
+                  >
+                    {glob}
+                  </Label>
+                  <Switch
+                    id={`agent-tool-${glob}`}
+                    checked={held(glob)}
+                    data-testid={`agent-tool-toggle-${glob}`}
+                    onCheckedChange={(on) => {
+                      // An inherited grant holds the whole ceiling, so the
+                      // first switch turned off has to write the rest of it
+                      // out explicitly — otherwise the save would read as
+                      // "narrow to nothing but this one".
+                      const base = summary.standardGrant ? ceiling : draft;
+                      const next = on
+                        ? [...new Set([...base, glob])]
+                        : base.filter((g) => g !== glob);
+                      setField(next.join(", "));
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground" data-testid="agent-tools-no-ceiling">
+              {deskCeilingActive
+                ? "This teammate's desk allows no tools, so there is nothing to grant here."
+                : "The company allows no tools, so there is nothing to grant here."}
+            </p>
+          )}
+
           <p className="text-xs text-muted-foreground">
-            One glob per grant, separated by commas or spaces. Each is narrowed by the
-            company tool list below
+            Every grant is narrowed by the company tool list
             {deskCeilingActive ? " and by this teammate's desk ceiling" : ""}, so this
             can only ever take capability away — never add to it.
           </p>
+
+          {/* The switches cannot spell a wildcard, and a company that grants
+              `docs.*` scopes teammates with patterns rather than with the
+              literal rows above. The field stays, one disclosure away. */}
+          <div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 h-7 px-2 text-xs text-muted-foreground"
+              onClick={() => setAdvanced((on) => !on)}
+              data-testid="agent-tools-advanced"
+            >
+              {advanced ? "Hide" : "Edit"} globs
+            </Button>
+            {advanced && (
+              <div className="mt-2 grid gap-2">
+                <Label htmlFor="agent-tools-field" className="text-xs">
+                  Tool grants
+                </Label>
+                <Input
+                  id="agent-tools-field"
+                  value={field}
+                  onChange={(event) => setField(event.target.value)}
+                  placeholder="workspace.read, docs.*, files.*"
+                  className="font-mono text-xs"
+                  data-testid="agent-tools-field"
+                />
+                <p className="text-xs text-muted-foreground">
+                  One glob per grant, separated by commas or spaces. A pattern here that
+                  matches none of the rows above still applies — the rows are the literal
+                  grants, not the whole vocabulary.
+                </p>
+              </div>
+            )}
+          </div>
           {draft.length === 0 && (
             // Since #1804 the inversion runs the other way: an empty list is a
             // deliberate deny-all, NOT the standard grant. An operator who
