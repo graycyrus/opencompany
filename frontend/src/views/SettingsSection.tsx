@@ -160,11 +160,14 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
           />
         )}
         {page === "people" && <PeopleView client={client} company={company} />}
-        {/* OAuth and MCP Servers were here. They are the Connections section
-            now (`#/connections/apps`, `#/connections/mcp`) — what the company
-            can act through is read repeatedly, and a settings rail is where an
-            operator changes configuration once. Both old addresses still
-            resolve, rewritten by `console-route-rewrites.ts`. Inference stayed:
+        {/* OAuth, MCP Servers, Inference and Skills were all here. They are the
+            Connections section now (`#/connections/apps`, `/mcp`, `/inference`,
+            `/skills`) — each is read repeatedly and changes as the company's
+            work does, and a settings rail is where an operator changes
+            configuration once. Every one of those addresses still resolves,
+            rewritten by `console-route-rewrites.ts`. Hosting and Search below
+            stayed, because they really are once-a-company credential forms;
+            `connection-pages.ts` argues the split. */}
         {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
             (docs/spec/runtime/finance-console.md): a credential form belongs
             beside the data it unlocks, and "Billing" read as *what OpenCompany
