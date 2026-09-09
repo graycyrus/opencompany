@@ -367,6 +367,14 @@
        surface. Not a substitute for the focus ring — an addition to it. */
     --shadow-brand: 0 2px 8px -2px color-mix(in oklab, var(--brand-500) 32%, transparent);
 
+    /* The ink of the orbiting halo behind the content card (`.content-orbit`).
+       Dark, because the effect is a drifting *shadow* rather than a light: on
+       the light chrome it reads as the card being lifted at one edge.
+       `--shadow-color` is the same hue every other shadow in this file uses, so
+       the halo belongs to the same family rather than being a second opinion
+       about what a shadow looks like here. */
+    --orbit-ink: hsl(var(--shadow-color) / 0.5);
+
     /* A soft brand glow bleeding from a card's lower-left corner, for the
        standing invitations on an otherwise empty surface — the "create a
        teammate" / "add people" pair on a channel with no transcript.
@@ -502,6 +510,12 @@
     --status-running: var(--cyan-bright);
     --status-running-text: var(--cyan-bright);
     --status-running-soft: color-mix(in oklab, var(--cyan-bright) 16%, transparent);
+
+    /* A dark halo on near-black chrome is invisible, so dark mode lifts the
+       ink rather than dropping the effect — the same inversion `--shadow-*`
+       already makes when its drop shadow becomes an inset highlight. Still
+       faint: this is a hint of a rim, not a neon edge. */
+    --orbit-ink: color-mix(in oklab, var(--foreground) 22%, transparent);
 
     --status-blocked: var(--amber-bright);
     --status-blocked-text: var(--amber-bright);
