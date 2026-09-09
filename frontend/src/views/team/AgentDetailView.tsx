@@ -1166,11 +1166,17 @@ export function AgentDetailView({
               onCancel={() => setEditingHarness(false)}
               onSave={() => void saveHarnessAndModel()}
             />
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="inbox" value={tab}>
             <Inbox
               agent={agent}
               busy={inboxSaving}
               onToggle={(next) => void toggleInbox(next)}
             />
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="budget" value={tab}>
             <Budget
               agent={agent}
               canEdit={isAdmin}
