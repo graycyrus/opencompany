@@ -92,19 +92,27 @@ describe("the sidebar's section table", () => {
       "Company",
       "Connections",
       "Flows",
+      "Approvals",
     ]);
   });
 
   it("keeps the surfaces that lost their row out of the table entirely", () => {
-    // Overview and Approvals moved up into the window's title row; Observatory
-    // moved down into Settings. A row left behind as a comment is the failure
-    // this codebase has already had once (#1311), so the assertion above is a
+    // Overview moved up into the window's title row; Observatory moved down
+    // into Settings. A row left behind as a comment is the failure this
+    // codebase has already had once (#1311), so the assertion above is a
     // whole-table equality — a commented row is not a member of it — and this
     // one says the same thing from the other side.
+    //
+    // Approvals is NOT in this list any more. It went up to the title row with
+    // Overview and has come back as a row: the count that justified making it
+    // chrome (issue #1018 — a signal must survive the rail collapsing) is
+    // carried in the column by `SidebarMenuBadge` and its icon-rail mirror
+    // `SidebarMenuDot`, and what the title row could not give it is that it is
+    // a place you go rather than a glyph.
     const views = NAV_SECTIONS.map((section) => section.view as string);
     expect(views).not.toContain("overview");
-    expect(views).not.toContain("approvals");
     expect(views).not.toContain("observatory");
+    expect(views).toContain("approvals");
   });
 
   it("files the company's five surfaces under Company, in this order", () => {
@@ -193,20 +201,24 @@ describe("which section an address belongs to", () => {
   });
 
   it("claims nothing for the surfaces that are deliberately not in the nav", () => {
-    // Settings and Feedback live in the sidebar's footer; Overview and
-    // Approvals in the window's title row; Observatory under Settings; Pages is
-    // direct-URL only (#1171, #1172); `not-found` is nowhere by design.
+    // Settings and Feedback live in the sidebar's footer; Overview in the
+    // window's title row; Observatory under Settings; Pages is direct-URL only
+    // (#1171, #1172); `not-found` is nowhere by design. Approvals has a row
+    // again and is therefore owned — asserted below rather than here.
     for (const view of [
       "settings",
       "feedback",
       "pages",
       "overview",
-      "approvals",
       "observatory",
       "not-found",
     ] as View[]) {
       expect(sectionOwning(view)).toBeUndefined();
     }
+  });
+
+  it("owns the approvals queue, which has a row of its own again", () => {
+    expect(sectionOwning("approvals" as View)?.label).toBe("Approvals");
   });
 });
 
@@ -232,16 +244,17 @@ describe("which child row is open", () => {
 });
 
 describe("the rendered sidebar", () => {
-  it("is the four rows and the Room rail's slot, on every section", () => {
+  it("is the top-level rows and the Room rail's slot, on every section", () => {
     // The middle region stopped swapping with the section you are in (issue
-    // #2130). It is the channel list, always — so the four rows are the only
+    // #2130). It is the channel list, always — so the section rows are the only
     // rows this column paints, whichever address is open, and a section's own
     // pages are rows on its content rail instead
     // (`section-rail-layout.test.ts`).
+    const rows = ["Room", "Company", "Connections", "Flows", "Approvals"];
     for (const view of ["chat", "company", "connections", "workflows"] as View[]) {
       render(view);
-      expect(fixedRows(), view).toEqual(["Room", "Company", "Connections", "Flows"]);
-      expect(renderedRows(), view).toEqual(["Room", "Company", "Connections", "Flows"]);
+      expect(fixedRows(), view).toEqual(rows);
+      expect(renderedRows(), view).toEqual(rows);
       expect(
         container.querySelectorAll("[data-testid='room-rail-slot']"),
         view,
