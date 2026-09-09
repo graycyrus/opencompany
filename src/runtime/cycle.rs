@@ -8164,25 +8164,31 @@ members = ["writer"]
             .await
             .unwrap();
 
-        // Two cycles run genuinely concurrently — two operator turns landing
-        // at once is a routine shape on a busy company, not a contrived one.
-        let turn = |text: &'static str| {
+        // Addressed to a teammate rather than left company-wide: an
+        // unaddressed turn resolves to no single agent, so `run_bracketed`
+        // takes the company serial lock and the two cycles queue behind each
+        // other. Their metering writes would then never overlap, and a lost
+        // update between them would go unnoticed by the very case meant to
+        // catch it.
+        let turn = |text: &'static str, chat: Option<&'static str>| {
             rt.run_cycle(vec![CompanyEvent::OperatorMessage {
                 mentions: Vec::new(),
                 parent: None,
                 text: text.into(),
                 by: None,
-                chat: None,
+                chat: chat.map(str::to_string),
                 deliverable: None,
                 attachments: Vec::new(),
             }])
         };
-        let (a, b) = tokio::join!(turn("first"), turn("second"));
+        let (a, b) = tokio::join!(turn("first", Some("ceo")), turn("second", Some("cfo")));
         a.expect("the first concurrent cycle completes");
         b.expect("the second concurrent cycle completes");
         // A third, sequential cycle — STATE across more than one moment in
         // time, not just concurrency at one moment.
-        turn("third").await.expect("the third cycle completes");
+        turn("third", Some("ceo"))
+            .await
+            .expect("the third cycle completes");
 
         let samples = rt.usage().query(rt.id(), 0).await.unwrap();
         assert_eq!(samples.len(), 3, "one sample per cycle, all three landed");
