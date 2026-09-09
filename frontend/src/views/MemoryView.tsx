@@ -27,7 +27,9 @@ import { VirtualList } from "@/components/virtual-list";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { DropZone } from "@/views/memory/DropZone";
 import { EngineSection } from "@/views/memory/EngineSection";
-import { resolveBrainPage } from "@/views/memory/brain-pages";
+import { BRAIN_PAGES, resolveBrainPage, type BrainPage } from "@/views/memory/brain-pages";
+import { PageTabPanel, PageTabs } from "@/components/page-tabs";
+import { consoleHref } from "@/lib/console-paths";
 import { Markdown } from "@/components/markdown";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -117,6 +119,17 @@ export function MemoryView({ client, company, sub }: Props) {
   // and for any segment that names nothing — a stale bookmark lands on the page
   // the section is for rather than on an error.
   const page = resolveBrainPage(sub ?? null);
+  // Brain's tabs ride the path segment they already owned rather than `?tab=`,
+  // so every `#/company/brain/upload` ever linked still opens Upload. A plain
+  // hash assignment, like every other address change in the console: it is a
+  // real history entry, so Back returns to the tab you came from.
+  //
+  // Overview clears the segment instead of writing it — `#/company/brain` and
+  // `#/company/brain/overview` are the same place, and only one of them should
+  // be the address you copy out of the bar.
+  const openPage = (next: BrainPage) => {
+    window.location.hash = consoleHref("brain", next === "overview" ? null : next);
+  };
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
   // The truncation metadata that rode in with the last list read, kept beside
@@ -254,6 +267,15 @@ export function MemoryView({ client, company, sub }: Props) {
             teammates can recall.
           </>
         }
+        tabs={
+          <PageTabs
+            tabs={BRAIN_PAGES}
+            value={page}
+            onChange={openPage}
+            idBase="brain"
+            aria-label="Brain views"
+          />
+        }
         actions={
           <>
             {engine && (
@@ -292,7 +314,7 @@ export function MemoryView({ client, company, sub }: Props) {
 
         {/* Settings. The engine is chosen once and then almost never, so it
             sat on top of the browser that is read constantly. */}
-        {page === "settings" && (
+        <PageTabPanel idBase="brain" id="settings" value={page}>
         <EngineSection
           client={client}
           company={company}
@@ -304,13 +326,12 @@ export function MemoryView({ client, company, sub }: Props) {
             void load({ silent: true });
           }}
         />
-        )}
+        </PageTabPanel>
 
         {/* Upload. Its own page rather than a target above the list: dropping a
             document is something an operator does when one arrives, not on the
             way to reading what is already remembered. */}
-        {page === "upload" && (
-        <>
+        <PageTabPanel idBase="brain" id="upload" value={page} className="space-y-5">
         <DropZone
           client={client}
           company={company}
@@ -318,8 +339,7 @@ export function MemoryView({ client, company, sub }: Props) {
           onIngested={() => void load({ silent: true })}
         />
         <AddMemoryPanel discarding={discarding} onAdd={add} />
-        </>
-        )}
+        </PageTabPanel>
 
         {error && (
           <Alert variant="destructive">
@@ -329,8 +349,7 @@ export function MemoryView({ client, company, sub }: Props) {
 
         {/* Overview: the health strip, the filters and the list — what the
             section is for, and what a bare `#/company/brain` lands on. */}
-        {page === "overview" && (
-        <>
+        <PageTabPanel idBase="brain" id="overview" value={page} className="space-y-5">
         <HealthStrip loading={loading} stats={stats} perType={perType} />
         {contextTruncated && (
           <Alert>
