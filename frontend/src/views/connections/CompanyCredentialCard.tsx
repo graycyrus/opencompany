@@ -14,6 +14,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
 
 interface Props {
   client: OpenCompanyClient;
@@ -190,6 +191,20 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
                 {status.notice}
               </p>
             )}
+
+            {/* The short path first. The field below it stays for a host with
+                no hub wired, and for anyone who would rather paste. */}
+            <ConnectTinyHumansButton
+              client={client}
+              company={company}
+              available={status?.hubLink ?? false}
+              canManage={canManage}
+              configured={configured}
+              onConnected={() => {
+                void refresh();
+                onChanged?.();
+              }}
+            />
 
             {canManage && (
               <>
