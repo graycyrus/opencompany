@@ -37,6 +37,8 @@
 // The state lives in the URL via `useHashTab`, so a tab is linkable and answers
 // the Back button. The strip itself is controlled and knows nothing about that.
 
+import type { ReactNode } from "react";
+
 import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -167,7 +169,7 @@ export function PageTabPanel({
   id: string;
   value: string;
   className?: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   if (id !== value) return null;
   const ids = pageTabIds(idBase, id);
