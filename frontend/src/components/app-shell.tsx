@@ -4222,6 +4222,10 @@ export function AppShell({
               company={company}
               feed={feed}
               sub={sub}
+              // The same tick the `#/observatory/<runId>` route below is given:
+              // the run index renders on this section's rail now, and it watches
+              // the same two signals.
+              eventTick={workflowRunTick + backgroundTurnTick}
               onFlag={() => setFeedbackOpen(true)}
               onResetCompany={onResetCompany}
             />

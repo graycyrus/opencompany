@@ -36,6 +36,16 @@ interface Props {
   feed: CompanyFeed;
   /** The hash's second segment, e.g. `people` in `#/settings/people`. */
   sub: string | null;
+  /**
+   * The shell's re-read tick, forwarded to the Observatory index.
+   *
+   * The same value `app-shell.tsx` hands the run-detail route: one counter for
+   * both signals a re-read should follow — a workflow run moved, or a workflow
+   * node started or settled. Passed through rather than defaulted to a constant
+   * because a constant is an index that never refreshes, which on the one page
+   * built to watch runs in flight is the whole feature.
+   */
+  eventTick: number;
   onFlag: () => void;
   /** Start the reset (archive + start clean) flow for the active company (#1807). */
   onResetCompany?: (id: string, name: string) => void;
@@ -57,7 +67,15 @@ interface Props {
  * resolving. A new row that names an outside service belongs there, not
  * here.
  */
-export function SettingsSection({ client, company, feed, sub, onFlag, onResetCompany }: Props) {
+export function SettingsSection({
+  client,
+  company,
+  feed,
+  sub,
+  eventTick,
+  onFlag,
+  onResetCompany,
+}: Props) {
   const page = resolveSettingsPage(sub);
   const activePage = SETTINGS_PAGES.find((item) => item.id === page)!;
 
@@ -182,10 +200,17 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
 
             `runId={null}` always: a single run is `#/observatory/<runId>`, a
             top-level route `app-shell.tsx` still owns, because `useHashView`
-            carries two segments and this page is already using the second. */}
+            carries two segments and this page is already using the second.
+            `eventTick` is the same counter that route is handed, so the index
+            re-reads on a run moving whichever of the two addresses is open. */}
         {page === "observatory" && (
           <Suspense fallback={<RouteLoading title="Observatory" label="Loading observatory…" />}>
-            <ObservatoryView client={client} company={company} runId={null} eventTick={0} />
+            <ObservatoryView
+              client={client}
+              company={company}
+              runId={null}
+              eventTick={eventTick}
+            />
           </Suspense>
         )}
         {/* OAuth, MCP Servers, Inference and Skills were all here. They are the
