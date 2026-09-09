@@ -80,7 +80,8 @@ export function MovesMatrix({
             // The response describes the saved grammar, while `moves` is the
             // operator's draft. A first edit must be possible when neither has
             // a row yet: toggling then materialises the narrowed row.
-            const governed = seat.governed || Object.hasOwn(moves, seat.agentId);
+            const governed =
+              seat.governed || Object.prototype.hasOwnProperty.call(moves, seat.agentId);
             const held = new Set(moves[seat.agentId] ?? []);
             return (
               <tr key={seat.agentId} className="border-t border-border">
