@@ -7939,15 +7939,18 @@ members = ["writer"]
     async fn concurrent_mints_of_different_tool_calls_both_survive_a_restart() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
-        let (rt, ids) = park_two_blocked_tool_calls(
+        // Two different teammates, not one effect cloned: an approval carries
+        // the agent it was raised for, so a pair that names the same agent
+        // races one subject's mint against itself and never reaches the
+        // cross-agent case a company with more than one teammate produces.
+        let (rt, ids) = park_two_blocked_tool_calls_for(
             home.clone(),
-            harness_effect("finance", "composio_execute", serde_json::json!({})),
+            [
+                harness_effect("finance", "composio_execute", serde_json::json!({})),
+                harness_effect("legal", "composio_execute", serde_json::json!({})),
+            ],
         )
         .await;
-        // `park_two_blocked_tool_calls` parks the identical effect twice, so
-        // both cards exist independently with their own approval ids — the two
-        // concurrent resolutions below race two distinct mints of the same
-        // tool, not one mint twice.
         let (a, b) = tokio::join!(
             rt.resolve_approval(&ids[0], Verdict::Approve, operator()),
             rt.resolve_approval(&ids[1], Verdict::Approve, operator()),
@@ -10935,6 +10938,77 @@ members = ["writer"]
     /// tests need both cards parked before either is resolved, because once a
     /// standing deny is live the identical call is denied inline and never
     /// parks again.
+    /// [`park_two_blocked_tool_calls`], with a distinct effect per cycle.
+    ///
+    /// The original parks one effect twice, which is right for the cases that
+    /// only need two approval ids. A case about two *agents* needs the two
+    /// parks to differ, or it races one subject against itself.
+    async fn park_two_blocked_tool_calls_for(
+        home: std::path::PathBuf,
+        effects: [Effect; 2],
+    ) -> (Arc<CompanyRuntime>, Vec<ApprovalId>) {
+        struct PerCycleParkingBrain {
+            queued: std::sync::Mutex<Vec<Effect>>,
+        }
+
+        #[async_trait]
+        impl Brain for PerCycleParkingBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                host: &dyn CycleHost,
+            ) -> Result<CycleResult> {
+                for event in &req.events {
+                    if let CompanyEvent::OperatorMessage { .. } = event {
+                        let effect = {
+                            let mut queued = self.queued.lock().expect("parking queue");
+                            if queued.len() > 1 {
+                                queued.remove(0)
+                            } else {
+                                queued[0].clone()
+                            }
+                        };
+                        host.park_effect(effect).await?;
+                    }
+                }
+                Ok(CycleResult {
+                    channel_responses: Vec::new(),
+                    new_traces: vec![CompressedTrace::now(&req.cycle_id, "parking cycle")],
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(Arc::new(PerCycleParkingBrain {
+                    queued: std::sync::Mutex::new(effects.into_iter().collect()),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+        (rt, ids)
+    }
+
     async fn park_two_blocked_tool_calls(
         home: std::path::PathBuf,
         effect: Effect,
