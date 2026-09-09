@@ -91,7 +91,7 @@ function linksFor(taskId: string, output: TaskOutput): TaskLink[] {
     links.push({
       kind: "workflow",
       href: workflowHref(workflow.workflowId, workflow.runId),
-      label: `Open workflow ${workflow.workflowId}`,
+      label: `Open automation ${workflow.workflowId}`,
       hint:
         workflow.action === "ran"
           ? "Opens the automation on its canvas, showing this run."

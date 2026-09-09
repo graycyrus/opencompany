@@ -76,7 +76,7 @@ export function destinationFor(nodeId: string): ConsoleDestination | null {
   }
   if (nodeId.startsWith("flow:")) {
     const id = nodeId.slice("flow:".length);
-    return id ? { hash: `#/workflows/${encodeURIComponent(id)}`, label: "Open workflow" } : null;
+    return id ? { hash: `#/workflows/${encodeURIComponent(id)}`, label: "Open automation" } : null;
   }
   if (nodeId.startsWith("team:")) {
     const deskId = deskIdOf(nodeId.slice("team:".length));
