@@ -606,7 +606,7 @@ export function CopilotPanel({
                 That is also all the answer is drawn from. This turn runs{" "}
                 <span className="font-medium text-foreground">confined to this automation</span>:
                 no tools, no company memory, and no reach into the board, your agents or
-                another workflow. Ask something that needs the wider company and it will say so
+                another automation. Ask something that needs the wider company and it will say so
                 rather than guess.
               </p>
               <p className="mt-1.5">
@@ -628,7 +628,7 @@ export function CopilotPanel({
                     Ask for a change and it{" "}
                     <span className="font-medium text-foreground">proposes one you review</span>:
                     you see the diff and decide. Nothing is written until you press Apply, and it
-                    goes through the same save the editor uses, which refuses a workflow that
+                    goes through the same save the editor uses, which refuses a automation that
                     moved while you were reading.
                   </>
                 )}
@@ -649,7 +649,7 @@ export function CopilotPanel({
 
         {messages.length === 0 && !echoing && (
           <p className="text-2xs text-muted-foreground">
-            No questions yet. Try “what does this workflow do?” or “why did the
+            No questions yet. Try “what does this automation do?” or “why did the
             last run fail?”.
           </p>
         )}

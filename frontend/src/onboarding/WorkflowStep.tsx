@@ -209,7 +209,7 @@ export function WorkflowStep({
 
       <div className="flex flex-wrap items-center gap-2">
         <Button onClick={onOpenWorkflows} data-testid="gate-workflow-open">
-          Open Workflows
+          Open Automations
           <ArrowRight className="size-4" />
         </Button>
         {progress?.kind === "waiting-on-you" && gateApprovalTargets(progress.run).length > 0 && (
@@ -248,7 +248,7 @@ function ProgressLine({
     case "none":
       return (
         <p className="text-sm text-muted-foreground" data-testid="gate-workflow-none">
-          No run yet. Open Workflows, pick one, and press Run — this step ticks when a run
+          No run yet. Open Automations, pick one, and press Run — this step ticks when a run
           finishes.
         </p>
       );
@@ -334,7 +334,7 @@ function ProgressLine({
               ask you something, so this step hasn&apos;t ticked. It also produced a report
               still waiting on a separate approval to send. Deciding either one is worth
               doing, but neither continues this run — it stopped on a step that can&apos;t
-              be re-entered, so run the workflow again to finish.
+              be re-entered, so run the automation again to finish.
             </>,
             "gate-workflow-blocked-mixed",
           );

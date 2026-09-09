@@ -1254,7 +1254,7 @@ export function InferenceSection({
                       <span>
                         <span className="font-medium">Restart required.</span> This company started
                         with no inference source, so it is running the offline echo brain and its
-                        scheduled workflows cannot fire. The brain is chosen at startup — this
+                        scheduled automations cannot fire. The brain is chosen at startup — this
                         configuration is saved, but agents keep echoing until the company is
                         restarted.
                       </span>

@@ -153,7 +153,7 @@ export function TaskWorkflowProposalPanel({
           <AlertDescription className="text-2xs leading-snug">
             <span className="font-medium text-foreground">Apply withheld.</span>{" "}
             {(result as { reason: string }).reason} You can still reject it to send the card back to
-            To-do and have the workflow built again.
+            To-do and have the automation built again.
           </AlertDescription>
         </Alert>
       ) : (

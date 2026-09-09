@@ -306,7 +306,7 @@ export function KnowledgeGraphFullscreen({
               {deptList.length > 0 ? 'Desks' : 'No desks yet'}
             </span>
             {/* With no pillars the graph still draws — agents, tools and
-                workflows hang off the core — so this corner is where the fact
+                automations hang off the core — so this corner is where the fact
                 is stated and where the one control that changes it lives. It
                 was previously the empty-state overlay's job, and that overlay
                 took the whole canvas with it. Only on an answered read: an
@@ -386,7 +386,7 @@ export function KnowledgeGraphFullscreen({
 
             Drawn only when the field really is bare. It used to be drawn for
             every deskless company, over a canvas that was itself suppressed —
-            so a company with a roster, tools and saved workflows was told it
+            so a company with a roster, tools and saved automations was told it
             had nothing, while the graph that could have shown all three was
             never rendered. */}
         {emptyState && (

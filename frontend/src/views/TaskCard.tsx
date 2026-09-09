@@ -252,7 +252,7 @@ export function TaskItem({
       {task.deliverable === "workflow" && (
         <div className="mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs text-muted-foreground">
           <ListTree className="size-3 shrink-0" />
-          Workflow
+          Automation
         </div>
       )}
       {/* Issue #1865 (Codex review): the task API converts a stored `todo`

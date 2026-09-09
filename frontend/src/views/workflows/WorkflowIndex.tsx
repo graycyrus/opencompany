@@ -173,7 +173,7 @@ const NO_RUNS_TITLE =
 const LOADING_RUNS_LABEL = "Loading runs…";
 
 export function WorkflowIndex({
-  workflows,
+  automations,
   runsByWorkflow,
   onSelect,
   mode,
@@ -225,7 +225,7 @@ export function WorkflowIndex({
         </div>
       ) : workflows.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          This company has no saved workflows yet.
+          This company has no saved automations yet.
         </p>
       ) : mode === "cards" ? (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -263,7 +263,7 @@ export function WorkflowIndex({
 /** One workflow as a card: what it is, whether the console can change it, and
  * how its recent runs went. */
 function WorkflowCard({
-  workflow,
+  automation,
   runs,
   runsLoaded,
   onSelect,
@@ -340,7 +340,7 @@ function WorkflowCard({
  * `display: none` cell is not a grid item, so the remaining three cells fall
  * into the three-track template with no second code path. */
 function WorkflowRow({
-  workflow,
+  automation,
   runs,
   runsLoaded,
   onSelect,
@@ -360,7 +360,7 @@ function WorkflowRow({
       <span className="min-w-0">
         <span className="flex min-w-0 items-center gap-2">
           {/* `title` because the column is fixed: a truncated name is unreadable
-              without one, and this is the only place the row says which workflow
+              without one, and this is the only place the row says which automation
               it is. */}
           <span className="truncate text-sm font-medium" title={workflow.name}>
             {workflow.name}

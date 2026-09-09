@@ -399,7 +399,7 @@ export function TaskEditDialog({
             </Select>
             {!deliverableEditable(task) && (
               <p className="text-2xs text-muted-foreground">
-                Locked once work starts — the workflow is built when a card enters In progress, so
+                Locked once work starts — the automation is built when a card enters In progress, so
                 this can only be changed while it&apos;s still in To-do or Planning.
               </p>
             )}

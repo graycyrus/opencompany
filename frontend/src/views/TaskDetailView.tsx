@@ -39,7 +39,7 @@ import {
   Square,
   Trash2,
   UserCog,
-  Workflow,
+  Automation,
 } from "lucide-react";
 
 import {
@@ -1085,7 +1085,7 @@ function DetailHeader({
           <span className="inline-flex items-center gap-1.5">
             <Badge variant="outline" className="gap-1 font-normal">
               <Workflow className="size-3" aria-hidden />
-              Workflow
+              Automation
             </Badge>
           </span>
         )}

@@ -453,7 +453,7 @@ export function RunHistoryPanel({
       <div className="max-h-72 overflow-auto px-4 py-3 xl:min-h-0 xl:max-h-none xl:flex-1">
         {runs.length === 0 ? (
           <p className="text-xs text-muted-foreground">
-            This workflow hasn't finished a run yet. Runs appear here once they
+            This automation hasn't finished a run yet. Runs appear here once they
             do — including scheduled ones that run while you're away.
           </p>
         ) : (
@@ -1092,7 +1092,7 @@ export function RunHistoryRow({
             nothing here is waiting on you any more. No decision left can move
             it
             {run.deliveries.length === 0 ? ", and no reports were routed" : ""}.
-            Run the workflow again if you still need it.
+            Run the automation again if you still need it.
           </p>
         </>
       ) : run.pendingApprovals.length > 0 ? (

@@ -831,10 +831,10 @@ export function StandingPermissions({
                   size="sm"
                   /* The subject, not just the grant: two teammates holding the
                      same tool and scope read identically in grantHeadline — and
-                     a workflow grant carries no agent at all — so button-only
+                     a automation grant carries no agent at all — so button-only
                      navigation would hear identical "Remove" buttons and could
                      take back the wrong one (#1411). `grantSubject` resolves
-                     the workflow subject for that second kind. The accessible
+                     the automation subject for that second kind. The accessible
                      name leads with the visible "Remove" verb so speech-input
                      users can say the control's label (WCAG 2.5.3 label in
                      name). */

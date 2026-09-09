@@ -62,7 +62,7 @@ const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; 
 const TIER_OPACITY: Record<KGNodeKind, number> = {
   self: 1,
   team: 1,
-  workflow: 0.98,
+  automation: 0.98,
   step: 0.9,
   person: 0.98,
   employee: 0.98,

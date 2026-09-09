@@ -1856,11 +1856,11 @@ export function WorkflowCreateDialog({
       const restored = await restoreWorkflowRevision(
         client,
         company,
-        workflow.id,
+        automation.id,
         rev.id,
         // Condition on the graph the operator is looking at, so a concurrent
         // edit is a 409 rather than a silent clobber.
-        workflow.version,
+        automation.version,
       );
       onSaved?.(restored);
       // The parent updates `workflow`, which re-hydrates this dialog and resets
@@ -2145,7 +2145,7 @@ export function WorkflowCreateDialog({
       showError(
         e instanceof Error
           ? e.message
-          : workflow
+          : automation
             ? "could not save the automation"
             : "could not create the automation",
       );
@@ -2577,9 +2577,9 @@ export function WorkflowCreateDialog({
       const saved = await updateWorkflow(
         client,
         company,
-        workflow!.id,
+        automation!.id,
         graph,
-        workflow!.version,
+        automation!.version,
       );
       onSaved?.(saved);
     });
@@ -2661,7 +2661,7 @@ export function WorkflowCreateDialog({
                   ) : (
                     <>
                       <p>
-                        The copilot corrected the workflow, but a few authoring
+                        The copilot corrected the automation, but a few authoring
                         checks still flag it — review before saving:
                       </p>
                       <ul className="mt-1 list-disc space-y-1 pl-4">
@@ -2678,17 +2678,17 @@ export function WorkflowCreateDialog({
         )}
 
         {/* The one-box dialog — every create, on every company and every build.
-            A sentence, and the Create button in the footer. Name, Workflow ID,
+            A sentence, and the Create button in the footer. Name, Automation ID,
             Description, Nodes and Connections are not rendered: the host mints
             the id, the copilot writes the rest where it can, and the canvas is
             where a graph is actually edited. Where it cannot, the notice below
-            says so and Create starts the workflow from the sentence — the box
+            says so and Create starts the automation from the sentence — the box
             is the dialog either way. */}
         {!editing && describing && (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
             <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">
               <Sparkles className="size-4" />
-              Describe the workflow
+              Describe the automation
             </Label>
             <Textarea
               id={`${formId}-copilot`}
@@ -2718,7 +2718,7 @@ export function WorkflowCreateDialog({
             )}
             {/* Nothing was drafted, and WHY decides what this says. A judgment
                 is advice — the copilot's own words, and an operator who
-                disagrees gets a workflow anyway rather than an argument. A
+                disagrees gets a automation anyway rather than an argument. A
                 failure is not advice, so it is not dressed as any: it says the
                 copilot did not manage it, in our words rather than in the
                 gates' node-and-trigger vocabulary, and the action beside it
@@ -2766,7 +2766,7 @@ export function WorkflowCreateDialog({
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
             <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">
               <Sparkles className="size-4" />
-              Describe the workflow
+              Describe the automation
             </Label>
             <Textarea
               id={`${formId}-copilot`}
@@ -3192,7 +3192,7 @@ export function WorkflowCreateDialog({
             <AlertDialogHeader>
               <AlertDialogTitle>Confirm the automation ID</AlertDialogTitle>
               <AlertDialogDescription>
-                The ID is permanent — it keys this workflow’s schedule and run
+                The ID is permanent — it keys this automation’s schedule and run
                 history and can’t be changed after creation. Check it now.
               </AlertDialogDescription>
             </AlertDialogHeader>
@@ -3234,7 +3234,7 @@ export function WorkflowCreateDialog({
                 disabled={submitting}
               >
                 {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-                Create workflow
+                Create automation
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
@@ -3260,7 +3260,7 @@ function NodeRow({
   company,
   roster,
   wiredChannels,
-  workflows,
+  automations,
   createMode,
   errors,
   configErrors,
@@ -3543,7 +3543,7 @@ function NodeRow({
               wiredChannels.status === "unavailable" && (
                 <p className="text-2xs leading-snug text-muted-foreground">
                   This host did not say which channels it can deliver to, so the
-                  target is checked when the workflow is saved.
+                  target is checked when the automation is saved.
                 </p>
               )}
           </>
@@ -3672,7 +3672,7 @@ function ScheduleField({
           set. #813 */}
       {createMode && looksLikeCron(schedule) && (
         <p className="text-3xs text-muted-foreground">
-          Heads up: a scheduled workflow is created paused. Resume it from the
+          Heads up: a scheduled automation is created paused. Resume it from the
           list to arm the schedule.
         </p>
       )}

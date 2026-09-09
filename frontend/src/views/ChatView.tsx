@@ -2773,7 +2773,7 @@ export function ChatView({
                     <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                     <span className="min-w-0">
                       The <span className="font-medium text-foreground">Operator</span> channel is a
-                      read-only feed of workflow reports and notifications — a scannable “what
+                      read-only feed of automation reports and notifications — a scannable “what
                       happened” view. There is nothing to reply to here.
                     </span>
                   </p>
@@ -2810,7 +2810,7 @@ export function ChatView({
 
                     Its rows are NOT under a roster agent, and the difference
                     matters (codex review on #2159). `DurableOperatorChannel` journals
-                    them under the reserved authors `workflow-report` and
+                    them under the reserved authors `automation-report` and
                     `owner-fallback-report` (`runtime/channel.rs`), which `senderOf`
                     titleizes into "Automation Report" and "Owner Fallback Report" —
                     author lines naming no person at all. That makes the case for the
@@ -2926,7 +2926,7 @@ export function ChatView({
                           not read this company's inference configuration. Names no
                           remedy on purpose — an unreadable config is no evidence
                           that saving one would help, which is the same #266
-                          doctrine that stops the workflow-run route answering
+                          doctrine that stops the automation-run route answering
                           `inference_required` in this state. A settings link here
                           would be the switch that does nothing, one more time. */}
                       {cognition === "undetermined" && (

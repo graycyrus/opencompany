@@ -414,7 +414,7 @@ function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
   return (
     <section className="flex flex-col gap-1">
       <h3 className="text-muted-foreground text-xs uppercase tracking-wide">
-        Workflow runs
+        Automation runs
       </h3>
       <ul className="flex flex-col gap-1">
         {grouped.map(([workflowRunId, own]) => {

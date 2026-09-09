@@ -42,7 +42,7 @@ import {
   ShieldCheck,
   SquareKanban,
   Unplug,
-  Workflow,
+  Automation,
   type LucideIcon,
 } from "lucide-react";
 

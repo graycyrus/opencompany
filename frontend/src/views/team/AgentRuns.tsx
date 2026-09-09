@@ -38,7 +38,7 @@ import {
   Loader2,
   MessageSquare,
   SquareKanban,
-  Workflow,
+  Automation,
   XCircle,
 } from "lucide-react";
 
@@ -101,7 +101,7 @@ const FILTERS: { key: string; label: string; statuses?: RunStatus[] }[] = [
 ];
 
 const SOURCE_ICON: Record<RunSourceKind, typeof Workflow> = {
-  workflow: Workflow,
+  automation: Automation,
   card: SquareKanban,
   chat: MessageSquare,
   unknown: Activity,
@@ -385,7 +385,7 @@ export function AgentRuns({
             <h3 className="font-medium">Runs</h3>
             <p className="text-xs text-muted-foreground">
               Every attempt {agentName} has made, newest first — cards it was
-              dispatched, messages it answered, and workflow steps it ran.
+              dispatched, messages it answered, and automation steps it ran.
             </p>
           </div>
           {/* Visible while a filter is active even if its fetch came back empty —
