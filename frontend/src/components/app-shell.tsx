@@ -3652,23 +3652,10 @@ export function AppShell({
         // `SidebarMenuBadge` and its icon-rail mirror `SidebarMenuDot`, so
         // nothing about the signal depends on this row any more. See
         // `NAV_SECTIONS`.
-        autonomy={
-          // What the agents in this company are allowed to do without asking.
-          // Renders nothing until the host has said, rather than guessing a
-          // tier — see `useAutonomy`.
-          //
-          // `canManage` is the role this shell already knows. Both write
-          // routes behind the pill call `require_admin`
-          // (`src/server/ops/policy.rs:309,427`), so without it a member was
-          // offered a menu whose every selection ends in a 403. The pill still
-          // STATES the tier for them — standing policy is a fact about what
-          // the agents around you may do, not an admin setting — it simply
-          // stops pretending to be a control. `null` while `fetchMe` is in
-          // flight reads as read-only, which is the safe direction: it hides
-          // an affordance for one round trip rather than offering one that
-          // cannot work.
-          <AutonomyPill status={autonomy} canManage={isGateAdmin} />
-        }
+        {/* No `autonomy` slot. The tier is a control on the composer's
+            toolbar row now (`views/chat/MessageComposer.tsx`): it is a fact
+            about what happens when you press Send, so it belongs beside Send
+            rather than in the band that holds facts about the console. */}
         profile={
           // Who you are signed in as, and nothing else. It renders nothing
           // where there is nobody to name — a host with no sign-in, or a
@@ -3836,6 +3823,20 @@ export function AppShell({
           <ChatView
               client={client}
               company={company}
+              // What the agents in this company are allowed to do without
+              // asking, rendered on the composer's toolbar row. Nothing renders
+              // until the host has said what the tier is, rather than guessing
+              // one — see `useAutonomy`.
+              //
+              // `canManage` is the role this shell already knows. Both write
+              // routes behind the pill call `require_admin`
+              // (`src/server/ops/policy.rs:309,427`), so without it a member was
+              // offered a menu whose every selection ends in a 403. The pill
+              // still STATES the tier for them — standing policy is a fact about
+              // what the agents around you may do, not an admin setting — it
+              // simply stops pretending to be a control. `null` while `fetchMe`
+              // is in flight reads as read-only, which is the safe direction.
+              autonomy={<AutonomyPill status={autonomy} canManage={isGateAdmin} />}
               // The chat segment, not the current view's — see `chatSub`.
               sub={view === "chat" ? sub : chatSub}
               routeOpen={view === "chat"}
