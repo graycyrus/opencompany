@@ -622,6 +622,10 @@ export function RoomView({
   const [isAdmin, setIsAdmin] = useState(false);
   /** Your own avatar reference, once `loadViewer` has resolved who you are. */
   const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
+  const [effectiveHive, setEffectiveHive] = useState<{
+    quorum: number;
+    turnBudget: number;
+  } | null>(null);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
   // the attribution line degrades to "an admin" rather than disappearing.
@@ -1408,6 +1412,29 @@ export function RoomView({
    * channel's kind, which is what keeps the surface unchanged for every
    * conversation that is not a room.
    */
+  useEffect(() => {
+    let live = true;
+    setEffectiveHive(null);
+    if (!channel?.memberIds) return () => {
+      live = false;
+    };
+    client
+      .getDeskHive(channel.id, company)
+      .then((hive) => {
+        if (live) {
+          setEffectiveHive({
+            quorum: hive.effective.quorum,
+            turnBudget: hive.effective.turnBudget,
+          });
+        }
+      })
+      // DMs and system channels have no desk grammar endpoint.
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [client, company, channel?.id, channel?.memberIds]);
+
   const episodes = useMemo(
     () =>
       foldEpisodes(
@@ -1417,9 +1444,11 @@ export function RoomView({
         // reports the number as derived rather than asserting one it cannot know.
         {
           members: channel?.memberIds?.length,
+          quorum: effectiveHive?.quorum,
+          turnBudget: effectiveHive?.turnBudget,
         },
       ),
-    [entries, channel?.memberIds],
+    [entries, channel?.memberIds, effectiveHive],
   );
 
   const items = useMemo(
