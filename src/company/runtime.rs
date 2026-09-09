@@ -2871,9 +2871,12 @@ impl CompanyRuntime {
     ///
     /// The step rides on the resolution itself — the journal scrubs a parked
     /// effect's payload, so it is captured at resolve time — while the DM thread
-    /// is read off the approval's origin, which is not scrubbed. The answer is
-    /// retired from the re-arm queue once re-entered, so the next boot does not
-    /// resume it a second time.
+    /// is read off the approval's origin, which is not scrubbed. A blocker that
+    /// carried no step of its own falls back to the card its approval is linked
+    /// to, read from that same unscrubbed origin: see
+    /// [`blocker_step_from_task_link`](Self::blocker_step_from_task_link). The
+    /// answer is retired from the re-arm queue once re-entered, so the next boot
+    /// does not resume it a second time.
     #[cfg(feature = "openhuman")]
     async fn resume_blocker(
         self: &Arc<Self>,
@@ -2887,13 +2890,12 @@ impl CompanyRuntime {
         let origin_parent = conversation
             .as_ref()
             .and_then(|conversation| conversation.parent);
+        let step = resolution
+            .step
+            .clone()
+            .or_else(|| self.blocker_step_from_task_link(approval_id));
         let outcome = self
-            .drive_blocker_resume(
-                &resolution,
-                resolution.step.as_ref(),
-                thread.as_deref(),
-                origin_parent,
-            )
+            .drive_blocker_resume(&resolution, step.as_ref(), thread.as_deref(), origin_parent)
             .await;
         // Retire the armed answer whether or not the drive succeeded: a failed
         // resume is reported, not retried forever, and re-arming it would resume
@@ -2914,6 +2916,40 @@ impl CompanyRuntime {
                 .await;
         }
         Ok(CycleRunner::new(self).already_resolved_report())
+    }
+
+    /// The card a blocker stopped, when its own payload never named one.
+    ///
+    /// An agent's question parks with no
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep): the tool holds
+    /// neither a card nor a node. Where a board card's dispatch cycle raised it,
+    /// the approval records that as its [`TaskLink`], the same key
+    /// [`unanswered_blocker`](Self::unanswered_blocker) returns an expired
+    /// blocker's card by — and for the same reason, that the journal has always
+    /// maintained the link while the payload's step is a field a producer can
+    /// omit.
+    ///
+    /// Read from the retained origins, never the pending set: the settle that
+    /// precedes a resume is what empties that set, so by here the approval is no
+    /// longer parked. An [`Unlinked`](TaskLink::Unlinked) record, a link written
+    /// before the journal kept one, and an id the journal never saw are one
+    /// answer — there is no card to re-enter, and the answer is carried back
+    /// into the conversation instead.
+    ///
+    /// [`TaskLink`]: crate::runtime::journal::TaskLink
+    #[cfg(feature = "openhuman")]
+    fn blocker_step_from_task_link(
+        &self,
+        id: &ApprovalId,
+    ) -> Option<crate::ports::blockers::BlockerStep> {
+        use crate::runtime::journal::TaskLink;
+
+        match self.journal.approval_task(id) {
+            Some(Some(TaskLink::Task { id })) => {
+                Some(crate::ports::blockers::BlockerStep::Task { task_id: id })
+            }
+            Some(Some(TaskLink::Unlinked)) | Some(None) | None => None,
+        }
     }
 
     /// Routes a resolved blocker to the right resume by its
@@ -2941,9 +2977,8 @@ impl CompanyRuntime {
                 self.resume_node_blocker(run_id, node_id, resolution, thread)
                     .await
             }
-            // An agent question with no step behind it — there is nothing to
-            // re-dispatch, so carrying the answer back into its DM is the whole
-            // of the resume.
+            // A question with no card or node behind it — carrying the answer
+            // back into its DM is the whole of the resume.
             None => {
                 self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
                     .await
@@ -13367,6 +13402,154 @@ mod tests {
                 "a cancel abandons the work rather than re-dispatching it"
             );
             assert!(after.bounced.is_some(), "the card is marked not-fresh");
+        }
+
+        /// What an agent's own `escalate_to_human` parks: a question with no
+        /// step, because the tool holds neither a card nor a node.
+        fn agent_question() -> BlockerPayload {
+            BlockerPayload {
+                kind: BlockerKind::Information,
+                source: BlockerSource::AgentQuestion,
+                step: None,
+                reason: "which of the two briefs is the current one?".to_string(),
+                needed: "an answer from you".to_string(),
+                group_key: None,
+            }
+        }
+
+        /// Parks a blocker the journal records as belonging to **no** card, the
+        /// way a workflow node's does. `park_blocker` always links the card it
+        /// is given, so the unlinked case has to be built here.
+        async fn park_unlinked(
+            runtime: &Arc<CompanyRuntime>,
+            payload: &BlockerPayload,
+        ) -> crate::ports::types::ApprovalId {
+            use crate::ports::now_millis;
+            use crate::ports::types::{Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            let id = runtime
+                .approvals
+                .park(&runtime.id, effect.clone())
+                .await
+                .expect("parks");
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation {
+                        thread: Some("dm:eng".to_string()),
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("records");
+            id
+        }
+
+        /// The defect this tier was missing: a question parked with no step of
+        /// its own still re-enters the card its approval is linked to, and the
+        /// operator's answer rides onto it.
+        #[tokio::test]
+        async fn an_agent_question_re_enters_the_card_its_approval_links() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&agent_question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Amend,
+                    "the second brief is current",
+                    None,
+                )
+                .await
+                .expect("resumes");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_IN_PROGRESS,
+                "a stepless question resumes through its approval's task link"
+            );
+            assert!(
+                after
+                    .note
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("the second brief is current"),
+                "the answer reaches the re-run: {:?}",
+                after.note
+            );
+        }
+
+        /// The same fallback settles rather than re-dispatches when the answer
+        /// is a cancel — the arm that moves a card for the first time.
+        #[tokio::test]
+        async fn an_agent_question_cancelled_settles_the_linked_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&agent_question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Cancel, "drop it", None)
+                .await
+                .expect("settles");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(after.column, COLUMN_TODO);
+            assert!(after.bounced.is_some(), "the card is marked not-fresh");
+        }
+
+        /// The negative that keeps the fallback honest: a blocker the journal
+        /// records against no card touches no card, however it is answered. A
+        /// fallback that reached for "whichever card was paused" would resume
+        /// work nobody asked about.
+        #[tokio::test]
+        async fn an_unlinked_question_moves_no_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            let id = park_unlinked(&runtime, &agent_question()).await;
+
+            runtime
+                .apply_blocker_reply(&[id], BlockerReplyIntent::Retry, "go on", None)
+                .await
+                .expect("resumes");
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_PAUSED,
+                "an unlinked question leaves every card where it was"
+            );
         }
 
         /// The guard the whole tier turns on: a blocker's effect is inert, so a
