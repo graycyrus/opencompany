@@ -3,6 +3,8 @@ import { BrainCircuit, Check, Loader2, RotateCcw, Save, Trash2, Zap } from "luci
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { getCompanyCredential, type CompanyCredentialStatus } from "@/api/credential";
+import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
 import {
   getInferenceStatus,
   listInferenceModels,
@@ -427,6 +429,11 @@ export function InferenceSection({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
+  // Whether this host can complete a one-click key grant. Read off the
+  // credential plane rather than the inference one, because that is where the
+  // flow lives — the same grant arms both, and asking the surface that owns it
+  // keeps one answer instead of two that could disagree.
+  const [credential, setCredential] = useState<CompanyCredentialStatus | null>(null);
   const [busy, setBusy] = useState<
     "save" | "reset" | "test" | "removeKey" | "restart" | null
   >(null);
@@ -540,10 +547,22 @@ export function InferenceSection({
     }
   }, [client, company, seedFromStatus]);
 
+  const refreshCredential = useCallback(async () => {
+    try {
+      setCredential(await getCompanyCredential(client, company));
+    } catch {
+      // A host with no credential plane, or one that could not answer. Either
+      // way the button stays hidden and the paste field below is unaffected —
+      // this read decides an addition, never whether the section works.
+      setCredential(null);
+    }
+  }, [client, company]);
+
   useEffect(() => {
     setLoad("loading");
     void refresh();
-  }, [refresh]);
+    void refreshCredential();
+  }, [refresh, refreshCredential]);
 
   /**
    * Whether the endpoint `GET …/inference/models` will answer for is the one an
@@ -596,9 +615,36 @@ export function InferenceSection({
    */
   const draftLeavesSavedEndpoint = savedIsProxied && key.trim().length > 0;
 
+  /**
+   * Whether the *draft's* provider select resolves to OpenRouter.
+   *
+   * Mirrors `storedProviderIsOpenRouter` above, but for the live form value
+   * instead of the saved config: `managed` is a legacy alias the host
+   * resolves onto the same OpenRouter-backed platform endpoint, and — since
+   * `INFERENCE_MANAGED_HIDDEN` stopped silently seeding the form onto
+   * `openrouter` whenever the saved provider was `managed` — a draft can now
+   * genuinely sit on `managed` while a key is typed into it. That key is sent
+   * straight to OpenRouter (`keyKind` above says so), so every guard below
+   * that exists to keep an OpenRouter-only catalog or id shape off a draft
+   * that would reach a *different* endpoint has to treat `managed` the same
+   * way it treats `openrouter`, or a `managed` draft slips through them.
+   *
+   * Gated on `status` having loaded, unlike a plain `provider === "managed"`
+   * check: `provider`'s own initial value *is* `"managed"` — a placeholder
+   * used before `seedFromStatus` seeds the real draft — and counting that
+   * placeholder as an OpenRouter-like window let the strip effect below latch
+   * `strippedForWindow` against empty placeholder models before the real,
+   * seeded ones ever arrived, then skip stripping them once they did, because
+   * the boolean never toggled to give the effect its reset edge. Once `status`
+   * is loaded this is exactly the same test as `storedProviderIsOpenRouter`
+   * above, applied to the live draft instead of the saved config.
+   */
+  const draftProviderIsOpenRouter =
+    provider === "openrouter" || (provider === "managed" && status !== null);
+
   useEffect(() => {
     let current = true;
-    if (provider !== "openrouter") {
+    if (!draftProviderIsOpenRouter) {
       setModelCatalog({ kind: "idle" });
       return () => {
         current = false;
@@ -811,15 +857,26 @@ export function InferenceSection({
    * `wouldSaveProxied` false again) and a new one opens — which is exactly
    * the set of transitions (`pickProvider`, typing then clearing a key) this
    * effect exists to catch.
+   *
+   * Latched on the **provider identity**, not just whether it is
+   * OpenRouter-like — since `draftProviderIsOpenRouter` folded `managed` in
+   * alongside `openrouter`, "leaves openrouter" above is no longer the only
+   * way to close a window: switching `managed` → `openrouter` (both true
+   * under that boolean) is *also* a new window, because each provider can
+   * carry catalog-derived models the other has never had a chance to check.
+   * A ref that only asked "have I stripped since the boolean last flipped
+   * false" stayed latched true across exactly that switch and skipped
+   * stripping the destination provider's freshly-seeded (and possibly
+   * proxy-incompatible) preset.
    */
-  const strippedForWindow = useRef(false);
+  const strippedForProvider = useRef<InferenceProvider | null>(null);
   useEffect(() => {
-    if (provider !== "openrouter" || !wouldSaveProxied) {
-      strippedForWindow.current = false;
+    if (!draftProviderIsOpenRouter || !wouldSaveProxied) {
+      strippedForProvider.current = null;
       return;
     }
-    if (strippedForWindow.current) return;
-    strippedForWindow.current = true;
+    if (strippedForProvider.current === provider) return;
+    strippedForProvider.current = provider;
     const next = stripProxyIncompatible(models);
     const changedTiers = TIERS.filter((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
     if (changedTiers.length === 0) return;
@@ -831,7 +888,7 @@ export function InferenceSection({
         ...Object.fromEntries(changedTiers.map((tier) => [tier, next[tier]])),
       },
     }));
-  }, [provider, wouldSaveProxied, models]);
+  }, [draftProviderIsOpenRouter, wouldSaveProxied, models, provider]);
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
@@ -904,7 +961,7 @@ export function InferenceSection({
         // catalog id under the proxy even in the window before that effect
         // has run (issue #1838 follow-up).
         const draftModels =
-          provider === "openrouter" && wouldSaveProxied
+          draftProviderIsOpenRouter && wouldSaveProxied
             ? stripProxyIncompatible(models)
             : models;
         const cleanModels = Object.fromEntries(
@@ -1320,7 +1377,7 @@ export function InferenceSection({
 
                 {isOffered(provider) && (
                   <div className="space-y-2">
-                    {provider === "openrouter" && modelCatalog.kind === "error" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "error" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-fallback"
@@ -1328,7 +1385,7 @@ export function InferenceSection({
                         {modelCatalog.message}
                       </p>
                     )}
-                    {provider === "openrouter" && modelCatalog.kind === "empty" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "empty" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-empty"
@@ -1344,7 +1401,7 @@ export function InferenceSection({
                       so naming the endpoint is the difference between a list
                       the operator can trust and one they have to guess at.
                     */}
-                    {provider === "openrouter" && modelCatalog.kind === "ready" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "ready" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-source"
@@ -1354,7 +1411,7 @@ export function InferenceSection({
                     )}
                     {/*
                       `kind !== "idle"` is a no-op here — the effect above
-                      only ever sets "idle" when `provider !== "openrouter"`,
+                      only ever sets "idle" when `!draftProviderIsOpenRouter`,
                       which the surrounding check already excludes. Left in
                       as a defensive guard against that invariant changing,
                       not a live branch.
@@ -1369,7 +1426,7 @@ export function InferenceSection({
                       still loading was dropped by `stripProxyIncompatible`
                       with no explanation (issue #1838 follow-up).
                     */}
-                    {provider === "openrouter" &&
+                    {draftProviderIsOpenRouter &&
                       modelCatalog.kind !== "idle" &&
                       wouldSaveProxied && (
                         <p
@@ -1391,7 +1448,7 @@ export function InferenceSection({
                         // select this render.
                         const manualEntry = manualEntryTiers.has(tier);
                         const useFreeText =
-                          provider !== "openrouter" ||
+                          !draftProviderIsOpenRouter ||
                           modelCatalog.kind === "error" ||
                           modelCatalog.kind === "empty" ||
                           wouldSaveProxied ||
@@ -1522,6 +1579,23 @@ export function InferenceSection({
                     route this console does not offer still carries its `keyKind`
                     prose, which names that route — and a key typed against a
                     provider nobody selected has nowhere to be scoped to. */}
+                {/* The managed route is the one a grant can fill in, so the
+                    button belongs to it alone — an OpenRouter or Ollama key is
+                    not something TinyHumans can mint. */}
+                {provider === "managed" && (
+                  <ConnectTinyHumansButton
+                    client={client}
+                    company={company}
+                    available={credential?.hubLink ?? false}
+                    canManage={canManage}
+                    configured={status?.keyConfigured ?? false}
+                    onConnected={() => {
+                      void refresh();
+                      void refreshCredential();
+                    }}
+                  />
+                )}
+
                 {isOffered(provider) && PROVIDERS[provider].acceptsKey && (
                   <div className="space-y-1">
                     <Label htmlFor="inference-key" className="text-xs">

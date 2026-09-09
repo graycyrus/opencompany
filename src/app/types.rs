@@ -439,6 +439,11 @@ pub struct AppState {
     /// self-hosted host) means the console offers no ecosystem sign-in at all,
     /// rather than offering a button that leads nowhere.
     hub_identity: Option<Arc<dyn crate::server::hub_identity::HubIdentityExchange>>,
+    /// Key-grant flows started and not yet finished, keyed by the opaque
+    /// `state` the browser carries. Holds the PKCE verifier, which is why it is
+    /// in memory and swept rather than persisted — see
+    /// [`hub_link`](crate::server::hub_link).
+    hub_links: Arc<crate::server::hub_link::HubLinks>,
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
@@ -586,6 +591,7 @@ impl AppState {
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
             hub_identity: None,
+            hub_links: Arc::new(crate::server::hub_link::HubLinks::new()),
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
@@ -964,6 +970,16 @@ impl AppState {
         &self,
     ) -> Option<&Arc<dyn crate::server::hub_identity::HubIdentityExchange>> {
         self.hub_identity.as_ref()
+    }
+
+    /// The pending key-grant flows for this host.
+    ///
+    /// Always present, unlike [`Self::hub_identity`]: the map costs nothing on a
+    /// host that never starts a link, and making it optional would put a
+    /// `None` branch on a path that already refuses earlier when there is no
+    /// exchange to redeem against.
+    pub fn hub_links(&self) -> &Arc<crate::server::hub_link::HubLinks> {
+        &self.hub_links
     }
 
     /// Installs platform (multi-tenant) auth. Mirrors [`Self::with_home`].
