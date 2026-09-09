@@ -762,7 +762,11 @@ mod test {
         state
     }
 
-    async fn get_with_cookie(app: axum::Router, uri: &str, cookie: &str) -> axum::response::Response {
+    async fn get_with_cookie(
+        app: axum::Router,
+        uri: &str,
+        cookie: &str,
+    ) -> axum::response::Response {
         app.oneshot(
             Request::builder()
                 .method("GET")
@@ -896,9 +900,9 @@ mod test {
         let app = router(state.clone());
         let barrier = Arc::new(tokio::sync::Barrier::new(N));
         let mut tasks = Vec::with_capacity(N);
-        for i in 0..N {
+        for (i, cookie) in cookies.iter().enumerate() {
             let app = app.clone();
-            let cookie = cookies[i].clone();
+            let cookie = cookie.clone();
             let target = format!("ring-{}", (i + 1) % N);
             let barrier = barrier.clone();
             tasks.push(tokio::spawn(async move {
@@ -925,7 +929,10 @@ mod test {
         // Exactly one of the six is refused — the request that would have
         // taken the last admin. The rest succeed.
         assert_eq!(
-            statuses.iter().filter(|s| **s == StatusCode::CONFLICT).count(),
+            statuses
+                .iter()
+                .filter(|s| **s == StatusCode::CONFLICT)
+                .count(),
             1,
             "exactly one demotion in the ring must be refused as the last admin: {statuses:?}"
         );

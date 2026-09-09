@@ -422,7 +422,11 @@ mod test {
             .map(|id| id.strip_prefix("company-").unwrap().parse().unwrap())
             .collect();
         seen.sort_unstable();
-        assert_eq!(seen, (0..N).collect::<Vec<_>>(), "every emit must land exactly once");
+        assert_eq!(
+            seen,
+            (0..N).collect::<Vec<_>>(),
+            "every emit must land exactly once"
+        );
     }
 
     #[test]

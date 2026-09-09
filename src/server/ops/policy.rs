@@ -1027,12 +1027,7 @@ mod tests {
         let state = state(dir.path()).await;
 
         let huge = "x".repeat(MAX_ALWAYS_APPROVE_ENTRY_LEN + 1);
-        let (status, _) = call(
-            &state,
-            "PUT",
-            Some(json!({ "alwaysApprove": [huge] })),
-        )
-        .await;
+        let (status, _) = call(&state, "PUT", Some(json!({ "alwaysApprove": [huge] }))).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
         let (_, body) = call(&state, "GET", None).await;

@@ -755,7 +755,10 @@ mod test {
     #[test]
     fn jwt_verifier_accepts_a_token_with_no_exp_claim_at_all() {
         let secret = "signing-secret";
-        let token = sign(secret, &json!({"tenant": "tenant:acme", "scopes": ["operator"]}));
+        let token = sign(
+            secret,
+            &json!({"tenant": "tenant:acme", "scopes": ["operator"]}),
+        );
         let claims = JwtPlatformVerifier::new(secret)
             .verify(&token)
             .expect("a token with no exp claim is currently accepted unconditionally");

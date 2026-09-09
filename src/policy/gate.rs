@@ -964,8 +964,8 @@ mod test {
     /// fail-closed default might suggest it has.
     #[tokio::test]
     async fn disabled_policy_hitl_fails_open_on_an_unrecognized_mode() {
-        let gate = ManifestApprovalGate::new(policy("not-a-real-tier", None))
-            .with_policy_hitl_disabled();
+        let gate =
+            ManifestApprovalGate::new(policy("not-a-real-tier", None)).with_policy_hitl_disabled();
         assert_eq!(
             decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
             PolicyDecision::Allow
