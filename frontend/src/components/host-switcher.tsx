@@ -609,22 +609,24 @@ export function HostSwitcher({
               // this is the only thing that still says which company the window
               // belongs to without opening the menu.
               title={switcherTooltip}
-              // A hairline and a fill, the same pair the title row's search
-              // field uses (`title-bar-search.tsx`). Both are controls standing
-              // on the window chrome, and `--chrome` is close enough to the
-              // shell's other surfaces that an unbordered box reads as text
-              // that happens to be bold rather than as something you can open.
-              // The border is what says "this is a select"; the chevron alone
-              // was doing that job and losing.
+              // A hairline and nothing else: the border says "this opens",
+              // and the control otherwise sits at the chrome's own value.
               //
-              // It replaced "no border, no shadow, no fill at rest", which was
-              // right while the control carried a filled glyph square — that
+              // It carried `bg-background` first, borrowed from the search
+              // field beside it. That field is a well you type into and wants
+              // to read as cut into the chrome; this one names the company you
+              // are already in, and a lighter fill made the quietest fact in
+              // the row its highest-contrast object. Same border, no fill —
+              // present when looked for, silent otherwise.
+              //
+              // Both replaced "no border, no shadow, no fill at rest", which
+              // was right while the control carried a filled glyph square: that
               // block was the thing giving it an edge. There is no glyph now.
               //
               // `w-full` against the row's own `max-w-72` cap, not a width of
               // its own: the cap belongs to the layout that placed it, and a
               // second width here would be two answers to one question.
-              className="flex h-9 w-full min-w-0 items-center gap-2 rounded-lg border border-chrome-border bg-background px-2.5 text-left transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[popup-open]:bg-sidebar-accent"
+              className="flex h-9 w-full min-w-0 items-center gap-2 rounded-lg border border-chrome-border px-2.5 text-left transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[popup-open]:bg-sidebar-accent"
             />
           }
           {...triggerData}
