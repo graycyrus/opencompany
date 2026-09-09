@@ -17,20 +17,35 @@ import { Blocks, BrainCircuit, LayoutGrid, Sparkles, type LucideIcon } from "luc
  * The sub-pages that live under Connections. The id is the hash's second
  * segment.
  *
- * Two, not five. A single "Connections" page once carried third-party
+ * Four pages, not one. A single "Connections" page once carried third-party
  * accounts, MCP servers, inference, channels and repositories, and was
  * deliberately broken apart because each was something an operator scrolled
  * past on the way to another (see the comment above the `oauth` entry in
  * `settings-pages.ts`, and `OAuthView`'s own header). That decision was about
- * one-question-per-page, and it stands: these are still two pages. What is new
- * is that they have a parent, which is a different thing from being merged
- * back together.
+ * one-question-per-page, and it stands: every entry below is still one page
+ * answering one question. What they gain is a parent, which is a different
+ * thing from being merged back together.
  *
- * Inference, Hosting and Search deliberately did **not** move here. Each is a
- * credential form that belongs beside the one thing it unlocks — the model, the
- * deploy target, the search provider — which is the argument `settings-pages.ts`
- * makes twice, and filing them under a section named for the act of connecting
- * would undo it.
+ * Inference and Skills join them here, and this file used to argue the
+ * opposite: that a credential form belongs beside the one thing it unlocks, so
+ * filing Inference under a section named for the act of connecting would
+ * separate it from what it is for. What that argument missed is that Settings
+ * is not "beside the model" either — it is a rail of configuration an operator
+ * visits once, and the model a company thinks with is the single most-read,
+ * most-changed thing on it. The test the section already applies to Apps and
+ * MCP Servers ("read repeatedly, changes as the company's work changes, asked
+ * as *can my teammates do X yet?*") is answered yes by both of these:
+ *
+ *   - **Inference** is what every teammate thinks with. A company with no model
+ *     configured cannot answer a single message, and the chat pane's own
+ *     "cannot reach a model" banner links straight here.
+ *   - **Skills** are the playbooks teammates read. Installing one is the same
+ *     act as connecting an app — granting the company a capability it did not
+ *     have a minute ago — and it is checked far more often than it is set.
+ *
+ * Hosting and Search stay in Settings. They are genuinely once-a-company
+ * credential forms, and the argument above is a test rather than a licence to
+ * move everything with a key field in it.
  */
 export const CONNECTION_PAGES = [
   {
@@ -44,6 +59,18 @@ export const CONNECTION_PAGES = [
     label: "MCP Servers",
     icon: Blocks,
     hint: "Tool servers and their tools",
+  },
+  {
+    id: "inference",
+    label: "Inference",
+    icon: BrainCircuit,
+    hint: "The model teammates think with",
+  },
+  {
+    id: "skills",
+    label: "Skills",
+    icon: Sparkles,
+    hint: "Playbooks your teammates read",
   },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon; hint: string }[];
 
