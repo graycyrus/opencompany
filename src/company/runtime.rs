@@ -1311,6 +1311,12 @@ impl CompanyRuntime {
         // Where an answer goes home, on a crossing FORWARD. `None` on a return
         // — an answer that has arrived does not need carrying further.
         origin: Option<tinyhivemind_core::referral::ReferralOrigin>,
+        // The forward this child is answering, by the journal sequence of its
+        // marker — carried so the return can name it exactly. Two crossings
+        // between the same desks to the same agent write geometrically
+        // identical markers, so a return that searched for "the forward that
+        // looks like mine" would pair one question with the other's answer.
+        answers: Option<u64>,
         // How deep in the chain this turn sits. Its own replies are offered to
         // the referral pass at this depth, so a follow-up is one deeper than
         // the answer it follows and `max_hops` finally counts something.
@@ -1368,6 +1374,7 @@ impl CompanyRuntime {
                         &desk_for_replies,
                         &report,
                         origin,
+                        answers,
                         hop,
                     )
                     .await;
@@ -9857,7 +9864,8 @@ mod tests {
         let (rt, _home) = runtime_that_may_refer().await;
         let rt = Arc::new(rt);
         let gate = Arc::new(tokio::sync::Mutex::new(()));
-        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1, 4);
+        let queue =
+            crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1, 4, None);
 
         let forward = |trigger: u64| tinyhivemind::referral::Referral {
             key: tinyhivemind::dispatch::DispatchKey {
@@ -9911,7 +9919,8 @@ mod tests {
         let gate = Arc::new(tokio::sync::Mutex::new(()));
         // A cap high enough not to be what this test measures: the second
         // enqueue must be refused as `Already`, by the marker, not by width.
-        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8, 4);
+        let queue =
+            crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8, 4, None);
 
         let referral = tinyhivemind::referral::Referral {
             key: tinyhivemind::dispatch::DispatchKey {

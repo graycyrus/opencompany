@@ -446,7 +446,7 @@ struct ReferralState {
     /// The answer the last forward produced, if it finished — read by the
     /// driver to decide whether a return hop is worth folding.
     last_answer: Option<(Referral, String)>,
-    /// The agents this episode's lines named DIRECTLY, by their id.
+    /// The agents named DIRECTLY, by the line that named them.
     ///
     /// A crossing goes to the pair's own thread only when a person was asked
     /// for by name. A `@#desk` mention resolves to whoever answers for that
@@ -455,7 +455,11 @@ struct ReferralState {
     /// their own thread. The two are indistinguishable by the time the library
     /// hands back a `Referral` — both carry the target's home desk in `to` —
     /// so the distinction is recorded here, where the mention is still in hand.
-    named: HashSet<String>,
+    /// Keyed by the trigger, not accumulated episode-wide: an earlier line
+    /// naming `@sre` must not make a LATER `@#platform` — which resolves to
+    /// that same person — look like it named them. Directness is a fact about
+    /// one line, and a room asks more than once.
+    named: HashMap<u64, HashSet<String>>,
     /// The journal sequence of each forward marker this episode wrote, by the
     /// desk it went to. A return names the forward it answers (`answers`), and
     /// this is where that sequence comes from — the episode knows it, because
@@ -497,15 +501,26 @@ impl<'a> EpisodeReferrals<'a> {
     }
 
     /// What this episode's referrals amounted to.
-    /// Record which agents this line named by name, before the referral for it
-    /// is decided.
-    pub async fn note_named(&self, mentions: &[Mention]) {
+    /// Record which agents THIS line named by name, before its referral is
+    /// decided.
+    pub async fn note_named(&self, trigger: u64, mentions: &[Mention]) {
         let mut state = self.state.lock().await;
+        let named = state.named.entry(trigger).or_default();
         for mention in mentions {
             if let MentionTarget::Agent { id } = &mention.target {
-                state.named.insert(id.clone());
+                named.insert(id.clone());
             }
         }
+    }
+
+    /// Whether `target` was named by the line that raised `trigger`.
+    async fn named_by(&self, trigger: u64, target: &str) -> bool {
+        self.state
+            .lock()
+            .await
+            .named
+            .get(&trigger)
+            .is_some_and(|named| named.contains(target))
     }
 
     pub async fn ledger(&self) -> ReferralLedger {
@@ -597,11 +612,8 @@ impl<'a> EpisodeReferrals<'a> {
             conversation: match returning {
                 true => None,
                 false => self
-                    .state
-                    .lock()
+                    .named_by(referral.key.trigger_sequence, &referral.target_id)
                     .await
-                    .named
-                    .contains(&referral.target_id)
                     .then(|| pair_conversation(&referral.source_id, &referral.target_id)),
             },
             from_desk: referral.from.desk_id.clone(),
@@ -642,7 +654,9 @@ impl<'a> EpisodeReferrals<'a> {
         // question put to that desk — turning it into a private chat with
         // whoever leads it would skip the deliberation the desk exists for,
         // which is the whole objection to `delegate_to_desk`.
-        let by_name = self.state.lock().await.named.contains(&referral.target_id);
+        let by_name = self
+            .named_by(referral.key.trigger_sequence, &referral.target_id)
+            .await;
         let pair = if by_name {
             DispatchConversation {
                 desk_id: pair_conversation(&referral.source_id, &referral.target_id),
@@ -851,7 +865,7 @@ pub async fn consider(
     );
     // Recorded before the decision, because the decision cannot tell a person
     // from a desk afterwards — see `ReferralState::named`.
-    queue.note_named(&mentions).await;
+    queue.note_named(seq.value(), &mentions).await;
     if mentions.is_empty() {
         return;
     }

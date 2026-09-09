@@ -1246,6 +1246,15 @@ pub struct JournalReferralQueue {
     /// a return spends no turn of its own, and refusing one would strand an
     /// answer that has already been paid for.
     asked: std::sync::Arc<tokio::sync::Mutex<u32>>,
+    /// The forward these replies answer, when they are answering one — the
+    /// journal sequence of its marker, handed down by the turn that spawned
+    /// this one.
+    ///
+    /// Recorded rather than searched for. Two crossings between the same desks
+    /// to the same agent write markers that are identical in every field a
+    /// search could match on, so "the most recent forward that looks like mine"
+    /// pairs one question with the other's answer as soon as two are in flight.
+    answers: Option<u64>,
 }
 
 impl std::fmt::Debug for JournalReferralQueue {
@@ -1263,12 +1272,14 @@ impl JournalReferralQueue {
         gate: std::sync::Arc<tokio::sync::Mutex<()>>,
         peer_cap: u32,
         max_hops: u32,
+        answers: Option<u64>,
     ) -> Self {
         Self {
             runtime,
             gate,
             peer_cap,
             max_hops,
+            answers,
             asked: std::sync::Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
@@ -1406,14 +1417,18 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
             // that conversation to this one, addressed to this agent, must
             // actually be on the journal. The marker that makes the forward
             // idempotent is the same marker that authorizes its answer home.
-            // On a return this is the forward it answers — both the permission
-            // and the pairing the marker records below. On a forward it stays
-            // `None`: there is nothing earlier to point at.
-            let mut answers: Option<u64> = None;
+            // On a return, the forward it answers, as the spawning turn named
+            // it. On a forward, nothing earlier to point at.
+            let answers = match referral.kind {
+                tinyhivemind::referral::ReferralKind::Return => self.answers,
+                tinyhivemind::referral::ReferralKind::Forward => None,
+            };
             let permitted = match referral.kind {
                 tinyhivemind::referral::ReferralKind::Return => {
-                    answers = self.answering_a_forward(&referral).await;
-                    answers.is_some()
+                    // Authorization still asks "is there a forward for this
+                    // return at all"; the PAIRING is the sequence carried down,
+                    // never this search's pick among look-alikes.
+                    self.answering_a_forward(&referral).await.is_some()
                 }
                 tinyhivemind::referral::ReferralKind::Forward => {
                     self.authorized(&referral.source_id, &referral.to.desk_id)
@@ -1468,8 +1483,11 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
             }
 
             // 4. The marker, durably, BEFORE the turn — see the type's doc for
-            //    which way this window fails.
-            self.runtime
+            //    which way this window fails. Its sequence is kept: the child
+            //    is told which forward it answers, rather than searching for a
+            //    marker that looks like the right one.
+            let marker_seq = self
+                .runtime
                 .events()
                 .append(
                     self.runtime.id(),
@@ -1498,12 +1516,24 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                 .await
                 .map_err(|err| Box::new(err) as tinyhivemind::responder::BoxError)?;
 
-            // 5. The child turn, on the TARGET's conversation.
+            // 5. The child turn, on the TARGET's conversation, told which
+            //    forward it is answering.
+            //
+            //    The sequence just returned by `append`, not a search: two
+            //    referrals between the same desks to the same agent can be in
+            //    flight at once, and every marker they write is geometrically
+            //    identical — same `from_desk`, `to_desk` and `target`. A return
+            //    that picked the newest match would pair one question with the
+            //    other question's answer. The writer knows which marker it wrote;
+            //    carrying that is the only way the reader cannot get it wrong.
+            let answers = (!matches!(referral.kind, tinyhivemind::referral::ReferralKind::Return))
+                .then_some(marker_seq.value());
             self.runtime.clone().spawn_referred_turn(
                 referral.to.desk_id.clone(),
                 returned_answer(&record, &referral, self.max_hops),
                 referral.source_id.clone(),
                 referral.origin.clone(),
+                answers,
                 // The depth THIS child sits at, so the chain it may start is
                 // measured from here. Passing a constant made every generation
                 // claim the same depth, and a bound that never advances bounds

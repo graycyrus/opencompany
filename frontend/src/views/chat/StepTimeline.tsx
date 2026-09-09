@@ -316,16 +316,35 @@ export function ReferralChip({
   // no part in it — so naming the desk here credited a room that was never asked.
   const who = direct ? `@${askerId}` : deskName;
   const label = direction === "asked" ? `Asked by ${who}` : `Answered by ${who}`;
+  const body = (
+    <>
+      <CornerUpLeft className="size-3 shrink-0" />
+      {label}
+    </>
+  );
   return (
     <span className="mt-1.5 flex w-fit items-center rounded-full bg-accent text-accent-foreground">
-      <a
-        href={`#/chat?desk=${encodeURIComponent(deskId)}&at=${sequence}`}
-        className="flex items-center gap-1 px-2 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80"
-        title={`Open the conversation that ${direction === "asked" ? "asked" : "answered"}`}
-      >
-        <CornerUpLeft className="size-3 shrink-0" />
-        {label}
-      </a>
+      {/* A DESK crossing ran on that desk, so its transcript is where the
+          question at `sequence` is and the link reaches it.
+
+          A DIRECT one did not: both sides are held in the pair's own thread and
+          the target's desk holds none of it, so this link would open an
+          unrelated conversation and land on a sequence that is not there.
+          Nothing to link to until a pair thread is a surface an operator can
+          open — and the exchange itself is already one click away, on the
+          message this chip sits under. So it reads as a label rather than
+          offering a way somewhere wrong. */}
+      {direct ? (
+        <span className="flex items-center gap-1 px-2 py-0.5 text-2xs font-medium">{body}</span>
+      ) : (
+        <a
+          href={`#/chat?desk=${encodeURIComponent(deskId)}&at=${sequence}`}
+          className="flex items-center gap-1 px-2 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80"
+          title={`Open the conversation that ${direction === "asked" ? "asked" : "answered"}`}
+        >
+          {body}
+        </a>
+      )}
     </span>
   );
 }

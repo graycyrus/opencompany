@@ -3541,7 +3541,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
         // desk. AFTER journaling, never before — the referral is keyed on the
         // reply's own sequence, so it has to exist first.
         #[cfg(feature = "hivemind")]
-        refer_committed_replies(&runtime, &company, &desk, &report, None, 0).await;
+        refer_committed_replies(&runtime, &company, &desk, &report, None, None, 0).await;
         settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
         Ok((report, feedback_note))
     })
@@ -3569,6 +3569,12 @@ pub(crate) async fn refer_committed_replies(
     // back in the next `ReferralInput`, or the answer has no way home. Nothing
     // in the library remembers it."
     origin: Option<tinyhivemind_core::referral::ReferralOrigin>,
+    // The forward these replies are answering, by its marker's journal
+    // sequence. Recorded on the return so the console pairs the two legs by
+    // identity rather than by looking for the nearest similar marker — two
+    // crossings between the same desks to the same agent are indistinguishable
+    // by shape.
+    answers: Option<u64>,
     // Depth of the reply being offered — NOT of the child it might spawn.
     //
     // A reply to an operator message is 0, so every operator message starts a
@@ -3617,6 +3623,7 @@ pub(crate) async fn refer_committed_replies(
         gate.clone(),
         config.peer_cap(),
         policy.max_hops,
+        answers,
     );
 
     for response in &report.responses {
