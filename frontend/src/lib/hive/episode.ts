@@ -191,16 +191,18 @@ export function parseEndingReport(text: string): EpisodeEnding | null {
   const line = text.trimStart();
 
   const converged =
-    /^The desk (?:settled on #(\S+) after|(settled after) (\d+) turns? \(#(\S+), backed by ([^)]*)\):)\s*(.*)$/ .exec(line);
+    /^The desk (?:settled on #(\S+) after (\d+) turns? \(backed by ([^)]*)\)\.|settled after (\d+) turns? \(#(\S+), backed by ([^)]*)\):)/.exec(
+      line,
+    );
   if (converged) {
-    const backing = converged[3].trim();
+    const backing = (converged[3] ?? converged[6]).trim();
     return {
       kind: "converged",
-      topic: converged[1],
+      topic: converged[1] ?? converged[5],
       // "the room" is the host's stand-in for an empty supporter list, and is
       // not a member id — carrying it through would invent a teammate.
       supporters: backing === "the room" || backing === "" ? [] : backing.split(", "),
-      turns: Number(converged[2]),
+      turns: Number(converged[2] ?? converged[4]),
     };
   }
 
