@@ -1859,6 +1859,82 @@ mod test {
         assert!(set.peek(&ApprovalId::new("a2")).is_some());
     }
 
+    /// `rehydrate` seeds a `HashMap` keyed by approval id, so two journal
+    /// lines that name the same id (a replay quirk, or a caller that passes
+    /// the same call twice) do not double-count the grant — the later entry
+    /// in the iterator simply overwrites the earlier one, same as inserting
+    /// the same key twice into any map.
+    #[test]
+    fn rehydrate_with_a_duplicate_approval_id_keeps_only_the_last_entry() {
+        let set = GrantSet::default();
+        set.rehydrate([
+            call("a1", "finance", "old_tool", serde_json::json!({"n": 1})),
+            call("a1", "finance", "new_tool", serde_json::json!({"n": 2})),
+        ]);
+        assert_eq!(
+            set.live_count(),
+            1,
+            "one approval id must seed exactly one live grant, not two"
+        );
+        let seeded = set
+            .peek(&ApprovalId::new("a1"))
+            .expect("the id is live");
+        assert_eq!(
+            seeded.tool, "new_tool",
+            "the later entry in the replay order wins"
+        );
+    }
+
+    /// `rehydrate` enforces no ceiling of its own on how many grants a single
+    /// replay can seed — the boot-time journal is the only source of a cap
+    /// (if any), and this queue must not silently drop entries past some
+    /// count. Mirrors the standing-list no-ceiling pin for the live side.
+    #[test]
+    fn rehydrate_seeds_every_grant_in_a_large_replay_batch_with_no_cap() {
+        let set = GrantSet::default();
+        let calls: Vec<_> = (0..500)
+            .map(|i| call(&format!("a{i}"), "finance", "t", serde_json::json!({ "i": i })))
+            .collect();
+        set.rehydrate(calls);
+        assert_eq!(
+            set.live_count(),
+            500,
+            "every grant in the replay batch must be seeded; none held back"
+        );
+        assert!(set.peek(&ApprovalId::new("a499")).is_some());
+    }
+
+    /// A boot-time `rehydrate` must not clobber grants a concurrent `consume`
+    /// is already working with: it seeds only the ids it was handed, under
+    /// the same lock as every other `GrantSet` operation, so a batch replay
+    /// can never wipe a grant that was live before the batch arrived.
+    #[test]
+    fn rehydrate_only_adds_its_own_batch_and_leaves_other_live_grants_alone() {
+        let set = GrantSet::default();
+        let pre_existing_args = serde_json::json!({ "amount_usd": 12.0 });
+        set.grant(call(
+            "pre-existing",
+            "finance",
+            "pay_invoice",
+            pre_existing_args,
+        ));
+
+        let batch: Vec<_> = (0..50)
+            .map(|i| call(&format!("new{i}"), "ops", "t", serde_json::json!({ "i": i })))
+            .collect();
+        set.rehydrate(batch);
+
+        assert!(
+            set.peek(&ApprovalId::new("pre-existing")).is_some(),
+            "a grant already live before the batch must survive the rehydrate"
+        );
+        assert_eq!(
+            set.live_count(),
+            51,
+            "the pre-existing grant plus every grant in the batch must all be live"
+        );
+    }
+
     /// Concurrent redemption of one grant: exactly one caller wins.
     ///
     /// The match and the removal are one critical section precisely so this
