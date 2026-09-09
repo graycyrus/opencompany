@@ -49,16 +49,6 @@ export const SETTINGS_PAGES = [
     hint: "The standing rule for what teammates may do unattended",
     group: "capability",
   },
-  // A fact about this browser rather than about the company: the theme is
-  // stored per client, and changing it changes nothing for anyone else who
-  // signs in. That is what separates it from every card left on General.
-  {
-    id: "appearance",
-    label: "Appearance",
-    icon: Palette,
-    hint: "Light, dark, or follow the system",
-    group: "console",
-  },
   // One question per page. "Connections" carried five — third-party accounts,
   // MCP servers, inference, channels, repositories — so each was something an
   // operator scrolled past on the way to another. The first three became pages;
@@ -118,6 +108,16 @@ export const SETTINGS_PAGES = [
   // cards and chat all link straight to one — burying that behind a settings
   // rail would break every link that names a run.
   { id: "observatory", label: "Observatory", icon: Activity, hint: "What your teammates actually did", group: "capability" },
+  // A fact about this browser rather than about the company: the theme is
+  // stored per client, and changing it changes nothing for anyone else who
+  // signs in. That is what separates it from every card left on General.
+  {
+    id: "appearance",
+    label: "Appearance",
+    icon: Palette,
+    hint: "Light, dark, or follow the system",
+    group: "console",
+  },
   // Brain is NOT here: it has its own nav row (`#/brain`). It was the one page
   // on this rail an operator came to *read* rather than to change — settings
   // are configuration, and what the company remembers is not configuration.
