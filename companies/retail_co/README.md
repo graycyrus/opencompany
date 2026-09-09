@@ -55,6 +55,23 @@ uv run tau2-mcp --roles roles/retail.yaml --role cancellations --http 8804 &
 uv run tau2-mcp --roles roles/retail.yaml --role amendments    --http 8805 &
 ```
 
+### Credentials
+
+The bundle carries the *routing* — provider, base URL, and every tier mapped to
+`deepseek/deepseek-v4-flash` — but never the key. Set that per company, from the
+console's Inference card or over the API:
+
+```bash
+curl -X PUT localhost:8099/api/v1/companies/retail-co/inference \
+  -H 'content-type: application/json' \
+  -d "{\"provider\":\"openrouter\",\"base_url\":\"https://openrouter.ai/api/v1\",\"key\":\"$OPENROUTER_API_KEY\"}"
+```
+
+A company declaring `[inference]` consults its own `inference/key` secret, so
+`OPENCOMPANY_INFERENCE_KEY` does **not** stand in for it — the first turn fails
+with a 401 from the platform endpoint rather than from OpenRouter. Hosting
+several tau2 companies on one `serve` means one `PUT` each.
+
 Then, against a running host:
 
 ```bash

@@ -67,6 +67,28 @@ allow = [
 [channels.operator]
 enabled = true
 
+# BYOK routing. The KEY is never in the bundle — it is a company secret
+# (`inference/key`), set from the console's Inference card or
+# `PUT {scope}/inference`. A company that declares this block consults that
+# secret rather than `OPENCOMPANY_INFERENCE_KEY`, so a host-level env var does
+# not stand in for it: the first turn fails with a 401 from the platform
+# endpoint, not from the provider named here.
+[inference]
+provider = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+
+# Every tier on one model, deliberately. The seats differ by the tools they
+# hold and the policy they carry, not by the model behind them — so a run that
+# routes them apart would be measuring the models rather than the org chart.
+# `vision-v1` is mapped too: nothing here sends an image, and leaving a tier
+# unmapped is what makes a stray request fall back to a provider default
+# nobody chose.
+[inference.models]
+chat-v1 = "deepseek/deepseek-v4-flash"
+reasoning-v1 = "deepseek/deepseek-v4-flash"
+agentic-v1 = "deepseek/deepseek-v4-flash"
+vision-v1 = "deepseek/deepseek-v4-flash"
+
 # ---------------------------------------------------------------------------
 # The front desk. One seat, so nothing is deliberated here: `deliberates()`
 # needs two. It answers in one turn and hands the case on.
