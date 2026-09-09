@@ -305,6 +305,8 @@ export interface ReferralConversationDto {
   otherId: string;
   otherDeskId: string;
   otherDeskName: string;
+  /** Whether a person was asked rather than a desk — `@name` vs `#desk`. */
+  direct: boolean;
   lines: ReferralLineDto[];
 }
 
@@ -315,6 +317,8 @@ export interface ReferredFromDto {
   askerLabel: string;
   /** The asking message, so the chip can link straight to it. */
   sequence: number;
+  /** Whether a person was asked rather than a desk. */
+  direct?: boolean;
   /**
    * Which leg of the referral this message is: the outbound ask, or the answer
    * arriving home.

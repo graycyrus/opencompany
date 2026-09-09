@@ -306,6 +306,13 @@ pub struct ReferredFrom {
     /// Whether this is the answer coming home rather than the outbound ask.
     /// Carried from the marker; see `CompanyEvent::ReferralEnqueued`.
     pub returning: bool,
+    /// Whether a PERSON was asked rather than a desk.
+    ///
+    /// The chip names whoever was actually addressed. "Answered by Front Desk"
+    /// for a question put to one person names a room that was never asked — its
+    /// other members had no part in it, and on a direct crossing it holds none
+    /// of the exchange.
+    pub direct: bool,
 }
 
 /// One line of a crossing, in the order it was said.
@@ -340,6 +347,13 @@ pub struct ReferralConversation {
     /// And where that person sits, for the label and the link.
     pub other_desk_id: String,
     pub other_desk_name: String,
+    /// Whether a PERSON was asked, rather than a desk.
+    ///
+    /// The two are different acts and the label says which: `@name` went to
+    /// somebody, `#desk` was put to a room. Taken from whether the crossing
+    /// named its own pair conversation — a desk crossing runs on the desk and
+    /// names none.
+    pub direct: bool,
     /// The exchange, oldest first. Its length is the message count the
     /// collapsed label shows.
     pub lines: Vec<ReferralLine>,
@@ -1294,6 +1308,7 @@ async fn attach_referral_origins(
             target,
             returning,
             answers,
+            conversation,
         } = &stored.event
         else {
             continue;
@@ -1323,6 +1338,23 @@ async fn attach_referral_origins(
             continue;
         };
         let child_id = child.seq.value().to_string();
+        // Whether this crossing went to a person. Read off the FORWARD, which
+        // is the leg that names a pair conversation; a return names none, so it
+        // cannot answer this about itself.
+        let direct = match returning {
+            true => answers
+                .and_then(|seq| page.iter().find(|st| st.seq.value() == seq))
+                .is_some_and(|fwd| {
+                    matches!(
+                        &fwd.event,
+                        CompanyEvent::ReferralEnqueued {
+                            conversation: Some(_),
+                            ..
+                        }
+                    )
+                }),
+            false => conversation.is_some(),
+        };
         let origin = ReferredFrom {
             desk_id: from_desk.clone(),
             desk_name: from_desk_name.clone(),
@@ -1330,6 +1362,7 @@ async fn attach_referral_origins(
             asker_label: asker_label.clone(),
             sequence: *trigger_sequence,
             returning: *returning,
+            direct,
         };
 
         // On a return, the chip belongs on the ASKER's report — the first thing
@@ -1364,6 +1397,33 @@ async fn attach_referral_origins(
                 // rules to drift from the host's.
                 let paired = answers.and_then(|seq| {
                     let forward = page.iter().find(|stored| stored.seq.value() == seq)?;
+                    // A crossing that ran in the pair's own thread keeps BOTH
+                    // sides there, in order, and neither desk carries them. That
+                    // is the whole exchange already — no delivered copy to hunt
+                    // for, no trigger row to fall back to.
+                    if let CompanyEvent::ReferralEnqueued {
+                        conversation: Some(thread),
+                        ..
+                    } = &forward.event
+                    {
+                        let said: Vec<String> = page
+                            .iter()
+                            .filter(|stored| stored.seq > forward.seq)
+                            .filter(|stored| {
+                                matches!(
+                                    &stored.event,
+                                    CompanyEvent::AgentReply { chat_id, .. } if chat_id == thread
+                                )
+                            })
+                            .filter_map(|stored| strip_relay_note(&stored.event))
+                            .collect();
+                        // The question is the first thing said there; anything
+                        // after it is the answer, which may run to several turns.
+                        if let Some(question) = said.first() {
+                            return Some(question.clone());
+                        }
+                        return None;
+                    }
                     // The question, in whichever form this crossing left behind.
                     //
                     // A chat-path crossing delivers a copy onto the far desk —
@@ -1461,6 +1521,7 @@ async fn attach_referral_origins(
                 if let Some(view) = messages.iter_mut().find(|m| m.id == id) {
                     if !lines.is_empty() {
                         view.referral_conversation = Some(ReferralConversation {
+                            direct,
                             asker_id: target.clone(),
                             other_id: asker.clone(),
                             other_desk_id: from_desk.clone(),
@@ -3416,6 +3477,9 @@ mod referral_origin_test {
     ) -> [CompanyEvent; 2] {
         [
             CompanyEvent::ReferralEnqueued {
+                // These fixtures are desk crossings, which run on the target's
+                // own desk and name no pair conversation.
+                conversation: None,
                 answers,
                 from_desk: from_desk.to_string(),
                 from_desk_name: from_desk_name.to_string(),

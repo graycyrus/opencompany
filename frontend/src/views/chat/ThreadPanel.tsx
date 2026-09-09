@@ -518,6 +518,8 @@ function Line({
           <ReferralChip
             deskId={message.referredFrom.deskId}
             deskName={message.referredFrom.deskName}
+            askerId={message.referredFrom.askerId}
+            direct={message.referredFrom.direct}
             sequence={message.referredFrom.sequence}
             direction={message.referredFrom.direction ?? "asked"}
           />

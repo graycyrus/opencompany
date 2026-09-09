@@ -74,6 +74,21 @@ fn move_line(kind: &str) -> Option<&'static str> {
 }
 
 /// The rules those moves are read under.
+/// **Write about yourself in the first person.**
+///
+/// The transcript attributes every row, the reader's own included — `[20]
+/// refunds (you):` — so a member can see which lines are its own. Seeing them
+/// is not the same as writing that way: rows are labelled by id, and a member
+/// copies the convention it was shown, which produced commits like "both
+/// refunds and exchanges agreed" written BY refunds — a member describing
+/// itself as somebody else in the one line whose job is to say who carried the
+/// decision.
+///
+/// Naming a COLLEAGUE by id stays right: that is how a citation is read back
+/// and how the fold counts them.
+const FIRST_PERSON_RULE: &str = "Lines marked `(you)` in the transcript are your own. Write about \
+yourself in the first person — never by your own id — and name colleagues by their id as usual.";
+
 const DELIBERATE_RULES: &str = "\
 The # on a topic and the ^ on a citation are part of the grammar: `!propose \
 #canary ...` names an option, `!propose canary ...` names nothing and is \
@@ -197,7 +212,7 @@ fn commit_protocol(topic: &str) -> String {
          topic and the ^ on the citation; without them the line records nothing. Angle brackets \
          are not part of the line — write the sentence itself. This is bookkeeping, not a fresh \
          judgement: record the topic the room actually settled on rather than the one you would \
-         have preferred, and do not re-derive the answer. Write nothing before or after the \
+         have preferred, and do not re-derive the answer. {FIRST_PERSON_RULE} Write nothing before or after the \
          single marker line."
     )
 }
@@ -412,6 +427,8 @@ impl<'a> EpisodePrompt<'a> {
         );
         let head = "Reply with ONE line only, beginning with exactly one of these markers:";
         let mut tail = DELIBERATE_RULES.to_owned();
+        tail.push('\n');
+        tail.push_str(FIRST_PERSON_RULE);
         if self.quorum.require_evidential {
             tail.push('\n');
             tail.push_str(EVIDENTIAL_RULE);

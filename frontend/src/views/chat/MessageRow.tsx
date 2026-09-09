@@ -388,6 +388,8 @@ export function MessageRow({
           <ReferralChip
             deskId={message.referredFrom.deskId}
             deskName={message.referredFrom.deskName}
+            askerId={message.referredFrom.askerId}
+            direct={message.referredFrom.direct}
             sequence={message.referredFrom.sequence}
             // The host's word, never a guess off `from`: both legs of a
             // referral are `company` lines, so that test called every answer

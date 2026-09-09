@@ -4032,6 +4032,8 @@ pub(crate) struct ReferralConversationDto {
     /// And where that person sits — id for the link, name for the label.
     other_desk_id: String,
     other_desk_name: String,
+    /// Whether a person was asked rather than a desk — `@name` vs `#desk`.
+    direct: bool,
     /// The exchange, oldest first. Its length is the count in the label.
     lines: Vec<ReferralLineDto>,
 }
@@ -4049,6 +4051,9 @@ pub(crate) struct ReferredFromDto {
     asker_label: String,
     /// The asking message, so the chip links straight to it.
     sequence: u64,
+    /// Whether a person was asked rather than a desk, so the chip can name
+    /// whoever was actually addressed.
+    direct: bool,
     /// Which word the chip uses. `"asked"` on the outbound leg, `"answered"`
     /// when the answer has come home.
     ///
@@ -4222,6 +4227,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
                     other_id: crossing.other_id,
                     other_desk_id: crossing.other_desk_id,
                     other_desk_name: crossing.other_desk_name,
+                    direct: crossing.direct,
                     lines: crossing
                         .lines
                         .into_iter()
@@ -4240,6 +4246,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
                 asker_id: origin.asker_id,
                 asker_label: origin.asker_label,
                 sequence: origin.sequence,
+                direct: origin.direct,
                 direction: if origin.returning {
                     "answered"
                 } else {

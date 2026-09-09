@@ -130,8 +130,12 @@ export function ReferralConversation({ crossing }: { crossing: ReferralConversat
       >
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         <span>
-          asked @{crossing.otherId} on {crossing.otherDeskName} · {count} message
-          {count === 1 ? "" : "s"}
+          {/* Who was asked, in the form they were asked in: `@name` went to a
+              person, `#desk` was put to a room. Naming the answerer's desk
+              alongside their name read as though the desk had been asked, which
+              for a `@name` crossing is the one thing that did not happen. */}
+          asked {crossing.direct ? `@${crossing.otherId}` : `#${crossing.otherDeskId}`} ·{" "}
+          {count} message{count === 1 ? "" : "s"}
         </span>
       </button>
       {open && (
@@ -148,19 +152,15 @@ export function ReferralConversation({ crossing }: { crossing: ReferralConversat
             // The desk each side is speaking from — the asker's is this one, so
             // it goes unsaid; the answer comes from somewhere the reader may not
             // have open.
-            const where = line.outbound ? null : crossing.otherDeskName;
             return (
               <li key={i} className="flex gap-2">
                 <TeammateAvatar name={who} className="mt-0.5 size-5 shrink-0" />
                 <div className="flex min-w-0 flex-col gap-0.5">
-                  <span className="text-2xs leading-none font-semibold">
-                    {who}
-                    {where && (
-                      <span className="ml-1 font-normal text-muted-foreground">
-                        on {where}
-                      </span>
-                    )}
-                  </span>
+                  {/* The name alone. The header already says whether this was
+                      a person or a desk, and repeating the answerer's desk on
+                      their line was what made a `@name` crossing read as though
+                      the desk had been asked. */}
+                  <span className="text-2xs leading-none font-semibold">{who}</span>
                   <span className="text-2xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
                     {line.text}
                   </span>
@@ -299,15 +299,23 @@ function formatElapsed(ms: number | undefined, status: TurnStep["status"]): stri
 export function ReferralChip({
   deskId,
   deskName,
+  askerId,
   sequence,
   direction,
+  direct = false,
 }: {
   deskId: string;
   deskName: string;
+  askerId: string;
   sequence: number;
   direction: "asked" | "answered";
+  direct?: boolean;
 }) {
-  const label = direction === "asked" ? `Asked by ${deskName}` : `Answered by ${deskName}`;
+  // Whoever was actually addressed. A crossing put to a PERSON never reached
+  // their desk — that desk holds none of the exchange and its other members had
+  // no part in it — so naming the desk here credited a room that was never asked.
+  const who = direct ? `@${askerId}` : deskName;
+  const label = direction === "asked" ? `Asked by ${who}` : `Answered by ${who}`;
   return (
     <span className="mt-1.5 flex w-fit items-center rounded-full bg-accent text-accent-foreground">
       <a

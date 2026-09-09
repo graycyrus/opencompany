@@ -705,6 +705,21 @@ pub enum CompanyEvent {
         /// back to the scan.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<u64>,
+        /// The conversation the exchange actually happened in, when it was not
+        /// a desk — the two teammates' own thread (`dm:a+b`).
+        ///
+        /// The desk fields stay what they are: who asked, from where, and whose
+        /// home desk the answerer keeps. Those name the PEOPLE, and the console
+        /// labels a crossing with them. This names the PLACE, which is what a
+        /// reader needs to find the rows. Keeping them apart is why a crossing
+        /// can move off the answerer's channel without the label following it
+        /// somewhere meaningless.
+        ///
+        /// Absent on a crossing that ran on a desk, and on markers written
+        /// before pairs had their own conversation. Defaulted for the reason
+        /// every other field here is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
         /// The agent that asked. Defaulted for the reason above.
         #[serde(default)]
         asker: String,

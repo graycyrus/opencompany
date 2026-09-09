@@ -1474,6 +1474,9 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                 .append(
                     self.runtime.id(),
                     CompanyEvent::ReferralEnqueued {
+                        // The chat path still runs a crossing on the target's
+                        // desk; only an episode's crossing moves to the pair.
+                        conversation: None,
                         from_desk: referral.from.desk_id.clone(),
                         from_desk_name: desk_label(&record, &referral.from.desk_id),
                         asker: referral.source_id.clone(),
