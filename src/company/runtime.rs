@@ -2890,10 +2890,10 @@ impl CompanyRuntime {
         let origin_parent = conversation
             .as_ref()
             .and_then(|conversation| conversation.parent);
-        let step = resolution
-            .step
-            .clone()
-            .or_else(|| self.blocker_step_from_task_link(approval_id));
+        let step = match resolution.step.clone() {
+            Some(step) => Some(step),
+            None => self.blocker_step_from_task_link(approval_id).await,
+        };
         let outcome = self
             .drive_blocker_resume(&resolution, step.as_ref(), thread.as_deref(), origin_parent)
             .await;
@@ -2936,20 +2936,31 @@ impl CompanyRuntime {
     /// answer — there is no card to re-enter, and the answer is carried back
     /// into the conversation instead.
     ///
+    /// A link is weaker evidence than a step, so it is only followed to a card
+    /// the board still holds. A declared step names the thing that stopped; a
+    /// link only says a card was in hand when the question was raised. Reading
+    /// a link to a card that is gone as a card resume answers the operator
+    /// with *that card is no longer on the board* — a report about a card,
+    /// where what was asked for was an answer to a question.
+    ///
     /// [`TaskLink`]: crate::runtime::journal::TaskLink
     #[cfg(feature = "openhuman")]
-    fn blocker_step_from_task_link(
+    async fn blocker_step_from_task_link(
         &self,
         id: &ApprovalId,
     ) -> Option<crate::ports::blockers::BlockerStep> {
         use crate::runtime::journal::TaskLink;
 
-        match self.journal.approval_task(id) {
-            Some(Some(TaskLink::Task { id })) => {
-                Some(crate::ports::blockers::BlockerStep::Task { task_id: id })
-            }
-            Some(Some(TaskLink::Unlinked)) | Some(None) | None => None,
-        }
+        let Some(Some(TaskLink::Task { id: task_id })) = self.journal.approval_task(id) else {
+            return None;
+        };
+        let on_board = self
+            .ops
+            .tasks
+            .list(&self.id)
+            .await
+            .is_ok_and(|tasks| tasks.iter().any(|task| task.id == task_id));
+        on_board.then_some(crate::ports::blockers::BlockerStep::Task { task_id })
     }
 
     /// Routes a resolved blocker to the right resume by its
@@ -12910,12 +12921,42 @@ mod tests {
             );
         }
 
-        /// A bare agent question — `step: None`, so no board card is needed and
-        /// the resume note alone distinguishes one verdict from another.
-        ///
-        /// Deliberately not the module's `blocker()` helper: that one carries a
-        /// Task step, and with no card seeded both retry and cancel resume as
-        /// "card not found", which cannot tell the two verdicts apart.
+        /// The paused card a parked blocker's approval links to.
+        async fn seed_paused_card(runtime: &Arc<CompanyRuntime>, id: &str) {
+            use crate::ports::tasks::{COLUMN_PAUSED, TaskDeliverable, TaskRecord, TaskTitle};
+
+            runtime
+                .ops
+                .tasks
+                .upsert(
+                    &runtime.id,
+                    &TaskRecord {
+                        id: id.to_string(),
+                        title: TaskTitle::authored("Draft the launch note"),
+                        note: None,
+                        column: COLUMN_PAUSED.to_string(),
+                        priority: "medium".to_string(),
+                        assignee: "eng".to_string(),
+                        updated_at_millis: 1,
+                        origin: crate::ports::TaskOrigin::new(Some("dm:eng".to_string()), None),
+                        parent_task_id: None,
+                        output: None,
+                        plan: None,
+                        planning_attempts: Vec::new(),
+                        deliverable: TaskDeliverable::Once,
+                        workflow_proposal: None,
+                        origin_run_id: None,
+                        origin_workflow_id: None,
+                        origin_message_seq: None,
+                        bounced: None,
+                    },
+                )
+                .await
+                .expect("seed card");
+        }
+
+        /// A bare agent question: `step: None`, so the resume has only the
+        /// approval's task link to work from.
         fn question() -> BlockerPayload {
             BlockerPayload {
                 kind: BlockerKind::Information,
@@ -13035,6 +13076,7 @@ mod tests {
 
             let (runtime, home) = runtime().await;
             let payload = question();
+            seed_paused_card(&runtime, "t-1").await;
             let id = runtime
                 .park_blocker(&payload, "t-1", assignee("eng"))
                 .await
@@ -13105,15 +13147,8 @@ mod tests {
                     .expect("follow-up runs");
             }
 
-            // The mechanism under test: for a step-less blocker, the resume
-            // posts a DIFFERENT acknowledgement into the DM depending on which
-            // verdict it reads off the armed side-channel — "Got it — picking
-            // that back up now." for retry, "Okay — cancelled." for cancel
-            // (`blocker_resume_note`). Exactly one resume runs (the loser's
-            // settle is `AlreadyResolved`, which owes no follow-up), so
-            // whichever note landed must match the winner — a
-            // last-write-wins race could instead post the LOSER's note under
-            // the WINNER's durable verdict.
+            // Retry and cancel post different notes into the DM, and exactly
+            // one resume runs, so the note that landed must match the winner.
             let notes: Vec<String> = runtime
                 .events
                 .read_from(
@@ -13135,12 +13170,16 @@ mod tests {
                 .collect();
 
             let (expected, contradicting) = match winner_verdict {
-                BlockerVerdict::Retry => {
-                    ("Got it — picking that back up now.", "Okay — cancelled.")
-                }
-                BlockerVerdict::Cancel => {
-                    ("Okay — cancelled.", "Got it — picking that back up now.")
-                }
+                BlockerVerdict::Retry => (
+                    "Got it — picking that back up now.",
+                    "Okay — I've cancelled that. It's back in To-do if you want to pick it up \
+                     later.",
+                ),
+                BlockerVerdict::Cancel => (
+                    "Okay — I've cancelled that. It's back in To-do if you want to pick it up \
+                     later.",
+                    "Got it — picking that back up now.",
+                ),
                 _ => unreachable!(),
             };
             assert!(
