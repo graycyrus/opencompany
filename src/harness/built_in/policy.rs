@@ -4341,26 +4341,27 @@ mod tests {
     /// second `request_approval` would be.
     #[tokio::test]
     async fn escalate_to_human_does_not_refuse_a_sibling_gated_call_in_the_same_turn() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
         let queue = ApprovalRequestQueue::default();
         let policy = policy("supervised", &[], None).with_requests(queue.clone());
         let claim = queue.claim(ApprovalScope::Cycle);
 
+        // Through the tool, not a hand-built `ApprovalRequest`: the boundary is
+        // established by what `execute` does, so a fixture that pushes the
+        // request itself would keep passing if the tool later began setting the
+        // task-local — the one regression this case exists to catch.
+        let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
+            queue.clone(),
+            "engineer".to_string(),
+        );
         let later_call = claim
             .scoped(queue.turn_scoped(async {
-                queue.push(ApprovalRequest {
-                    tool: crate::harness::built_in::blockers::ESCALATE_TO_HUMAN_TOOL.to_string(),
-                    reason: "staging or prod?".to_string(),
-                    effect: Effect {
-                        kind: "blocker.information".to_string(),
-                        group: EffectGroup::Other,
-                        amount_usd: None,
-                        established_thread: false,
-                        first_time_counterparty: false,
-                        payload: serde_json::json!({ "reason": "staging or prod?" }),
-                        agent: None,
-                        run_id: None,
-                    },
-                });
+                let asked = tool
+                    .execute(serde_json::json!({ "question": "staging or prod?" }))
+                    .await
+                    .expect("the question runs");
+                assert!(!asked.is_error, "{}", asked.output());
                 policy
                     .check(&request("composio_execute", composio_send_args()))
                     .await
