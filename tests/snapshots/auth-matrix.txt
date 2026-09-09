@@ -1713,6 +1713,20 @@ POST /api/v1/companies/{id}/connections/{provider}/start must-change-password-ad
 POST /api/v1/companies/{id}/connections/{provider}/start platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/connections/{provider}/start tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/connections/{provider}/start tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/finish admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/finish anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/finish member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/finish must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/finish platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/finish tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/finish tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/start admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/start anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/start member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/start must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/start platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/start tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/credential/link/start tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/desks admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may create desks (group chats) for the company." wait=-
 POST /api/v1/companies/{id}/desks anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may create desks (group chats) for the company." wait=-
 POST /api/v1/companies/{id}/desks member permitted source=operator access=scoped features=openhuman blast=authority note="Members may create desks (group chats) for the company." wait=-
@@ -2175,6 +2189,20 @@ POST /api/v1/company/connections/{provider}/start must-change-password-admin ref
 POST /api/v1/company/connections/{provider}/start platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/connections/{provider}/start tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/connections/{provider}/start tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/finish admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/finish anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/finish member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/finish must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/finish platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/finish tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/finish tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/start admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/start anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/start member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/start must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/start platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/start tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/credential/link/start tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/desks admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may create desks (group chats) for the company." wait=-
 POST /api/v1/company/desks anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may create desks (group chats) for the company." wait=-
 POST /api/v1/company/desks member permitted source=operator access=scoped features=openhuman blast=authority note="Members may create desks (group chats) for the company." wait=-
