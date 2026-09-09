@@ -258,14 +258,17 @@ export function WindowTitleBar({
           `SidebarCollapseButton` for the three homes it had before this one and
           what each cost. Here it is one more glyph among the row's own. */}
       {sidebarToggle}
-      {/* Two draggable spacers with the search field between them.
-          `self-stretch` so the grabbable area is the full height of the row
-          rather than a hairline through its centre. Two rather than one because
-          the field sits in the middle: a single spacer would push it against
-          whichever end the flexbox settled it on. */}
-      <div data-tauri-drag-region aria-hidden="true" className="min-w-0 flex-1 self-stretch" />
+      {/* The elastic middle IS the search field — no spacers beside it.
+          It briefly had one `flex-1` spacer either side, which made three
+          equal-weight elastic members sharing the gap, so the field took a
+          third of the middle and read as a chip that had drifted to the centre.
+          One elastic member means it takes the whole of what the two `flex-none`
+          groups leave.
+          `TitleBarSearch` carries the drag region on its own wrapper — the
+          padding around the input, and the band above and below it in a 52px
+          row — so the window stays grabbable across the middle without a
+          spacer to hold it. */}
       {search}
-      <div data-tauri-drag-region aria-hidden="true" className="min-w-0 flex-1 self-stretch" />
       {/* Group one — where you are going. The two places you jump to from
           anywhere, held tighter to each other (`gap-1`) than to the groups
           beside them, so they read as one object. No divider: it is the first

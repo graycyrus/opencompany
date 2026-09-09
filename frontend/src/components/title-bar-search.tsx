@@ -32,7 +32,16 @@ export function TitleBarSearch() {
     // and this is not, so it takes exactly what they leave and gives it back
     // first when the row is crowded. `min-w-0` is what lets it actually shrink
     // rather than flooring the row at its own content width.
-    <div className="flex min-w-0 flex-1 justify-center px-3">
+    // `self-stretch` + `data-tauri-drag-region`: this wrapper is the row's only
+    // elastic member now, so it is also the only thing left to grab the window
+    // by across the middle. Stretched to the full 52px it leaves an 8px band
+    // above and below the 36px field, plus its own side padding — the input
+    // below does NOT carry the attribute (it is opt-in per element), so the
+    // field keeps its own clicks.
+    <div
+      data-tauri-drag-region
+      className="flex min-w-0 flex-1 items-center justify-center self-stretch px-3"
+    >
       <div className="relative w-full">
         <Search
           aria-hidden="true"
