@@ -86,10 +86,10 @@ test("a key typed for a BYOK provider is not discarded by switching provider", a
   await expect(page.getByTestId("inference-key-note")).toBeVisible();
 
   // Type a key under one provider, then switch to another and back. The value
-  // survives the switch — that is the state that used to lose it. The pair used
-  // to be OpenRouter and managed; managed is no longer selectable, and the
-  // defect was never about *which* two providers, only about crossing between
-  // any of them.
+  // survives the switch — that is the state that used to lose it. The pair
+  // used to be OpenRouter and managed, back when managed was not selectable;
+  // Custom stands in for it here instead, but the defect was never about
+  // *which* two providers, only about crossing between any of them.
   await pickProvider(page, "OpenRouter");
   const typed = `pw-e2e-${Date.now()}`;
   await page.locator("#inference-key").fill(typed);
