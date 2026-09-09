@@ -350,6 +350,18 @@ mod http {
         email: String,
     }
 
+    /// The hub's envelope for `POST /auth/keys`.
+    #[derive(Debug, Deserialize)]
+    struct KeyResponse {
+        data: KeyData,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct KeyData {
+        /// The plaintext key. The hub emits it exactly once.
+        key: String,
+    }
+
     /// A [`HubIdentityExchange`] backed by `GET {api_url}/auth/me`.
     ///
     /// Deliberately the hub's *existing* session route rather than anything
@@ -417,6 +429,40 @@ mod http {
             Ok(HubIdentity {
                 email: parsed.data.email,
             })
+        }
+
+        async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String> {
+            let url = format!("{}/auth/keys", self.api_url);
+            let (product_header_name, product_header_value) =
+                crate::product::product_identity_header();
+            // No bearer: the hub's redemption route is unauthenticated, and the
+            // verifier is what authenticates it. That is the whole point of the
+            // exchange — this host never holds a credential belonging to the
+            // person who approved the grant.
+            let resp = self
+                .http
+                .post(&url)
+                .header(product_header_name, product_header_value)
+                .json(&serde_json::json!({ "code": code, "code_verifier": verifier }))
+                .send()
+                .await
+                .map_err(|e| Self::err("unreachable", e))?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                // The hub's message describes the code's standing ("invalid or
+                // expired", "verifier does not match"), never the key. Neither
+                // argument is echoed: both are live secrets, and the response
+                // body is the hub's own words about its own flow.
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(Self::err(
+                    &format!("http_{}", status.as_u16()),
+                    truncate(&detail, 200),
+                ));
+            }
+
+            let parsed: KeyResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
+            Ok(parsed.data.key)
         }
     }
 
