@@ -233,6 +233,17 @@ export function AgentDetailView({
     "overview",
   );
   const editing = editRequested && (agent?.editable.length ?? 0) > 0;
+  // The edit form lives on the Instructions tab, so an address that asks to
+  // edit has to open that tab — `#/team/<id>?edit` is what the chat profile
+  // panel's "Edit agent" links, and it would otherwise land on Overview with
+  // the form it asked for on a tab the operator has to know to look under.
+  //
+  // Written into the address rather than used as a dynamic fallback: a fallback
+  // that changes with `editing` would yank the operator back to Overview the
+  // moment they pressed Cancel.
+  useEffect(() => {
+    if (editing && tab !== "instructions") setTab("instructions");
+  }, [editing, tab, setTab]);
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
   /**
@@ -870,6 +881,26 @@ export function AgentDetailView({
                 ) : undefined
               }
             />
+            {/*
+              The page's tab strip. `Identity` is this page's header — it draws
+              the name, the face and the role — so the strip sits under it and
+              on its own hairline, which is the same reading as `PageHeader`'s
+              built-in `tabs` slot everywhere else. The margins are overridden
+              because that slot's own offsets are measured against
+              `PageHeader`'s `pb-3`, which there is none of here.
+            */}
+            <div className="border-b">
+              <PageTabs
+                tabs={AGENT_TABS}
+                value={tab}
+                onChange={setTab}
+                idBase="agent"
+                aria-label="Teammate views"
+                className="mt-0 -mb-px"
+              />
+            </div>
+
+            <PageTabPanel idBase="agent" id="overview" value={tab} className="space-y-6">
             <FactLine agent={agent} workload={workload} />
             <OpenTasks tasks={openTasks} />
 
