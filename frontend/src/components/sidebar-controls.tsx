@@ -1,23 +1,8 @@
-import {
-  LayoutDashboard,
-  MessageSquareWarning,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Settings,
-} from "lucide-react";
-
-import type { View } from "@/components/app-shell";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import {
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  useSidebar,
-} from "@/components/ui/sidebar";
+import { useSidebar } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { DiscordIcon } from "@/components/discord-icon";
-import { DISCORD_INVITE_URL } from "@/lib/links";
 import { cn } from "@/lib/utils";
 
 /**
@@ -32,14 +17,6 @@ import { cn } from "@/lib/utils";
 // `data-active="true"` — match it the same way the sidebar's own styles do.
 export const RESTING_ROW =
   "opacity-60 transition-opacity hover:opacity-100 focus-visible:opacity-100 data-active:opacity-100";
-
-// Discord's brand blurple, lifted a step in dark mode so it clears the
-// sidebar's surface instead of sinking into it. Named tokens rather than raw
-// hex — the colour is deliberately not ours, and saying so in the token name
-// is what stops it being "fixed" into the palette later. See `--brand-discord`
-// in index.css.
-const DISCORD_BLURPLE =
-  "text-(--brand-discord-on-light) dark:text-(--brand-discord-on-dark)";
 
 /*
  * `SidebarUtilityBar` used to live here — Settings, Feedback and Discord as
