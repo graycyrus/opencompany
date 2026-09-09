@@ -166,6 +166,8 @@ const TITLE_BAR_DIVIDER = "before:mr-2 before:h-5 before:w-px before:bg-chrome-b
 export function WindowTitleBar({
   switcher,
   overview,
+  sidebarToggle,
+  search,
   utilities,
   approvals,
   autonomy,
@@ -192,6 +194,18 @@ export function WindowTitleBar({
    * around it — hairline included. See `AutonomyPill`.
    */
   autonomy?: React.ReactNode;
+  /**
+   * Show/hide the sidebar, beside the switcher at the row's leading end.
+   *
+   * Optional: the shell withholds it below `md`, where the sidebar is a sheet
+   * with a trigger of its own and this control's two labels are both wrong.
+   */
+  sidebarToggle?: React.ReactNode;
+  /**
+   * The search field, filling the row's elastic middle. See
+   * `title-bar-search.tsx` — a placed control, not a wired one.
+   */
+  search?: React.ReactNode;
   /**
    * Settings, Feedback and Discord, beside Overview in the first group.
    *
@@ -238,8 +252,19 @@ export function WindowTitleBar({
       <div className="w-[calc(var(--sidebar-width)-(--spacing(6)))] min-w-0 shrink-0">
         {switcher}
       </div>
-      {/* The draggable middle. `self-stretch` so the grabbable area is the full
-          height of the row rather than a hairline through its centre. */}
+      {/* Show/hide the column, beside the company whose column it acts on.
+          It used to float over the seam between the sidebar and the content
+          card, absolutely positioned out of `SidebarInset` — see
+          `SidebarCollapseButton` for the three homes it had before this one and
+          what each cost. Here it is one more glyph among the row's own. */}
+      {sidebarToggle}
+      {/* Two draggable spacers with the search field between them.
+          `self-stretch` so the grabbable area is the full height of the row
+          rather than a hairline through its centre. Two rather than one because
+          the field sits in the middle: a single spacer would push it against
+          whichever end the flexbox settled it on. */}
+      <div data-tauri-drag-region aria-hidden="true" className="min-w-0 flex-1 self-stretch" />
+      {search}
       <div data-tauri-drag-region aria-hidden="true" className="min-w-0 flex-1 self-stretch" />
       {/* Group one — where you are going. The two places you jump to from
           anywhere, held tighter to each other (`gap-1`) than to the groups

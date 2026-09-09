@@ -23,6 +23,7 @@ import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { OverviewButton } from "@/components/overview-button";
+import { TitleBarSearch } from "@/components/title-bar-search";
 import { TitleBarUtilities } from "@/components/title-bar-utilities";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
@@ -3617,6 +3618,17 @@ export function AppShell({
             canCreateCompany={offersCompanyCreation(client)}
           />
         }
+        sidebarToggle={
+          // `md` and up only, and the breakpoint is the same one `useIsMobile`
+          // flips at: below it the sidebar is a sheet with its own trigger in
+          // the inset, and this button's two labels ("Collapse"/"Expand") are
+          // both wrong for a sheet. It was gated at exactly this width while it
+          // floated over the content card, for exactly this reason.
+          <span className="hidden md:inline-flex">
+            <SidebarCollapseButton />
+          </span>
+        }
+        search={<TitleBarSearch />}
         utilities={
           // The three that were the sidebar's footer, beside Overview in the
           // same group: all four are about the console rather than the page.
