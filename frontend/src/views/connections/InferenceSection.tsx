@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { getCompanyCredential, type CompanyCredentialStatus } from "@/api/credential";
+import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
 import {
   getInferenceStatus,
   listInferenceModels,
