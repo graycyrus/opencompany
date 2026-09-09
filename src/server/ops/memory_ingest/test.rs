@@ -240,24 +240,68 @@ async fn a_drop_with_no_files_is_refused() {
 
 /// The server-side request forgery guard: this route makes the *host* fetch a
 /// URL, so the deployment's own network is off limits.
+///
+/// Every case here is decided without a lookup — a literal address, or a
+/// scheme refused before any host is considered — so the test does not depend
+/// on the runner having DNS. The arm that does resolve is the one this now
+/// delegates: a hostname answering with a private address is refused by
+/// `dns_check_with_empty_allowlist_blocks_private_resolved_ip` and
+/// `dns_check_blocks_localhost_resolution` in the runtime's own
+/// `url_guard_tests.rs`, both against the empty allow-list this passes.
 #[cfg(feature = "documents")]
-#[test]
-fn link_ingestion_refuses_this_deployments_own_network() {
+#[tokio::test]
+async fn link_ingestion_refuses_this_deployments_own_network() {
     for refused in [
         "http://localhost:8080/admin",
         "http://127.0.0.1/",
         "http://169.254.169.254/latest/meta-data/",
         "http://10.0.0.5/",
         "http://192.168.1.1/",
+        "http://[::1]/",
         "file:///etc/passwd",
         "ftp://example.com/x",
     ] {
         assert!(
-            super::guard_link(refused).is_err(),
+            super::guard_link(refused).await.is_err(),
             "{refused} must be refused"
         );
     }
-    assert!(super::guard_link("https://example.com/pricing").is_ok());
+    // A public literal, so the answer is the guard's and not a resolver's.
+    assert!(
+        super::guard_link("https://93.184.216.34/pricing")
+            .await
+            .is_ok()
+    );
+}
+
+/// The half a string check cannot do, and the reason this delegates.
+///
+/// A host that is not a literal was admitted on its spelling alone, so
+/// `http://anything.example/` answering `169.254.169.254` read as an ordinary
+/// public URL and the fetch reached the metadata service. The guard now
+/// resolves the name and refuses it on what it answers with.
+///
+/// This case needs working DNS, which the rest of the guard's cases
+/// deliberately do not: `localtest.me` is a long-standing public name that
+/// answers `127.0.0.1`, and using a real one is the only way to exercise the
+/// resolving arm from outside the runtime crate, whose own
+/// resolver-injected tests are not reachable from here. A runner without DNS
+/// fails this loudly rather than passing it quietly, which is the right way
+/// round.
+#[cfg(feature = "documents")]
+#[tokio::test]
+async fn a_host_that_resolves_into_this_network_is_refused_on_what_it_resolves_to() {
+    let refusal = super::guard_link("http://localtest.me/admin")
+        .await
+        .expect_err("a name resolving to loopback must be refused");
+    // Which loopback it answers with is the resolver's business — v4 on some
+    // hosts, `::1` on others. What must hold is that the refusal names the
+    // address it resolved to, so the operator can see why their link was
+    // turned down rather than guessing.
+    assert!(
+        refusal.contains("resolves to") && refusal.contains("own network"),
+        "the refusal must name the address it resolved to: {refusal}"
+    );
 }
 
 /// Dropping the wrong folder is a mistake an operator makes once; without a
