@@ -167,8 +167,8 @@ describe("AddMemberDialog, when the write is refused", () => {
         el.dispatchEvent(new Event("input", { bubbles: true }));
       });
     };
-    setInput(document.body.querySelector("#member-name") as HTMLInputElement, "Nova");
-    setInput(document.body.querySelector("#member-role") as HTMLInputElement, "Growth Marketer");
+    setInput(document.body.querySelector("#agent-add-name") as HTMLInputElement, "Nova");
+    setInput(document.body.querySelector("#agent-add-role") as HTMLInputElement, "Growth Marketer");
 
     const create = Array.from(document.body.querySelectorAll("button")).find(
       (b) => b.textContent === "Add agent" || b.textContent === "Adding…",
@@ -186,7 +186,7 @@ describe("AddMemberDialog, when the write is refused", () => {
     // is the visible error; this dialog's honest half is staying open and
     // retryable rather than claiming the write landed.
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
-    expect((document.body.querySelector("#member-name") as HTMLInputElement).value).toBe("Nova");
+    expect((document.body.querySelector("#agent-add-name") as HTMLInputElement).value).toBe("Nova");
     const retry = Array.from(document.body.querySelectorAll("button")).find(
       (b) => b.textContent === "Add agent",
     ) as HTMLButtonElement | undefined;
