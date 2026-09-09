@@ -890,6 +890,22 @@ export function AgentDetailView({
               agentId={agent.id}
               agentName={agent.name?.trim() || agent.role}
             />
+            {/* One switch and one cap. Neither is a tab (see `AGENT_TABS`);
+                both are facts about how this teammate is set up, which is what
+                Overview is. */}
+            <Inbox
+              agent={agent}
+              busy={inboxSaving}
+              onToggle={(next) => void toggleInbox(next)}
+            />
+            <Budget
+              agent={agent}
+              canEdit={isAdmin}
+              setByLabel={agent.budgetSetBy ? whoSet(agent.budgetSetBy) : undefined}
+              onEdit={() => setBudgetOpen(true)}
+              onRemoveCap={() => void applyBudget(null)}
+              onResetBudget={() => void resetBudget()}
+            />
             </PageTabPanel>
 
             {/* Edit sits in this card, beside the fields it opens (issue #1434
@@ -1170,19 +1186,6 @@ export function AgentDetailView({
             />
             </PageTabPanel>
 
-            <Inbox
-              agent={agent}
-              busy={inboxSaving}
-              onToggle={(next) => void toggleInbox(next)}
-            />
-            <Budget
-              agent={agent}
-              canEdit={isAdmin}
-              setByLabel={agent.budgetSetBy ? whoSet(agent.budgetSetBy) : undefined}
-              onEdit={() => setBudgetOpen(true)}
-              onRemoveCap={() => void applyBudget(null)}
-              onResetBudget={() => void resetBudget()}
-            />
           </>
         )}
       </div>
