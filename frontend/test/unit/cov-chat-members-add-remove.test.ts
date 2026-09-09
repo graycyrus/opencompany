@@ -176,11 +176,16 @@ describe("AddMemberDialog, when the write is refused", () => {
     await act(async () => create.click());
     await flush();
 
+    // `inbox` is gone with the per-agent inbox; `avatar` and `landOnProfile`
+    // are what the reduced dialog adds. `avatar` is undefined because nobody
+    // picked a face, which is not the same as picking the hashed mascot.
     expect(onAdd).toHaveBeenCalledWith({
       name: "Nova",
       role: "Growth Marketer",
       description: "",
-      inbox: false,
+      instructions: "",
+      avatar: undefined,
+      landOnProfile: true,
     });
     // Not closed on a failed write — the caller's own toast (ChatView.addMember)
     // is the visible error; this dialog's honest half is staying open and
