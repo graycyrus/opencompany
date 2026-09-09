@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { AvatarPicker } from "@/components/avatar-picker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { fetchBoardColumns } from "@/lib/board-columns";
@@ -41,6 +40,7 @@ import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
+import { AddMemberDialog } from "@/views/chat/AddMemberDialog";
 
 interface Props {
   client: OpenCompanyClient;
@@ -554,7 +554,7 @@ export function TeamView({
         )}
       </div>
 
-      <AddAgentDialog
+      <AddMemberDialog
         open={addOpen}
         onOpenChange={setAddOpen}
         onAdd={addMember}
@@ -867,183 +867,5 @@ function WorkloadLine({ workload }: { workload: Workload }) {
         {workload.open === 1 ? "1 open task" : `${workload.open} open tasks`}
       </span>
     </p>
-  );
-}
-
-/**
- * Add an agent: a name, a face, and a post.
- *
- * # Why it collects three things
- *
- * It used to be the whole teammate — name, role, description, persona
- * instructions, an inbox switch and a daily cap — with a copilot that would
- * design all of it from one sentence, and a hand-over to the long form when
- * that design was refused. Four states in a create dialog, three of which
- * existed to recover from the other one.
- *
- * A teammate is not finished at the moment it is created, and this dialog was
- * the only place pretending otherwise. What it needs is enough to make a real
- * record the operator can then open: who they are, what they look like on a
- * roster of thirteen, and what they do. Everything else — the description, the
- * persona, the tools, the model — is on the teammate's own page, next to the
- * copilot that drafts it and the record it is grounded in.
- *
- * So this creates and gets out of the way: the write lands and the operator is
- * put on the new agent's page, which is where the fine-tuning was always going
- * to happen.
- */
-function AddAgentDialog({
-  open,
-  onOpenChange,
-  onAdd,
-  client,
-  company,
-}: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-  /**
-   * Writes the agent, answering whether the write landed.
-   *
-   * Awaited, and the dialog is cleared only on `true`: a 5xx that cleared the
-   * form would throw away what the operator typed for no reason, so `false`
-   * keeps it and Create becomes a retry.
-   */
-  onAdd: (fields: AddMemberFields) => boolean | Promise<boolean>;
-  /** For the avatar picker's upload route. This dialog writes nothing itself. */
-  client: OpenCompanyClient;
-  company: string | null;
-}) {
-  const [name, setName] = useState("");
-  const [role, setRole] = useState("");
-  /** `undefined` is the hashed mascot — a face nobody chose is still a face. */
-  const [avatar, setAvatar] = useState<string | undefined>(undefined);
-  const [creating, setCreating] = useState(false);
-
-  function reset() {
-    setName("");
-    setRole("");
-    setAvatar(undefined);
-  }
-
-  // Both required: a nameless agent is unrecognisable on the roster, and the
-  // post is what the host derives the starting tool belt from.
-  const ready = name.trim() !== "" && role.trim() !== "";
-
-  async function submit() {
-    if (!ready || creating) return;
-    setCreating(true);
-    let landed: boolean;
-    try {
-      landed = await onAdd({
-        name: name.trim(),
-        role: role.trim(),
-        // The two long fields this dialog no longer asks for. Empty rather than
-        // absent because `AddMemberFields` requires them, and empty is the
-        // truth: there is no description and no persona yet.
-        description: "",
-        instructions: "",
-        avatar,
-        // Always. The whole point of collecting three things is that the rest
-        // happens on the page this opens.
-        landOnProfile: true,
-      });
-    } catch {
-      // A parent that rejected rather than answering. Read as "did not land",
-      // which keeps the form for a retry — and caught rather than left to
-      // escape, because `submit` is invoked as `void submit()`.
-      landed = false;
-    } finally {
-      setCreating(false);
-    }
-    if (landed) reset();
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        // A write in flight holds the dialog: closing it now would leave the
-        // operator on the roster while a teammate they cannot see is created.
-        if (creating) return;
-        if (!o) reset();
-        onOpenChange(o);
-      }}
-    >
-      <DialogContent className="sm:max-w-md" showCloseButton={!creating}>
-        <DialogHeader>
-          <DialogTitle>Add agent</DialogTitle>
-          <DialogDescription>
-            Name them and give them a post. You can fill in the rest on their page.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-4">
-          <div className="grid gap-2">
-            <Label htmlFor="agent-add-name">Name</Label>
-            <Input
-              id="agent-add-name"
-              value={name}
-              disabled={creating}
-              placeholder="e.g. Ada"
-              onChange={(e) => setName(e.target.value)}
-              data-testid="team-add-name"
-            />
-          </div>
-
-          <div className="grid gap-2">
-            <Label>Icon</Label>
-            {/* Seeded on the name, so the default mascot is the same face the
-                roster would hash for this agent — the picker opens showing what
-                you get if you choose nothing, rather than a stand-in that
-                changes the moment the record exists. */}
-            <AvatarPicker
-              client={client}
-              company={company}
-              value={avatar}
-              seed={name.trim() || "new-agent"}
-              name={name.trim() || "New agent"}
-              onChange={setAvatar}
-              disabled={creating}
-            />
-          </div>
-
-          <div className="grid gap-2">
-            <Label htmlFor="agent-add-role">Post</Label>
-            <Input
-              id="agent-add-role"
-              value={role}
-              disabled={creating}
-              placeholder="e.g. Research analyst"
-              onChange={(e) => setRole(e.target.value)}
-              data-testid="team-add-role"
-            />
-            <p className="text-xs text-muted-foreground">
-              What they do. The company gives an agent its starting tools from this.
-            </p>
-          </div>
-        </div>
-
-        <DialogFooter>
-          <Button
-            variant="ghost"
-            disabled={creating}
-            onClick={() => {
-              reset();
-              onOpenChange(false);
-            }}
-          >
-            Cancel
-          </Button>
-          <Button
-            disabled={!ready || creating}
-            onClick={() => void submit()}
-            data-testid="team-add-submit"
-          >
-            {creating && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-            Add agent
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
