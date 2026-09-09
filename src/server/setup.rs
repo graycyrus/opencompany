@@ -727,6 +727,20 @@ async fn apply(
         .map_err(|e| ApiError::from(e).into_response().into())
 }
 
+/// Serializes the whole first-run apply, process-wide.
+///
+/// Without this, two `POST /api/v1/setup` requests that both land before
+/// either has inserted into the registry can both read
+/// `state.registry().is_empty()` as `true` and both seed a starter company —
+/// exactly the "a re-run must never hand the operator a second starter
+/// company" case this module documents, just reached by two concurrent
+/// first runs instead of one re-run. Held for the whole of [`apply_inner`],
+/// not just the seed check, so a second caller only ever starts once the
+/// first has fully landed (or failed) — including the `config.toml` write,
+/// which is not otherwise safe against a torn concurrent write either.
+static APPLY_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// `+ Sync` so the returned future is `Send`, which axum requires of a handler:
 /// a `&T` is `Send` only when `T` is `Sync`, and the bare trait object is not.
 async fn apply_inner(
@@ -734,6 +748,7 @@ async fn apply_inner(
     req: SetupRequest,
     env: &(dyn EnvSource + Sync),
 ) -> Result<AppliedDto, OpenCompanyError> {
+    let _apply_guard = APPLY_LOCK.lock().await;
     // See `snapshot`'s comment: this must be the same root startup reads
     // `config.toml` from, which is not always `state.home()`.
     let dir = state.config_root().to_path_buf();
