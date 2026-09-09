@@ -114,16 +114,16 @@ describe("what the panel says a agent is", () => {
 
 describe("where the panel's buttons go", () => {
   it("links to the agent's page", () => {
-    expect(agentHref("jamie")).toBe("#/team/jamie");
+    expect(agentHref("jamie")).toBe("#/company/agent/jamie");
   });
 
   it("asks for the edit form with the flag the page opens on", () => {
-    expect(agentHref("jamie", { edit: true })).toBe("#/team/jamie?edit");
+    expect(agentHref("jamie", { edit: true })).toBe("#/company/agent/jamie?edit");
   });
 
   it("escapes an id that would otherwise change the address", () => {
     // A tenant-namespaced id carries characters the hash reads structurally;
     // an unescaped `/` would name a teammate of some other view entirely.
-    expect(agentHref("acme/ceo")).toBe("#/team/acme%2Fceo");
+    expect(agentHref("acme/ceo")).toBe("#/company/agent/acme%2Fceo");
   });
 });
