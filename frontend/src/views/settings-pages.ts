@@ -70,18 +70,21 @@ export const SETTINGS_PAGES = [
   // it unlocks, and an operator looking for "where do I put my Brave key"
   // searches for search.
   { id: "search", label: "Search", icon: Search, hint: "Where teammates look things up", group: "integrations" },
-  // "What this company knows how to do" read as capability the company performs
-  // — the implication issue #569 exists to remove, set here *before* the tab
-  // gets a chance to correct it. The siblings describe their content; so does
-  // this now.
-  { id: "skills", label: "Skills", icon: Sparkles, hint: "Playbooks your teammates read", group: "capability" },
+  // Skills is NOT here any more: it is `#/connections/skills`, rewritten from
+  // this rail so every link minted while it lived here works. Installing a
+  // skill is the same act as connecting an app — granting the company a
+  // capability it did not have a minute ago — and it is read far more often
+  // than it is set, which is the test the Connections section applies. See
+  // `connection-pages.ts`.
+  //
   // The run observatory: what the company's agents actually did, run by run.
   //
   // It had a nav row of its own and lost it to the four-section restructure.
   // Filed here rather than parked, because this is where an operator goes to
-  // ask a question *about* the company rather than to work in it — and beside
-  // Skills, which is the other half of the same pair: what teammates are told
-  // to do, and what they did.
+  // ask a question *about* the company rather than to work in it. It used to
+  // sit beside Skills as the other half of a pair — what teammates are told to
+  // do, and what they did — and keeps its place now that Skills has moved:
+  // what a company DID is a question about it, not a capability you grant it.
   //
   // This row is a doorway, not the address. `#/settings/observatory` is
   // rewritten straight back onto `#/observatory` by `console-route-rewrites.ts`
