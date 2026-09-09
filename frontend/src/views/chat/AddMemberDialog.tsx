@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { Mail } from "lucide-react";
+import { useState } from "react";
+import { Loader2 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { getInferenceStatus, type CognitionPath } from "@/api/inference";
+import { AvatarPicker } from "@/components/avatar-picker";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,18 +14,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
-import { designTeammate, refusalNotice, type DraftRefusal } from "@/api/agent-copilot";
-import {
-  addTeammateSurface,
-  carriedDescribe,
-  describeBlocked as blockedReason,
-  designedTeammateFields,
-  heldFields,
-  type DesignedTeammateFields,
-} from "@/lib/team-add-surface";
-import { DescribeTeammate } from "@/views/team/DescribeTeammate";
 
 export interface NewMemberFields {
   name: string;
