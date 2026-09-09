@@ -26,6 +26,8 @@ import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } f
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
+import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -165,6 +167,29 @@ async function classifyFailure(
  * disagreement as a failed save instead of as a field that will not take an
  * edit.
  */
+/**
+ * A teammate's page, as tabs.
+ *
+ * It was six cards in one scrolling column — what it is doing, its
+ * instructions, its tools, its harness, its inbox, its budget — so every edit
+ * began by scrolling to find the card, and the page's own length hid how much
+ * of a teammate is configurable at all.
+ *
+ * **Overview leads** because it is the question the page is opened to answer:
+ * what is this teammate doing, and what has it done. The five that follow are
+ * its definition, and each one is a thing you change rather than read.
+ */
+const AGENT_TABS = [
+  { id: "overview", label: "Overview", hint: "What it is doing, and what it has done" },
+  { id: "instructions", label: "Instructions", hint: "What it owns and how it is told to work" },
+  { id: "tools", label: "Tools", hint: "What it is allowed to call" },
+  { id: "model", label: "Model", hint: "The harness and model it thinks with" },
+  { id: "inbox", label: "Inbox", hint: "What reaches it" },
+  { id: "budget", label: "Budget", hint: "What it may spend" },
+] as const satisfies readonly PageTab<string>[];
+
+type AgentTab = (typeof AGENT_TABS)[number]["id"];
+
 export function AgentDetailView({
   client,
   company,
@@ -203,6 +228,10 @@ export function AgentDetailView({
    */
   const [editRequested, setEditRequested] = useHashFlag("edit");
   const setEditing = setEditRequested;
+  const [tab, setTab] = useHashTab<AgentTab>(
+    AGENT_TABS.map((t) => t.id),
+    "overview",
+  );
   const editing = editRequested && (agent?.editable.length ?? 0) > 0;
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
