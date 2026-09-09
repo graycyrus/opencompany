@@ -480,7 +480,17 @@ describe("the New-workflow dialog on a company with no model configured", () => 
     expect(inDialog(ID_INPUT), "Workflow ID must not render").toBeNull();
     expect(inDialog(DESCRIPTION_BOX), "the second Description box must not render").toBeNull();
     expect(dialogText()).not.toContain("Nodes");
-    expect(dialogText()).not.toContain("Connections");
+    // Read with the no-model notice taken out first. That notice says
+    // "Connections → Inference" — the section the model lives in since it left
+    // the settings rail — and a bare `not.toContain("Connections")` over the
+    // whole dialog cannot tell the graph editor's section heading from a
+    // direction to go and wire a model. The heading is what must not come
+    // back; the direction is the point of this state.
+    const withoutNotice = dialogText().replace(
+      inDialog('[data-testid="workflow-draft-unavailable"]')?.textContent ?? "",
+      "",
+    );
+    expect(withoutNotice).not.toContain("Connections");
     expect(dialogText()).not.toContain("Add node");
     expect(dialogText()).not.toContain("Add edge");
     expect(inDialog('[data-testid="workflow-copilot-draft"]')).toBeNull();
