@@ -212,6 +212,13 @@ interface Props {
    */
   presence?: ReadonlyMap<string, { status: "online" | "away" | "offline" }>;
   /**
+   * The autonomy control, rendered on the composer's toolbar row.
+   *
+   * A node, not the policy: `AppShell` owns the tier and the admin check, and
+   * handing the rendered pill down keeps every fact about policy in one place.
+   */
+  autonomy?: ReactNode;
+  /**
    * The company's people, for the members pane's People section.
    *
    * Separate from `members` (teammates) on purpose: desk membership is a
@@ -456,6 +463,7 @@ export function ChatView({
   routeOpen = true,
   onNavigate,
   onOpenAgent,
+  autonomy,
   onReply,
   transcripts,
   setTranscripts,
