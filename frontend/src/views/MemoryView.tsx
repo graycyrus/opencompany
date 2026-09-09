@@ -124,7 +124,7 @@ export function MemoryView({ client, company, sub }: Props) {
   // Which of the three this address names. Overview for a bare `#/company/brain`
   // and for any segment that names nothing — a stale bookmark lands on the page
   // the section is for rather than on an error.
-  const page = resolveBrainPage(sub);
+  const page = resolveBrainPage(sub ?? null);
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
   // The truncation metadata that rode in with the last list read, kept beside

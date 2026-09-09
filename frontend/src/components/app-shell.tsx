@@ -4111,7 +4111,10 @@ export function AppShell({
           )}
           {view === "brain" && (
             <Suspense fallback={<RouteLoading title="Brain" label="Loading what your company remembers…" />}>
-              <MemoryView client={client} company={company} />
+              {/* `#/company/brain/<page>` — Overview, Upload or Settings.
+                  Unvalidated here, as every sub-dispatching route is: only the
+                  view knows which of its pages exist. */}
+              <MemoryView client={client} company={company} sub={sub} />
             </Suspense>
           )}
           {view === "approvals" && (
