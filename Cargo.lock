@@ -3595,7 +3595,7 @@ dependencies = [
 
 [[package]]
 name = "openhuman"
-version = "0.63.22"
+version = "0.63.21"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -5922,7 +5922,7 @@ dependencies = [
 
 [[package]]
 name = "tinyconnectors-bus"
-version = "0.8.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6058,7 +6058,7 @@ dependencies = [
 
 [[package]]
 name = "tinymemory"
-version = "1.15.2"
+version = "1.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7504,7 +7504,7 @@ version = "0.1.2"
 
 [[patch.unused]]
 name = "tinycortex"
-version = "0.1.2"
+version = "0.1.1"
 
 [[patch.unused]]
 name = "tinycortex-api"
