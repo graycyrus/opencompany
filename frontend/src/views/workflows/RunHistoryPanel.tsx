@@ -83,7 +83,7 @@ const RUN_STATUS_DEFINITIONS = {
   running: "Still working through its steps — nothing here is final yet.",
   ok: "Finished, with nothing left undelivered and nobody waiting on you — every report either reached its destination or didn't need to (a dry run, or one an earlier run already delivered).",
   failed:
-    "The run ended in error — usually a step that failed and the automation needs a fix, but sometimes nothing in the graph got the chance to run at all, and the error can be a host restart or a capability that failed to build rather than anything wrong with the automation. Read the error before assuming the automation needs correcting.",
+    "The run ended in error — usually a step that failed and the automation needs a fix, but sometimes nothing in the graph got the chance to run at all, and the error can be a host restart or a capability that failed to build rather than anything wrong with the workflow. Read the error before assuming the automation needs correcting.",
   // Codex review on #1821 (eleventh pass): this still asserted "the step
   // that was mid-flight" as if every stopped run has one. A run cancelled
   // before it ever reached the graph — `a_run_cancelled_before_it_starts_

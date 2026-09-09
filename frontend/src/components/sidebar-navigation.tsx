@@ -9,7 +9,7 @@ import {
   Plug,
   Wallet,
   ShieldCheck,
-  Automation,
+  Workflow,
 } from "lucide-react";
 
 import {

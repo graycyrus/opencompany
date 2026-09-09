@@ -38,7 +38,7 @@ import {
   Loader2,
   MessageSquare,
   SquareKanban,
-  Automation,
+  Workflow,
   XCircle,
 } from "lucide-react";
 
@@ -101,7 +101,7 @@ const FILTERS: { key: string; label: string; statuses?: RunStatus[] }[] = [
 ];
 
 const SOURCE_ICON: Record<RunSourceKind, typeof Workflow> = {
-  automation: Automation,
+  workflow: Workflow,
   card: SquareKanban,
   chat: MessageSquare,
   unknown: Activity,

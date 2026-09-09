@@ -620,7 +620,7 @@ const NO_DESTINATION = "__none__";
  * (issue #1006). One string, because every path out of the dialog — Esc, a
  * click outside, Cancel, a hash navigation — has to ask the same question. */
 const DISCARD_PROMPT =
-  "You have unsaved changes to this automation. Leave without saving them?";
+  "You have unsaved changes to this workflow. Leave without saving them?";
 
 /**
  * A stable string covering everything the form can change (issue #1006).
@@ -1856,11 +1856,11 @@ export function WorkflowCreateDialog({
       const restored = await restoreWorkflowRevision(
         client,
         company,
-        automation.id,
+        workflow.id,
         rev.id,
         // Condition on the graph the operator is looking at, so a concurrent
         // edit is a 409 rather than a silent clobber.
-        automation.version,
+        workflow.version,
       );
       onSaved?.(restored);
       // The parent updates `workflow`, which re-hydrates this dialog and resets
@@ -2145,7 +2145,7 @@ export function WorkflowCreateDialog({
       showError(
         e instanceof Error
           ? e.message
-          : automation
+          : workflow
             ? "could not save the automation"
             : "could not create the automation",
       );
@@ -2577,9 +2577,9 @@ export function WorkflowCreateDialog({
       const saved = await updateWorkflow(
         client,
         company,
-        automation!.id,
+        workflow!.id,
         graph,
-        automation!.version,
+        workflow!.version,
       );
       onSaved?.(saved);
     });
@@ -3260,7 +3260,7 @@ function NodeRow({
   company,
   roster,
   wiredChannels,
-  automations,
+  workflows,
   createMode,
   errors,
   configErrors,

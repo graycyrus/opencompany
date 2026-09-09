@@ -143,7 +143,7 @@ export function compareRuns(
 
 export function RunTracesList({
   runs,
-  automations,
+  workflows,
   company,
   loading,
   onSelectRun,

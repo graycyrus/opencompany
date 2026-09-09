@@ -173,7 +173,7 @@ const NO_RUNS_TITLE =
 const LOADING_RUNS_LABEL = "Loading runs…";
 
 export function WorkflowIndex({
-  automations,
+  workflows,
   runsByWorkflow,
   onSelect,
   mode,

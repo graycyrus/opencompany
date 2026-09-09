@@ -606,7 +606,7 @@ export function CopilotPanel({
                 That is also all the answer is drawn from. This turn runs{" "}
                 <span className="font-medium text-foreground">confined to this automation</span>:
                 no tools, no company memory, and no reach into the board, your agents or
-                another automation. Ask something that needs the wider company and it will say so
+                another workflow. Ask something that needs the wider company and it will say so
                 rather than guess.
               </p>
               <p className="mt-1.5">

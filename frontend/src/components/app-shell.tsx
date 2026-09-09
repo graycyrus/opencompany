@@ -1174,7 +1174,7 @@ export function AppShell({
     const done: Record<GateStepId, boolean> = {
       name: status.nameConfirmed,
       integration: status.integrationConnected,
-      automation: status.workflowRunSucceeded,
+      workflow: status.workflowRunSucceeded,
     };
     for (const step of waivedGateSteps(scope)) {
       if (done[step]) clearGateStepWaiver(scope, step);

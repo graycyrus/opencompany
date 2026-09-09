@@ -773,7 +773,7 @@ export function MessageComposer({
                   {
                     value: "workflow",
                     label: "Build me the automation",
-                    title: "Turn this into a repeating automation.",
+                    title: "Turn this into a repeating workflow.",
                   },
                 ] as const
               ).map((option) => (

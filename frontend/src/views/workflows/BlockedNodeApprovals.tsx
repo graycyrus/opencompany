@@ -82,7 +82,7 @@ export function BlockedNodeApprovals({
                 {approvalIds.length === 1
                   ? "its approval is no longer in the queue"
                   : "none of its approvals are in the queue any more"}
-                , so this run cannot be continued. Re-run the automation.
+                , so this run cannot be continued. Re-run the workflow.
               </span>
             ) : (
               approvalIds.length > 0 && (

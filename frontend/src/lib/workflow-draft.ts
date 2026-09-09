@@ -40,7 +40,7 @@ export function draftBanners(drafted: WorkflowDraftFromDescription): DraftBanner
   return {
     summary: null,
     notes: [],
-    reason: drafted.reason ?? "This is better done once than built into a automation.",
+    reason: drafted.reason ?? "This is better done once than built into a workflow.",
   };
 }
 

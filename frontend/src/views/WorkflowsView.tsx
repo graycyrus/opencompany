@@ -26,7 +26,7 @@ import {
   RotateCw,
   Square,
   Trash2,
-  Automation as WorkflowIcon,
+  Workflow as WorkflowIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -1280,7 +1280,7 @@ export function WorkflowsView({
     (async () => {
       try {
         const { runs: rows, hasMore, nextBeforeSeq } = await listWorkflowRuns(client, company, {
-          automation: selectedId,
+          workflow: selectedId,
           limit: 50,
         });
         if (!live) return;
@@ -1361,7 +1361,7 @@ export function WorkflowsView({
     (async () => {
       try {
         const { runs: older, hasMore, nextBeforeSeq } = await listWorkflowRuns(client, company, {
-          automation: selectedId,
+          workflow: selectedId,
           limit: 50,
           beforeSeq: cursor,
         });
@@ -2060,7 +2060,7 @@ export function WorkflowsView({
         if (res.automatable && res.workflow) {
           setPrefilledDraft({
             summary: res.summary,
-            automation: res.automation,
+            workflow: res.automation,
             notes: res.notes,
             readiness: res.readiness,
           });
@@ -2388,7 +2388,7 @@ export function WorkflowsView({
       // and the operator is told why the run they asked for isn't on it.
       toast.error("That run isn't in this automation's run history.", {
         description:
-          "It may have aged out of the journal, or belong to a different automation. The canvas is showing the current state instead.",
+          "It may have aged out of the journal, or belong to a different workflow. The canvas is showing the current state instead.",
       });
       return;
     }
@@ -3609,7 +3609,7 @@ export function WorkflowsView({
       )}
 
       {/* Issue #1110's reasoning, extended by #1205: `result` and `runFailure`
-          are per-automation chrome that must not outlive leaving the automation.
+          are per-automation chrome that must not outlive leaving the workflow.
           Both used to render as full-width strips here, below `CanvasShell`.
           They are now `CanvasShell`'s `rightRail` (see the call above), gated
           by the very same `detailOpen` branch structurally — a list of

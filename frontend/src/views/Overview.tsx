@@ -286,7 +286,7 @@ export function Overview({ client, company, companyName }: Props) {
         desksRead,
         people,
         memories,
-        automations,
+        workflows,
         fetchedAt,
       });
       setLoading(false);
@@ -303,7 +303,7 @@ export function Overview({ client, company, companyName }: Props) {
         desks: sources.desks,
         tasks: sources.tasks,
         people: sources.people,
-        automations: sources.automations,
+        workflows: sources.workflows,
         ownedBy,
       }),
     [sources],
@@ -316,7 +316,7 @@ export function Overview({ client, company, companyName }: Props) {
         adapted.departments,
         adapted.people,
         adapted.tasks,
-        adapted.automations,
+        adapted.workflows,
         // The company's real name (issue #1219), falling back to the slug and
         // then to the model's own placeholder — never an empty string, which
         // would otherwise beat the default and draw a blank core node.

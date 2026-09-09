@@ -39,7 +39,7 @@ import {
   Square,
   Trash2,
   UserCog,
-  Automation,
+  Workflow,
 } from "lucide-react";
 
 import {
