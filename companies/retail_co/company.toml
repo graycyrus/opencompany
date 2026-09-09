@@ -1,0 +1,141 @@
+# retail-co — the tau2-bench retail domain run as a company of three desks.
+#
+# The business is not modelled in this manifest. It lives behind five
+# role-scoped MCP servers from the `opencompany-tau2` repo, each serving one
+# slice of the tau2 retail domain and all five sharing ONE state file under an
+# exclusive `flock`. So a cancellation is visible to triage on its next read,
+# and every fact an agent states is a tool call somebody can replay.
+#
+# WHY THIS BUNDLE EXISTS: scope enforced below the model, and a room that has
+# something to argue about.
+#
+# Each seat is granted exactly one MCP server, and each server registers only
+# the tools its role is scoped to. A seat reaching outside its role does not
+# violate a policy it was asked to respect — it calls a tool that was never
+# registered, and fails at the protocol layer. `triage` has nine tools and no
+# mutating one at all; it cannot cancel an order however the conversation goes.
+#
+# The two write desks are staffed by PAIRS holding different remedies for the
+# same situation, because a desk of one cannot deliberate (`deliberates()`
+# requires two). A delivered-order problem can be answered with an exchange or
+# with a refund; a pending-order problem by cancelling or by amending. Neither
+# seat can reach the other's tool, so the room has to argue rather than quietly
+# do both — and `quorum = 2` on a two-seat desk means the remedy that carries
+# is unanimous, which is the right bar for a write nobody can reverse.
+#
+# What tau2's own orchestrator cannot ask, and this can: it wires exactly one
+# agent to one user simulator, with no agent-to-agent path. Here a customer's
+# problem arrives at `triage`, which can establish what is true and nothing
+# more, and the remedy belongs to a desk that has to settle it internally.
+
+[company]
+name = "retail-co"
+output = "A customer's order problem resolved by the desk that owns the remedy, with every read and write recorded as a tool call"
+human_role = "Read the transcript and say whether the desks did what the retail policy required"
+
+[brain]
+mode = "hosted"
+max_passes = 12
+
+[policy]
+# `supervised`: acting on the customer's order IS the job, and tau2 scores the
+# end state of the database, so parking every write for a human would make every
+# task unscoreable. The limits here are structural instead — they are in which
+# tools each server registers, not in an approval queue.
+mode = "supervised"
+
+[users]
+admins = ["harness-e2e@tinyhumans.ai"]
+
+[tools]
+# Each `mcp:` grant is named literally. `grants_cover_server` refuses to let `*`
+# reach an MCP server (`src/runtime/tools.rs`), so a wildcard here would silently
+# acquire any server an operator later installed — and the whole point of this
+# bundle is that a seat's reach is exactly its role's.
+#
+# No `web` and no `search`: every fact about this business is in the shared
+# retail state. A desk that could look things up would answer questions about
+# online retail in general instead of about THIS customer's order.
+allow = [
+    "mcp:tau2-retail-triage",
+    "mcp:tau2-retail-exchanges",
+    "mcp:tau2-retail-refunds",
+    "mcp:tau2-retail-cancellations",
+    "mcp:tau2-retail-amendments",
+]
+
+[channels.operator]
+enabled = true
+
+# ---------------------------------------------------------------------------
+# The front desk. One seat, so nothing is deliberated here: `deliberates()`
+# needs two. It answers in one turn and hands the case on.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "triage"
+name = "Triage"
+description = "Who is this customer, what did they order, and what state is that order in — established before anybody changes anything."
+members = ["triage"]
+
+[group_chat.hive]
+enabled = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+# A round trip is two hops: the question out, the answer home. Two stops it from
+# becoming a chain.
+max_hops = 2
+returns = true
+peer_cap = 2
+
+# ---------------------------------------------------------------------------
+# Pending orders. Two seats, competing remedies.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "order_ops"
+name = "Order Operations"
+description = "Pending orders: cancel outright, or amend items, address or payment in place."
+members = ["cancellations", "amendments"]
+
+[group_chat.hive]
+enabled = true
+# Two seats, a few turns each: an opening position, a reply to the room, a
+# commit. Short on purpose — conformity in a group of language models rises with
+# interaction time, so a longer episode buys correlated error rather than
+# scrutiny.
+turn_budget = 8
+quorum = 2
+blind_round = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2
+
+# ---------------------------------------------------------------------------
+# Delivered orders. Same shape.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "returns"
+name = "Returns and Exchanges"
+description = "Delivered orders: exchange an item for a variant of the same product, or take a return for refund."
+members = ["exchanges", "refunds"]
+
+[group_chat.hive]
+enabled = true
+turn_budget = 8
+quorum = 2
+blind_round = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2

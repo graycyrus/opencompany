@@ -1,0 +1,82 @@
+# retail-co
+
+The [tau2-bench](https://github.com/sierra-research/tau2-bench) **retail**
+domain, run as a company of three desks and five seats.
+
+| desk | seats | remedy each seat holds | deliberates |
+|---|---|---|---|
+| `triage` | `triage` | none — nine read tools, zero mutating | no (one seat) |
+| `order_ops` | `cancellations`, `amendments` | cancel the whole order / amend it in place | yes |
+| `returns` | `exchanges`, `refunds` | swap for a variant / take it back | yes |
+
+## Why it is shaped like this
+
+**Scope is enforced below the model.** Each seat is granted exactly one MCP
+server, and each server registers only the tools its role is scoped to. A seat
+reaching outside its role does not violate a policy it was asked to respect —
+it calls a tool that was never registered, and fails at the protocol layer.
+`triage` cannot cancel an order however the conversation goes.
+
+**The write desks are pairs, so the room has something to argue about.** A
+desk of one cannot deliberate (`deliberates()` requires two). A delivered-order
+problem can be answered with an exchange or with a refund, and those are
+different seats holding different tools; a pending-order problem by cancelling
+or by amending. Neither seat can reach the other's tool, so the remedy has to
+be argued for rather than quietly done both ways. `quorum = 2` on a two-seat
+desk means the remedy that carries is unanimous — the right bar for a write
+nobody can reverse.
+
+**It asks what tau2 cannot.** tau2's orchestrator wires exactly one agent to
+one user simulator, with no agent-to-agent path, so it scores whether an agent
+called the right tool — not whether an *organisation* routed the work to the
+seat that owns it. Here a task only completes if the case reaches the right
+desk and that desk settles which remedy applies.
+
+## The servers are not in this repo
+
+They live in `opencompany-tau2`, which vendors tau2-bench (~850 MB, mostly
+benchmark data) and needs its own Python venv. This bundle therefore ships five
+**disabled** `mcp.json` entries pointing at placeholder `https` hosts, because a
+bundle here must not point an agent at a host nobody has provisioned — and
+because runtime is the only layer that accepts an `http://` endpoint.
+
+All five servers share ONE state file under an exclusive `flock`, so a
+cancellation is visible to `triage` on its next read.
+
+## Running it
+
+Start the five role servers from the `opencompany-tau2` checkout:
+
+```bash
+uv run tau2-mcp --roles roles/retail.yaml --role triage        --http 8801 &
+uv run tau2-mcp --roles roles/retail.yaml --role exchanges     --http 8802 &
+uv run tau2-mcp --roles roles/retail.yaml --role refunds       --http 8803 &
+uv run tau2-mcp --roles roles/retail.yaml --role cancellations --http 8804 &
+uv run tau2-mcp --roles roles/retail.yaml --role amendments    --http 8805 &
+```
+
+Then, against a running host:
+
+```bash
+cargo run --features openhuman,hivemind,mcp --bin opencompany -- \
+  serve --company companies/retail_co --home /tmp/retail
+python3 scripts/retail-tau2.py --task 0
+```
+
+`scripts/retail-tau2.py` repoints the five entries at loopback, replays the
+task's opening message into `triage`, and grades the shared retail database
+against tau2's own `evaluation_criteria`. Exit status is the number of tasks
+whose end state did not match.
+
+## Handing work on
+
+Two mechanisms, and they are not interchangeable:
+
+- **`@desk` in a reply** posts the case on that desk's channel, where its seats
+  deliberate and send back what the room settled on. This is the hand-off to
+  reach for when the choice between remedies is the question.
+- **`delegate_to_teammate`** takes one turn from one named person, no room.
+
+`delegate_to_desk` resolves to whoever leads the desk and takes one turn from
+them, which skips the deliberation these paired desks exist for — the seats are
+told not to use it.
