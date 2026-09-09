@@ -218,7 +218,7 @@ async fn set_key(
 /// Names the company, so someone looking at a list of keys can tell which
 /// instance each belongs to and revoke one without guessing.
 fn key_name(company: &CompanyRuntime) -> String {
-    format!("OpenCompany \u2014 {}", company.id())
+    format!("OpenCompany — {}", company.id())
 }
 
 /// What the console navigates to, and nothing else.
@@ -310,7 +310,7 @@ async fn finish_link(
         .take(&body.state, &runtime.id().to_string())
     else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
-            "that connection attempt has expired \u2014 start it again".to_string(),
+            "that connection attempt has expired — start it again".to_string(),
         )));
     };
 
