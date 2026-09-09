@@ -22,6 +22,14 @@ export { SETTINGS_PAGES, type SettingsPage };
 // Recharts is heavy and only used here — load the usage dashboard on demand.
 const UsageView = lazy(() => import("@/views/UsageView").then((m) => ({ default: m.UsageView })));
 
+// Same rule, same reason: the Observatory pulls its own charting and DAG code,
+// and an operator who never opens it should not pay for it. `app-shell.tsx`
+// lazies the same module for the run-detail route; two `lazy()` calls over one
+// import share a chunk, so this costs nothing beyond the second boundary.
+const ObservatoryView = lazy(() =>
+  import("@/views/observatory/ObservatoryView").then((m) => ({ default: m.ObservatoryView })),
+);
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -165,6 +173,21 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
         {/* Both were cards on General. See their own files for why each left. */}
         {page === "approvals" && <ApprovalsSettingsView client={client} company={company} />}
         {page === "appearance" && <AppearanceView />}
+        {/* The run index, rendered here rather than bounced to `#/observatory`.
+            The row on this rail used to be a doorway — the address was rewritten
+            away before this dispatch ever saw it — because the view reads its
+            own query keys off the hash and they were keyed on the head being
+            `observatory`. `readObservatoryHash` answers to both heads now, so
+            `?tab=analytics` is addressable from here.
+
+            `runId={null}` always: a single run is `#/observatory/<runId>`, a
+            top-level route `app-shell.tsx` still owns, because `useHashView`
+            carries two segments and this page is already using the second. */}
+        {page === "observatory" && (
+          <Suspense fallback={<RouteLoading title="Observatory" label="Loading observatory…" />}>
+            <ObservatoryView client={client} company={company} runId={null} eventTick={0} />
+          </Suspense>
+        )}
         {/* OAuth, MCP Servers, Inference and Skills were all here. They are the
             Connections section now (`#/connections/apps`, `/mcp`, `/inference`,
             `/skills`) — each is read repeatedly and changes as the company's

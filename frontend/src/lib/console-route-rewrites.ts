@@ -76,14 +76,15 @@ export const REWRITE_RETIRED = (
   if (head === "oauth") return ["connections", "apps"];
   if (head === "mcp") return ["connections", "mcp"];
   if (head === "people") return ["settings", "people"];
-  // Observatory has a row on the Settings rail and no row in the sidebar, so
-  // `#/settings/observatory` is an address an operator can now arrive at — and
-  // it must not be where the surface lives. The Observatory reads four query
-  // keys of its own straight off `window.location`, keyed on the hash's head
-  // being `observatory` (`views/observatory/hash.ts`), so under `#/settings/…`
-  // its analytics tab and its agent/turn selection stop being addressable. The
-  // rail row is a doorway; this is the door.
-  if (head === "settings" && sub === "observatory") return ["observatory", null];
+  // `#/settings/observatory` is NOT rewritten. It used to bounce straight onto
+  // `#/observatory`, because the Observatory reads four query keys off the hash
+  // keyed on its head — so under `#/settings/…` its analytics tab and its
+  // agent/turn selection silently stopped being addressable, and the rail row
+  // was a doorway rather than the address. `readObservatoryHash` answers to
+  // both heads now, so the index renders where its row says it does. A single
+  // run keeps `#/observatory/<runId>`: `useHashView` carries two segments, so
+  // there is no `#/settings/observatory/<runId>` to move it to, and every
+  // workflow row and approval card links straight to one.
   // An empty hash is the normal console entry point and uses the router's
   // Overview fallback. Keep the head as the sub-page for every non-empty
   // unknown address so the explanation can identify what failed without
