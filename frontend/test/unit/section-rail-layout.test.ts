@@ -65,9 +65,22 @@ afterEach(() => {
 });
 
 describe("which sections get a rail", () => {
-  it("draws one for Company, with its five pages whole and in order", () => {
+  it("draws one for Company, with its pages whole and in order", () => {
+    // Finance is a caption group rather than a row: its heading is a `<div>`
+    // (not a button, so it is not in this list) and its three pages are always
+    // listed under it. Brain went the other way — it was a three-row group and
+    // is one row again, because its Overview / Upload / Settings are tabs in
+    // the page's own header now.
     render("company");
-    expect(railRows()).toEqual(["Agents", "Work", "Workspace", "Brain", "Finance"]);
+    expect(railRows()).toEqual([
+      "Agents",
+      "Work",
+      "Workspace",
+      "Brain",
+      "Overview",
+      "Invoicing",
+      "Wallet",
+    ]);
     expect(container.querySelector("nav")?.getAttribute("aria-label")).toBe("Company");
   });
 
@@ -123,18 +136,24 @@ describe("never two rails at once", () => {
       "Work",
       "Workspace",
       "Brain",
-      "Finance",
       "Overview",
       "Invoicing",
       "Wallet",
     ]);
   });
 
-  it("shows a nested page only while its parent is the open row", () => {
+  it("lists a caption group's pages whether or not one of them is open", () => {
+    // The inverse of what this asserted. Finance was a collapsible row whose
+    // pages appeared only while it was the open one; it is a caption group now,
+    // and a heading that hides what it heads is not a heading — so its three
+    // pages stand on Company's rail at all times, exactly as the Settings
+    // rail's groups do.
     render("company");
-    expect(railRows()).not.toContain("Wallet");
+    expect(railRows()).toContain("Wallet");
     render("brain");
-    expect(railRows()).not.toContain("Wallet");
+    expect(railRows()).toContain("Wallet");
+    // Still one rail, which is the property the Finance decision was about.
+    expect(container.querySelectorAll("nav")).toHaveLength(1);
   });
 
   it("marks the resolved page for a segment that names none of them", () => {
@@ -250,12 +269,17 @@ describe("the tour anchors travelled with the rows", () => {
     expect(container.querySelectorAll('[data-tour="nav-company"]')).toHaveLength(0);
   });
 
-  it("gives a nested row no anchor, since it would collide with its parent's", () => {
+  it("gives a caption group no anchor of its own", () => {
+    // Finance is not a row any more, so there is nothing for `nav-finances` to
+    // anchor to and its pages carry their own anchors. A tour step pointing at
+    // a caption would point at a `<div>` nobody can press — the degradation
+    // `tour/steps.ts` documents as a skipped step rather than a broken one.
     render("finances");
     const anchors = [...container.querySelectorAll("[data-tour]")].map((el) =>
       el.getAttribute("data-tour"),
     );
-    expect(anchors.filter((a) => a === "nav-finances")).toHaveLength(1);
+    expect(anchors.filter((a) => a === "nav-finances")).toHaveLength(0);
+    expect(anchors).toContain("nav-wallet");
   });
 });
 
