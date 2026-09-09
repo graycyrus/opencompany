@@ -1080,7 +1080,7 @@ export function WorkflowsView({
         setMissingWorkflowId(target);
         setSelectedId(null);
         clearWorkflowFromHash();
-        toast.error(`This company has no workflow “${target}”.`, {
+        toast.error(`This company has no automation “${target}”.`, {
           description:
             "It may have been renamed or deleted since the link was made. Showing every automation this company has instead.",
         });
@@ -3273,7 +3273,7 @@ export function WorkflowsView({
           <Alert data-testid="workflow-missing-link">
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs">
-                This company has no workflow “{missingWorkflowId}”. It may have been renamed
+                This company has no automation “{missingWorkflowId}”. It may have been renamed
                 or deleted since that link was made. Everything it does have is below.
               </span>
               <Button
