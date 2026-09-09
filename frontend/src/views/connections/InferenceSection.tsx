@@ -1426,7 +1426,7 @@ export function InferenceSection({
                         // select this render.
                         const manualEntry = manualEntryTiers.has(tier);
                         const useFreeText =
-                          provider !== "openrouter" ||
+                          !draftProviderIsOpenRouter ||
                           modelCatalog.kind === "error" ||
                           modelCatalog.kind === "empty" ||
                           wouldSaveProxied ||
