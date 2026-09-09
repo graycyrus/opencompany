@@ -205,7 +205,7 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
 
     expect(toasts.error).toHaveBeenCalledWith("This card still has work running.");
     // Still there: the link half of the chip survives a refused delete.
-    expect(container.querySelector('a[href="#/tasks/task-1"]')).not.toBeNull();
+    expect(container.querySelector('a[href="#/company/tasks/task-1"]')).not.toBeNull();
   });
 
   it("clears the chip when the host says the card is already gone (404)", async () => {
@@ -216,7 +216,7 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
     await openConfirm();
 
     expect(toasts.success).toHaveBeenCalledWith("That card was already gone — chip cleared.");
-    expect(container.querySelector('a[href="#/tasks/task-1"]')).toBeNull();
+    expect(container.querySelector('a[href="#/company/tasks/task-1"]')).toBeNull();
   });
 });
 
