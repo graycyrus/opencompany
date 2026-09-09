@@ -1984,6 +1984,97 @@ mod test {
         assert_eq!(set.drain_consumed().len(), 1, "one consumption journaled");
     }
 
+    /// Consumption is buffered in `GrantState::consumed`, not journaled — the
+    /// durable `GrantConsumed` record is written one layer up, by the cycle
+    /// runner's drain, strictly after `consume` already returned. A restart
+    /// between "the tool ran" (`consume` removed the grant here) and "the
+    /// drain journalled it" therefore replays the pre-consumption journal
+    /// state: the grant comes back exactly as if it had never been redeemed,
+    /// and the identical call is admitted a **second** time with no second
+    /// approval ever asked. Modelled at the `GrantSet` layer: rehydrating the
+    /// same `GrantedCall` into a fresh set is exactly what a restart's replay
+    /// does when the `GrantConsumed` line never reached disk (see
+    /// `a_grant_consumed_but_not_yet_drained_replays_as_live_after_a_restart`
+    /// in `journal.rs` for the journal-file half of this).
+    #[test]
+    fn a_consumed_but_undrained_grant_re_admits_the_identical_call_after_rehydrate() {
+        let live = GrantSet::default();
+        let args = serde_json::json!({ "to": "a@b.test" });
+        let grant = call("appr-crash", "finance", "composio_execute", args.clone());
+        live.grant(grant.clone());
+
+        // The tool runs. `consume` removes it from `live` and buffers the id
+        // — the real, synchronous, journal-less path `ToolPolicy::check`
+        // takes deep inside a turn.
+        assert!(
+            live.consume("finance", "composio_execute", &args).is_some(),
+            "the first call is admitted normally"
+        );
+        assert_eq!(live.live_count(), 0);
+        // The drain that would journal `GrantConsumed` never runs here —
+        // modelling the crash between the tool running and the next cycle's
+        // drain picking the buffered id up.
+        assert_eq!(
+            live.drain_consumed().len(),
+            1,
+            "the consumption sits buffered, exactly as it would right before the crash"
+        );
+
+        // Restart: replay seeds a fresh set from the journal, which never
+        // learned the grant was spent.
+        let after_restart = GrantSet::default();
+        after_restart.rehydrate([grant]);
+        assert_eq!(
+            after_restart.live_count(),
+            1,
+            "the undrained consumption re-arms the grant on replay"
+        );
+
+        // AUTH: a different agent claiming the same tool and arguments must
+        // not redeem it — only the agent the grant actually names may
+        // collect the replay.
+        assert!(
+            after_restart
+                .consume("legal", "composio_execute", &args)
+                .is_none(),
+            "the re-armed grant must still only admit the agent it was minted for"
+        );
+        assert_eq!(
+            after_restart.live_count(),
+            1,
+            "the wrong-agent attempt must not have consumed the grant"
+        );
+
+        // BOUND: different arguments for the right agent and tool must not
+        // redeem it either — the re-arm is an exact-match replay, not a
+        // blanket re-authorization of the tool.
+        assert!(
+            after_restart
+                .consume(
+                    "finance",
+                    "composio_execute",
+                    &serde_json::json!({ "to": "someone-else@b.test" })
+                )
+                .is_none(),
+            "the re-armed grant must not admit a call with different arguments"
+        );
+        assert_eq!(after_restart.live_count(), 1);
+
+        // FAIL: the actual duplication — the identical (agent, tool, args)
+        // call the operator approved exactly once is admitted a SECOND time,
+        // with no new approval in between. This is the concrete failure
+        // TOOL-005 names, not a list-length assertion one layer removed
+        // from it.
+        assert!(
+            after_restart
+                .consume("finance", "composio_execute", &args)
+                .is_some(),
+            "documented duplication window: the crash-then-replay grant re-admits the \
+             identical call a second time with no second approval"
+        );
+        assert_eq!(after_restart.live_count(), 0);
+    }
+
     // -----------------------------------------------------------------------
     // Standing grants (issue #374)
     // -----------------------------------------------------------------------
