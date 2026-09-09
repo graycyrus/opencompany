@@ -42,6 +42,25 @@ use crate::analytics::{Envelope, NullTracker, Tracker};
 /// [`Decision::Silent`] gets a [`NullTracker`], and in a build without the
 /// `analytics` feature *every* decision does, because there is nothing else to
 /// return.
+///
+/// # A transport that cannot be built is a [`NullTracker`], never a degraded one
+///
+/// [`HttpOpenPanelTracker::new`] is fallible because the HTTP client it wraps is
+/// where the credential headers and the send timeout are configured, and both
+/// are load-bearing. The obvious fallback — `reqwest::Client::default()` — is
+/// the wrong answer twice: that client carries **no default headers**, so every
+/// request goes out unauthenticated and is refused, and it carries **no
+/// timeout**, so a slow collector parks a drain forever and `Tracker::flush`
+/// waits behind it, which is exactly the shutdown block the five-second bound
+/// exists to prevent. It is also not even a safe fallback in the case that
+/// produces it: `Client::default()` is `Client::new()`, which is
+/// `ClientBuilder::new().build().expect(…)` — the same `build` that just
+/// failed, now panicking at boot instead of returning an error.
+///
+/// So a client that will not build disables reporting and says so once, loudly.
+/// Sending nothing is a documented outcome of this module with a whole
+/// vocabulary of reasons behind it; sending unauthenticated requests with no
+/// timeout is not.
 pub fn build(decision: &Decision, envelope: Envelope) -> Arc<dyn Tracker> {
     match decision {
         Decision::Silent(_) => Arc::new(NullTracker),
@@ -49,11 +68,22 @@ pub fn build(decision: &Decision, envelope: Envelope) -> Arc<dyn Tracker> {
         Decision::Report {
             endpoint,
             credentials,
-        } => Arc::new(http::HttpOpenPanelTracker::new(
-            endpoint,
-            credentials,
-            envelope,
-        )),
+        } => match http::HttpOpenPanelTracker::new(endpoint, credentials, envelope) {
+            Ok(tracker) => Arc::new(tracker),
+            // Routed through the same redaction the send path uses. A builder
+            // error carries no request URL today, but "the dependency does not
+            // print one here" is not a property this crate owns, and the
+            // endpoint on the same line comes from the one helper that redacts.
+            Err(error) => {
+                tracing::warn!(
+                    endpoint = %crate::analytics::boot::loggable_endpoint(endpoint),
+                    error = %http::loggable_send_error(error),
+                    "[analytics] the HTTP client for the collector could not be built, so \
+                     reporting is off for this process. Nothing will be sent."
+                );
+                Arc::new(NullTracker)
+            }
+        },
         // Without the feature there is no transport to hand back. Reporting was
         // configured and the build cannot honour it, which is worth one line at
         // boot: silently ignoring an explicit `OPENCOMPANY_ANALYTICS=on` is the
@@ -208,6 +238,20 @@ mod http {
         /// permanent, so repeating it adds nothing and would drown the log of a
         /// busy tenant.
         credential_refused: std::sync::atomic::AtomicBool,
+        /// Whether the collector has already answered with a redirect.
+        ///
+        /// The client follows none of them — see
+        /// [`HttpOpenPanelTracker::new`] — which closes the credential leak and
+        /// opens a diagnostic hole in its place: a `3xx` arrives here as an
+        /// ordinary non-success response, so a misconfigured endpoint would
+        /// look exactly like a collector rejecting every event, behind a
+        /// `debug!` nobody has enabled, forever. That is the failure shape this
+        /// module exists to refuse.
+        ///
+        /// So a redirect gets the [`Self::credential_refused`] treatment: it is
+        /// a verdict on the *endpoint* rather than on one event, every event
+        /// behind it gets the same one, and it is a `warn!` said exactly once.
+        endpoint_redirects: std::sync::atomic::AtomicBool,
     }
 
     impl HttpOpenPanelTracker {
@@ -222,19 +266,64 @@ mod http {
         /// header value, which the collector refuses with a 401 — a loud,
         /// bounded outcome rather than a panic at boot, for a branch that is
         /// unreachable given the check upstream.
-        pub fn new(endpoint: &str, credentials: &ClientCredentials, envelope: Envelope) -> Self {
+        ///
+        /// # Fallible, because there is no acceptable degraded client
+        ///
+        /// The client built here is the only place the credential headers and
+        /// [`SEND_TIMEOUT`] are set, so a client built without them is not a
+        /// weaker version of this one — it is one that authenticates against
+        /// nothing and can hang a shutdown. [`super::build`] turns the error
+        /// into a `NullTracker` and one `warn!`; see the note there for why
+        /// `reqwest::Client::default()` is not the fallback it looks like.
+        ///
+        /// # Redirects are never followed
+        ///
+        /// `reqwest`'s default policy follows up to ten hops, and its
+        /// cross-origin sanitization removes only `Authorization`, `Cookie`,
+        /// `cookie2`, `Proxy-Authorization` and `WWW-Authenticate`
+        /// (`redirect.rs::remove_sensitive_headers`, reqwest 0.12.28, read
+        /// rather than assumed). The two `openpanel-client-*` headers are none
+        /// of those, so a `302` from the configured endpoint to any other
+        /// authority — a reverse proxy sending unauthenticated callers to an
+        /// SSO host is the ordinary way one arrives — would have handed this
+        /// instance's write secret to a host the operator never named.
+        /// `HeaderValue::set_sensitive` does not help: it governs `Debug` and
+        /// HPACK indexing, not redirect handling.
+        ///
+        /// That sanitization also compares only **host and port**, never the
+        /// scheme, so an `https` endpoint that redirected to `http://` on the
+        /// same host would have carried the secret across in cleartext — the
+        /// `Silence::InsecureEndpoint` rule in
+        /// [`crate::analytics::config`] bypassed by a response the operator
+        /// does not control.
+        ///
+        /// So: [`reqwest::redirect::Policy::none`], with no same-origin
+        /// exception. A same-origin policy would also be safe, but it is a
+        /// predicate to keep correct rather than an invariant to state, and all
+        /// it buys is a collector that 301s `/track` to `/api/track` — an
+        /// endpoint the operator can type correctly once, after reading the
+        /// warning [`Inner::report_redirected_endpoint`] emits. Following none
+        /// of them makes "the credential only ever goes to the configured
+        /// endpoint" a property of this client rather than a claim about a
+        /// comparison.
+        pub fn new(
+            endpoint: &str,
+            credentials: &ClientCredentials,
+            envelope: Envelope,
+        ) -> Result<Self, reqwest::Error> {
             let inner = Arc::new(Inner {
                 client: reqwest::Client::builder()
                     .timeout(SEND_TIMEOUT)
+                    .redirect(reqwest::redirect::Policy::none())
                     .default_headers(request_headers(credentials))
-                    .build()
-                    .unwrap_or_default(),
+                    .build()?,
                 endpoint: endpoint.to_string(),
                 envelope: std::sync::RwLock::new(envelope),
                 queue: Mutex::new(Vec::new()),
                 sending: tokio::sync::Mutex::new(()),
                 stop: tokio::sync::Notify::new(),
                 credential_refused: std::sync::atomic::AtomicBool::new(false),
+                endpoint_redirects: std::sync::atomic::AtomicBool::new(false),
             });
 
             // A `Weak` so the loop cannot keep the tracker alive, and
@@ -247,7 +336,7 @@ mod http {
                 handle.spawn(async move { drain_loop(weak).await });
             }
 
-            Self { inner }
+            Ok(Self { inner })
         }
     }
 
@@ -387,6 +476,15 @@ mod http {
         /// thousand pointless requests a minute at the operator's own
         /// collector, to learn something already known. So it abandons the drain
         /// like a transport failure, and says so once.
+        ///
+        /// **A `3xx` is the same shape of exception, for the same reason.**
+        /// This client follows no redirect at all — see
+        /// [`HttpOpenPanelTracker::new`] for why the alternative hands the
+        /// write secret to a host nobody configured — so a redirecting endpoint
+        /// arrives here as a plain non-success response that will never
+        /// resolve. It is a verdict on the endpoint, not on the event, so it
+        /// abandons the drain and warns once rather than logging a `debug!` per
+        /// event for the life of the process.
         async fn drain(&self) {
             let _sending = self.sending.lock().await;
             let events = {
@@ -407,6 +505,12 @@ mod http {
                         self.report_refused_credential(total - sent);
                         return;
                     }
+                    // Also not a per-event answer, and — because this client
+                    // follows no redirects — not one that resolves itself.
+                    Ok(response) if response.status().is_redirection() => {
+                        self.report_redirected_endpoint(response.status(), total - sent);
+                        return;
+                    }
                     Ok(response) => tracing::debug!(
                         status = %response.status(),
                         "[analytics] the collector refused an event; dropping it"
@@ -423,6 +527,37 @@ mod http {
                     }
                 }
             }
+        }
+
+        /// Says once, out loud, that the configured endpoint redirects and that
+        /// nothing is being sent as a result.
+        ///
+        /// **Never prints the `Location` header.** It is a URL the collector
+        /// chose, and a URL is the one place this module already knows a
+        /// credential hides — an authenticated proxy's key lives in the
+        /// userinfo or the query string, which is the whole reason
+        /// [`loggable_send_error`] exists. A redirect target is *less* trusted
+        /// than the configured endpoint, not more: the operator did not write
+        /// it, and printing it verbatim would hand a hostile or merely careless
+        /// collector a way to write arbitrary text into a tenant's logs. The
+        /// status code alone is enough to act on, and the fix is in the
+        /// operator's own environment file either way.
+        fn report_redirected_endpoint(&self, status: reqwest::StatusCode, dropped: usize) {
+            use std::sync::atomic::Ordering;
+            if self.endpoint_redirects.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            tracing::warn!(
+                endpoint = %crate::analytics::boot::loggable_endpoint(&self.endpoint),
+                status = %status,
+                dropped,
+                "[analytics] the collector answered with a redirect, which this client \
+                 never follows: the credential headers would otherwise travel to a host \
+                 OPENCOMPANY_ANALYTICS_ENDPOINT does not name. Every event will be \
+                 dropped until that variable points at the collector directly. For a \
+                 self-hosted OpenPanel behind its bundled Caddy that is \
+                 https://<your-domain>/api/track."
+            );
         }
 
         /// Says once, out loud, that the collector will not accept this
@@ -847,6 +982,129 @@ mod test {
              must not be attempted"
         );
         collector.stop().await;
+    }
+
+    /// **The write secret never follows a redirect to another host.**
+    ///
+    /// The leak this closes is not exotic. `reqwest`'s default policy follows
+    /// ten hops, and its cross-origin sanitization
+    /// (`redirect.rs::remove_sensitive_headers`, 0.12.28) removes exactly
+    /// `Authorization`, `Cookie`, `cookie2`, `Proxy-Authorization` and
+    /// `WWW-Authenticate` — and nothing else. `openpanel-client-secret` is none
+    /// of them, so before [`reqwest::redirect::Policy::none`] a single `307`
+    /// from the configured collector handed this instance's long-lived write
+    /// credential to whatever host the `Location` named.
+    ///
+    /// `set_sensitive` is not a defence and is worth naming, because it looks
+    /// like one in the source: it governs `Debug` output and HPACK indexing,
+    /// and has no bearing on which headers survive a hop.
+    ///
+    /// Two collectors on two ports, so `next.port_or_known_default() !=
+    /// previous.port_or_known_default()` — reqwest's own cross-host test — is
+    /// unambiguously true and the sanitization it does perform is in play. The
+    /// assertion is on the **destination**: it must be untouched. Asserting
+    /// only "the redirect was not followed" would pass against a client that
+    /// followed it and merely dropped the header, which is a different and
+    /// weaker property than the one being claimed.
+    #[tokio::test]
+    async fn a_redirect_never_carries_the_credential_to_another_host() {
+        // Where a followed redirect would land: a real collector that records
+        // every header of everything it is sent.
+        let elsewhere = spawn_collector().await;
+        let target = elsewhere.url.clone();
+
+        // The configured endpoint: answers every POST with a 307 to the other
+        // collector, on a different port and so a different origin.
+        let redirected = Arc::new(AtomicUsize::new(0));
+        let counted = redirected.clone();
+        let app = axum::Router::new().route(
+            "/track",
+            axum::routing::post(move || {
+                let hits = counted.clone();
+                let target = target.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, target)],
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/track", listener.local_addr().unwrap());
+        let (shutdown, rx) = tokio::sync::oneshot::channel();
+        let redirector = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+
+        let env = env(&url, &[(DEPLOYMENT_ENV, "hosted-tenant")]);
+        let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+        for _ in 0..3 {
+            tracker.track(Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            });
+        }
+        tracker.flush().await;
+
+        assert_eq!(
+            elsewhere.hits.load(Ordering::SeqCst),
+            0,
+            "a redirect must not carry the client credential to a host \
+             OPENCOMPANY_ANALYTICS_ENDPOINT never named"
+        );
+        assert_eq!(
+            redirected.load(Ordering::SeqCst),
+            1,
+            "a redirecting endpoint is a verdict on the endpoint, not on one event, so \
+             the two behind it must not be attempted"
+        );
+
+        let _ = shutdown.send(());
+        let _ = redirector.await;
+        elsewhere.stop().await;
+    }
+
+    /// The control that makes the test above non-vacuous.
+    ///
+    /// `elsewhere.hits == 0` would also hold if the destination collector were
+    /// simply broken, or if `spawn_collector` did not record what it received.
+    /// Same collector, same events, pointed at directly rather than through a
+    /// redirect: it must see all three requests, carrying the secret, so the
+    /// zero above is about the redirect and nothing else.
+    #[tokio::test]
+    async fn the_redirect_destination_would_have_recorded_the_credential() {
+        let elsewhere = spawn_collector().await;
+        let env = env(&elsewhere.url, &[(DEPLOYMENT_ENV, "hosted-tenant")]);
+        let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+        for _ in 0..3 {
+            tracker.track(Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            });
+        }
+        tracker.flush().await;
+
+        assert_eq!(
+            elsewhere.hits.load(Ordering::SeqCst),
+            3,
+            "the destination records what it is sent, so the zero above is the redirect \
+             policy rather than a collector that counts nothing"
+        );
+        assert_eq!(
+            elsewhere.header(0, CLIENT_SECRET_HEADER).as_deref(),
+            Some(TEST_CLIENT_SECRET),
+            "and it records the credential header, which is the thing that must not \
+             have arrived across a redirect"
+        );
+        elsewhere.stop().await;
     }
 
     /// The queue is bounded. An unreachable collector must cost telemetry, not
