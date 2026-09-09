@@ -184,8 +184,10 @@ const AGENT_TABS = [
   { id: "instructions", label: "Instructions", hint: "What it owns and how it is told to work" },
   { id: "tools", label: "Tools", hint: "What it is allowed to call" },
   { id: "model", label: "Model", hint: "The harness and model it thinks with" },
-  { id: "inbox", label: "Inbox", hint: "What reaches it" },
-  { id: "budget", label: "Budget", hint: "What it may spend" },
+  // Inbox and Budget are not tabs. Both are one control each — a switch, and a
+  // cap — and a tab is a promise of a surface worth navigating to; a whole view
+  // holding a single toggle spends a click to show almost nothing. They live on
+  // Overview, beside the other facts about how this teammate is set up.
 ] as const satisfies readonly PageTab<string>[];
 
 type AgentTab = (typeof AGENT_TABS)[number]["id"];
@@ -1168,15 +1170,11 @@ export function AgentDetailView({
             />
             </PageTabPanel>
 
-            <PageTabPanel idBase="agent" id="inbox" value={tab}>
             <Inbox
               agent={agent}
               busy={inboxSaving}
               onToggle={(next) => void toggleInbox(next)}
             />
-            </PageTabPanel>
-
-            <PageTabPanel idBase="agent" id="budget" value={tab}>
             <Budget
               agent={agent}
               canEdit={isAdmin}
@@ -1185,7 +1183,6 @@ export function AgentDetailView({
               onRemoveCap={() => void applyBudget(null)}
               onResetBudget={() => void resetBudget()}
             />
-            </PageTabPanel>
           </>
         )}
       </div>
