@@ -1355,7 +1355,7 @@ export function InferenceSection({
 
                 {isOffered(provider) && (
                   <div className="space-y-2">
-                    {provider === "openrouter" && modelCatalog.kind === "error" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "error" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-fallback"
@@ -1363,7 +1363,7 @@ export function InferenceSection({
                         {modelCatalog.message}
                       </p>
                     )}
-                    {provider === "openrouter" && modelCatalog.kind === "empty" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "empty" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-empty"
@@ -1379,7 +1379,7 @@ export function InferenceSection({
                       so naming the endpoint is the difference between a list
                       the operator can trust and one they have to guess at.
                     */}
-                    {provider === "openrouter" && modelCatalog.kind === "ready" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "ready" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-source"
@@ -1389,7 +1389,7 @@ export function InferenceSection({
                     )}
                     {/*
                       `kind !== "idle"` is a no-op here — the effect above
-                      only ever sets "idle" when `provider !== "openrouter"`,
+                      only ever sets "idle" when `!draftProviderIsOpenRouter`,
                       which the surrounding check already excludes. Left in
                       as a defensive guard against that invariant changing,
                       not a live branch.
@@ -1404,7 +1404,7 @@ export function InferenceSection({
                       still loading was dropped by `stripProxyIncompatible`
                       with no explanation (issue #1838 follow-up).
                     */}
-                    {provider === "openrouter" &&
+                    {draftProviderIsOpenRouter &&
                       modelCatalog.kind !== "idle" &&
                       wouldSaveProxied && (
                         <p
