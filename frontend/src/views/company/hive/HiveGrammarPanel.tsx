@@ -159,6 +159,9 @@ export function HiveGrammarPanel({
       // Toggling an ungoverned seat materialises its row: until now the table
       // did not name it, and naming it is what makes the narrowing a decision.
       const current = new Set(table[agentId] ?? GATEABLE_KINDS);
+      // An empty list is deliberately fail-open in the runtime, so do not
+      // serialize an apparently fully-restricted seat as one.
+      if (!next && current.size === 1 && current.has(kind)) return prev;
       if (next) current.add(kind);
       else current.delete(kind);
       table[agentId] = GATEABLE_KINDS.filter((k) => current.has(k));

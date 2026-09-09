@@ -191,7 +191,7 @@ export function parseEndingReport(text: string): EpisodeEnding | null {
   const line = text.trimStart();
 
   const converged =
-    /^The desk settled on #(\S+) after (\d+) turns? \(backed by ([^)]*)\)\./.exec(line);
+    /^The desk (?:settled on #(\S+) after|(settled after) (\d+) turns? \(#(\S+), backed by ([^)]*)\):)\s*(.*)$/ .exec(line);
   if (converged) {
     const backing = converged[3].trim();
     return {
