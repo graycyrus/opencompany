@@ -437,10 +437,14 @@ export function SidebarNavigation({
           footer either, so a rule here would also have been the only one in the
           column.
 
-          `pt-5` rather than the group's own `py-1`: deliberate, and large enough
-          that the break is legible at a glance rather than a row gap that reads
-          as an accident. Together with the fixed block's `pb-1` that is 24px of
-          air against an 8px rhythm.
+          The gap is the column's own rhythm, and no more: the fixed block's
+          `pb-1` plus `SidebarContent`'s `gap-1` is 8px, which is the same step
+          between any two rows in the column. This carried a `pt-5` on top of
+          that — 24px against an 8px rhythm — on the argument that the break had
+          to be legible at a glance. It read instead as the channel list having
+          come loose from the four rows above it, which is the one thing this
+          column should never suggest: they are one navigation surface, and the
+          section caption below already names where the second half starts.
 
           `min-h-0 flex-1`, so a long channel list scrolls INSIDE itself rather
           than pushing the four rows or the footer off the column. A flex item's
@@ -449,7 +453,7 @@ export function SidebarNavigation({
           scrolls. */}
       <SidebarGroup
         className={cn(
-          "min-h-0 flex-1 pt-5",
+          "min-h-0 flex-1",
           // On the 3rem rail this group's own `px-2` is the difference between
           // fitting and not. The rail is 48px; the gutter leaves a 32px content
           // box, and `ChannelRail`'s compact rows are `size-9` (36px) with their
