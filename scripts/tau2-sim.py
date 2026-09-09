@@ -67,7 +67,11 @@ from typing import Any
 DOMAINS = {
     "retail": {
         "company": "retail-co",
-        "entry": "triage",
+        # The company's own `general` channel is the front door. There is no
+        # `triage` desk — `triage` is an agent, and a desk holding one seat is
+        # not a room. The responder ladder picks it because reading the order is
+        # what it is for.
+        "entry": "general",
         "state": ".state/retail.json",
         # seat -> (port, tools in scope, of which mutating). The counts are the
         # contract this whole design rests on: `triage` holding a write tool, or
@@ -81,7 +85,6 @@ DOMAINS = {
             "amendments": (8805, 11, 3),
         },
         "desks": {
-            "triage": ["triage"],
             "order_ops": ["cancellations", "amendments"],
             "returns": ["exchanges", "refunds"],
         },
@@ -306,6 +309,21 @@ FOLLOW_UP = (
     "Yes — I confirm, go ahead exactly as you described. "
     "Use the original payment method on the order. I have nothing to add."
 )
+
+
+def communicated(task: dict, replies: list[str]) -> tuple[list[str], list[str]]:
+    """Which `communicate_info` strings actually reached the customer.
+
+    tau2 grades most tasks on ``reward_basis = ["DB", "NL_ASSERTION"]``: the
+    database end state AND natural-language assertions about what the agent
+    said, the latter judged by an LLM in tau2's own harness. This checks neither
+    — it is a literal substring test over what the desks replied, which is a
+    deterministic PROXY for the communication half and nothing more. A task can
+    pass here and still fail tau2's judge.
+    """
+    want = [str(x) for x in ((task.get("evaluation_criteria") or {}).get("communicate_info") or [])]
+    blob = "\n".join(r or "" for r in replies)
+    return want, [w for w in want if w not in blob]
 
 
 def grade(task: dict, state: dict, spec: dict) -> tuple[bool, str]:
@@ -543,9 +561,31 @@ def main() -> int:
                 print(f"  … not settled ({why}); confirming", file=sys.stderr)
                 text = FOLLOW_UP
 
+        said = [r for t in turns for r in (t["replies"] or [])]
+        want_info, missing_info = communicated(task, said)
+        basis = (task.get("evaluation_criteria") or {}).get("reward_basis") or []
+
         failed += 0 if ok else 1
-        print(f"  -> {'PASS' if ok else 'FAIL'} ({why}) in {len(turns)} turn(s)", file=sys.stderr)
-        results.append({"id": tid, "passed": ok, "detail": why, "turns": turns})
+        print(f"  -> DB {'PASS' if ok else 'FAIL'} ({why}) in {len(turns)} turn(s)", file=sys.stderr)
+        if want_info:
+            print(f"     communicate_info {len(want_info) - len(missing_info)}/{len(want_info)}"
+                  + (f", missing {missing_info}" if missing_info else ""), file=sys.stderr)
+        if "NL_ASSERTION" in basis:
+            print("     note: tau2 also scores NL_ASSERTION here, which needs its judge",
+                  file=sys.stderr)
+
+        results.append({
+            "id": tid,
+            # DB only. Named so a reader cannot mistake it for tau2's reward.
+            "db_passed": ok,
+            "db_detail": why,
+            "reward_basis": basis,
+            "communicate_info": {"expected": want_info, "missing": missing_info},
+            "scored_here": "DB end state, plus a literal substring proxy for "
+                           "communicate_info. NL_ASSERTION is NOT scored — it needs "
+                           "tau2's LLM judge over the transcript.",
+            "turns": turns,
+        })
 
     if args.out:
         args.out.write_text(json.dumps({"domain": args.domain, "results": results}, indent=2) + "\n")

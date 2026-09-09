@@ -90,27 +90,17 @@ agentic-v1 = "deepseek/deepseek-v4-flash"
 vision-v1 = "deepseek/deepseek-v4-flash"
 
 # ---------------------------------------------------------------------------
-# The front desk. One seat, so nothing is deliberated here: `deliberates()`
-# needs two. It answers in one turn and hands the case on.
+# There is no `triage` DESK. `triage` is an agent, and a desk whose id equals
+# one of its own members' id is ceremony that the runtime does not even
+# represent consistently: the manifest says `triage`, `POST /chat` accepts
+# `triage`, and `GET /desks` reports the same block back as `front_desk`.
+#
+# A desk exists to hold a ROOM — two or more seats with something to settle
+# between them (`deliberates()` needs two). One seat is not a room, so the
+# front door is the company's own `general` channel: the customer arrives,
+# the responder ladder picks `triage` because reading the order is what it is
+# for, and it refers the case on to whichever desk owns the remedy.
 # ---------------------------------------------------------------------------
-
-[[group_chat]]
-id = "triage"
-name = "Triage"
-description = "Who is this customer, what did they order, and what state is that order in — established before anybody changes anything."
-members = ["triage"]
-
-[group_chat.hive]
-enabled = true
-
-[group_chat.hive.referral]
-enabled = true
-reach = "desks"
-# A round trip is two hops: the question out, the answer home. Two stops it from
-# becoming a chain.
-max_hops = 2
-returns = true
-peer_cap = 2
 
 # ---------------------------------------------------------------------------
 # Pending orders. Two seats, competing remedies.
