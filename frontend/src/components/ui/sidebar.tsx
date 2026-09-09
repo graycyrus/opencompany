@@ -723,24 +723,38 @@ function SidebarMenuBadge({
   )
 }
 
-/*
- * `SidebarMenuDot` used to live here — the attention mark that survived the
- * rail collapsing (issue #1018).
+/**
+ * The attention mark that survives the rail collapsing (issue #1018).
  *
- * It existed for one reason: `SidebarMenuBadge` carries
- * `group-data-[collapsible=icon]:hidden`, so the approvals count — the
- * sidebar's only attention signal — vanished the moment the sidebar collapsed
- * to icons, and a collapsed rail showing nothing is indistinguishable from
- * all-clear. The dot was the same `pending` value rendered small enough to
- * survive 32px, mirrored so exactly one of the two ever showed.
+ * `SidebarMenuBadge` above carries `group-data-[collapsible=icon]:hidden`, so a
+ * count rendered only there vanishes the moment the sidebar collapses to icons
+ * — and a collapsed rail showing nothing is indistinguishable from all-clear.
+ * This is the same value rendered small enough to survive 32px, and the two are
+ * mirrored so exactly one of them is ever on screen.
  *
- * The signal has moved to the window's title row (`ApprovalsButton`), which is
- * chrome: it does not collapse, and it is on screen on every page in every
- * sidebar state. The disappearance the dot was protecting against can no longer
- * happen, so the dot is deleted rather than left as a second mechanism for a
- * count that is no longer here. Do not re-add it without re-adding a sidebar
- * badge for it to mirror.
+ * It was deleted once, when Approvals was chrome in the window's title row: the
+ * title row does not collapse, so the disappearance this guards against could
+ * not happen, and a second mechanism for a count that had left the sidebar was
+ * worth removing. Approvals is a sidebar row again, so the hazard is back and so
+ * is this. Whichever of the two moves, they move together — a badge with no dot
+ * is issue #1018 verbatim.
  */
+function SidebarMenuDot({ className, ...props }: React.ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="sidebar-menu-dot"
+      data-sidebar="menu-dot"
+      aria-hidden="true"
+      className={cn(
+        // The mirror of the badge's own hide rule: shown ONLY on the icon rail.
+        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full",
+        "bg-(--status-blocked) group-data-[collapsible=icon]:block",
+        className
+      )}
+      {...props}
+    />
+  )
+}
 
 function SidebarMenuSkeleton({
   className,
@@ -854,6 +868,7 @@ export {
   SidebarMenu,
   SidebarMenuAction,
   SidebarMenuBadge,
+  SidebarMenuDot,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSkeleton,
