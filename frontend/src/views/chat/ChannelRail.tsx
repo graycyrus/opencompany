@@ -15,7 +15,12 @@ import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
 import { NewMessageDialog } from "./NewMessageDialog";
-import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
+import {
+  channelSubtitle,
+  dmFace,
+  type Channel,
+  type ChannelSection,
+} from "./model";
 
 /**
  * What an unread badge actually claims (issue #364).
@@ -26,7 +31,8 @@ import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./mo
  * now — this is not, and it says so rather than letting an operator read the
  * badge as "unread by my team".
  */
-const UNREAD_IS_LOCAL = "Estimated in this browser — unread is not tracked on the company.";
+const UNREAD_IS_LOCAL =
+  "Estimated in this browser — unread is not tracked on the company.";
 
 interface Props {
   sections: ChannelSection[];
@@ -118,13 +124,18 @@ export function ChannelRail({
   // "open": the default is a fully expanded list. `ChatView` passes the state
   // in so both rail instances share one fold set across the `lg` breakpoint;
   // a standalone rail (tests, other hosts) keeps it local to the instance.
-  const [internalOpenSections, setInternalOpenSections] = useState<Record<string, boolean>>({});
+  const [internalOpenSections, setInternalOpenSections] = useState<
+    Record<string, boolean>
+  >({});
   const resolvedOpenSections = openSections ?? internalOpenSections;
   const toggleSection = (id: string) => {
     if (onToggleSection) {
       onToggleSection(id);
     } else {
-      setInternalOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
+      setInternalOpenSections((prev) => ({
+        ...prev,
+        [id]: !(prev[id] ?? true),
+      }));
     }
   };
 
@@ -146,19 +157,24 @@ export function ChannelRail({
         >
           <PanelRight className="size-4" />
         </Button>
-        <nav aria-label="Channels" className="mt-3 flex w-full flex-col items-center gap-1 px-2">
-          {sections.flatMap((section) => section.channels).map((channel) => (
-            <CompactChannelRow
-              key={channel.id}
-              channel={channel}
-              active={channel.id === activeId}
-              activeAria={activeAria}
-              onPage={onPage}
-              unread={unread[channel.id] ?? 0}
-              mentions={mentions?.[channel.id] ?? 0}
-              onSelect={onSelect}
-            />
-          ))}
+        <nav
+          aria-label="Channels"
+          className="mt-3 flex w-full flex-col items-center gap-1 px-2"
+        >
+          {sections
+            .flatMap((section) => section.channels)
+            .map((channel) => (
+              <CompactChannelRow
+                key={channel.id}
+                channel={channel}
+                active={channel.id === activeId}
+                activeAria={activeAria}
+                onPage={onPage}
+                unread={unread[channel.id] ?? 0}
+                mentions={mentions?.[channel.id] ?? 0}
+                onSelect={onSelect}
+              />
+            ))}
         </nav>
       </aside>
     );
@@ -178,8 +194,10 @@ export function ChannelRail({
             channel={section.channels[0]}
             active={section.channels[0]?.id === activeId}
             activeAria={activeAria}
-              onPage={onPage}
-            unread={section.channels[0] ? (unread[section.channels[0].id] ?? 0) : 0}
+            onPage={onPage}
+            unread={
+              section.channels[0] ? (unread[section.channels[0].id] ?? 0) : 0
+            }
             onSelect={onSelect}
           />
         ) : (
@@ -193,7 +211,13 @@ export function ChannelRail({
             // chrome for the rail rather than an action on a section.
             action={
               section.id === "channels" ? (
-                onAddChannel && <SectionAction onClick={onAddChannel} label="New channel" icon={Plus} />
+                onAddChannel && (
+                  <SectionAction
+                    onClick={onAddChannel}
+                    label="New channel"
+                    icon={Plus}
+                  />
+                )
               ) : section.id === "dms" && onStartDirectMessage ? (
                 <NewMessageDialog
                   directMessages={directMessages}
@@ -210,7 +234,7 @@ export function ChannelRail({
             }
             activeId={activeId}
             activeAria={activeAria}
-              onPage={onPage}
+            onPage={onPage}
             unread={unread}
             mentions={mentions}
             onSelect={onSelect}
@@ -319,15 +343,14 @@ function CompactChannelRow({
       // in the accessible name — the expanded row says it in text, and
       // collapsing the rail must not strip the same fact from the screen-reader
       // tree. The dot itself stays a sighted-hover-only cue.
-      aria-label={
-        [
-          channel.name,
-          hasMentions && `${mentions > 99 ? "99+" : mentions} mention${mentions === 1 ? "" : "s"}`,
-          hasUnread && `${unread > 99 ? "99+" : unread} unread`,
-        ]
-          .filter(Boolean)
-          .join(", ")
-      }
+      aria-label={[
+        channel.name,
+        hasMentions &&
+          `${mentions > 99 ? "99+" : mentions} mention${mentions === 1 ? "" : "s"}`,
+        hasUnread && `${unread > 99 ? "99+" : unread} unread`,
+      ]
+        .filter(Boolean)
+        .join(", ")}
       title={channel.name}
       className={cn(
         "relative flex size-9 shrink-0 items-center justify-center rounded-md transition-colors",
@@ -436,42 +459,45 @@ function Section({
     // a channel row lands on exactly the same two numbers.
     <section className="group/section select-none pt-2">
       <div className="flex items-center gap-0.5">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        // `px-2`, matching the nav rows above: the caption's chevron then
-        // stands on the same vertical line as their icons.
-        className="flex w-full min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronRight
-          className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
-          aria-hidden
-        />
-        <span className="truncate">{section.label}</span>
-        {(hiddenMentions > 0 || hiddenUnread > 0) && (
-          <span className="ml-auto flex items-center gap-1">
-            {hiddenMentions > 0 && (
-              <span
-                data-testid="section-mentions"
-                title={`${hiddenMentions} ${hiddenMentions === 1 ? "mention" : "mentions"} of you in this section`}
-                className="rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
-              >
-                @{hiddenMentions > 99 ? "99+" : hiddenMentions}
-              </span>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          // `px-2`, matching the nav rows above: the caption's chevron then
+          // stands on the same vertical line as their icons.
+          className="flex w-full min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronRight
+            className={cn(
+              "size-3 shrink-0 transition-transform",
+              open && "rotate-90",
             )}
-            {hiddenUnread > 0 && (
-              <span
-                title={UNREAD_IS_LOCAL}
-                className="rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
-              >
-                {hiddenUnread > 99 ? "99+" : hiddenUnread}
-              </span>
-            )}
-          </span>
-        )}
-      </button>
-      {action}
+            aria-hidden
+          />
+          <span className="truncate">{section.label}</span>
+          {(hiddenMentions > 0 || hiddenUnread > 0) && (
+            <span className="ml-auto flex items-center gap-1">
+              {hiddenMentions > 0 && (
+                <span
+                  data-testid="section-mentions"
+                  title={`${hiddenMentions} ${hiddenMentions === 1 ? "mention" : "mentions"} of you in this section`}
+                  className="rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
+                >
+                  @{hiddenMentions > 99 ? "99+" : hiddenMentions}
+                </span>
+              )}
+              {hiddenUnread > 0 && (
+                <span
+                  title={UNREAD_IS_LOCAL}
+                  className="rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
+                >
+                  {hiddenUnread > 99 ? "99+" : hiddenUnread}
+                </span>
+              )}
+            </span>
+          )}
+        </button>
+        {action}
       </div>
 
       {open && (
@@ -482,7 +508,7 @@ function Section({
                 channel={channel}
                 active={channel.id === activeId}
                 activeAria={activeAria}
-              onPage={onPage}
+                onPage={onPage}
                 unread={unread[channel.id] ?? 0}
                 mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
@@ -490,7 +516,9 @@ function Section({
             </li>
           ))}
           {section.channels.length === 0 && (
-            <li className="px-2 py-1 text-xs text-muted-foreground">Nothing here yet.</li>
+            <li className="px-2 py-1 text-xs text-muted-foreground">
+              Nothing here yet.
+            </li>
           )}
         </ul>
       )}
@@ -545,7 +573,11 @@ function ChannelRow({
       {hasMentions && (
         <span
           data-testid="channel-mentions"
-          title={mentions === 1 ? "1 mention of you here" : `${mentions} mentions of you here`}
+          title={
+            mentions === 1
+              ? "1 mention of you here"
+              : `${mentions} mentions of you here`
+          }
           className="shrink-0 rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
         >
           @{mentions > 99 ? "99+" : mentions}
@@ -581,7 +613,8 @@ function ChannelIcon({ channel }: { channel: Channel }) {
   // channel you post into, which this one refuses (issue #1757 rework). A
   // distinct glyph is the honest mark, the same way `Lock` already distinguishes
   // a private channel from an ordinary one.
-  if (channel.system) return <Radio className="size-4 shrink-0 opacity-70" aria-hidden />;
+  if (channel.system)
+    return <Radio className="size-4 shrink-0 opacity-70" aria-hidden />;
   const Icon = channel.private ? Lock : Hash;
   return <Icon className="size-4 shrink-0 opacity-70" aria-hidden />;
 }
