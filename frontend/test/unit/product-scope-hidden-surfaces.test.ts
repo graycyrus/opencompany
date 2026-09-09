@@ -428,10 +428,12 @@ describe("the wizard's model step offers the managed endpoint too", () => {
 });
 
 describe("the roster's keyboard shortcuts go with the roster", () => {
-  it("does not select a host on Cmd-1 when there is no roster to see", async () => {
-    // The listener is installed on `window` by the provider, not by the menu, so
-    // hiding the switcher does not remove it. Left live it would swallow the
-    // browser's own Cmd-1 and switch hosts with nothing on screen saying so.
+  it("selects a host on Cmd-2 now that the roster is on screen", async () => {
+    // The listener is installed on `window` by the provider, not by the menu,
+    // and it is gated on the same flag as the roster it drives. The pairing is
+    // the point: a shortcut that switched hosts with no roster on screen would
+    // swallow the browser's own Cmd-2 and act invisibly, and a roster whose
+    // printed `⌘2` did nothing would be furniture.
     const picked: string[] = [];
     const value = { ...hosts([CONNECTION, SECOND]), onSelect: (id: string) => picked.push(id) };
     await show(value as HostsValue);
@@ -442,7 +444,7 @@ describe("the roster's keyboard shortcuts go with the roster", () => {
       );
     });
 
-    expect(picked).toEqual([]);
+    expect(picked).toEqual(["c2"]);
   });
 });
 
