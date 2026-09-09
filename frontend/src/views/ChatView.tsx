@@ -641,12 +641,6 @@ export function ChatView({
     setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
   /** Your own avatar reference, once `loadViewer` has resolved who you are. */
   const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
-  // Who set which cap (issue #360, ported from the retired Team page). Only
-  // an admin may read the user directory, so this stays empty for a member —
-  // the attribution line degrades to "an admin" rather than disappearing.
-  const [people, setPeople] = useState<Person[]>([]);
-  // The member whose budget dialog is open, if any.
-  const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
 
   /**
    * Ask the host whether this company can think (issues #1734, #1735).
@@ -805,38 +799,27 @@ export function ChatView({
    * prevents.
    */
   // Only the newest load may write, exactly as `loadDesks` guards its own runs.
-  // `fetchMe` and `listPeople` can overlap — a scope change while a request is
-  // merely slow — and a stale answer landing last would wear the previous
-  // company's face on your own lines. The face is cleared *before* the fetch so
-  // a slow request can never pin an old avatar across a scope change; the
-  // timeline falls back to the name-seeded mascot meanwhile.
+  // A scope change while a request is merely slow would otherwise let a stale
+  // answer land last and wear the previous company's face on your own lines.
+  // The face is cleared *before* the fetch so a slow request can never pin an
+  // old avatar across a scope change; the timeline falls back to the
+  // name-seeded mascot meanwhile.
+  //
+  // It used to read the user directory too, to attribute who set a teammate's
+  // daily cap. There are no caps in the console any more, so the second request
+  // went with them and this is one call again.
   const viewerRun = useRef(0);
   const loadViewer = useCallback(async () => {
     const run = ++viewerRun.current;
     setYouAvatar(undefined);
-    let admin = false;
     try {
       const who = await fetchMe(client, company);
       if (run !== viewerRun.current) return;
-      admin = who.role === "admin";
       // Your own face, so your lines in a busy channel are yours at a glance.
-      // Read from the same call that resolves your role — there is no second
-      // round trip for it, and no way for the two to disagree about who you are.
       setYouAvatar(personAvatar(who));
     } catch {
-      if (run !== viewerRun.current) return;
-      // No user plane on this host, or not signed in — treat as non-admin, and
-      // leave the composer's own lines on the name-seeded fallback.
-    }
-    if (!admin) return;
-    try {
-      const people = await listPeople(client, company);
-      if (run !== viewerRun.current) return;
-      setPeople(people);
-    } catch {
-      if (run !== viewerRun.current) return;
-      // Attribution falls back to "an admin"; not worth a toast.
-      setPeople([]);
+      // No user plane on this host, or not signed in — leave the composer's
+      // own lines on the name-seeded fallback.
     }
   }, [client, company, roomVisits]);
 
@@ -847,13 +830,7 @@ export function ChatView({
   }, [boot, loadViewer]);
 
 
-  const budgetError = (error: unknown, fallback: string): string => {
-    if (error instanceof ApiError) {
-      if (error.status === 404) return "This host doesn't support console budgets yet.";
-      return error.message;
-    }
-    return error instanceof Error ? error.message : fallback;
-  };
+
 
 
 
