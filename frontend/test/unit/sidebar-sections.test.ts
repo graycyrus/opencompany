@@ -258,7 +258,7 @@ describe("the rendered sidebar", () => {
     // rows this column paints, whichever address is open, and a section's own
     // pages are rows on its content rail instead
     // (`section-rail-layout.test.ts`).
-    const rows = ["Room", "Company", "Connections", "Flows", "Approvals"];
+    const rows = ["Room", "Company", "Connections", "Automations", "Approvals"];
     for (const view of ["chat", "company", "connections", "workflows"] as View[]) {
       render(view);
       expect(fixedRows(), view).toEqual(rows);
