@@ -15,10 +15,13 @@ import {
 import {
   SidebarGroup,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
+  SidebarMenuDot,
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { approvalsCount, approvalsLabel } from "@/components/approvals-button";
 import { RESTING_ROW } from "@/components/sidebar-controls";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { isNavigationActive, type View } from "@/lib/console-routes";
@@ -78,16 +81,17 @@ export interface NavSection {
 }
 
 /**
- * The console's four sections.
+ * The console's five sections.
  *
  * ## Why four rows and not ten
  *
  * Ten flat rows is not a list an operator scans, it is a wall — the same
  * judgement `docs/spec/runtime/ledgers-console-ia.md` made when it rejected a
- * row per declared list. What replaces it is four things you can name without
- * reading: the room you talk in, the company you are running, what it is
- * connected to, and the work it repeats. Everything else is filed under one of
- * them, in the sidebar, visible while you are in that section.
+ * row per declared list. What replaces it is a handful of things you can name
+ * without reading: the room you talk in, the company you are running, what it
+ * is connected to, the work it repeats, and what is waiting on you. Everything
+ * else is filed under one of them, in the sidebar, visible while you are in
+ * that section.
  *
  * ## Labels and view ids are allowed to differ
  *
@@ -101,7 +105,7 @@ export interface NavSection {
  * ## Sub-navigation lives in the CONTENT area, not here
  *
  * This table feeds two surfaces now, and only one of them is the sidebar. The
- * four rows above are the sidebar's; every `children` list below is read by
+ * top-level rows above are the sidebar's; every `children` list below is read by
  * `components/section-rail.tsx` and drawn as the first column of the content
  * area, the way Settings has always drawn its own.
  *
