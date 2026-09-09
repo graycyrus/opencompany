@@ -628,8 +628,19 @@ export function InferenceSection({
    * that exists to keep an OpenRouter-only catalog or id shape off a draft
    * that would reach a *different* endpoint has to treat `managed` the same
    * way it treats `openrouter`, or a `managed` draft slips through them.
+   *
+   * Gated on `status` having loaded, unlike a plain `provider === "managed"`
+   * check: `provider`'s own initial value *is* `"managed"` — a placeholder
+   * used before `seedFromStatus` seeds the real draft — and counting that
+   * placeholder as an OpenRouter-like window let the strip effect below latch
+   * `strippedForWindow` against empty placeholder models before the real,
+   * seeded ones ever arrived, then skip stripping them once they did, because
+   * the boolean never toggled to give the effect its reset edge. Once `status`
+   * is loaded this is exactly the same test as `storedProviderIsOpenRouter`
+   * above, applied to the live draft instead of the saved config.
    */
-  const draftProviderIsOpenRouter = provider === "openrouter" || provider === "managed";
+  const draftProviderIsOpenRouter =
+    provider === "openrouter" || (provider === "managed" && status !== null);
 
   useEffect(() => {
     let current = true;
