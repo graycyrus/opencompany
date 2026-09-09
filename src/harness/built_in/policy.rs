@@ -142,7 +142,7 @@ use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 
 use crate::company::Policy;
 use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
-use crate::policy::{CallPath, McpReadSet};
+use crate::policy::{CallPath, McpReadSet, Standing};
 use crate::ports::UsageMeter;
 use crate::ports::types::{CompanyId, Effect, EffectGroup, Verdict};
 use crate::runtime::grants::{GrantSet, GrantSubject, GrantedCall};
@@ -889,6 +889,17 @@ pub struct ApprovalPolicy {
     /// S1 tells the agent to route these providers through Composio, this refuses
     /// the raw `http_request` / `curl` / `web_fetch` that ignores it.
     connected_composio_toolkits: Vec<String>,
+    /// The company's emergency-stop flag, consulted ahead of the mode dispatch
+    /// so a consequential call still refuses under `full` autonomy — the one
+    /// tier with no per-call gate to reach `ManifestApprovalGate::evaluate` or
+    /// `park` at all.
+    ///
+    /// `None` at every non-harness construction site and every test with no
+    /// company gate to ask, which keeps them dispatching exactly as before.
+    /// Only `build_roster` chains
+    /// [`with_emergency_gate`](Self::with_emergency_gate), from
+    /// `deps.emergency_gate`.
+    emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
 }
 
 #[derive(Clone)]
@@ -943,6 +954,10 @@ impl ApprovalPolicy {
             // No connected toolkits by default, so the S2 web-deflection arm is
             // inert — see `with_connected_composio_toolkits`.
             connected_composio_toolkits: Vec::new(),
+            // No gate by default, so every non-harness construction site and
+            // every test with no company to ask dispatches exactly as before —
+            // see `with_emergency_gate`.
+            emergency_gate: None,
         }
     }
 
@@ -974,6 +989,17 @@ impl ApprovalPolicy {
     /// effect knows whose tool call it came from (issue #243).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    /// Installs the company's emergency-stop flag, so `check` refuses a
+    /// consequential call under `full` autonomy the same way `evaluate` and
+    /// `park` already refuse one on every other tier.
+    pub fn with_emergency_gate(
+        mut self,
+        gate: Arc<crate::policy::gate::ManifestApprovalGate>,
+    ) -> Self {
+        self.emergency_gate = Some(gate);
         self
     }
 
@@ -1306,6 +1332,64 @@ impl ApprovalPolicy {
     /// **untouched at cap**. A spend cap caps spend; making a teammate unable to
     /// answer a question because it spent its budget this morning would be a
     /// different feature, and a worse one.
+    /// Record what a consequence floor would have done with this call, and
+    /// change nothing (issue #2147).
+    ///
+    /// Epic #1817 asks for outward, irreversible acts — publish, send, sign,
+    /// hire, identity, spend that leaves — to reach a person whatever tier the
+    /// company runs. Since #1925 nothing does: the bypass immediately below
+    /// this call site allows every classification-derived decision. Whether to
+    /// re-introduce a stop is a product question, and the honest input to it is
+    /// how often such a stop would actually fire on live traffic — a
+    /// taxonomically narrow floor can still be practically wide.
+    ///
+    /// So this emits one line per call the floor would have stopped, tagged
+    /// with the reason, the tier, and whether HITL was on at the time. Silent
+    /// calls emit nothing: the denominator is the tool-call trace the runs
+    /// already record, and logging every allowed call to count it would bury
+    /// the signal it exists to produce.
+    ///
+    /// [`floor::deferred_group`] is reported on its own axis so #658's
+    /// `publish_artifact` carve-out can be revisited with a number instead of
+    /// two opinions — it is counted, never folded into the floor's own count.
+    ///
+    /// Emitted through `tracing`, at the `policy::shadow_floor` target
+    /// `DEFAULT_LOG_FILTER` (`src/bin/opencompany.rs`) names explicitly. The
+    /// binary's default filter is bare `error`, and no container image,
+    /// compose file or deploy workflow sets `RUST_LOG` — the same shape issue
+    /// #450 already found once for the durable-append worker's `warn!` lines.
+    /// An `info!` with no matching exception is exactly as silent as those
+    /// were: a week of staging traffic would produce this measurement's
+    /// entire denominator and record none of it.
+    fn record_shadow_floor(&self, tool: &str, args: &serde_json::Value) {
+        // The per-call allowance, which is the cap a single call is measured
+        // against. The daily budget is a different question and has its own arm.
+        let verdict = crate::policy::floor::evaluate(tool, args, self.auto_approve_under_usd);
+        if verdict.requires_human() {
+            tracing::info!(
+                target: "policy::shadow_floor",
+                "[policy:shadow-floor] agent={} tool='{}' would_stop={} mode={:?} hitl={} issue=2147",
+                self.agent.as_deref().unwrap_or("-"),
+                tool,
+                verdict.reason_word(),
+                self.mode,
+                self.policy_hitl_enabled,
+            );
+        }
+        if let Some(group) = crate::policy::floor::deferred_group(tool, args) {
+            tracing::info!(
+                target: "policy::shadow_floor",
+                "[policy:shadow-floor] agent={} tool='{}' deferred_group={:?} mode={:?} hitl={} \
+                 issue=2147",
+                self.agent.as_deref().unwrap_or("-"),
+                tool,
+                group,
+                self.mode,
+                self.policy_hitl_enabled,
+            );
+        }
+    }
+
     fn is_priced_call(tool: &str, args: &serde_json::Value, declared_amount: Option<f64>) -> bool {
         declared_amount.is_some() || classify_group(tool, args) == EffectGroup::Spend
     }
@@ -1522,6 +1606,94 @@ impl ApprovalPolicy {
         }
         consequence
     }
+
+    /// Does the run this call is executing inside already carry an operator's
+    /// consent for it (issue #2150, Rung 3 of epic #1817)?
+    ///
+    /// Consulted only from inside the `auto` / `supervised` mode arms of
+    /// [`check`](ToolPolicy::check), which is what keeps this a narrowing: it
+    /// can turn a park those two tiers would otherwise raise into an allow,
+    /// and it is never reached for `readonly` (denies before the mode
+    /// dispatch) or `full` (never parks here at all). Everything above the
+    /// mode dispatch — the reserved `never_do` slot, the S2 web-deflection
+    /// deny, the `readonly` brake, both grant arms, `always_approve`, the
+    /// daily cap — has already had its say and none of it reads this.
+    ///
+    /// [`crate::harness::built_in::run_origin::current`] is fail-closed by
+    /// construction, so every early `false` below is this predicate refusing
+    /// to admit rather than the origin failing to supply an answer.
+    fn trusted_dispatch_admits(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        consequence: crate::policy::Consequence,
+    ) -> bool {
+        // Issue #674's split, reasserted here rather than merely documented:
+        // `judge` is silent on an authored workflow node, so admitting one
+        // through trust as well would remove the ceiling `always_approve`
+        // still leaves on that path. `for_authored_workflow_nodes` is the only
+        // constructor that sets this, and this arm must never fire for it.
+        if self.call_path != CallPath::Agent {
+            return false;
+        }
+        // `Standing::PerCall` is exactly "every call is its own decision" —
+        // the set an operator could never have handed over ahead of time, so
+        // there is nothing here for a dispatched run to have inherited.
+        if consequence.standing == Standing::PerCall {
+            return false;
+        }
+        // The consequence floor outranks every trust this module hands out.
+        // `None` for the cap matches `judge`'s own reading — any declared
+        // amount stops.
+        //
+        // It cannot change an outcome today, and that is worth saying rather
+        // than discovering. Two reasons, and both could stop being true:
+        // every tool the floor names is `PerCall`, which the arm above already
+        // refused (the one `Grantable` tool with a consequence group,
+        // `publish_artifact`, is deferred by #658 so the floor is silent on
+        // it); and the money arm is caught anyway by `judge` at the tail of
+        // `check`, which re-judges whatever the tier allowed.
+        //
+        // Removing it therefore keeps the suite green — verified, not assumed.
+        // It stays because the second reason is positional: if epic #1817's
+        // floor becomes an enforced arm ABOVE the `policy_hitl_enabled`
+        // bypass, `judge`'s tail placement no longer covers a call this
+        // function admitted, and this line is what keeps trust from outranking
+        // the floor on that day. The first reason is one `DECLARED` edit away
+        // from changing on its own.
+        if crate::policy::floor::evaluate_consequence(tool, consequence, args, None)
+            .requires_human()
+        {
+            return false;
+        }
+        let crate::harness::built_in::run_origin::RunOrigin::Dispatched { agent, scope, .. } =
+            crate::harness::built_in::run_origin::current()
+        else {
+            return false;
+        };
+        // The dispatched agent, not this call's arguments, is what earned the
+        // trust — and the checking policy's own `self.agent` is the identity
+        // actually making this call. A delegate running under an origin its
+        // dispatch never named is exactly the escalation `run_origin`'s own
+        // docs warn against; the mismatch here is what stops it.
+        if self.agent.as_deref() != Some(agent.as_str()) {
+            return false;
+        }
+        match consequence.standing {
+            Standing::Grantable => true,
+            Standing::ScopedGrantable => {
+                // A scope that cannot be derived refuses rather than admits —
+                // the same direction `StandingGrant::admits_scope` takes for a
+                // live call whose scope reads `None` against a scoped grant.
+                let Some(call_scope) = crate::policy::consequence::standing_scope_of(tool, args)
+                else {
+                    return false;
+                };
+                scope.as_deref() == Some(call_scope.as_str())
+            }
+            Standing::PerCall => unreachable!("returned above"),
+        }
+    }
 }
 
 #[async_trait]
@@ -1550,6 +1722,37 @@ impl ToolPolicy for ApprovalPolicy {
         // refused by the boundary above.
         if tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
             return ToolPolicyDecision::Allow;
+        }
+
+        // The emergency stop (issue #86), computed and enforced HERE — above
+        // every unconditional `Allow` this function can still reach below: a
+        // redeemed single-use grant, a standing grant, `policy_hitl_enabled ==
+        // false`, and `auto_approve_under_usd`. `ManifestApprovalGate` enforces
+        // the same veto at `evaluate`/`park`, but a harness tool call never
+        // reaches either — `check` decides `Allow` on its own, so any one of
+        // those branches returning first is a live bypass, not just `full`
+        // autonomy's blanket allow. Without this, an in-flight turn that
+        // survives the stop (by design — see
+        // `CompanyRuntime::ensure_not_emergency_stopped`) could still dispatch
+        // a consequential tool the containment story assumes the gate denies.
+        // `EffectGroup::Other` stays exempt, matching `evaluate`/`park`.
+        //
+        // `consequence_for` is computed here rather than at its original site
+        // near the mode dispatch, and reused there (see `let reach =
+        // consequence.reach;` below) — it depends only on `tool`/`args` and
+        // `self.mode`/`self.workspace`/`self.agent`, none of which the branches
+        // between here and there can change.
+        let consequence = self.consequence_for(tool, &request.arguments).await;
+        if consequence.group != EffectGroup::Other
+            && self
+                .emergency_gate
+                .as_deref()
+                .is_some_and(|gate| gate.is_emergency())
+        {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' was not run because the company is stopped and will run no work \
+                 until an operator releases it"
+            ));
         }
 
         // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
@@ -1694,6 +1897,19 @@ impl ToolPolicy for ApprovalPolicy {
             );
         }
 
+        // Shadow measurement for issue #2147 — reads, records, decides nothing.
+        //
+        // Immediately ABOVE the bypass because that is the position the
+        // consequence floor epic #1817 proposes for a real arm, and a
+        // measurement taken anywhere else would be measuring a different
+        // question. Everything above has already returned for the calls it owns
+        // — a hard deny, a redeemed grant, a paid-media card — so what reaches
+        // here is exactly the population a floor would decide.
+        //
+        // It must stay incapable of changing an outcome: no early return, no
+        // mutation, no queue write. The only observable is a log line.
+        self.record_shadow_floor(tool, &request.arguments);
+
         // General approvals come only from `request_approval`; specialized
         // approval-producing tools such as paid media stage themselves above.
         // Keep the readonly brake and old-grant redemption above this point,
@@ -1747,7 +1963,8 @@ impl ToolPolicy for ApprovalPolicy {
         // operator who does want a per-call gate has
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
-        let consequence = self.consequence_for(tool, &request.arguments).await;
+        // `consequence` was computed, and the emergency stop already enforced
+        // against it, above — see the comment there for why this moved.
         let reach = consequence.reach;
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
@@ -1762,7 +1979,11 @@ impl ToolPolicy for ApprovalPolicy {
             // company-context downgrade, graded by `consequence_for` before the
             // table verdict is taken (issue #877).
             PolicyMode::Auto => {
-                if consequence.parks_under_auto() {
+                if !consequence.parks_under_auto()
+                    || self.trusted_dispatch_admits(tool, &request.arguments, consequence)
+                {
+                    ToolPolicyDecision::Allow
+                } else {
                     self.require_approval(
                         tool,
                         &request.arguments,
@@ -1770,19 +1991,19 @@ impl ToolPolicy for ApprovalPolicy {
                             "'{tool}' leaves the company or spends money, and this desk runs auto"
                         ),
                     )
-                } else {
-                    ToolPolicyDecision::Allow
                 }
             }
             PolicyMode::Supervised => {
-                if reach.parks_under_supervision() {
+                if !reach.parks_under_supervision()
+                    || self.trusted_dispatch_admits(tool, &request.arguments, consequence)
+                {
+                    ToolPolicyDecision::Allow
+                } else {
                     self.require_approval(
                         tool,
                         &request.arguments,
                         format!("'{tool}' has an external effect and this desk runs supervised"),
                     )
-                } else {
-                    ToolPolicyDecision::Allow
                 }
             }
             PolicyMode::Readonly => {
@@ -2127,6 +2348,64 @@ mod tests {
             .await,
             ToolPolicyDecision::Allow
         );
+    }
+
+    /// The shadow floor observes; it never decides (issue #2147).
+    ///
+    /// Every tool below is one the consequence floor names — a send, a launch,
+    /// an identity change, a call carrying money. With policy HITL disabled,
+    /// which is the production build, all of them must still be allowed. A
+    /// failure here means the measurement grew teeth, which is the one way this
+    /// instrumentation could do harm.
+    #[tokio::test]
+    async fn the_shadow_floor_decides_nothing_with_hitl_disabled() {
+        for mode in ["auto", "supervised", "full"] {
+            let p = policy(mode, &[], None).with_policy_hitl_disabled();
+            for (tool, args) in [
+                ("chargebee_send_invoice", serde_json::json!({})),
+                ("hosting_launch_site", serde_json::json!({})),
+                ("composio_authorize", serde_json::json!({})),
+                ("publish_artifact", serde_json::json!({})),
+                ("file_write", serde_json::json!({ "amount_usd": 500.0 })),
+                (
+                    "composio_execute",
+                    serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+                ),
+            ] {
+                assert_eq!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::Allow,
+                    "{tool} under {mode}: the shadow floor must observe, not gate"
+                );
+            }
+        }
+    }
+
+    /// The floor's own reading of a call agrees with what the tier does with it
+    /// while HITL is on.
+    ///
+    /// Not a tautology: it pins that the population the shadow counts is the
+    /// population a real floor arm would decide. If a later change moved the
+    /// shadow call site above a hard deny or below the tier, this is what
+    /// notices — the count would silently start describing a different
+    /// question, which is the failure mode a measurement cannot self-report.
+    #[tokio::test]
+    async fn what_the_shadow_counts_is_what_full_autonomy_already_stops() {
+        let p = policy("full", &[], None);
+        for tool in ["chargebee_send_invoice", "hosting_launch_site"] {
+            let args = serde_json::json!({});
+            assert!(
+                crate::policy::floor::evaluate(tool, &args, None).requires_human(),
+                "{tool} is a floor call"
+            );
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} is stopped by the judgement arm under full autonomy today"
+            );
+        }
     }
 
     /// Every tier is reachable from a manifest, parses to its own variant, and
@@ -2482,6 +2761,167 @@ mod tests {
                 "{tool} leaves the company or spends money and must still park under auto"
             );
         }
+    }
+
+    /// **Codex review finding on PR #2140 (`3952368155`).** `full` autonomy is
+    /// the one tier with no per-call gate at all
+    /// ([`PolicyMode::Full`](PolicyMode::Full) allows every consequential call
+    /// outright), so it never reaches `ManifestApprovalGate::evaluate` or
+    /// `park` — the choke point the emergency stop is enforced at everywhere
+    /// else. An in-flight turn that survives the stop by design (see
+    /// `CompanyRuntime::ensure_not_emergency_stopped`) could dispatch a
+    /// consequential harness tool through this tier with nothing to refuse it.
+    ///
+    /// `EffectGroup::Other` calls (`spawn_task` and the like) still run, matching
+    /// `evaluate`/`park`'s own exemption.
+    #[tokio::test]
+    async fn full_autonomy_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("full", &[], None).with_emergency_gate(gate.clone());
+
+        assert!(
+            matches!(
+                p.check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a consequential call must refuse under `full` once the company is stopped, \
+             the same way `evaluate`/`park` already refuse one on every other tier"
+        );
+
+        assert_eq!(
+            p.check(&request("spawn_task", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "an `EffectGroup::Other` call is exempt while stopped, matching evaluate/park"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("publish_artifact", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores `full`'s ordinary blanket allow"
+        );
+    }
+
+    /// **CodeRabbit review finding on PR #2140 (`3960328855`, CWE-863).** The
+    /// emergency-stop veto above used to sit AFTER a redeemed single-use
+    /// grant, `policy_hitl_enabled == false`, and `auto_approve_under_usd` —
+    /// each an unconditional `Allow` on its own, so any one of them let a
+    /// consequential call through on every tier, not just `full`. This one
+    /// pins the single-use-grant path.
+    #[tokio::test]
+    async fn a_redeemed_grant_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let (p, grants) = granting_policy("supervised", &[], "finance");
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "supervised".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        let p = p.with_emergency_gate(gate.clone());
+        let args = composio_send_args();
+        grants.grant(granted("finance", "composio_execute", args.clone()));
+
+        gate.set_emergency(true);
+        assert!(
+            matches!(
+                p.check(&request("composio_execute", args.clone())).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a live single-use grant must not let a consequential call through while stopped"
+        );
+        assert_eq!(
+            grants.live_count(),
+            1,
+            "the refused call must not consume the grant it never redeemed"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("composio_execute", args)).await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop lets the still-live grant redeem normally"
+        );
+    }
+
+    /// See the single-use-grant test above for the finding this pins. This one
+    /// covers the `policy_hitl_enabled == false` path — every production
+    /// roster (`with_policy_hitl_disabled` at construction).
+    #[tokio::test]
+    async fn disabled_policy_hitl_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_emergency_gate(gate.clone());
+
+        assert!(
+            matches!(
+                p.check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a roster built with policy HITL disabled must still refuse a consequential call \
+             while stopped"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("publish_artifact", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores the HITL-disabled blanket allow"
+        );
+    }
+
+    /// See the single-use-grant test above for the finding this pins. This one
+    /// covers the `auto_approve_under_usd` path.
+    #[tokio::test]
+    async fn auto_approve_under_usd_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "supervised".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: Some(50.0),
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("supervised", &[], Some(50.0)).with_emergency_gate(gate.clone());
+        let args = serde_json::json!({ "amount_usd": 10.0 });
+
+        assert!(
+            matches!(
+                p.check(&request("payment.send", args.clone())).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "an under-threshold auto-approved spend must still refuse while stopped"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("payment.send", args)).await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores the auto-approve-under-threshold allow"
+        );
     }
 
     /// **Issue #1124, end to end at the policy layer.** A bridge call to a
@@ -3784,6 +4224,52 @@ mod tests {
         assert!(
             !notice.contains(&MAX_APPROVAL_REQUESTS_PER_TURN.to_string()),
             "and not the constant the call site happened to have in scope: {notice}"
+        );
+    }
+
+    /// `escalate_to_human` (issue #1860's agent-question blocker), unlike
+    /// `request_approval`, never sets `EXPLICIT_REQUEST_PENDING` — so nothing
+    /// stops a model from calling it again inside the same turn. A ninth
+    /// distinct question in one turn overflows `MAX_APPROVAL_REQUESTS_PER_TURN`
+    /// and is dropped by the drain cap with no card ever raised for it, even
+    /// though the run may still park believing it asked something.
+    #[tokio::test]
+    async fn escalate_to_human_does_not_set_the_turn_boundary_and_can_overflow_the_cap() {
+        let queue = ApprovalRequestQueue::default();
+        let blocker_request = |i: usize| ApprovalRequest {
+            tool: crate::harness::built_in::blockers::ESCALATE_TO_HUMAN_TOOL.to_string(),
+            reason: format!("question {i}"),
+            effect: Effect {
+                kind: "blocker.information".to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({ "reason": format!("question {i}") }),
+                agent: None,
+                run_id: None,
+            },
+        };
+
+        queue
+            .turn_scoped(async {
+                for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
+                    queue.push(blocker_request(i));
+                }
+                assert!(
+                    !queue.explicit_request_pending(),
+                    "unlike request_approval, escalate_to_human never establishes the turn \
+                     boundary — nothing in the queue itself stops a model from calling it \
+                     again in the same turn"
+                );
+            })
+            .await;
+
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(
+            drained.discarded, 1,
+            "a ninth question in one turn overflows the cap and is silently dropped — no card \
+             is ever raised for it, though the run may still park expecting an answer"
         );
     }
 
@@ -6313,5 +6799,425 @@ mod tests {
             ),
             "the S2 arm must sit above the grant checks"
         );
+    }
+
+    // Issue #2150 (Rung 3, epic #1817): trusted-dispatch-origin admission.
+    //
+    // These tests exercise `trusted_dispatch_admits` both through `check()`
+    // (real declared tools, real tiers) and directly (the `ScopedGrantable`
+    // scope-matching branch, which no tool in today's declaration table
+    // reaches through `check()` — the same gap
+    // `a_grant_scoped_to_one_provider_does_not_admit_another_providers_read`
+    // above records for the standing-grant scope check this mirrors).
+
+    use crate::harness::built_in::run_origin::{DispatchSource, RunOrigin, claim};
+
+    fn dispatched(agent: &str) -> crate::harness::built_in::run_origin::RunOriginClaim {
+        claim(RunOrigin::Dispatched {
+            agent: agent.to_string(),
+            source: DispatchSource::Task,
+            scope: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_unlabelled_turn_decides_exactly_as_before() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        assert!(
+            matches!(
+                p.check(&request("file_write", serde_json::json!({}))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "no origin was scoped, so this must park exactly as it did before #2150"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_operator_origin_decides_the_same_as_unlabelled() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let origin = claim(RunOrigin::Operator);
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a live operator turn earns no trust from this arm — only `Dispatched` does"
+        );
+    }
+
+    /// The headline case: a call an operator could already have granted
+    /// standing for (`Standing::Grantable`, so no scope to check) parks under
+    /// `supervised` absent a grant — `an_expired_standing_grant_re_parks`
+    /// above pins that baseline — and a dispatched run whose agent matches is
+    /// admitted without ever raising an approval row.
+    #[tokio::test]
+    async fn a_dispatched_run_admits_a_grantable_call_with_no_approval_row() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        assert_eq!(
+            origin
+                .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                .await,
+            ToolPolicyDecision::Allow,
+            "a scratch write is exactly what an operator could have granted standing for"
+        );
+        assert_eq!(
+            queue.queued(),
+            0,
+            "an admitted call must never raise an approval row"
+        );
+    }
+
+    /// A dispatched run carrying money still reaches a person.
+    ///
+    /// This pins the **outcome**, not any one arm, and the distinction is
+    /// deliberate. `trusted_dispatch_admits` consults the consequence floor,
+    /// but deleting that consultation leaves this test — and the whole suite —
+    /// green, because `judge` re-judges whatever the tier allowed and stops a
+    /// declared amount at the tail of `check`. The floor consultation is a belt
+    /// whose braces are `judge`; see the note at that line for the two facts
+    /// that make it unreachable today and what would change either.
+    ///
+    /// What this test is worth is the property itself: trust granted for being
+    /// dispatched must not become permission to spend. Whichever arm enforces
+    /// that, an operator sees the call.
+    ///
+    /// `supervised` rather than `auto`, deliberately: under `auto` a
+    /// `Grantable` tool never reaches the trusted arm at all, so the test would
+    /// pass without exercising the admission path.
+    #[tokio::test]
+    async fn the_consequence_floor_outranks_a_trusted_dispatch() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        let spend = serde_json::json!({ "amount_usd": 500.0 });
+        assert!(
+            matches!(
+                origin.scoped(p.check(&request("file_write", spend))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a dispatched run carrying money must reach a person, whatever the tool's standing"
+        );
+        assert_eq!(
+            queue.queued(),
+            1,
+            "and it must raise exactly one approval row for them to answer"
+        );
+    }
+
+    /// The same run, calling a `Standing::PerCall` tool, still raises exactly
+    /// one approval row — trust never reaches a call nobody could have handed
+    /// over ahead of time.
+    #[tokio::test]
+    async fn a_dispatched_run_still_parks_a_percall_send() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("composio_execute", composio_send_args())))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a send is `Standing::PerCall` — nothing here for a dispatch to have earned"
+        );
+        assert_eq!(queue.queued(), 1, "exactly one approval row for the send");
+    }
+
+    /// Delegation must not be a privilege-escalation primitive: an origin
+    /// dispatched to one agent must not admit a call from a different agent's
+    /// policy instance, even though the task-local is still ambient (the
+    /// same-task inheritance `run_origin`'s own tests cover).
+    #[tokio::test]
+    async fn a_mismatched_agent_does_not_admit() {
+        let p = policy("supervised", &[], None).with_agent("marketing");
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "the dispatch named `ops`; a different agent's policy must not be trusted by it"
+        );
+    }
+
+    /// Issue #674's split, reasserted at the constructor: `judge` is silent on
+    /// an authored workflow node, so admitting one through trust as well would
+    /// remove the ceiling `always_approve` still leaves on that path.
+    #[tokio::test]
+    async fn the_arm_never_fires_for_an_authored_workflow_node() {
+        let p = policy("supervised", &[], None)
+            .with_agent("ops")
+            .for_authored_workflow_nodes();
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "an authored node must never be admitted by this arm, whatever the origin says"
+        );
+    }
+
+    /// `shell` is `Standing::PerCall` (arbitrary code, unbounded reach) and an
+    /// undeclared tool defaults to `Standing::PerCall` too (never `Grantable`
+    /// by omission) — both stop for a human whatever this run's origin says.
+    #[tokio::test]
+    async fn shell_and_an_undeclared_tool_still_park_under_a_dispatched_origin() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        for tool in ["shell", "some_tool_nobody_declared"] {
+            let origin = dispatched("ops");
+            assert!(
+                matches!(
+                    origin
+                        .scoped(p.check(&request(tool, serde_json::json!({}))))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "`{tool}` must still park inside a dispatched run"
+            );
+        }
+    }
+
+    /// The consequence floor (issue #1817's own arm) outranks a trusted
+    /// origin for every tool it declares irreversible — exhaustive over the
+    /// declaration table, the same style `floor`'s own tests use, so a future
+    /// tool added to either table is covered without a second hand-written
+    /// list.
+    #[tokio::test]
+    async fn a_dispatched_origin_still_parks_every_floor_covered_tool() {
+        for tool in crate::policy::consequence::declared_tools() {
+            let args = serde_json::json!({});
+            let consequence = crate::policy::consequence_of(tool, &args);
+            if !crate::policy::floor::evaluate_consequence(tool, consequence, &args, None)
+                .requires_human()
+            {
+                continue;
+            }
+            for mode in ["auto", "supervised"] {
+                let p = policy(mode, &[], None).with_agent("ops");
+                let origin = dispatched("ops");
+                let decision = origin.scoped(p.check(&request(tool, args.clone()))).await;
+                assert!(
+                    !matches!(decision, ToolPolicyDecision::Allow),
+                    "`{tool}` commits the company under `{mode}`; a dispatched origin must \
+                     never admit it, got {decision:?}"
+                );
+            }
+        }
+    }
+
+    /// [`crate::policy::consequence::standing_scope_of`] is the same reader a
+    /// standing grant's mint side uses. Pinned **directly** against
+    /// `trusted_dispatch_admits` rather than through `check()` — no tool in
+    /// today's declaration table reaches `Standing::ScopedGrantable` with a
+    /// reach that parks (`web_fetch` is the only classifier that produces the
+    /// variant, and it pairs the variant exclusively with `Reach::ExternalRead`,
+    /// which parks nowhere — see `a_grant_scoped_to_one_provider_does_not_admit_another_providers_read`
+    /// above for the same gap on the standing-grant path). A synthetic
+    /// `Consequence` is the only way to exercise the branch this codebase's own
+    /// tables cannot reach yet.
+    fn scoped_grantable() -> crate::policy::Consequence {
+        crate::policy::Consequence {
+            group: EffectGroup::Other,
+            reach: crate::policy::Reach::Consequence,
+            standing: Standing::ScopedGrantable,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scope_matched_call_inside_a_trusted_run_is_admitted() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let origin = claim(RunOrigin::Dispatched {
+            agent: "ops".to_string(),
+            source: DispatchSource::Task,
+            scope: Some("gmail".to_string()),
+        });
+        let admitted = origin
+            .scoped(async {
+                p.trusted_dispatch_admits(
+                    "composio_execute",
+                    &composio_send_args(),
+                    scoped_grantable(),
+                )
+            })
+            .await;
+        assert!(
+            admitted,
+            "the call's own scope (gmail, from GMAIL_SEND_EMAIL) matches the run's declared scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_out_of_scope_call_inside_a_trusted_run_still_parks() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let origin = claim(RunOrigin::Dispatched {
+            agent: "ops".to_string(),
+            source: DispatchSource::Task,
+            scope: Some("github".to_string()),
+        });
+        let admitted = origin
+            .scoped(async {
+                p.trusted_dispatch_admits(
+                    "composio_execute",
+                    &composio_send_args(),
+                    scoped_grantable(),
+                )
+            })
+            .await;
+        assert!(
+            !admitted,
+            "the run is scoped to github; a call whose own scope resolves to gmail must still park"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_underivable_scope_refuses_rather_than_admits() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        // No scope declared on the run either — the underivable-call-scope
+        // refusal must hold even when it would otherwise be the more
+        // permissive reading (an unscoped run admitting an unscoped call).
+        let origin = dispatched("ops");
+        let admitted = origin
+            .scoped(async {
+                p.trusted_dispatch_admits(
+                    "composio_execute",
+                    &composio_unclassified_args(),
+                    scoped_grantable(),
+                )
+            })
+            .await;
+        assert!(
+            !admitted,
+            "an action the catalogue cannot place resolves no scope; refuse rather than admit"
+        );
+    }
+
+    /// Everything above the mode dispatch keeps deciding first, whatever this
+    /// run's origin says: the `readonly` brake, `always_approve`, the daily
+    /// spend cap, and a standing deny.
+    #[tokio::test]
+    async fn a_dispatched_origin_does_not_bypass_the_arms_above_the_mode_dispatch() {
+        // `readonly` denies an external effect before any grant or origin is
+        // consulted.
+        let p = policy("readonly", &[], None).with_agent("ops");
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly must still deny, dispatched origin or not"
+        );
+
+        // `always_approve` wins over every tier, `full` included.
+        let p = policy("full", &["file_write"], None).with_agent("ops");
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "always_approve must still park under full, dispatched origin or not"
+        );
+
+        // The per-agent daily cap parks a priced call once the agent is out of
+        // budget, above the tier dispatch entirely.
+        let meter = FixedMeter::with(vec![spend_sample("ops", 5.00, today())]);
+        let (capped, _) = capped_policy("supervised", None, 5.0, "ops", meter);
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(capped.check(&request(
+                        "web_search",
+                        serde_json::json!({ "query": "acme pricing" })
+                    )))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "the daily cap must still park at cap, dispatched origin or not"
+        );
+
+        // A standing deny is a company saying "not this", which a run's own
+        // origin cannot override.
+        let (denying, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing_verdict(
+            "ops",
+            "file_write",
+            far_future(),
+            Verdict::Deny,
+        ));
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(denying.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a standing deny must still refuse, dispatched origin or not"
+        );
+    }
+
+    /// Structural proof that the arm adds nothing outside `auto`/`supervised`:
+    /// scoping a dispatched origin must never change `full`'s or `readonly`'s
+    /// verdict, because the code for this arm is not reachable from either of
+    /// their match arms.
+    #[tokio::test]
+    async fn the_arm_is_inert_under_full_and_readonly() {
+        for mode in ["full", "readonly"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            let baseline = p.check(&request("file_write", serde_json::json!({}))).await;
+            let with_origin = dispatched("ops")
+                .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                .await;
+            assert_eq!(
+                with_origin, baseline,
+                "`{mode}` must decide identically whether or not a dispatch origin is scoped"
+            );
+        }
+    }
+
+    /// [`standing`] mints an `Approve` grant; this is its `Deny` twin, needed
+    /// once here to prove a standing deny still outranks a trusted origin.
+    fn standing_verdict(
+        agent: &str,
+        tool: &str,
+        expires_at_millis: u64,
+        verdict: Verdict,
+    ) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("deny-standing-1"),
+            agent: agent.to_string(),
+            workflow: None,
+            tool: tool.to_string(),
+            verdict,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-deny-1"),
+            at_millis: 1_000,
+            expires_at_millis,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: None,
+        }
     }
 }

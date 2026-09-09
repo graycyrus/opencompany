@@ -51,7 +51,29 @@ function stubClient(replies: InferenceStatus[], mutation?: InferenceStatus) {
   return {
     scopeFor: (company: string | null) =>
       company ? `/api/v1/companies/${company}` : "/api/v1/company",
-    get: async (path: string) => (path.endsWith("/inference/models") ? [] : read()),
+    // The catalog route answers with an object naming the endpoint that was
+    // read, not a bare array (`InferenceModelCatalog`). These tests assert
+    // nothing about the picker, so the stub answers the host's *unreadable
+    // catalog* reply — a 200 carrying `error`, with no `tierVocabulary`,
+    // because "we could not ask" is not the same fact as `"unknown"`.
+    //
+    // Deliberately not `{models: [], tierVocabulary: "unknown"}`: the host
+    // cannot produce that pairing. `list_models` only sets a vocabulary in its
+    // success arm, and `catalog_models` treats an empty catalog as a failure,
+    // so an empty list always arrives with `error` set and no vocabulary. A
+    // double that answered a shape the host cannot emit would let these tests
+    // pass on behaviour nothing real can reach.
+    get: async (path: string) =>
+      path.endsWith("/inference/models")
+        ? {
+            baseUrl: "https://openrouter.ai/api/v1",
+            models: [],
+            tierDefaults: {},
+            error:
+              "Could not list models from https://openrouter.ai/api/v1: connection refused. " +
+              "Enter model ids directly.",
+          }
+        : read(),
     put: async () => ({ status: settled(), note: "" }),
     del: async () => ({ status: settled(), note: "" }),
     post: async () => ({ status: settled(), note: "" }),

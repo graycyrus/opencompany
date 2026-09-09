@@ -41,7 +41,16 @@ import {
 import { TourController } from "@/tour/TourController";
 import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
-import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import {
+  clearGateSkipped,
+  clearGateStepWaiver,
+  clearGateStepWaivers,
+  type GateStepId,
+  gateSkippedThisSession,
+  markGateSkipped,
+  markGateStepWaived,
+  waivedGateSteps,
+} from "@/onboarding/state";
 import {
   resolveGateAdminCheckError,
   shouldHoldShellPending,
@@ -62,6 +71,7 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
 import {
   hasOtherOpenTurns,
+  isDuplicateLiveReply,
   mergeOpenTurns,
   openTurnsFromRuns,
   PendingSyncPosts,
@@ -160,6 +170,7 @@ import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import type { LocalScope } from "@/connections/types";
 import { forgetSession } from "@/connections/registry";
 import { offersCompanyCreation } from "@/components/create-company-dialog";
 
@@ -966,6 +977,49 @@ export function AppShell({
   }, [scope]);
 
   /**
+   * Steps the founder has durably waived (bugs B-001/B-020) — held in state for
+   * the same reason `gateSkipped` is: waiving has to re-render past the gate
+   * without a reload, and `localStorage` alone would need one.
+   */
+  const [gateWaived, setGateWaived] = useState<GateStepId[]>(() => waivedGateSteps(scope));
+  useEffect(() => {
+    setGateWaived(waivedGateSteps(scope));
+  }, [scope]);
+  // The `storage`-event cross-tab listener lives further down, right after
+  // `activationGate` is declared — a REMOVAL it observes has to trigger a
+  // fresh activation read on THIS tab before it is safe to apply, so it
+  // needs `activationGate.refresh` in scope. See that effect's own doc.
+  const waiveGateStep = useCallback(
+    (step: GateStepId) => {
+      markGateStepWaived(scope, step);
+      setGateWaived(waivedGateSteps(scope));
+    },
+    [scope],
+  );
+
+  /**
+   * Leaves the gate for a console route (bug B-006).
+   *
+   * The session skip is what actually stands the gate down — the founder asked
+   * to be somewhere else, and a gate that re-renders over the page they asked
+   * for is the defect. It is deliberately the *session* marker rather than a
+   * durable waiver: following a link is not an answer to the step, so the gate
+   * is still owed on the next fresh tab.
+   *
+   * Order matters. The hash is set first so the router has the destination
+   * before this render swaps the gate out for the shell; setting it afterwards
+   * renders the shell on the old route for a frame and then moves it.
+   */
+  const leaveGateFor = useCallback(
+    (route: string) => {
+      window.location.hash = route;
+      markGateSkipped(scope);
+      setGateSkipped(true);
+    },
+    [scope],
+  );
+
+  /**
    * Whether the signed-in user is this company's admin (PR #1875 review
    * finding) — `null` until the read lands. Mirrors the `admin =
    * (await fetchMe(...)).role === "admin"` pattern every other admin-gated
@@ -1049,13 +1103,137 @@ export function AppShell({
   // the company is actually activated; nothing here needs to.
   const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
 
+  // CodeRabbit review, PR #2046: which scope `activationGate.status` actually
+  // describes, read during THIS effect before it is overwritten below.
+  //
+  // `useActivationGate` resets `status` to `null` for the new company only
+  // from its OWN effect, which runs in the same commit as this one but is not
+  // guaranteed to run first, and even when it does the reset does not take
+  // effect until the next render. So the very first commit after switching
+  // companies can still pair the FORMER company's `isActivated: true` with the
+  // NEW `scope` — and without this guard the branch below would read that
+  // combination and wipe the new company's just-loaded waiver before its own
+  // activation read has ever landed. Comparing against the scope this effect
+  // itself saw last time closes that one-render race; a bare
+  // `[activationGate.status?.isActivated, scope]` dependency list cannot, since
+  // both can appear to "agree" on exactly the commit where they do not.
+  const lastGateWaiverScopeRef = useRef<LocalScope | null>(null);
   // PR #1875 review finding, round 4: a skip marker from before the funnel
   // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
   // already stops gating on it either way), but leaving it in `sessionStorage`
   // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
   useEffect(() => {
-    if (activationGate.status?.isActivated) clearGateSkipped(scope);
-  }, [activationGate.status?.isActivated, scope]);
+    const previous = lastGateWaiverScopeRef.current;
+    const scopeJustChanged =
+      previous === null || previous.connection !== scope.connection || previous.company !== scope.company;
+    lastGateWaiverScopeRef.current = scope;
+    if (scopeJustChanged) return;
+    const status = activationGate.status;
+    if (!status) return;
+    if (status.isActivated) {
+      clearGateSkipped(scope);
+      // Same housekeeping, one step down: a waiver cannot matter once the funnel
+      // has actually completed, and leaving one behind would let it speak for a
+      // later incomplete funnel the founder never answered (see
+      // `clearGateStepWaivers`).
+      clearGateStepWaivers(scope);
+      setGateWaived([]);
+      return;
+    }
+    // Codex review, PR #2046, round 3: the same housekeeping PER STEP, because
+    // waiting for the whole funnel leaves a window where a stale waiver does
+    // real harm. Waive `integration`; the integration then genuinely connects
+    // while some other step is still outstanding, so `isActivated` never
+    // latches and the branch above never runs; the connection is later revoked
+    // or expires. The waiver — an answer to a step that could not be finished —
+    // silently comes back into force against a step a credential now makes
+    // ordinarily completable, and this browser stops showing a gate the host
+    // still considers owed.
+    //
+    // `outstandingGateSteps`' own doc already claims this rule ("a stale
+    // waiver must never be able to mask a step going incomplete again later");
+    // ignoring the waiver while the step reads done was only half of it.
+    const done: Record<GateStepId, boolean> = {
+      name: status.nameConfirmed,
+      integration: status.integrationConnected,
+      workflow: status.workflowRunSucceeded,
+    };
+    for (const step of waivedGateSteps(scope)) {
+      if (done[step]) clearGateStepWaiver(scope, step);
+    }
+    // Codex review, PR #2046, round 4: and THIS is where a deferred cross-tab
+    // removal is finally applied.
+    //
+    // The `storage` listener below refuses to act on another tab's removal on
+    // that tab's word alone — it asks for a refresh and keeps what it has. Its
+    // round-2 reasoning still holds, but it assumed every removal meant "some
+    // tab saw `isActivated`", which is monotonic on the host and so always
+    // arrives here eventually. The per-step clearing above broke that
+    // assumption: a removal can now mean "some tab saw THIS STEP complete",
+    // and step completion is not monotonic — an integration can be revoked.
+    // So the deferral had no end condition any more. `gateWaived` kept a step
+    // whose `localStorage` key was already gone, and went on masking it for
+    // the life of the tab.
+    //
+    // Reading storage back here ends it. This line only runs when THIS tab's
+    // own `status` has just changed, which only happens on a read that
+    // actually succeeded — so an outage still defers indefinitely, which is
+    // the half of the round-2 protection that was always the real one. What
+    // it no longer does is defer forever against a first-hand answer.
+    setGateWaived((previous) => {
+      const stored = waivedGateSteps(scope);
+      const same =
+        previous.length === stored.length && stored.every((step, i) => previous[i] === step);
+      return same ? previous : stored;
+    });
+  }, [activationGate.status, scope]);
+
+  // Codex review, PR #2046: a waiver is durably scoped and meant to survive a
+  // FRESH tab (see `markGateStepWaived`'s own doc) — but a tab that was
+  // already open when a DIFFERENT tab wrote one never noticed, because
+  // `gateWaived` only re-read when `scope` itself changed. The `storage`
+  // event is the browser's own cross-tab signal for exactly this: it fires
+  // in every OTHER same-origin tab (never the one that wrote), so listening
+  // for it and re-reading closes the gap without polling.
+  //
+  // Codex review, round 2: an ADDITION and a REMOVAL are not safe to trust
+  // the same way. `clearGateStepWaivers` above fires from ANOTHER tab too,
+  // the moment THAT tab's own poll confirms `isActivated` — and every
+  // `removeItem` it makes is a deletion `storage` event here. Applying that
+  // removal immediately would drop this tab's waiver against a `status` this
+  // tab has not yet refreshed itself: `outstandingGateSteps` would count the
+  // step as outstanding again, and the gate would reopen until this tab's
+  // own poll independently catches up — or, through an outage, stay open
+  // for as long as that poll keeps failing. An addition has no such failure
+  // mode (it can only shorten `outstandingGateSteps`, never lengthen it), so
+  // only a removal needs the extra caution: ask `activationGate` to refresh
+  // right now instead of trusting the other tab's word, and let THIS tab's
+  // own cleanup effect above — gated on ITS OWN confirmed `isActivated` —
+  // be what actually drops the waiver once it lands.
+  useEffect(() => {
+    const onStorage = () => {
+      setGateWaived((previous) => {
+        const next = waivedGateSteps(scope);
+        const isRemoval = previous.some((step) => !next.includes(step));
+        if (isRemoval) {
+          void activationGate.refresh();
+          return previous;
+        }
+        return next;
+      });
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+    // `activationGate.refresh` (not the whole `activationGate` object) is the
+    // dependency: `useActivationGate` returns a fresh object literal every
+    // render, so depending on the object itself would tear down and re-add
+    // this listener on every AppShell render regardless of whether anything
+    // it actually reads (`scope`, `refresh`) changed — the same reason the
+    // cleanup effect above depends on `activationGate.status?.isActivated`
+    // rather than `activationGate.status`. `refresh` (`load`) is itself
+    // `useCallback`-memoized on `[client, company]`, so this is stable across
+    // ordinary renders.
+  }, [scope, activationGate.refresh]);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;
@@ -2266,6 +2444,14 @@ export function AppShell({
   // resolves, instead of the shell needing a second copy of this logic.
   const renderAgentReply = useCallback(
     (event: AgentReplyEvent) => {
+      // `replyVoice`, not a literal: a live frame attributed to the runtime
+      // itself — `SYSTEM_AUTHOR` on the Rust side, which covers both B-101's
+      // mention-ambiguity note and the iteration-cap pause notice (issue
+      // #2068) — renders as the centred system pill `fromHistory` already
+      // gives it on reload, never as a named teammate's bubble with an
+      // avatar and reply/reaction controls, which is what unconditionally
+      // passing `"company"` here used to produce (Codex review, PR #2052).
+      const from = replyVoice(event.agentId);
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op:
       // better silent than in the wrong place.
@@ -2305,20 +2491,32 @@ export function AppShell({
         // history's own order rather than appending to the recent tail this
         // scans. Live-then-hydrate was the one route neither guard covered,
         // and it doubled every reply that arrived while its channel was closed.
-        const dup = existing
-          .slice(-8)
-          .some((m) => m.from === "company" && m.text === event.text);
+        //
+        // **The content check alone is too broad** (Codex review, PR #2052):
+        // two genuinely different events can carry identical text — an
+        // operator repeating the same ambiguous `@name` produces two
+        // B-101 notices with the same wording — and content matching then
+        // suppressed the second one outright, not merely deduped it.
+        // `isDuplicateLiveReply` checks this event's own durable identity
+        // first (`event.seq`) and only falls back to content for a row that
+        // has not yet been reconciled to a durable id — see its own doc for
+        // why that scoping is what keeps two same-text-but-different events
+        // from being conflated. Named and extracted for the same reason
+        // every rule in `live-reply.ts` is: this is exactly the kind of
+        // regression that shows up nowhere but a repeated-mention screenshot.
+        const dup = isDuplicateLiveReply(existing.slice(-8), event, from);
         if (dup) return t;
         return {
           ...t,
           [channelId]: [
             ...existing,
-            // `replyVoice`, not a literal: a host-authored line (the
-            // iteration-cap pause) is projected with `agentId: "system"` and
-            // must render as the same centred row `fromHistory` gives it, or
-            // whoever watched the turn live keeps an agent-style bubble that
-            // hydration will never correct.
-            makeMessage(replyVoice(event.agentId), event.text, {
+            // `from` is `replyVoice(event.agentId)`, computed once above and
+            // reused by the `dup` check too — a host-authored line (B-101's
+            // ambiguity note, the iteration-cap pause notice) must render as
+            // the same centred row `fromHistory` gives it, or whoever watched
+            // the turn live keeps an agent-style bubble hydration never
+            // corrects.
+            makeMessage(from, event.text, {
               channel: event.agentId,
               taskId: event.taskId,
               mentions: event.mentions,
@@ -2355,7 +2553,20 @@ export function AppShell({
       // still be listed. That only defers the clear to its own settle, which
       // then runs the re-read above — the conservative direction, and the one
       // that never erases a running turn's rows.
-      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+      //
+      // Also guarded on `from !== "system"` (Codex review, PR #2052). A
+      // system-attributed frame — B-101's mention-ambiguity note among them —
+      // is emitted mid-turn, before the cycle that answers has even run, and
+      // is never itself the turn's completion. `onSendFailed` can release such
+      // a frame (held while the POST was in flight) before its own async
+      // `/runs` lookup below has had a chance to install the still-running
+      // turn into `openTurnsRef` — so at the instant this runs, `openTurns`
+      // legitimately knows nothing about it yet, `hasOtherOpenTurns` reads
+      // `false`, and treating the advisory as "the end of that turn" would
+      // erase the live tool trace of a turn that is, per the very lookup
+      // racing it, still running. Only the actual reply — never an advisory
+      // interleaved before it — is a completion signal.
+      if (from !== "system" && !hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
         setLiveStepsByThread((prev) =>
           prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
         );
@@ -2489,8 +2700,15 @@ export function AppShell({
     return gen;
   }, []);
   const onSendEnd = useCallback(
-    (threadId: string, gen?: number) => {
-      pendingPostThreadsRef.current.ended(threadId);
+    (threadId: string, gen?: number, responseTexts?: readonly string[]) => {
+      // `ended` hands back any held system-attributed frame the settled
+      // response did NOT already carry (issue #101 review, PR #2052) — B-101's
+      // mention-ambiguity note, never returned in the response body by design.
+      // Rendered here rather than discarded: see `ended`'s own doc for why the
+      // response's own text, only available at this call site, is what makes
+      // this safe without double-rendering the frames the response DOES carry.
+      const released = pendingPostThreadsRef.current.ended(threadId, responseTexts);
+      released.forEach((frame) => renderAgentReply(frame));
       if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
       setLiveStepsByThread((prev) => {
         if (!prev[threadId]?.length) return prev;
@@ -2498,7 +2716,7 @@ export function AppShell({
       });
       clearReceipt(threadId, gen);
     },
-    [clearReceipt],
+    [clearReceipt, renderAgentReply],
   );
   /**
    * A chat POST that resolved for a company the operator has since left
@@ -3244,6 +3462,7 @@ export function AppShell({
       skippedThisSession: gateSkipped,
       isAdmin: isGateAdmin,
       retrying: activationGate.retrying,
+      waived: gateWaived,
     })
   ) {
     // A durable read failure must not read as a hang. `stuck` means three
@@ -3310,6 +3529,7 @@ export function AppShell({
       setupOpen,
       skippedThisSession: gateSkipped,
       isAdmin: isGateAdmin,
+      waived: gateWaived,
     }) &&
     // Narrows `status` for the render below — `shouldShowOnboardingGate`
     // already guarantees this is non-null whenever it returns `true`, but
@@ -3324,8 +3544,11 @@ export function AppShell({
           company={company}
           status={activationGate.status}
           currentName={feed.status.name}
+          waived={gateWaived}
           onRefresh={activationGate.refresh}
           onSkip={skipGate}
+          onLeave={leaveGateFor}
+          onWaiveStep={waiveGateStep}
         />
       </ConsoleProvider>
     );

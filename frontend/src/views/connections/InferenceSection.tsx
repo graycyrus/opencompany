@@ -195,20 +195,44 @@ const METERING_NOTES: Record<UsageMetering, string> = {
   none: "no model runs on this path, so Usage stays at zero",
 };
 
-/** Per-provider form defaults applied when the operator picks a provider. */
+/**
+ * Per-provider form defaults applied when the operator picks a provider.
+ *
+ * `catalogTierDefaults` is `null` when **no** catalog has been read yet, and an
+ * object — possibly `{}` — once one has. The two are not interchangeable, and
+ * collapsing them was a defect (Codex review on #2045): a catalog classified
+ * `unknown` legitimately implies **no** defaults, and testing only the key count
+ * read that confirmed emptiness as "nothing loaded" and fell through to
+ * OpenRouter's ids. Switching provider away and back then repopulated four ids
+ * the endpoint's own catalog had just proved absent, and Save persisted them —
+ * the exact failure the vocabulary work exists to remove.
+ */
 function presetFor(
   provider: InferenceProvider,
   defaultTierModels?: Partial<Record<Tier, string>>,
+  catalogTierDefaults?: Partial<Record<Tier, string>> | null,
 ): {
   baseUrl: string;
   models: Partial<Record<Tier, string>>;
 } {
   const preset = PROVIDERS[provider].preset;
-  // The host's own `defaultTierModels` (from `GET …/inference`) is the source
-  // of truth once it has loaded; `PROVIDERS.openrouter.preset.models` is only
-  // the fallback used before that first status read resolves, so switching to
-  // OpenRouter still has something to prefill with immediately.
-  if (provider === "openrouter" && defaultTierModels && Object.keys(defaultTierModels).length > 0) {
+  if (provider !== "openrouter") return preset;
+  // A catalog has been read: its answer is the whole answer, including when
+  // that answer is "this endpoint implies no defaults".
+  //
+  // `status.defaultTierModels` is OpenRouter's vocabulary and nothing wider, so
+  // prefilling from it against an endpoint that publishes `chat-v1` writes four
+  // ids that endpoint has already told us it does not serve — an explicit,
+  // saved, silently unusable mapping, which is worse than the unmapped case the
+  // host now resolves correctly on its own.
+  if (catalogTierDefaults) {
+    return { ...preset, models: catalogTierDefaults };
+  }
+  // No catalog yet: the host's own `defaultTierModels` (from `GET …/inference`)
+  // beats `PROVIDERS.openrouter.preset.models`, which is only the fallback used
+  // before that first status read resolves, so switching to OpenRouter still
+  // has something to prefill with immediately.
+  if (defaultTierModels && Object.keys(defaultTierModels).length > 0) {
     return { ...preset, models: defaultTierModels };
   }
   return preset;
@@ -221,14 +245,26 @@ type TestState =
   | { kind: "ok"; note: string }
   | { kind: "error"; message: string };
 
+/**
+ * `baseUrl` and `message` travel with the state because the catalog is now the
+ * *configured endpoint's*, not a vendor registry: "could not be loaded" has to
+ * name which endpoint could not be loaded, or the operator has no idea what to
+ * go and look at.
+ */
 type ModelCatalogState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "ready"; models: InferenceModel[] }
-  | { kind: "empty" }
-  | { kind: "error" };
+  | {
+      kind: "ready";
+      models: InferenceModel[];
+      baseUrl: string;
+      /** The tier → model mapping this endpoint's own vocabulary implies. */
+      tierDefaults: Record<string, string>;
+    }
+  | { kind: "empty"; baseUrl: string }
+  | { kind: "error"; message: string };
 
-/** Keep a stored custom id selectable even after the registry no longer lists it. */
+/** Keep a stored custom id selectable even after the catalog no longer lists it. */
 function optionsForTier(catalog: InferenceModel[], current: string): InferenceModel[] {
   if (!current || catalog.some((model) => model.id === current)) return catalog;
   return [{ id: current, name: "Current custom model" }, ...catalog];
@@ -396,6 +432,24 @@ export function InferenceSection({
   >(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogState>({ kind: "idle" });
+  /**
+   * The last tier → model mapping a *read* catalog implied, kept apart from
+   * `modelCatalog` on purpose: switching the provider select away from
+   * OpenRouter resets that state to `idle`, and `pickProvider` runs before the
+   * effect has had a chance to re-read anything — so a form that reads the
+   * defaults straight off `modelCatalog` would fall back to OpenRouter's ids on
+   * exactly the switch-away-and-back path an operator takes while comparing
+   * providers.
+   *
+   * `null` means **no catalog has been read**, which is a different fact from a
+   * catalog that was read and implies no defaults (`{}`, the `unknown`
+   * vocabulary). `presetFor` needs to tell them apart: treating a confirmed-empty
+   * mapping as "not loaded" repopulated four OpenRouter ids the endpoint had
+   * just been seen not to publish.
+   */
+  const [catalogTierDefaults, setCatalogTierDefaults] = useState<Record<string, string> | null>(
+    null,
+  );
 
   // Switch form.
   const [provider, setProvider] = useState<InferenceProvider>("managed");
@@ -491,6 +545,57 @@ export function InferenceSection({
     void refresh();
   }, [refresh]);
 
+  /**
+   * Whether the endpoint `GET …/inference/models` will answer for is the one an
+   * `openrouter` draft would actually reach.
+   *
+   * The route resolves the **saved** config, so this is the only thing that
+   * makes its answer applicable to the form. `managed` is included because the
+   * host treats it as a legacy alias for `openrouter` and resolves it onto the
+   * same platform endpoint, so an unconfigured company — the first-run case —
+   * still gets a real catalog rather than a refusal. `undefined` (status not
+   * loaded yet) is excluded: the effect re-runs when it arrives.
+   */
+  const storedProviderIsOpenRouter =
+    status?.provider === "openrouter" || status?.provider === "managed";
+
+  /**
+   * Whether the **saved** config rides the platform's subscription proxy.
+   *
+   * The same test `wouldSaveProxied` below applies to the draft, minus the key
+   * the operator is currently typing — which is exactly the difference the
+   * catalog effect has to notice. Hoisted here because that effect runs before
+   * `wouldSaveProxied` is computed.
+   */
+  const savedIsProxied = !(status?.provider === "openrouter" && status.keyConfigured);
+
+  /**
+   * Whether typing a key has pointed the draft at a *different endpoint* than
+   * the one the catalog was read from.
+   *
+   * A company on the platform proxy — `managed`, or `openrouter` with no key —
+   * resolves to the platform's own tier-native endpoint, whose catalog
+   * publishes `chat-v1` and friends. The moment an OpenRouter key is typed,
+   * Save would send the config straight to `api.openrouter.ai` instead, and
+   * that endpoint has never heard of `chat-v1` (Codex review on #2045). The
+   * catalog effect does not otherwise depend on the key, so the picker went on
+   * offering the proxy's tier names under a draft that no longer reaches the
+   * proxy; selecting one persisted it as a verbatim override that direct
+   * OpenRouter rejects.
+   *
+   * This is the same class of mistake as the `storedProviderIsOpenRouter`
+   * guard below and gets the same answer: the route can only be asked about the
+   * saved config, so a draft that has moved off it must be told the catalog no
+   * longer applies rather than shown one that does not describe where it is
+   * going.
+   *
+   * On its own this is only half the test — it says the *endpoint* moved, not
+   * that the catalog is unusable there. It is combined with the catalog's own
+   * `tierVocabulary` at the point of use below, because only a tier-native
+   * catalog publishes ids that are categorically wrong at direct OpenRouter.
+   */
+  const draftLeavesSavedEndpoint = savedIsProxied && key.trim().length > 0;
+
   useEffect(() => {
     let current = true;
     if (provider !== "openrouter") {
@@ -500,20 +605,123 @@ export function InferenceSection({
       };
     }
 
+    // The route answers for the endpoint this company is **saved** against, and
+    // has no way to be asked about an unsaved draft. So a form whose provider
+    // select has been moved somewhere the stored config is not must not present
+    // that catalog as this provider's (Codex review on #2045): switching a saved
+    // Ollama or custom company to OpenRouter used to list the *old* endpoint's
+    // models under an OpenRouter picker, and choosing one saved a foreign model
+    // id against OpenRouter — a configuration that cannot work. Naming the
+    // source endpoint on screen does not stop the picker writing it into the
+    // wrong provider's mapping.
+    //
+    // `managed` counts as OpenRouter here because the host does: it is a legacy
+    // alias (`LEGACY_MANAGED`), and an unconfigured company resolves to the same
+    // platform endpoint an `openrouter` draft with no base URL would reach. That
+    // keeps first-run setup — the common case — showing a real catalog.
+    if (!storedProviderIsOpenRouter) {
+      setModelCatalog({
+        kind: "error",
+        message:
+          "This company is saved against a different endpoint, so its model list is not " +
+          "OpenRouter's. Save the provider first to pick from OpenRouter's catalog, or enter " +
+          "model ids directly.",
+      });
+      // Nothing was read *for this provider*, so the tier prefill must stay on
+      // its pre-catalog fallback rather than inherit the other endpoint's.
+      setCatalogTierDefaults(null);
+      return () => {
+        current = false;
+      };
+    }
+
     setModelCatalog({ kind: "loading" });
     void listInferenceModels(client, company)
       .then((catalog) => {
         if (!current) return;
-        setModelCatalog(catalog.length ? { kind: "ready", models: catalog } : { kind: "empty" });
+        // The host reports an unreadable catalog as a 200 carrying `error`, so
+        // the console can say what went wrong instead of rendering an empty
+        // picker that reads as "this provider has no models".
+        if (catalog.error) {
+          setModelCatalog({ kind: "error", message: catalog.error });
+          // A previous successful read's mapping must not survive a failure:
+          // leaving it in state let a later `pickProvider` seed the form from
+          // ids this endpoint never confirmed, and Save persisted them
+          // (CodeRabbit review on #2045).
+          //
+          // Cleared to `null` — "no catalog has been read" — and deliberately
+          // not to the `{}` the failing response literally carries. The two are
+          // different facts here for the same reason `tierVocabulary` is `null`
+          // rather than `"unknown"` when the catalog cannot be read: `{}` is a
+          // *confirmed* empty mapping, which `presetFor` honours by prefilling
+          // nothing at all, whereas an endpoint that did not answer has
+          // confirmed nothing. Collapsing the two discards the host's own
+          // `status.defaultTierModels` fallback on any blip, which is what the
+          // `seeds the switch form from status.defaultTierModels` regression in
+          // `inference-model-picker.test.ts` catches.
+          setCatalogTierDefaults(null);
+          return;
+        }
+        // The catalog describes the **saved** endpoint. When a key has been
+        // typed against a company still saved on the platform proxy, Save would
+        // go direct to OpenRouter instead — and a *tier-native* catalog's ids
+        // are precisely the ones that endpoint cannot resolve, because
+        // resolving a tier server-side is what `tiers` means. Offering them
+        // here let an operator pick `chat-v1` and persist it as a verbatim
+        // override direct OpenRouter rejects (Codex review on #2045).
+        //
+        // Narrowed to `tiers` deliberately. A `concrete` or `unknown` catalog
+        // publishes ordinary `<author>/<model>` ids, which are not categorically
+        // invalid at another endpoint and which the operator may well be
+        // choosing on purpose — and withdrawing the picker for those would break
+        // the deliberate flow where typing a key is what makes the catalog
+        // select safe to offer at all (`useFreeText` below, and the two
+        // `inference.spec.ts` cases that encode it). The tier-native case is the
+        // one where the ids are known-wrong for where the draft is going.
+        if (draftLeavesSavedEndpoint && catalog.tierVocabulary === "tiers") {
+          setModelCatalog({
+            kind: "error",
+            message:
+              "A key sends this company straight to OpenRouter, so the subscription endpoint's " +
+              "tier list no longer applies. Save the key first to pick from OpenRouter's " +
+              "catalog, or enter model ids directly.",
+          });
+          // Nothing was read for the endpoint this draft would actually reach,
+          // so the prefill must not inherit the proxy's tier names either.
+          setCatalogTierDefaults(null);
+          return;
+        }
+        setCatalogTierDefaults(catalog.tierDefaults ?? {});
+        setModelCatalog(
+          catalog.models.length
+            ? {
+                kind: "ready",
+                models: catalog.models,
+                baseUrl: catalog.baseUrl,
+                tierDefaults: catalog.tierDefaults ?? {},
+              }
+            : { kind: "empty", baseUrl: catalog.baseUrl },
+        );
       })
       .catch(() => {
-        if (current) setModelCatalog({ kind: "error" });
+        if (current) {
+          setModelCatalog({
+            kind: "error",
+            message: "The provider's model list could not be loaded. Enter model ids directly.",
+          });
+          // A rejected request carries no answer at all — not even the empty
+          // map a 200-with-`error` supplies — so the prefill goes back to "no
+          // catalog has been read", which is what `null` means here. Holding a
+          // previous read's mapping through a failure is how unconfirmed ids
+          // reached Save (CodeRabbit review on #2045).
+          setCatalogTierDefaults(null);
+        }
       });
 
     return () => {
       current = false;
     };
-  }, [client, company, provider]);
+  }, [client, company, provider, storedProviderIsOpenRouter, draftLeavesSavedEndpoint]);
 
   /**
    * Whether saving right now would ride the platform's subscription proxy
@@ -531,8 +739,7 @@ export function InferenceSection({
    * that follows can depend on it — hooks cannot come after a conditional
    * return.
    */
-  const wouldSaveProxied =
-    key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
+  const wouldSaveProxied = key.trim().length === 0 && savedIsProxied;
 
   /**
    * Drop a catalog-shaped tier override the moment the form would save
@@ -628,7 +835,7 @@ export function InferenceSection({
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
-    const preset = presetFor(next, status?.defaultTierModels);
+    const preset = presetFor(next, status?.defaultTierModels, catalogTierDefaults);
     setBaseUrl(preset.baseUrl);
     setModels(preset.models);
     setBaseline({ baseUrl: preset.baseUrl, models: preset.models });
@@ -1118,7 +1325,7 @@ export function InferenceSection({
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-fallback"
                       >
-                        OpenRouter&apos;s model list could not be loaded. Enter model ids directly.
+                        {modelCatalog.message}
                       </p>
                     )}
                     {provider === "openrouter" && modelCatalog.kind === "empty" && (
@@ -1126,7 +1333,23 @@ export function InferenceSection({
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-empty"
                       >
-                        OpenRouter returned no models. Enter model ids directly.
+                        {modelCatalog.baseUrl} returned no models. Enter model ids directly.
+                      </p>
+                    )}
+                    {/*
+                      Which endpoint these options came from. The list is the
+                      *configured* provider's catalog, not a vendor registry —
+                      and the form's provider select can be pointed somewhere
+                      else than the saved config while an operator is mid-edit,
+                      so naming the endpoint is the difference between a list
+                      the operator can trust and one they have to guess at.
+                    */}
+                    {provider === "openrouter" && modelCatalog.kind === "ready" && (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-model-catalog-source"
+                      >
+                        Models listed by {modelCatalog.baseUrl}.
                       </p>
                     )}
                     {/*
@@ -1210,7 +1433,7 @@ export function InferenceSection({
                                       })
                                     }
                                   >
-                                    Choose from the OpenRouter catalog instead
+                                    Choose from the provider&apos;s catalog instead
                                   </button>
                                 )}
                               </div>
@@ -1240,7 +1463,7 @@ export function InferenceSection({
                                   <SelectValue
                                     placeholder={
                                       modelCatalog.kind === "loading"
-                                        ? "Loading OpenRouter models…"
+                                        ? "Loading models…"
                                         : "Choose a model"
                                     }
                                   />
