@@ -35,15 +35,17 @@ interface Props {
  * Settings, as a section rather than a page.
  *
  * Everything that configures the company rather than running it lives here,
- * behind a sub-sidebar: the connection and lifecycle controls, who can sign in,
- * which model teammates think with, where its sites deploy and where it
- * searches. Each is its own route (`#/settings/people`), so a sub-page is
- * linkable and survives a refresh exactly as a top-level view does.
+ * behind a sub-sidebar: the connection and lifecycle controls, who can sign
+ * in, what its teammates actually did, and what it spends. Each is its own
+ * route (`#/settings/people`), so a sub-page is linkable and survives a
+ * refresh exactly as a top-level view does.
  *
- * Which third-party accounts are linked and which tool servers are installed
- * used to be here too. They are the Connections section now — see
- * `views/connections/ConnectionsSection.tsx` for why, and note that the three
- * credential forms still on this rail stayed on purpose.
+ * Everything with an outside service at the other end of it used to be here
+ * too — apps, tool servers, the model, skills, hosting, search. All six are
+ * the Connections section now; `views/connection-pages.ts` argues why, and
+ * `console-route-rewrites.ts` keeps their old `#/settings/…` addresses
+ * resolving. A new row that names an outside service belongs there, not
+ * here.
  */
 export function SettingsSection({ client, company, feed, sub, onFlag, onResetCompany }: Props) {
   const page = resolveSettingsPage(sub);
