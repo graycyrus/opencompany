@@ -91,22 +91,24 @@ pub const HUB_PROVIDERS: &[HubProvider] = &[
 /// unescaped it would end at the console origin's own `?` and the hub would
 /// read the console's `company=` as one of its own parameters.
 ///
-/// ## The hosted blocker
+/// ## Which origins the hub accepts
 ///
-/// The hub accepts `redirectUri` only when it passes an RFC 8252 **loopback**
-/// check (`http://` on `127.0.0.1`, `localhost`, or `[::1]`). A console on
-/// `127.0.0.1:<port>` satisfies that today, which is why the whole flow can be
-/// built and demonstrated locally against the route exactly as it ships.
+/// The hub decides, and it is the only party that can: `isAllowedFrontendRedirectUri`
+/// admits a loopback `http://` URI **or** an origin that resolves to a
+/// provisioned tenant in its own registry (`<slug>.<base-domain>`, or a
+/// verified custom domain). A registry lookup is not something this crate can
+/// mirror, and a de-provisioned tenant stops being accepted there with no
+/// redeploy here.
 ///
-/// A hosted console on an `https://<slug>.<domain>` origin satisfies neither
-/// that check nor the named `redirect ∈ {app,dashboard,admin}` targets, so the
-/// hub will answer `400` until it learns to allowlist tenant console origins.
-/// Nothing here needs to change when it does: the origin this builds on comes
-/// from [`AppConfig::host_base_url`](crate::AppConfig::host_base_url), so
-/// hosted is `OPENCOMPANY_PUBLIC_URL=https://…` and no code edit.
+/// So this builds the URL and lets the hub answer. The origin comes from
+/// [`AppConfig::host_base_url`](crate::AppConfig::host_base_url), which means a
+/// hosted console is `OPENCOMPANY_PUBLIC_URL=https://…` and no code change.
 ///
-/// Until then, [`hub_accepts_redirect_uri`] is what keeps a console from
-/// offering a button that lands on that `400`.
+/// This once carried a local `hub_accepts_redirect_uri` copy of the hub's
+/// then-loopback-only rule, so a console would not render a button that could
+/// only 400 (issue #512). `tinyhumansai/backend#1243` has since landed and the
+/// copy went with it — it had become the thing hiding the buttons on every
+/// hosted console, which is the failure it existed to prevent, one level up.
 pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> String {
     format!(
         "{}/auth/{}/login?redirectUri={}",
@@ -114,87 +116,6 @@ pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> Str
         provider,
         percent_encode(redirect_uri),
     )
-}
-
-/// Whether the hub will accept `redirect_uri` as a sign-in return target.
-///
-/// A copy of somebody else's rule, held here for one reason: so a console can
-/// decline to render a button that cannot complete. That is the same judgement
-/// `hub_providers` already makes for a host with no exchange at all — the
-/// difference between a console that says "sign in with a link" and one that
-/// sends someone to Google and back into a bare `400`.
-///
-/// Mirrors the platform backend's RFC 8252 check (`isLoopbackHttpUri`, in
-/// `src/utils/deepLinkRedirect.ts`): `http://` on `127.0.0.1`, `localhost`, or
-/// `[::1]`, port and path irrelevant. Every hosted `https://<slug>.<domain>`
-/// origin fails it, which is the whole of issue #512.
-///
-/// ## Delete this when the gate moves
-///
-/// `tinyhumansai/backend#1243` teaches that gate to accept provisioned tenant
-/// origins. When it lands, this function and its single call site in
-/// `server::users::routes::hub_providers` both go, and hosted consoles start
-/// offering the buttons with no other change. Nothing else calls it, and it
-/// deliberately owns no configuration — a knob to turn it off would outlive the
-/// condition it exists for.
-///
-/// Divergence is one-directional by construction: this is stricter than the
-/// hub, never laxer. It refuses the IPv4 shorthands `URL` normalizes
-/// (`http://127.1/`, `http://2130706433/` are both `127.0.0.1` there), which
-/// costs a hidden button on a console configured that way — and never a click
-/// that 400s.
-pub fn hub_accepts_redirect_uri(redirect_uri: &str) -> bool {
-    let Some((scheme, rest)) = redirect_uri.split_once("://") else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("http") {
-        return false;
-    }
-    // The authority is everything before the path, query, or fragment.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let Some(host) = authority_host(authority) else {
-        return false;
-    };
-    // `URL` lowercases a hostname, so `LOCALHOST` is a loopback host there too.
-    host.eq_ignore_ascii_case("127.0.0.1")
-        || host.eq_ignore_ascii_case("localhost")
-        || host.eq_ignore_ascii_case("::1")
-}
-
-/// The host of an authority, or `None` when it is not one `URL` would parse.
-///
-/// Being strict is the whole job. A malformed authority this waved through and
-/// the hub rejects is the one direction that costs something: the console
-/// renders a button, and the click lands on the very `400` this guard exists to
-/// keep people away from.
-fn authority_host(authority: &str) -> Option<&str> {
-    // Userinfo is discarded, as `new URL(…).hostname` discards it — the host of
-    // `http://127.0.0.1@evil.example/` is `evil.example`.
-    let host_port = match authority.rsplit_once('@') {
-        Some((_, after)) => after,
-        None => authority,
-    };
-    let (host, port) = match host_port.strip_prefix('[') {
-        // An IPv6 literal must close its bracket, and nothing but a port may
-        // follow it: `[::1` and `[::1]junk` are parse errors, not hosts.
-        Some(tail) => tail.split_once(']')?,
-        // Otherwise the first colon begins the port — which is what makes a
-        // bare `::1` fall out here as a bad port rather than a host. To be one
-        // it has to be bracketed.
-        None => match host_port.find(':') {
-            Some(at) => (&host_port[..at], &host_port[at..]),
-            None => (host_port, ""),
-        },
-    };
-    if !port.is_empty() {
-        // A colon then digits, or nothing at all. An empty port
-        // (`http://127.0.0.1:/`) means the default, which `URL` also accepts.
-        let digits = port.strip_prefix(':')?;
-        if !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-    }
-    Some(host)
 }
 
 /// Percent-encodes `value` for use as a single query-string value.
