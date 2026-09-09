@@ -71,9 +71,16 @@ describe("which sections get a rail", () => {
     expect(container.querySelector("nav")?.getAttribute("aria-label")).toBe("Company");
   });
 
-  it("draws one for Connections, with both of its pages", () => {
+  it("draws one for Connections, with every page that section holds", () => {
     render("connections", "mcp");
-    expect(railRows()).toEqual(["Apps", "MCP Servers"]);
+    expect(railRows()).toEqual([
+      "Apps",
+      "MCP Servers",
+      "Inference",
+      "Skills",
+      "Hosting",
+      "Search",
+    ]);
   });
 
   it("draws none for Room or Flows, so their pane keeps its full width", () => {
