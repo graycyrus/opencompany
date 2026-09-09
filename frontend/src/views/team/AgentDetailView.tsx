@@ -1185,6 +1185,7 @@ export function AgentDetailView({
               onRemoveCap={() => void applyBudget(null)}
               onResetBudget={() => void resetBudget()}
             />
+            </PageTabPanel>
           </>
         )}
       </div>
