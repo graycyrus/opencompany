@@ -367,9 +367,11 @@ describe("changing the tier from the title bar", () => {
       const item = row(tier.value);
       expect(item, `no row for ${tier.value}`).not.toBeNull();
       expect(item!.textContent).toContain(tier.label);
-      // The FULL description, not `leadSentence`: an open menu has the room,
-      // and this is the moment the words actually matter.
-      expect(item!.textContent).toContain(tier.description);
+      // Titles only. The menu printed each tier's full description, which made
+      // every row a paragraph and the dropdown as wide as the longest one —
+      // the sentence rides each row's own `title` instead.
+      expect(item!.textContent).not.toContain(tier.description);
+      expect(item!.getAttribute("title")).toBe(tier.description);
     }
   });
 
@@ -739,15 +741,22 @@ describe("the policy as read-only", () => {
     ["an operator whose role has not been read yet", null],
   ] as [string, boolean | null][]) {
     describe(who, () => {
-      it("still states the tier and the host's sentence", async () => {
+      it("still states the tier, and still carries the host's sentence", async () => {
         // The half that must NOT be lost. A member who cannot see the standing
         // policy cannot know what the agents around them are allowed to do.
+        //
+        // The pill prints the tier name alone now, so the sentence is asserted
+        // where it actually is — the tooltip — rather than dropped from this
+        // test: "a member can still find out what the agents may do" is the
+        // guarantee, and it would pass vacuously if only the name were checked.
         const api = client({ get: () => Promise.resolve(policy({ mode: "supervised" })) });
         await mount(api, canManage);
         expect(pill()).not.toBeNull();
         expect(pill()!.textContent).toContain("Supervised");
-        expect(pill()!.textContent).toContain("Conservative execution restrictions.");
         expect(pill()!.getAttribute("title")).toBe(TIERS[1].description);
+        expect(pill()!.getAttribute("title")).toContain(
+          "Conservative execution restrictions.",
+        );
       });
 
       it("is not offered as a control", async () => {
