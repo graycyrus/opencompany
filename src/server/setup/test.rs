@@ -643,7 +643,7 @@ struct SelectiveRebuilder {
 impl RuntimeRebuilder for SelectiveRebuilder {
     async fn rebuild(
         &self,
-        _state: &AppState,
+        state: &AppState,
         request: RebuildRequest,
     ) -> crate::Result<CompanyRuntime> {
         if self.fails.iter().any(|id| id == request.id.as_ref()) {
@@ -651,9 +651,13 @@ impl RuntimeRebuilder for SelectiveRebuilder {
                 "simulated rebuild failure".to_string(),
             ));
         }
+        // The auth-mode override is carried the way the boot rebuilder carries
+        // it, or a company rebuilt here keeps the manifest default and the
+        // mode the request chose is silently dropped.
         RuntimeBuilder::new(self.home.clone(), request.manifest)
             .with_id(request.id)
             .with_handover(request.handover)
+            .with_auth_mode_override(state.auth_mode_override())
             .build()
             .await
     }
