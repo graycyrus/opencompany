@@ -416,7 +416,25 @@ export function InferenceSection({
   client,
   company,
   canManage,
+  view = "all",
 }: {
+  /**
+   * Which half of the form to draw. `all` is the whole thing, and the default,
+   * so a caller that has no tabs is unchanged.
+   *
+   * **This gates rendering only — never state.** Provider, base URL, key and
+   * the tier→model map are one draft written by one Save, so the component
+   * stays mounted across a tab change and simply shows less of itself. Putting
+   * the two halves in separate panels that mount and unmount would discard
+   * whichever half you were not looking at the moment you looked away, and the
+   * Save button would then write the discarded half's defaults over what the
+   * operator had typed.
+   *
+   * That is also why Save, Reset and Remove key are drawn on **both** views:
+   * they act on the whole configuration, and a Save reachable from only one
+   * tab would strand edits made on the other.
+   */
+  view?: "all" | "connect" | "routing";
   client: OpenCompanyClient;
   company: string | null;
   /**
