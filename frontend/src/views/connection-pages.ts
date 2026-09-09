@@ -11,13 +11,21 @@
 // table inside the section because nothing outside needs to read it. This one
 // is read from two other modules, so it lives on its own.
 
-import { Blocks, BrainCircuit, LayoutGrid, Sparkles, type LucideIcon } from "lucide-react";
+import {
+  Blocks,
+  BrainCircuit,
+  Globe,
+  LayoutGrid,
+  Search,
+  Sparkles,
+  type LucideIcon,
+} from "lucide-react";
 
 /**
  * The sub-pages that live under Connections. The id is the hash's second
  * segment.
  *
- * Four pages, not one. A single "Connections" page once carried third-party
+ * Six pages, not one. A single "Connections" page once carried third-party
  * accounts, MCP servers, inference, channels and repositories, and was
  * deliberately broken apart because each was something an operator scrolled
  * past on the way to another (see the comment above the `oauth` entry in
@@ -79,6 +87,18 @@ export const CONNECTION_PAGES = [
     label: "Skills",
     icon: Sparkles,
     hint: "Playbooks your teammates read",
+  },
+  {
+    id: "hosting",
+    label: "Hosting",
+    icon: Globe,
+    hint: "Where this company's sites go live",
+  },
+  {
+    id: "search",
+    label: "Search",
+    icon: Search,
+    hint: "Where teammates look things up",
   },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon; hint: string }[];
 
