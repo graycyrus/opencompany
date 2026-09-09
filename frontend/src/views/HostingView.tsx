@@ -44,7 +44,7 @@ function reason(err: unknown): string {
 }
 
 /**
- * Settings → Hosting: the company's hosting provider connection.
+ * Connections → Hosting: the company's hosting provider connection.
  *
  * With a key stored here and the `hosting` grant in the manifest, a teammate can
  * put a site in this company's workspace on the public internet — with a managed

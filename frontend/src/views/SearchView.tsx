@@ -59,7 +59,7 @@ function reason(err: unknown): string {
 }
 
 /**
- * Settings → Search: which index this company's teammates search.
+ * Connections → Search: which index this company's teammates search.
  *
  * Every teammate that holds the `search` grant gets a `web_search` tool. This
  * page decides what is behind it: the platform's own account (metered, capped,

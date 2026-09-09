@@ -27,7 +27,7 @@ const DISPOSITION_COPY: Record<FailureDisposition, string> = {
   transport:
     "The request didn't complete, so the host may or may not have started this run. Run history is the answer either way.",
   "refusal-inference":
-    "The host did not start this run because inference needs attention. Update Settings → Inference, then try again.",
+    "The host did not start this run because inference needs attention. Update Connections → Inference, then try again.",
   "refusal-lifecycle":
     "This company is not running, so the host did not start this run. Resume it from the company's controls, then try again.",
   "refusal-not-wired": "This host cannot run workflows, so it did not start this run.",

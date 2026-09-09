@@ -642,7 +642,7 @@ export function CopilotPanel({
             <AlertDescription className="text-2xs leading-snug">
               This company has no inference configured, so it can't answer
               questions — it would just repeat them back. Set a provider in
-              Settings → Inference, then reopen the copilot.
+              Connections → Inference, then reopen the copilot.
             </AlertDescription>
           </Alert>
         )}

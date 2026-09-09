@@ -1382,7 +1382,7 @@ export function WorkflowCreateDialog({
   const draftUnavailable =
     draftGap ??
     (echoing
-      ? "This company has no model configured, so the copilot can’t draft yet — set one in Settings → Inference."
+      ? "This company has no model configured, so the copilot can’t draft yet — set one in Connections → Inference."
       : null);
 
   /**
@@ -2783,7 +2783,7 @@ export function WorkflowCreateDialog({
             <div className="flex items-center justify-between gap-2">
               <p className="text-2xs leading-snug text-muted-foreground">
                 {echoing
-                  ? "This company has no model configured, so the copilot can't draft yet — set one in Settings → Inference, or build the graph by hand below."
+                  ? "This company has no model configured, so the copilot can't draft yet — set one in Connections → Inference, or build the graph by hand below."
                   : "The copilot fills in the form below — review and edit it, then Create."}
               </p>
               <Button

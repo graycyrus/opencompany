@@ -152,9 +152,9 @@ export interface ProfileDraft {
 export function refusalNotice(reason: DraftRefusal | undefined): string {
   switch (reason) {
     case "no_model":
-      return "This company has no model configured, so the copilot can't draft yet — set one up in Settings → Inference, or write the field yourself.";
+      return "This company has no model configured, so the copilot can't draft yet — set one up in Connections → Inference, or write the field yourself.";
     case "model_unreachable":
-      return "The model didn't answer in time. Try again, or check the provider in Settings → Inference.";
+      return "The model didn't answer in time. Try again, or check the provider in Connections → Inference.";
     case "unreadable":
       return "The model's answer couldn't be used. Try again, or add a note saying what this teammate should own.";
     case "budget_exhausted":
