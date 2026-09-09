@@ -486,17 +486,21 @@ function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-content"
       data-sidebar="content"
-      // The collapsed rail used to clip rather than scroll here
-      // (`overflow-hidden`), which was harmless while the rail's own chrome
-      // was short enough that the nav list always fit above the fold. Issue
-      // #1931 review: it no longer always is — the macOS traffic-light inset
-      // (`WindowControlsInset`) and the four-utility bar (`SidebarUtilityBar`)
-      // both stack vertically above the nav in collapsed mode, and at the
-      // desktop's supported minimum window height that stack plus a full nav
-      // list can exceed the rail's height, clipping the last row(s) out of
-      // reach with no way to get to them. `overflow-y-auto` keeps them
-      // reachable by scroll; `no-scrollbar` (already applied above) keeps the
-      // rail visually identical when everything already fits.
+      // This region does not scroll and does not clip: `sidebar-inner` is the
+      // column's single scroller (issue #1931 review, and the Slack-style
+      // whole-column scroll that replaced it).
+      //
+      // It used to own the overflow, and answered it with `overflow-hidden`
+      // while the rail's chrome was short enough that the nav list always fit.
+      // That stopped being true — the macOS traffic-light inset stacks above
+      // the nav in collapsed mode, and at the supported minimum window height
+      // that stack plus a full nav list exceeded the rail, clipping the last
+      // rows out of reach with no way to get to them.
+      //
+      // Moving the scroller to the whole column fixes the collapsed rail by
+      // construction rather than by a second `collapsible=icon` rule: there is
+      // one scrolling box, at every state. `flex-none` is what keeps this
+      // region from absorbing the slack instead of the channel list below it.
       // `pt-4.5` (18px) starts the nav list level with the first row of the
       // page beside it, instead of at the top of its own column. Both columns
       // begin at the same y under the title row, but the content surface
