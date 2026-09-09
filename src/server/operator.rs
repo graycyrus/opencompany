@@ -10717,24 +10717,18 @@ mode = "full"
         assert!(banked_resolutions(&home, &company).await.is_empty());
     }
 
-    /// **A documented limitation, pinned rather than left incidental.**
-    ///
     /// A blocker raised by `escalate_to_human` carries no
-    /// [`BlockerStep`](crate::ports::blockers::BlockerStep), and every resume
-    /// reads the verdict's step and nothing else — so its card is never
-    /// re-dispatched however it is answered, on this route and on the
-    /// two-value one that predates it. The resume posts a note into the
-    /// blocker's thread and stops there.
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep) — the tool holds
+    /// neither a card nor a node — so the resume falls back to the card the
+    /// approval is linked to, and answering re-dispatches it.
     ///
-    /// The route lets the verdict through rather than refusing it: the answer
-    /// is banked durably and correctly, so the resume that reads the approval's
-    /// own task link inherits a right answer rather than a discarded one, and
-    /// refusing only `skip`/`amend` would leave `approve` no-opping in exactly
-    /// the same way while looking supported. Tracked as its own defect; when it
-    /// is fixed this test's final assertion is what changes.
+    /// The banked resolution is still stepless, and that assertion is
+    /// load-bearing rather than incidental: the fallback is read at resume
+    /// time, so the durable record keeps saying what the blocker actually
+    /// carried instead of being rewritten to claim a step it never had.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn an_agent_question_banks_its_verdict_but_re_dispatches_no_card() {
+    async fn an_agent_question_re_dispatches_the_card_its_approval_is_linked_to() {
         use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
         use crate::runtime::journal::{ApprovalConversation, TaskLink};
 
@@ -10833,7 +10827,7 @@ mode = "full"
         );
         assert!(
             banked[0]["resolution"].get("step").is_none(),
-            "an agent question is parked with no step, which is the defect: {}",
+            "the durable record keeps the stepless park the blocker carried: {}",
             banked[0]
         );
         let card = runtime
@@ -10846,8 +10840,120 @@ mode = "full"
             .expect("the card still exists");
         assert_eq!(
             card.column,
-            crate::ports::tasks::COLUMN_PAUSED,
-            "the stepless resume moves no card — the limitation this pins"
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the answer re-dispatches the linked card"
+        );
+    }
+
+    /// The link is followed only to a card the board still holds.
+    ///
+    /// A stepless question's approval carries a task link because a card was in
+    /// hand when it was asked, not because the card is the thing to re-enter.
+    /// When that card is gone — deleted, or never on this board — reading the
+    /// link as a card resume answers the operator with *that card is no longer
+    /// on the board*, which is a report about a card in place of the answer to
+    /// the question they just gave. The answer goes back into the conversation
+    /// instead, exactly as it does for a question that was never linked.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_agent_question_linked_to_a_card_the_board_lost_still_answers_the_question() {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Information,
+            source: BlockerSource::AgentQuestion,
+            step: None,
+            reason: "which of the two briefs is current?".to_string(),
+            needed: "an answer from you".to_string(),
+            group_key: None,
+        };
+        let approval = ApprovalId::new("question-2");
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: None,
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        // The link names a card that is not on the board, which is the whole
+        // case: nothing is seeded for `t-gone`.
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::from_task_id(Some("t-gone")),
+                ApprovalConversation {
+                    thread: Some("dm:eng".to_string()),
+                    parent: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (status, answer) = post_resolve(
+            &app,
+            &approval,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "retry" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "retry",
+            "the operator's answer is banked whatever the resume finds: {}",
+            banked[0]
+        );
+        let notes: Vec<String> = runtime
+            .events
+            .read_from(
+                runtime.id(),
+                crate::ports::types::EventSeq::new(0),
+                usize::MAX,
+            )
+            .await
+            .expect("read events")
+            .into_iter()
+            .filter_map(|stored| match stored.event {
+                crate::ports::types::CompanyEvent::AgentReply { chat_id, text, .. }
+                    if chat_id == "dm:eng" =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.contains("no longer on the board")),
+            "answering a question must not report on a card the asker never mentioned; \
+             posted: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note == "Got it — picking that back up now."),
+            "the answer must still reach the conversation it was asked in; posted: {notes:?}"
         );
     }
 
