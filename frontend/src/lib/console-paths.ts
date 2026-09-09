@@ -50,6 +50,15 @@ export const COMPANY_PAGES: Readonly<Record<string, View>> = {
   brain: "brain",
   finances: "finances",
   team: "team",
+  // Two slugs, one view, and the order matters: `SLUG_FOR_VIEW` inverts this
+  // map and the last entry wins, so `team` resolves *out* to `agent` while
+  // `#/company/team/<id>` still resolves *in*. That is what retires the old
+  // address without breaking it — an old link lands, and `canonicalize`
+  // rewrites the bar to `#/company/agent/<id>` on arrival.
+  //
+  // Singular deliberately: this address is one teammate. The plural
+  // `#/company/agents` is the roster, and it is a different page.
+  agent: "team",
   tasks: "tasks",
 };
 

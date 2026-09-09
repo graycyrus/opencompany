@@ -179,7 +179,7 @@ export const NAV_SECTIONS: NavSection[] = [
       // Today's Company page, renamed. "Company > Company" said the word twice
       // and told you nothing; what the page actually is, is the roster and the
       // org chart — the agents.
-      { view: "company", label: "Agents", icon: Network, hint: "Who is in this company" },
+      { view: "company", sub: "agents", label: "Agents", icon: Network, hint: "Who is in this company" },
       // Tasks by default; every other list the company declared is one click
       // away through the switcher on `LedgersView`'s own title. See
       // `docs/spec/runtime/ledgers-console-ia.md` Rule 2 for why this is one
