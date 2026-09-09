@@ -172,33 +172,36 @@ export const NAV_SECTIONS: NavSection[] = [
       { view: "ledgers", label: "Work", icon: BookText, hint: "Tasks, and every list it declared" },
       { view: "workspace", label: "Workspace", icon: FolderClosed, hint: "The files it keeps" },
       { view: "brain", label: "Brain", icon: Brain, hint: "What it remembers" },
+      // A row under Company, with sub-pages of its own — the table's one
+      // grandchild list.
+      //
+      // It was briefly a top-level section beside Company and Connections, on
+      // the argument that being two levels down made its pages reachable
+      // differently from everybody else's. What that missed is what the row is
+      // *about*: what a company earns and spends is one of the facts Company
+      // enumerates, alongside who is in it and what it remembers — a section of
+      // its own put a peer of Connections next to it and said this is a
+      // different subject, which it is not.
+      //
+      // Nested rather than left as a second rail inside the Finance page:
+      // Company already draws a `w-60` rail, and a second one beside it is
+      // issue #1383 at every width rather than only at 768–1023px.
+      // `FinanceSection` is dispatch-only as a result, which is the shape
+      // `ConnectionsSection` already had.
+      {
+        view: "finances",
+        label: "Finance",
+        icon: Wallet,
+        hint: "What it earns and spends",
+        children: FINANCE_PAGES.map((page) => ({
+          view: "finances" as const,
+          sub: page.id,
+          label: page.label,
+          icon: page.icon,
+          hint: page.hint,
+        })),
+      },
     ],
-  },
-  // What the company earns and spends.
-  //
-  // It was a row *under* Company with three children of its own — the only
-  // grandchild list in the table, and the only rail row that indented. That
-  // shape was chosen to avoid a second `w-60` rail beside Company's (issue
-  // #1383), and it worked, but it made Finance the one part of the console
-  // whose sub-pages were reached differently from everybody else's: two levels
-  // down a rail, behind a row that had to be opened first.
-  //
-  // A section of its own costs nothing that argument was protecting. There is
-  // still exactly one rail on screen — `SectionContentRail` draws the section
-  // you are in, and Finance is now one of those — so its three pages are rail
-  // rows at the same depth as Connections' six and Company's four. The nesting
-  // support in `NavChild.children` stays for a future case; nothing uses it.
-  {
-    view: "finances",
-    label: "Finance",
-    icon: Wallet,
-    children: FINANCE_PAGES.map((page) => ({
-      view: "finances" as const,
-      sub: page.id,
-      label: page.label,
-      icon: page.icon,
-      hint: page.hint,
-    })),
   },
   // What the company can act through: the apps its teammates sign in to, and
   // the MCP tool servers they can call. Its children come straight off
