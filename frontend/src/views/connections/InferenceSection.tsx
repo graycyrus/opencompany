@@ -849,7 +849,7 @@ export function InferenceSection({
    */
   const strippedForWindow = useRef(false);
   useEffect(() => {
-    if (provider !== "openrouter" || !wouldSaveProxied) {
+    if (!draftProviderIsOpenRouter || !wouldSaveProxied) {
       strippedForWindow.current = false;
       return;
     }
