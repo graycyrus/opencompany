@@ -1,23 +1,37 @@
 // @vitest-environment jsdom
 //
-// The Add-teammate dialog must send the persona it collected (issue #1776).
+// The Add-agent dialog collects three things and gets out of the way.
 //
-// `AGENT_FIELDS` has rendered an Instructions box in this dialog since #264,
-// and the host has accepted `instructions` at creation since #1530 — but
-// `AddMemberFields` never carried the value between them, so an operator who
-// wrote a persona here watched it disappear on Add. Nothing failed and nothing
-// warned; the teammate was simply created without it.
+// # What it replaced, and why this file changed shape
 //
-// # Why this is a component test
+// This used to pin that the dialog's Instructions box reached the host (issue
+// #1776), over a dialog that collected name, role, description, persona, an
+// inbox switch and a daily cap — with a copilot that would design all of it
+// from one sentence (#1989) and a hand-over to the long form when that design
+// was refused.
 //
-// The gap was in the wiring, not in a function: every piece was individually
-// correct, and only the path from the box to the request was missing. A test of
-// any one helper would have passed before the fix. This drives the dialog the
-// way an operator does and asserts on what left for the host — which is the
-// only place the omission was ever visible.
+// The dialog asks for a name, a face and a post now. An agent is not finished
+// at the moment it is created, and this dialog was the only place pretending
+// otherwise: the description and the persona are written on the agent's own
+// page, next to the copilot that drafts them and the record it is grounded in.
+// So there is no Instructions box left to pin, and the contract worth pinning
+// moved.
 //
-// It matters more now than it did: #1776 puts a copilot under that box, and a
-// drafted persona thrown away on Add would be a worse failure than a typed one.
+// # What is worth pinning instead
+//
+// Three things, each of which fails silently if it breaks:
+//
+//   1. **The dialog asks for exactly three things.** A regression that put the
+//      long form back would look correct on screen — it did, for months — and
+//      nothing would report it.
+//   2. **The avatar is a second write.** `addTeamMember` takes no avatar, so a
+//      chosen face has to be sent as its own `updateAgent` call against the id
+//      the host answers with. Miss it and the agent is created wearing the
+//      hashed mascot, which looks like a face nobody chose rather than a
+//      dropped write.
+//   3. **It lands on the agent's page.** The dialog collects three of the
+//      fields an agent has; a create that stayed on the roster would leave the
+//      rest unwritten with nothing pointing at where to write them.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -49,7 +63,6 @@ const api = vi.hoisted(() => ({
   fetchBoardColumns: vi.fn(),
   fetchMe: vi.fn(),
   listPeople: vi.fn(),
-  setInboxEnabled: vi.fn(),
   getInferenceStatus: vi.fn(),
 }));
 
@@ -59,7 +72,6 @@ vi.mock("@/lib/board-columns", () => ({
   IN_FLIGHT_COLUMNS: ["planning", "in_progress"],
 }));
 vi.mock("@/api/auth", () => ({ me: api.fetchMe, listPeople: api.listPeople }));
-vi.mock("@/api/inbox", () => ({ setInboxEnabled: api.setInboxEnabled }));
 vi.mock("@/api/inference", () => ({ getInferenceStatus: api.getInferenceStatus }));
 
 const { TeamView } = await import("@/views/TeamView");
@@ -71,6 +83,7 @@ const ROSTER: TeamMemberDto[] = [
 let container: HTMLDivElement;
 let root: Root;
 let added: Array<Record<string, unknown>>;
+let patched: Array<{ id: string; patch: Record<string, unknown> }>;
 
 function fakeClient(): OpenCompanyClient {
   return {
@@ -79,6 +92,12 @@ function fakeClient(): OpenCompanyClient {
     addTeamMember: async (input: Record<string, unknown>) => {
       added.push(input);
       return { id: "growth", name: "Growth", role: "Growth Marketer" } as TeamMemberDto;
+    },
+    // The avatar's own write, recorded separately because that is the point:
+    // `addTeamMember` has no avatar field, so a face has to arrive here.
+    updateAgent: async (id: string, patch: Record<string, unknown>) => {
+      patched.push({ id, patch });
+      return { id } as unknown as TeamMemberDto;
     },
   } as unknown as OpenCompanyClient;
 }
@@ -89,18 +108,15 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   added = [];
+  patched = [];
   vi.clearAllMocks();
   api.listTasks.mockResolvedValue([]);
   api.fetchBoardColumns.mockResolvedValue([]);
   api.fetchMe.mockResolvedValue({ id: "u1", role: "admin" });
   api.listPeople.mockResolvedValue([]);
-  // The dialog reads this to gate the copilot; an offline brain keeps the
-  // control disabled and out of the way of what this file is about.
-  //
-  // Since issue #1989 it decides more than that: `echo` is what makes the dialog
-  // render the FULL form at all, so this line is now what puts the Instructions
-  // box this file is about on screen. A company that can draft gets the reduced
-  // dialog instead — proved separately in `team-add-one-box.test.ts`.
+  // Still mocked because the roster reads it, but it no longer decides which
+  // dialog renders: there is only one dialog now, and it asks nothing a model
+  // could draft.
   api.getInferenceStatus.mockResolvedValue({ cognition: "echo" });
 });
 
@@ -124,16 +140,7 @@ function click(el: HTMLElement | undefined | null) {
   });
 }
 
-/**
- * Opens the Add-teammate dialog and waits for its cognition read to land.
- *
- * The wait is load-bearing since issue #1989. The dialog fetches `/inference`
- * when it opens and, until that answers, biases to the reduced one-box form —
- * deliberately, because guessing "can draft" wrong is corrected out loud while
- * guessing "cannot" is silent. So the full form this file drives does not exist
- * on the first paint even on an `echo` company; flushing the promise is what
- * puts it there.
- */
+/** Opens the dialog and flushes the roster's pending reads. */
 async function openDialog() {
   click(byText("button", "Add agent"));
   await act(async () => {});
