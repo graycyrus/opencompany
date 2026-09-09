@@ -93,7 +93,7 @@ describe("the sidebar's section table", () => {
       "Room",
       "Company",
       "Connections",
-      "Flows",
+      "Automations",
       "Approvals",
     ]);
   });
@@ -134,8 +134,8 @@ describe("the sidebar's section table", () => {
     // `ledgers` view since #1284 for the same reason. The `data-tour` anchors
     // follow the view id, so the tour and the e2e specs do not move when a word
     // does.
-    const flows = NAV_SECTIONS.find((section) => section.label === "Flows")!;
-    expect(flows.view).toBe("workflows");
+    const automations = NAV_SECTIONS.find((section) => section.label === "Automations")!;
+    expect(automations.view).toBe("workflows");
 
     const room = NAV_SECTIONS.find((section) => section.label === "Room")!;
     expect(room.view).toBe("chat");
@@ -171,8 +171,14 @@ describe("the sidebar's section table", () => {
     }
     expect(new Set(anchors).size, anchors.join(", ")).toBe(anchors.length);
 
+    // Agents used to land on its section's own address (`#/company`) with no
+    // sub, so its anchor would have been `nav-company` — the collision this
+    // test is about, and why `childAnchor` returned nothing for it. It has its
+    // own address now (`#/company/agents`, because a row reading "Agents" over
+    // an address reading "company" was the mismatch the prefix work removed),
+    // so it gets an anchor of its own and there is nothing to collide with.
     const company = NAV_SECTIONS.find((s) => s.view === "company")!;
-    expect(childAnchor(company, company.children![0])).toBeUndefined();
+    expect(childAnchor(company, company.children![0])).toBe("nav-agents");
     expect(childAnchor(company, company.children![1])).toBe("nav-ledgers");
   });
 
