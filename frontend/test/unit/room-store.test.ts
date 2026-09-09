@@ -74,7 +74,7 @@ describe("scope", () => {
 
     enterScope("conn-a::other");
     oldScopeWrites.setTranscripts({
-      general: [{ id: "late", from: "agent", text: "from acme", at: 1 }],
+      general: [{ id: "late", from: "company", text: "from acme", at: 1 }],
     });
 
     expect(readRoom().transcripts).toEqual({});
