@@ -55,12 +55,27 @@ export interface NavChild {
    */
   hint: string;
   /**
-   * This child's own sub-pages, rendered indented under it while it is the open
-   * row. Finance is the only one, and it nests rather than drawing a rail of its
-   * own because two `w-60` rails in one viewport is issue #1383 — the argument
-   * is on `SectionContentRail`.
+   * This child's own sub-pages, rendered indented under it. Finance is the only
+   * one, and it nests rather than drawing a rail of its own because two `w-60`
+   * rails in one viewport is issue #1383 — the argument is on
+   * `SectionContentRail`.
    */
   children?: NavChild[];
+  /**
+   * Render this child as a **caption over its pages**, not as a row you press.
+   *
+   * A row with children is a destination that also opens: you click it, it
+   * navigates, and its pages appear under it. A `group` is not a destination at
+   * all — it is a heading, its pages are always listed beneath it, and there is
+   * nothing to press on the heading itself. The Settings rail has had exactly
+   * this shape all along (`SETTINGS_PAGE_GROUPS`), which is what makes it the
+   * pattern to match rather than a third thing to learn.
+   *
+   * A `group` therefore needs no `view`/`sub` of its own that anyone lands on —
+   * it keeps them only so the table stays one type, and the rail never calls
+   * its `onSelect`.
+   */
+  group?: boolean;
 }
 
 /**
@@ -193,6 +208,15 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Finance",
         icon: Wallet,
         hint: "What it earns and spends",
+        // A caption over its three pages, not a row that reveals them.
+        //
+        // As a row it was the odd one out twice over: the only entry on this
+        // rail whose pages were hidden until you pressed it, and — because a
+        // row is an icon and a word — a glyph that looked like a destination
+        // and behaved like a disclosure. Overview, Invoicing and Wallet are
+        // now simply listed, the way Settings lists the pages under
+        // "Identity & lifecycle".
+        group: true,
         children: FINANCE_PAGES.map((page) => ({
           view: "finances" as const,
           sub: page.id,

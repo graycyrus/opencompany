@@ -48,6 +48,13 @@ export interface SectionRailRow {
    * deeper rail.
    */
   children?: SectionRailRow[];
+  /**
+   * Render as a caption over {@link children} rather than as a row.
+   *
+   * A group is a heading, not a destination: its pages are always listed, and
+   * `onSelect` is never called. See `NavChild.group`.
+   */
+  group?: boolean;
 }
 
 /**
@@ -93,7 +100,16 @@ export function SectionRail({
   // eight equal chips in a horizontal scroller, three of which are only
   // meaningful under a fourth. Following the rail costs one extra tap and keeps
   // the two surfaces saying the same thing.
-  const chips = rows.flatMap((row) => [row, ...(row.active ? (row.children ?? []) : [])]);
+  const chips = rows.flatMap((row) =>
+    // A group contributes its pages and NOT itself: there is nothing to press
+    // on a caption, and a chip that navigates nowhere is a dead control in a
+    // row of live ones. Its pages are always present for the same reason they
+    // are always listed on the rail above — a heading that hides what it heads
+    // is not a heading.
+    row.group
+      ? (row.children ?? [])
+      : [row, ...(row.active ? (row.children ?? []) : [])],
+  );
   // The DEEPEST active row, not the first. On `#/finances/wallet` both Finance
   // and Wallet are active and Finance comes first, so a `find` here named the
   // parent — "What it earns and spends" — on the one surface where the label
@@ -117,13 +133,34 @@ export function SectionRail({
         <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">{label}</div>
         {rows.map((row) => (
           <Fragment key={row.key}>
-            <RailRow row={row} current={row === current} />
-            {/* A row's own sub-pages, only while it is the row you are on.
-                Always-visible would put every leaf of every branch on one rail,
-                which is the wall `ledgers-console-ia.md` Rule 2 rejected. */}
-            {row.active &&
+            {row.group ? (
+              // A caption, matching the rail's own at the top of this column
+              // and the Settings rail's group headings — `pt-3` rather than
+              // `pt-1` because this one opens a group inside a list rather than
+              // sitting above one. Not a `<button>`, not a heading element: the
+              // `nav` is already named by its `aria-label`, and a heading here
+              // would land in the document outline ahead of the page's own `h1`
+              // (issue #1392).
+              <div className="px-2 pt-3 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                {row.label}
+              </div>
+            ) : (
+              <RailRow row={row} current={row === current} />
+            )}
+            {/* A group's pages are always listed; an ordinary row's appear only
+                while it is the row you are on. Always-visible for every row
+                would put every leaf of every branch on one rail, which is the
+                wall `ledgers-console-ia.md` Rule 2 rejected — a group is the
+                deliberate exception, and it earns it by being a heading rather
+                than a place. */}
+            {(row.group || row.active) &&
               row.children?.map((child) => (
-                <RailRow key={child.key} row={child} current={child === current} nested />
+                <RailRow
+                  key={child.key}
+                  row={child}
+                  current={child === current}
+                  nested={!row.group}
+                />
               ))}
           </Fragment>
         ))}
@@ -297,6 +334,7 @@ function sectionRows(
 
   return (section.children ?? []).map((child) => ({
     ...row(child, childActive(section, child, view, sub), childAnchor(section, child)),
+    group: child.group,
     children: child.children?.map((grandchild) =>
       // No `data-tour` on a nested row: the anchors follow the address, and a
       // grandchild's address is its parent's view with a second segment — which
