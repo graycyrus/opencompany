@@ -123,7 +123,7 @@ function menuItem(testid: string): HTMLElement | null {
 
 async function openBudgetDialog() {
   const membersToggle = [...container.querySelectorAll("button")].find((b) =>
-    (b.textContent ?? "").includes("teammates"),
+    (b.textContent ?? "").includes("agents"),
   ) as HTMLButtonElement;
   await act(async () => membersToggle.click());
   await flush();
@@ -145,7 +145,7 @@ function setInput(el: HTMLInputElement, text: string) {
   });
 }
 
-describe("setting a teammate's daily cap from chat", () => {
+describe("setting a agent's daily cap from chat", () => {
   it("writes the cap through client.setTeamBudget and confirms it", async () => {
     const client = clientAs({});
     await mount(client);

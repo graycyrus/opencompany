@@ -29,7 +29,7 @@ function agent(over: Partial<AgentDetailDto> = {}): AgentDetailDto {
   };
 }
 
-describe("what the panel says a teammate is", () => {
+describe("what the panel says a agent is", () => {
   it("shows the instructions in force, not the blueprint they mask", () => {
     const profile = agentProfile(
       agent({
@@ -42,11 +42,11 @@ describe("what the panel says a teammate is", () => {
     expect(profile.about).toBe("Confirm the budget before launching anything.");
   });
 
-  it("falls back to the description for a teammate with no instructions", () => {
+  it("falls back to the description for a agent with no instructions", () => {
     expect(agentProfile(agent({ instructions: null })).about).toBe("Runs paid acquisition.");
   });
 
-  it("has nothing to say about a teammate defined with neither", () => {
+  it("has nothing to say about a agent defined with neither", () => {
     const profile = agentProfile(agent({ description: undefined, instructions: null }));
     expect(profile.about).toBeNull();
     expect(profile.aboutTruncated).toBe(false);
@@ -66,7 +66,7 @@ describe("what the panel says a teammate is", () => {
     expect(profile.aboutTruncated).toBe(false);
   });
 
-  it("shows a manifest teammate by its role, and says so once", () => {
+  it("shows a manifest agent by its role, and says so once", () => {
     const profile = agentProfile(
       agent({ name: undefined, role: "Chief Executive", source: "manifest" }),
     );
@@ -113,7 +113,7 @@ describe("what the panel says a teammate is", () => {
 });
 
 describe("where the panel's buttons go", () => {
-  it("links to the teammate's page", () => {
+  it("links to the agent's page", () => {
     expect(agentHref("jamie")).toBe("#/team/jamie");
   });
 

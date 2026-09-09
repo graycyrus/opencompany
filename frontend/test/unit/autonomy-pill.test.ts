@@ -566,7 +566,7 @@ describe("widening the tier from the title bar", () => {
     await pick("full");
 
     const text = document.body.textContent ?? "";
-    expect(text).toContain("Give teammates more autonomy?");
+    expect(text).toContain("Give agents more autonomy?");
     // Both sides of the move, in the host's own prose.
     expect(text).toContain("Instead of: Conservative execution restrictions.");
     expect(text).toContain("With Full: Broadest execution autonomy.");

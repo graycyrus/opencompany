@@ -162,7 +162,7 @@ describe("Settings → Search, by role", () => {
     expect(notice?.textContent).toContain("Only an admin");
     // The footnote's own characters, typographic apostrophe included — this is
     // the sentence the page was printing under an enabled picker.
-    expect(container.textContent).toContain("an administrator’s and not a teammate’s");
+    expect(container.textContent).toContain("an administrator’s and not a agent’s");
   });
 
   it("offers an admin the whole form and no notice", async () => {

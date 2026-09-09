@@ -81,12 +81,12 @@ function menuItem(text: string): HTMLElement | undefined {
 }
 
 describe("MembersPane's Add/Remove, for a plain member (canEditBudget: false)", () => {
-  it("still offers Add teammate — no admin gate on this control", async () => {
+  it("still offers Add agent — no admin gate on this control", async () => {
     await act(async () => {
       root.render(createElement(MembersPane, paneProps()));
     });
 
-    const add = container.querySelector('[aria-label="Add teammate"]') as HTMLButtonElement;
+    const add = container.querySelector('[aria-label="Add agent"]') as HTMLButtonElement;
     expect(add).not.toBeNull();
     expect(add.disabled).toBe(false);
 
@@ -100,7 +100,7 @@ describe("MembersPane's Add/Remove, for a plain member (canEditBudget: false)", 
       root.render(createElement(MembersPane, paneProps({ onAdd })));
     });
 
-    const add = container.querySelector('[aria-label="Add teammate"]') as HTMLButtonElement;
+    const add = container.querySelector('[aria-label="Add agent"]') as HTMLButtonElement;
     await act(async () => add.click());
 
     expect(onAdd).toHaveBeenCalled();
@@ -171,7 +171,7 @@ describe("AddMemberDialog, when the write is refused", () => {
     setInput(document.body.querySelector("#member-role") as HTMLInputElement, "Growth Marketer");
 
     const create = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent === "Add teammate" || b.textContent === "Adding…",
+      (b) => b.textContent === "Add agent" || b.textContent === "Adding…",
     ) as HTMLButtonElement;
     await act(async () => create.click());
     await flush();
@@ -188,7 +188,7 @@ describe("AddMemberDialog, when the write is refused", () => {
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
     expect((document.body.querySelector("#member-name") as HTMLInputElement).value).toBe("Nova");
     const retry = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent === "Add teammate",
+      (b) => b.textContent === "Add agent",
     ) as HTMLButtonElement | undefined;
     expect(retry).not.toBeUndefined();
     expect(retry?.disabled).toBe(false);

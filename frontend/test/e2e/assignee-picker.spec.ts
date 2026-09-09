@@ -81,7 +81,7 @@ function card(page: Page, title: string) {
   return page.locator("[draggable=true]").filter({ hasText: title }).first();
 }
 
-test("the edit dialog offers Unassigned, desks and teammates instead of a text field", async ({
+test("the edit dialog offers Unassigned, desks and agents instead of a text field", async ({
   page,
   request,
 }) => {
@@ -113,7 +113,7 @@ test("the edit dialog offers Unassigned, desks and teammates instead of a text f
   // order. (Scoped to the popup's own group labels: the sidebar also has a
   // "Desks" nav item.)
   const groups = page.locator('[data-slot="select-label"]');
-  await expect(groups).toHaveText(["Desks", "Teammates"]);
+  await expect(groups).toHaveText(["Desks", "Agents"]);
 
   await expect(page.getByRole("option", { name: /Engineering desk/ })).toBeVisible();
   await expect(page.getByRole("option", { name: /Content desk/ })).toBeVisible();
@@ -125,9 +125,9 @@ test("the edit dialog offers Unassigned, desks and teammates instead of a text f
   await expect(page.getByRole("option", { name: /^ceo —/ })).toBeVisible();
 
   // A desk with nobody on it stays assignable (EmptyDesk is real), and says so.
-  await expect(page.getByRole("option", { name: /Legal — no teammates yet/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Legal — no agents yet/ })).toBeVisible();
   // A staffed desk shows its headcount.
-  await expect(page.getByRole("option", { name: /Engineering desk — 1 teammate/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Engineering desk — 1 agent/ })).toBeVisible();
 });
 
 test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
@@ -149,7 +149,7 @@ test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
   await expect(created).not.toContainText(/\bengineer\b(?!ing)/);
 });
 
-test("a card can be assigned to a teammate, and created for nobody at all", async ({
+test("a card can be assigned to a agent, and created for nobody at all", async ({
   page,
   request,
 }) => {

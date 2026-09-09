@@ -231,7 +231,7 @@ describe("writeRefusalHandsOverForm", () => {
 
   it("hands over for per-node problems, which each want a control", () => {
     const err = new ApiError(400, "workflow_invalid", "the graph was refused", true);
-    err.problems = [{ node_id: "write", message: "no such teammate" }];
+    err.problems = [{ node_id: "write", message: "no such agent" }];
     expect(writeRefusalHandsOverForm(err)).toBe(true);
   });
 
@@ -247,7 +247,7 @@ describe("writeRefusalHandsOverForm", () => {
     // Belt and braces: even a `problems` array cannot smuggle a non-host error
     // through, though the client never populates one off an unparsed body.
     const forged = new ApiError(409, "http_409", "HTTP 409");
-    forged.problems = [{ node_id: "write", message: "no such teammate" }];
+    forged.problems = [{ node_id: "write", message: "no such agent" }];
     expect(writeRefusalHandsOverForm(forged)).toBe(false);
   });
 

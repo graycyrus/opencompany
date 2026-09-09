@@ -95,9 +95,9 @@ const HAND_ROLLED: Record<string, { count: number; why: string }> = {
   "team/AgentDetailView.tsx": {
     count: 1,
     why:
-      "The teammate profile block: a 56px avatar that is itself the control for " +
+      "The agent profile block: a 56px avatar that is itself the control for " +
       "changing it (#1181), the name, the role, and a row of desk and tier badges. " +
-      "It also renders only once the teammate has loaded, so it cannot be hoisted " +
+      "It also renders only once the agent has loaded, so it cannot be hoisted " +
       "to a header that has to exist through the loading and error states too.",
   },
 };

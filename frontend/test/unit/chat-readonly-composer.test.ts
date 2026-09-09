@@ -280,7 +280,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     // under, from the offline echo brain, and no setting changes it.
     expect(strip?.textContent).toContain(
       "The replies in this conversation come from the offline echo brain rather than the " +
-        "teammate they appear under. No setting changes that: it takes a host built and " +
+        "agent they appear under. No setting changes that: it takes a host built and " +
         "started with the harness.",
     );
   });
@@ -391,7 +391,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     );
     expect(strip?.textContent).toContain(
       "The replies in this conversation come from the offline echo brain rather than the " +
-        "teammate they appear under. No setting changes that: it takes a host built and " +
+        "agent they appear under. No setting changes that: it takes a host built and " +
         "started with the harness.",
     );
 

@@ -41,7 +41,7 @@ function renderSelect() {
           SelectContent,
           null,
           createElement(SelectItem, { value: "trigger" }, "Trigger — starts the workflow"),
-          createElement(SelectItem, { value: "agent" }, "Agent — a teammate performs a step"),
+          createElement(SelectItem, { value: "agent" }, "Agent — a agent performs a step"),
         ),
       ),
     );
@@ -100,6 +100,6 @@ describe("the select popup's width", () => {
     // would pass against an empty string.
     renderSelect();
     expect(popup()?.textContent).toContain("Trigger — starts the workflow");
-    expect(popup()?.textContent).toContain("Agent — a teammate performs a step");
+    expect(popup()?.textContent).toContain("Agent — a agent performs a step");
   });
 });

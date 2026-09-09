@@ -570,7 +570,7 @@ describe("the finished build-out points at what would actually help", () => {
 });
 
 describe("a replacing build-out clears the team it replaces", () => {
-  it("removes operator-staffed teammates before creating the new roster", async () => {
+  it("removes operator-staffed agents before creating the new roster", async () => {
     const client = clientWith({
       source: "fallback",
       reason: "model_unreachable",

@@ -450,7 +450,7 @@ describe("leaving the completion screen to wire a model", () => {
     await runFlow();
 
     expect(removed, "the fallback team should be replaced").toEqual(["ada", "cara"]);
-    expect(removed, "a teammate staffed while settings were open must survive").not.toContain("bob");
+    expect(removed, "a agent staffed while settings were open must survive").not.toContain("bob");
   });
 
   it("does not reopen a redesign whose fallback team another operator already replaced", async () => {

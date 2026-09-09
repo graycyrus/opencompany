@@ -157,7 +157,7 @@ describe("designedTeammateFields", () => {
     for (const reason of ["no_model", "model_unreachable", "unreadable", "budget_exhausted"] as const) {
       expect(
         designedTeammateFields(described, { source: "unavailable", reason }),
-        `a ${reason} refusal must not produce a teammate`,
+        `a ${reason} refusal must not produce a agent`,
       ).toBeNull();
     }
   });
@@ -177,7 +177,7 @@ describe("designedTeammateFields", () => {
     }
   });
 
-  it("refuses a teammate with no name, which nothing can derive", () => {
+  it("refuses a agent with no name, which nothing can derive", () => {
     // The id is slugged from the name host-side (`mint_agent_id`), and no pass
     // produces one: a model asked for a person's name either invents a person
     // or restates the job.
@@ -197,7 +197,7 @@ describe("designedTeammateFields", () => {
     ).toBeNull();
   });
 
-  it("never returns a partial or blank-role teammate, for any design", () => {
+  it("never returns a partial or blank-role agent, for any design", () => {
     const designs: TeammateDesign[] = [
       DESIGNED,
       { source: "model" },

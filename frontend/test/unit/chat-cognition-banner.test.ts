@@ -144,7 +144,7 @@ describe("the chat cognition banner", () => {
     const notice = banner();
     expect(notice).not.toBeNull();
     // What is wrong, in the operator's terms rather than the runtime's.
-    expect(notice!.textContent).toContain("Teammates can't think yet.");
+    expect(notice!.textContent).toContain("Agents can't think yet.");
     // Why the replies below are not what they look like.
     expect(notice!.textContent).toContain("offline echo brain");
     // And the remedy, as a link that actually goes there — the whole point of
@@ -505,7 +505,7 @@ describe("the cognition banner's copy claims no direction", () => {
 
       const text = banner()!.textContent!;
       expect(text).toContain("offline echo brain");
-      expect(text).toContain("rather than the teammate they appear under");
+      expect(text).toContain("rather than the agent they appear under");
     });
   }
 });

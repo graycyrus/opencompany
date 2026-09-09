@@ -36,7 +36,7 @@ async function openDm(page: Page, agentId: string) {
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
-test("a teammate's face opens who they are, without leaving the channel", async ({ page }) => {
+test("a agent's face opens who they are, without leaving the channel", async ({ page }) => {
   await openDm(page, "engineer");
 
   await page.getByRole("button", { name: /Open .*'s profile/ }).first().click();
@@ -56,7 +56,7 @@ test("a teammate's face opens who they are, without leaving the channel", async 
   await expect(page).toHaveURL(/#\/chat\/dm:engineer$/);
 });
 
-test("the panel hands off to the teammate's own page, with the form open", async ({ page }) => {
+test("the panel hands off to the agent's own page, with the form open", async ({ page }) => {
   await openDm(page, "engineer");
   await page.getByRole("button", { name: /Open .*'s profile/ }).first().click();
   await expect(page.getByTestId("agent-profile-panel")).toBeVisible();
@@ -73,7 +73,7 @@ test("the panel hands off to the teammate's own page, with the form open", async
   await expect(page.getByTestId("agent-profile-panel")).toHaveCount(0);
 });
 
-test("Back closes the editor and leaves the teammate's page standing", async ({ page }) => {
+test("Back closes the editor and leaves the agent's page standing", async ({ page }) => {
   await page.goto("/#/team/engineer");
   await page.getByTestId("agent-edit").click();
   await expect(page).toHaveURL(/#\/team\/engineer\?edit$/);

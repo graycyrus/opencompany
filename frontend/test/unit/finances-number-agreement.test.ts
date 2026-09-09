@@ -136,7 +136,7 @@ describe("Monthly budget card", () => {
     const origin = container.querySelector('[data-testid="monthly-budget-origin"]');
     expect(origin?.textContent).toContain("company manifest");
     expect(origin?.textContent).toContain("cannot be changed here");
-    expect(origin?.textContent).toContain("daily cap on each teammate's page");
+    expect(origin?.textContent).toContain("daily cap on each agent's page");
   });
 
   it("keeps saying so once a cap exists, since the console still cannot change it", async () => {

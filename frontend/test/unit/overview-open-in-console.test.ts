@@ -16,10 +16,10 @@ import { destinationFor, MEMORY_DESTINATION } from "@/views/overview/kg/open-in-
  * has to be built from *that* id rather than from anything re-derived.
  */
 describe("where a graph node lives in the console", () => {
-  it("sends a teammate to their own page", () => {
+  it("sends a agent to their own page", () => {
     expect(destinationFor("emp:frontend_engineer")).toEqual({
       hash: "#/team/frontend_engineer",
-      label: "Open teammate",
+      label: "Open agent",
     });
   });
 

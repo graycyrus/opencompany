@@ -98,7 +98,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("a teammate's run history", () => {
+describe("a agent's run history", () => {
   it("asks the host for this desk's attempts rather than filtering a company page", async () => {
     const client = makeClient({
       "/runs": [run()],
@@ -145,7 +145,7 @@ describe("a teammate's run history", () => {
     expect(row?.textContent).toContain("card-7");
   });
 
-  it("says the teammate has not run rather than showing an empty list", async () => {
+  it("says the agent has not run rather than showing an empty list", async () => {
     const client = makeClient({ "/runs": [], "/tasks": [], "/workflows": [] });
     await mount(client);
     expect(container.textContent).toContain("Robin hasn't run yet");
@@ -183,7 +183,7 @@ describe("a teammate's run history", () => {
     ).not.toBeNull();
   });
 
-  it("says no attempt matches an empty filtered fetch, not that the teammate never ran", async () => {
+  it("says no attempt matches an empty filtered fetch, not that the agent never ran", async () => {
     // The desk has history, but none of it is failed. The host answers the
     // filtered read with an empty page; the section must say the filter matched
     // nothing — not that the teammate has never run — and keep the controls up
@@ -356,7 +356,7 @@ describe("a teammate's run history", () => {
     expect(panel?.textContent).not.toContain("Running");
   });
 
-  it("discards a stale list response after the operator switches teammates", async () => {
+  it("discards a stale list response after the operator switches agents", async () => {
     // The engineer's list read is slow; the operator moves to Dana before it
     // resolves. The late answer was filtered against the old agentId and must
     // not render the engineer's rows beneath Dana's name.

@@ -159,7 +159,7 @@ test("the tooltip's own Next still advances the tour", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("with the tour dismissed the same card still opens the teammate", async ({
+test("with the tour dismissed the same card still opens the agent", async ({
   page,
 }) => {
   await page.goto("/#/company");

@@ -18,7 +18,7 @@ function member(id: string, name: string): TeamMember {
 }
 
 describe("direct-message channels", () => {
-  it("shows every teammate, conversations first and newest of those on top", () => {
+  it("shows every agent, conversations first and newest of those on top", () => {
     const ada = member("ada", "Ada");
     const ben = member("ben", "Ben");
     const cy = member("cy", "Cy");

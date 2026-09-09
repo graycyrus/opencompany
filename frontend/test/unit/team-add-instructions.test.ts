@@ -135,7 +135,7 @@ function click(el: HTMLElement | undefined | null) {
  * puts it there.
  */
 async function openDialog() {
-  click(byText("button", "Add teammate"));
+  click(byText("button", "Add agent"));
   await act(async () => {});
 }
 
@@ -154,7 +154,7 @@ function type(id: string, value: string) {
   });
 }
 
-describe("adding a teammate (issue #1776)", () => {
+describe("adding a agent (issue #1776)", () => {
   it("sends the persona the dialog collected", async () => {
     await act(async () => {
       root.render(
@@ -182,7 +182,7 @@ describe("adding a teammate (issue #1776)", () => {
 
     // The footer's Add teammate — the dialog is open, so it is the last one.
     const buttons = Array.from(document.querySelectorAll<HTMLElement>("button")).filter(
-      (el) => el.textContent?.trim() === "Add teammate",
+      (el) => el.textContent?.trim() === "Add agent",
     );
     await act(async () => {
       buttons[buttons.length - 1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -218,7 +218,7 @@ describe("adding a teammate (issue #1776)", () => {
     type("member-role", "Growth Marketer");
 
     const buttons = Array.from(document.querySelectorAll<HTMLElement>("button")).filter(
-      (el) => el.textContent?.trim() === "Add teammate",
+      (el) => el.textContent?.trim() === "Add agent",
     );
     await act(async () => {
       buttons[buttons.length - 1].dispatchEvent(new MouseEvent("click", { bubbles: true }));

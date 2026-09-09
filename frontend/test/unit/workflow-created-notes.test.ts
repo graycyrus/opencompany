@@ -63,7 +63,7 @@ const CREATED: WorkflowGraph = {
   version: "v1",
 };
 
-const NOTES = ["Matched “the writer” to teammate `writer`.", "Set the trigger to Mondays at 09:00."];
+const NOTES = ["Matched “the writer” to agent `writer`.", "Set the trigger to Mondays at 09:00."];
 
 /** What `onCreated` is called with, chosen per test. */
 let createdNotes: string[] | undefined;

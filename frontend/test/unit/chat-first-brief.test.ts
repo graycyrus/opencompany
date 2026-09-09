@@ -89,7 +89,7 @@ afterEach(() => {
 });
 
 describe("the empty-channel first brief", () => {
-  it("offers a brief instead of teammate creation and starts the composer action", () => {
+  it("offers a brief instead of agent creation and starts the composer action", () => {
     const onStartBrief = vi.fn();
     renderTimeline(onStartBrief);
 
@@ -97,7 +97,7 @@ describe("the empty-channel first brief", () => {
       button.textContent?.includes("Give the team a brief"),
     );
     expect(brief).toBeDefined();
-    expect(container.textContent).not.toContain("Create teammate");
+    expect(container.textContent).not.toContain("Create agent");
 
     act(() => brief!.click());
     expect(onStartBrief).toHaveBeenCalledOnce();

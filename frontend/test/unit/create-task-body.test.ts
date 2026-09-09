@@ -47,7 +47,7 @@ describe("newTaskBody", () => {
     expect(body?.priority).toBe("high");
   });
 
-  it("carries a chosen teammate verbatim", () => {
+  it("carries a chosen agent verbatim", () => {
     const body = newTaskBody({
       prompt: "fetch trending tweets about agent harnesses",
       deliverable: "once",

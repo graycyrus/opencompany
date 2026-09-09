@@ -458,7 +458,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ).not.toBeNull();
   });
 
-  it("names a workflow gate's broad approve after the workflow, not a teammate (#1411)", async () => {
+  it("names a workflow gate's broad approve after the workflow, not a agent (#1411)", async () => {
     // A native `workflow.approve` gate carries no agent — the broader scope's
     // subject is the workflow itself (issue #1098) — so picking it must not
     // tell a screen-reader user that a "teammate" is being granted the tool.

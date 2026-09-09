@@ -142,7 +142,7 @@ function type(testId: string, value: string) {
 /** The footer's Add teammate — the dialog is open, so it is the last one. */
 async function pressCreate() {
   const buttons = Array.from(document.querySelectorAll<HTMLElement>("button")).filter(
-    (el) => el.textContent?.trim() === "Add teammate",
+    (el) => el.textContent?.trim() === "Add agent",
   );
   await act(async () => {
     buttons[buttons.length - 1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -160,8 +160,8 @@ async function pressCancel() {
 const box = '[data-testid="team-describe-box"]';
 const roleField = "#member-role";
 
-describe("chat's reduced Add-teammate dialog (issue #1989)", () => {
-  it("renders one box, and writes the teammate the host designed", async () => {
+describe("chat's reduced Add-agent dialog (issue #1989)", () => {
+  it("renders one box, and writes the agent the host designed", async () => {
     await openDialog();
 
     expect(document.querySelector(box), "the description box must be on screen").not.toBeNull();
@@ -211,7 +211,7 @@ describe("chat's reduced Add-teammate dialog (issue #1989)", () => {
     expect(notice!.textContent).toContain("didn't answer in time");
   });
 
-  it("refuses to write a part-designed teammate", async () => {
+  it("refuses to write a part-designed agent", async () => {
     // A role and a mandate with no persona is not a partial success to salvage.
     api.designTeammate.mockResolvedValue({
       source: "model",
@@ -254,7 +254,7 @@ describe("chat's reduced Add-teammate dialog (issue #1989)", () => {
   });
 });
 
-describe("chat's full Add-teammate form on a company that cannot draft", () => {
+describe("chat's full Add-agent form on a company that cannot draft", () => {
   it("keeps every field, because nothing downstream could draft them", async () => {
     api.getInferenceStatus.mockResolvedValue({ cognition: "echo" });
     await openDialog();
@@ -264,7 +264,7 @@ describe("chat's full Add-teammate form on a company that cannot draft", () => {
     // fields it stops asking for would be askable nowhere.
     expect(document.querySelector(box)).toBeNull();
     expect(document.querySelector(roleField)).not.toBeNull();
-    expect(byText("span", "Give this teammate an inbox")).not.toBeUndefined();
+    expect(byText("span", "Give this agent an inbox")).not.toBeUndefined();
   });
 });
 
@@ -409,7 +409,7 @@ describe("chat's dialog: a write that does not land", () => {
   });
 });
 
-describe("chat's dialog: a host that says it cannot design a teammate", () => {
+describe("chat's dialog: a host that says it cannot design a agent", () => {
   it("renders the full form up front on a non-echo path with no drafter", async () => {
     api.getInferenceStatus.mockResolvedValue({ cognition: "hosted", designsProfiles: false });
     await openDialog();

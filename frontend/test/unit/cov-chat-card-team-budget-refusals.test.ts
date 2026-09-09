@@ -226,10 +226,10 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
  * had no coverage was the one refusal the host still enforces (a company's
  * last teammate) and an ordinary write failure, neither silently swallowed.
  */
-describe("removing a teammate from the chat member pane", () => {
+describe("removing a agent from the chat member pane", () => {
   async function openRemove() {
     const toggle = [...container.querySelectorAll("button")].find((b) =>
-      (b.textContent ?? "").includes("teammate"),
+      (b.textContent ?? "").includes("agent"),
     ) as HTMLButtonElement;
     expect(toggle, "the members-pane toggle").not.toBeUndefined();
     await act(async () => toggle.click());
@@ -244,15 +244,15 @@ describe("removing a teammate from the chat member pane", () => {
     await flush();
   }
 
-  it("names the host's last-teammate refusal (AUTH — a removal the host will not allow)", async () => {
+  it("names the host's last-agent refusal (AUTH — a removal the host will not allow)", async () => {
     const client = clientAs({
       removeTeamMember: () =>
-        Promise.reject(new ApiError(409, "conflict", "You can't remove your company's last teammate.")),
+        Promise.reject(new ApiError(409, "conflict", "You can't remove your company's last agent.")),
     });
     await mount(client);
     await openRemove();
 
-    expect(toasts.error).toHaveBeenCalledWith("You can't remove your company's last teammate.");
+    expect(toasts.error).toHaveBeenCalledWith("You can't remove your company's last agent.");
   });
 
   it("reports an ordinary failure rather than leaving the row untouched with no explanation (FAIL)", async () => {

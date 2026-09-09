@@ -431,13 +431,13 @@ describe("whether a payload lead was cut to fit the compact row", () => {
 });
 
 describe("a kind nobody has named", () => {
-  it("says a teammate wants a tool rather than inventing one", () => {
+  it("says a agent wants a tool rather than inventing one", () => {
     expect(
       approvalAction(approval({ kind: "some_tool_nobody_declared" })),
     ).toBe("Use one of its tools");
   });
 
-  it("says less again when there is no teammate to name", () => {
+  it("says less again when there is no agent to name", () => {
     expect(
       approvalAction(approval({ kind: "some.native.effect", agent: null })),
     ).toBe("Do something that needs your sign-off");

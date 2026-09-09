@@ -38,7 +38,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("a teammate's page lists the attempts it has made", async ({ page }) => {
+test("a agent's page lists the attempts it has made", async ({ page }) => {
   await page.goto("/#/team/engineer");
   await dismissOnboarding(page);
 

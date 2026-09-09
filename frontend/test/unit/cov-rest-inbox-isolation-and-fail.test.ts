@@ -58,7 +58,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("switching teammates never leaks a slower read across the boundary", () => {
+describe("switching agents never leaks a slower read across the boundary", () => {
   it("drops a late response for the inbox the operator has already left", async () => {
     let resolveAlex: ((rows: InboxMessageDto[]) => void) | null = null;
     const inboxMessages = vi.fn((key: string) => {

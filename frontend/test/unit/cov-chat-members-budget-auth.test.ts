@@ -92,7 +92,7 @@ describe("MembersPane budget menu, by canEditBudget (ChatView's isAdmin && fromH
     expect(menuAt("team-budget-edit")).not.toBeNull();
   });
 
-  it("still withholds the budget entry point from an admin viewing a starter-roster teammate (fromHost false)", async () => {
+  it("still withholds the budget entry point from an admin viewing a starter-roster agent (fromHost false)", async () => {
     // `canEditBudget` is computed as `isAdmin && fromHost` in ChatView — a
     // starter-roster row has no budget record on the host to edit.
     await act(async () => {

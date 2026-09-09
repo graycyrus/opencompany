@@ -414,7 +414,7 @@ describe("policy tier changes", () => {
       full?.click();
     });
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(document.body.textContent).toContain("Acts without asking.");
 
     const confirm = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find(
@@ -487,7 +487,7 @@ describe("policy tier changes", () => {
         new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
       );
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
@@ -578,7 +578,7 @@ describe("policy tier changes", () => {
       );
     });
     expect(document.body.textContent).toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
     expect(document.body.textContent).toContain("Acts without asking.");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
@@ -635,7 +635,7 @@ describe("policy tier changes", () => {
     await act(async () => {
       full?.click();
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
 
     const confirm = Array.from(
       document.body.querySelectorAll<HTMLButtonElement>("button"),
@@ -648,7 +648,7 @@ describe("policy tier changes", () => {
     expect(failingPut).toHaveBeenCalledWith("/api/v1/acme/policy", {
       mode: "full",
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(toasts.error).toHaveBeenCalled();
   });
 
@@ -674,7 +674,7 @@ describe("policy tier changes", () => {
     await act(async () => {
       full?.click();
     });
-    expect(document.body.textContent).not.toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).not.toContain("Give agents more autonomy?");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
@@ -767,7 +767,7 @@ describe("manifest resets", () => {
     });
     // Nothing persisted yet; the escalation confirmation is up instead.
     expect((client.del as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(document.body.textContent).toContain("manifest's Full setting");
 
     const confirm = Array.from(
@@ -809,7 +809,7 @@ describe("manifest resets", () => {
       "/api/v1/acme/policy",
     );
     expect(document.body.textContent).not.toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
   });
 });

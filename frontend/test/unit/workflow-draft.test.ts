@@ -30,14 +30,14 @@ describe("draftBanners", () => {
       drafted({
         workflow: GRAPH,
         summary: "email the weekly digest",
-        notes: ["Assigned the “Write” step to teammate `qa_engineer`."],
+        notes: ["Assigned the “Write” step to agent `qa_engineer`."],
       }),
     );
     expect(banners.summary).toBe(
       "Drafted: email the weekly digest — review below, then Create.",
     );
     expect(banners.notes).toEqual([
-      "Assigned the “Write” step to teammate `qa_engineer`.",
+      "Assigned the “Write” step to agent `qa_engineer`.",
     ]);
     expect(banners.reason).toBeNull();
   });

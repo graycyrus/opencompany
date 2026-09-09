@@ -182,7 +182,7 @@ async function mount() {
 /** Opens the dialog and lets its cognition read land. */
 async function openDialog() {
   await act(async () => {
-    byText("button", "Add teammate")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    byText("button", "Add agent")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
   await act(async () => {});
 }
@@ -190,7 +190,7 @@ async function openDialog() {
 /** The footer's Add teammate — the dialog is open, so it is the last one. */
 async function pressCreate() {
   const buttons = Array.from(document.querySelectorAll<HTMLElement>("button")).filter(
-    (el) => el.textContent?.trim() === "Add teammate",
+    (el) => el.textContent?.trim() === "Add agent",
   );
   await act(async () => {
     buttons[buttons.length - 1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -200,7 +200,7 @@ async function pressCreate() {
 const box = '[data-testid="team-describe-box"]';
 const roleField = '[data-testid="agent-field-role"]';
 
-describe("the reduced Add-teammate dialog (issue #1989)", () => {
+describe("the reduced Add-agent dialog (issue #1989)", () => {
   it("renders one box and no Role, Instructions, budget or inbox field", async () => {
     await mount();
     await openDialog();
@@ -227,12 +227,12 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
       "the budget is set on the detail page",
     ).toBeNull();
     expect(
-      byText("span", "Give this teammate an inbox"),
+      byText("span", "Give this agent an inbox"),
       "the inbox is toggled on the detail page",
     ).toBeUndefined();
   });
 
-  it("writes the teammate the host designed, and lands on its edit form", async () => {
+  it("writes the agent the host designed, and lands on its edit form", async () => {
     await mount();
     await openDialog();
 
@@ -266,7 +266,7 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
     expect(opened).toEqual([["nova", { edit: true }]]);
   });
 
-  it("hands over the full form when the host cannot design the teammate", async () => {
+  it("hands over the full form when the host cannot design the agent", async () => {
     api.designTeammate.mockResolvedValue({ source: "unavailable", reason: "no_model" });
     await mount();
     await openDialog();
@@ -301,7 +301,7 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
 
     type("team-describe-box", "Runs paid acquisition.");
     await pressCreate();
-    expect(added, "a nameless teammate has no id to mint").toHaveLength(0);
+    expect(added, "a nameless agent has no id to mint").toHaveLength(0);
 
     type("team-describe-name", "Nova");
     type("team-describe-box", "");
@@ -310,7 +310,7 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
   });
 });
 
-describe("closing the Add-teammate dialog (issue #1989)", () => {
+describe("closing the Add-agent dialog (issue #1989)", () => {
   // The hand-over to the full form is meant to last for one open — the module
   // says so in `reset`'s own comment. It did not. `reset` hung off the wrapper
   // passed to Radix's `onOpenChange`, which Radix invokes for Escape and the
@@ -370,7 +370,7 @@ describe("closing the Add-teammate dialog (issue #1989)", () => {
   });
 });
 
-describe("the full Add-teammate form on a company that cannot draft", () => {
+describe("the full Add-agent form on a company that cannot draft", () => {
   beforeEach(() => {
     // The operator's screenshot: "No model is configured, so the copilot can't
     // draft yet." That path keeps today's form, unchanged — hidden, never
@@ -391,7 +391,7 @@ describe("the full Add-teammate form on a company that cannot draft", () => {
       ).not.toBeNull();
     }
     expect(document.querySelector('[data-testid="team-add-budget"]')).not.toBeNull();
-    expect(byText("span", "Give this teammate an inbox")).toBeDefined();
+    expect(byText("span", "Give this agent an inbox")).toBeDefined();
     // The hand-over note belongs to the reduced dialog's dead end. This form is
     // simply what the dialog IS here, so there is nothing to explain.
     expect(document.querySelector('[data-testid="team-add-handover"]')).toBeNull();
@@ -658,7 +658,7 @@ describe("a write that does not land (issue #1989)", () => {
   });
 });
 
-describe("a host that says it cannot design a teammate", () => {
+describe("a host that says it cannot design a agent", () => {
   // The console used to answer this itself, as `cognition !== "echo"`. The host
   // reports the capability now, and this is the path the guess got wrong: a
   // `hosted` company has no profile drafter either, so the reduced dialog could

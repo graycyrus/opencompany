@@ -121,7 +121,7 @@ describe("adapt", () => {
   });
 });
 
-describe("a teammate's tools", () => {
+describe("a agent's tools", () => {
   it("are the grants the host resolved, verbatim", () => {
     const { agents } = adapt({
       ...BASE,
@@ -348,7 +348,7 @@ describe("workflows", () => {
     expect(graph.nodes.filter((n) => n.kind === "step")).toEqual([]);
   });
 
-  it("draws a stage only to the teammate the flow names", () => {
+  it("draws a stage only to the agent the flow names", () => {
     const { agents, departments, workflows } = adapt({
       ...BASE,
       members: [

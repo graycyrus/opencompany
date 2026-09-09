@@ -68,7 +68,7 @@ test.beforeEach(async ({ page }) => {
   await goToTeam(page);
 });
 
-test("an admin can cap a teammate the company left uncapped, and reset it back", async ({
+test("an admin can cap a agent the company left uncapped, and reset it back", async ({
   page,
 }) => {
   // The engineer starts uncapped: no budget line at all on the card.

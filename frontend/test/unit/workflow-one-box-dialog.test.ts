@@ -158,7 +158,7 @@ function describeBox(): HTMLTextAreaElement | null {
 function perNodeRefusal(): ApiError {
   const err = new ApiError(400, "workflow_invalid", "the graph was refused", true);
   err.problems = [
-    { node_id: "write", field: "config.agent", message: "no such teammate" },
+    { node_id: "write", field: "config.agent", message: "no such agent" },
   ];
   return err;
 }
@@ -286,7 +286,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
             automatable: true,
             summary: "a weekly digest",
             workflow: DRAFTED,
-            notes: ["Matched “the writer” to teammate `writer`.", "   "],
+            notes: ["Matched “the writer” to agent `writer`.", "   "],
           }),
         create: (body) => {
           posted.push(body);
@@ -313,7 +313,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
     expect(onCreated.mock.calls[0]![0].version).toBe("v1");
     expect(onCreated.mock.calls[0]![1]).toEqual([
-      "Matched “the writer” to teammate `writer`.",
+      "Matched “the writer” to agent `writer`.",
     ]);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
@@ -782,7 +782,7 @@ describe("the New-workflow dialog after a write that may have landed", () => {
             automatable: true,
             summary: "a digest",
             workflow: DRAFTED,
-            notes: ["Matched “the writer” to teammate `writer`."],
+            notes: ["Matched “the writer” to agent `writer`."],
           }),
         create: failFirstCreate(posted),
       }),
@@ -816,7 +816,7 @@ describe("the New-workflow dialog after a write that may have landed", () => {
     expect(onCreated.mock.calls[0]![0].id).toBe("weekly-digest");
     expect(onCreated.mock.calls[0]![0].version).toBe("v1");
     expect(onCreated.mock.calls[0]![1]).toEqual([
-      "Matched “the writer” to teammate `writer`.",
+      "Matched “the writer” to agent `writer`.",
     ]);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
@@ -1083,7 +1083,7 @@ describe("the New-workflow dialog after the sentence changes", () => {
  * did not ask for — the saved graph had corrections nobody was ever shown.
  */
 describe("the New-workflow dialog's corrections across a refusal", () => {
-  const NOTE = "Matched “the writer” to teammate `writer`.";
+  const NOTE = "Matched “the writer” to agent `writer`.";
 
   it("shows them on the handed-over form and carries them to the canvas", async () => {
     const posted: unknown[] = [];
