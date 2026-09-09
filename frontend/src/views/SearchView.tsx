@@ -249,7 +249,7 @@ export function SearchView({ client, company }: Props) {
         )}
 
         {!status.inBuild ? (
-          <Alert data-testid="search-not-in-build">
+          <Alert variant="warning" data-testid="search-not-in-build">
             <TriangleAlert className="size-4" />
             <AlertDescription>
               This host was built without the agent tools, so these settings will

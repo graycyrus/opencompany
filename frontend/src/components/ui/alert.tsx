@@ -9,6 +9,22 @@ const alertVariants = cva(
     variants: {
       variant: {
         default: "bg-card text-card-foreground",
+        /*
+         * Something is wrong but nothing has failed — a setting that will be
+         * stored and do nothing, a build missing the feature it configures.
+         *
+         * These were `default`, which paints a card: an alert with a warning
+         * triangle in it, in the same grey as the panel it sits on, reads as a
+         * caption rather than as a warning, and the one thing it has to do is
+         * be noticed. `destructive` is the wrong end — nothing here has broken
+         * or been refused — so this is the amber the console already uses for
+         * "blocked" everywhere else (`--status-blocked`), tinted rather than
+         * filled so it still reads as a notice on the page and not an error
+         * dialog.
+         */
+        warning:
+          "border-status-blocked/40 bg-status-blocked-soft text-foreground " +
+          "*:data-[slot=alert-description]:text-muted-foreground *:[svg]:text-status-blocked-text",
         destructive:
           "bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
       },

@@ -217,7 +217,7 @@ export function HostingView({ client, company }: Props) {
         {/* The two problems this form cannot fix, said before the form so an
           operator does not fill it in and wonder why nothing happened. */}
         {!status.inBuild ? (
-          <Alert data-testid="hosting-not-in-build">
+          <Alert variant="warning" data-testid="hosting-not-in-build">
             <TriangleAlert className="size-4" />
             <AlertDescription>
               This host was built without the hosting tools, so these settings
