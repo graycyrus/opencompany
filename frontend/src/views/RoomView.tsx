@@ -1415,7 +1415,9 @@ export function RoomView({
   useEffect(() => {
     let live = true;
     setEffectiveHive(null);
-    if (!channel?.memberIds) return () => {
+    // Lightweight room-test clients and older hosts do not expose this optional
+    // grammar read. The fold retains its derived policy in that case.
+    if (!channel?.memberIds || typeof client.getDeskHive !== "function") return () => {
       live = false;
     };
     client
