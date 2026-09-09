@@ -1797,13 +1797,33 @@ impl ToolPolicy for ApprovalPolicy {
         // family lives in `toolbelt`; this arm only joins them.
         if !self.connected_composio_toolkits.is_empty()
             && crate::harness::toolbelt::is_web_request_tool(tool)
-            && let Some(url) = request.arguments.get("url").and_then(|v| v.as_str())
-            && let Some(reason) = crate::harness::composio_catalog::web_call_deflection(
-                &self.connected_composio_toolkits,
-                url,
-            )
         {
-            return ToolPolicyDecision::deny(reason);
+            // Every tool this arm recognises declares `url` as a REQUIRED
+            // string in its own schema, so a call that does not carry one that
+            // way is not a legitimate call this guardrail failed to reach — it
+            // is malformed relative to the tool's own contract. Falling
+            // through silently would let exactly that malformed shape walk
+            // past the one thing standing between `full` autonomy and a
+            // connected provider's API host, so this arm fails CLOSED on it
+            // instead of treating "could not read a url" as "nothing to
+            // check".
+            match request.arguments.get("url").and_then(|v| v.as_str()) {
+                Some(url) => {
+                    if let Some(reason) = crate::harness::composio_catalog::web_call_deflection(
+                        &self.connected_composio_toolkits,
+                        url,
+                    ) {
+                        return ToolPolicyDecision::deny(reason);
+                    }
+                }
+                None => {
+                    return ToolPolicyDecision::deny(format!(
+                        "'{tool}' must be called with `url` as a plain string so it can be \
+                         checked against this company's connected toolkits; retry with a \
+                         string `url`"
+                    ));
+                }
+            }
         }
 
         // 1. `readonly` outranks a grant — the brake wins (issue #243).
@@ -2216,6 +2236,34 @@ mod tests {
         );
     }
 
+    /// BOUND-axis (TOOL-001): the boundary is a `Cell<bool>` that starts at
+    /// `false` inside every fresh `turn_scoped` call — the zero-vs-one
+    /// transition `an_explicit_request_refuses_later_calls_in_the_same_turn`
+    /// above only tests the "one" side of (the second request is denied),
+    /// never asserting that the FIRST request in a brand new turn is not
+    /// itself refused by a boundary nothing has tripped yet.
+    #[tokio::test]
+    async fn the_first_explicit_request_in_a_fresh_turn_is_not_refused() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+
+        let first_request = claim
+            .scoped(queue.turn_scoped(policy.check(&request(
+                crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
+                serde_json::json!({ "title": "Ask", "question": "May I send this?" }),
+            ))))
+            .await;
+        assert_eq!(
+            first_request,
+            ToolPolicyDecision::Allow,
+            "the very first explicit request in a fresh turn must not be refused: \
+             {first_request:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_duplicate_explicit_request_still_establishes_a_fresh_turn_boundary() {
         let queue = ApprovalRequestQueue::default();
@@ -2386,6 +2434,138 @@ mod tests {
             "the same grant is still redeemable once the brake releases — the readonly denial \
              must not have consumed it"
         );
+    }
+
+    /// INPUT-axis (TOOL-004): the brake classifies purely on `tool` and the
+    /// INCOMING call's own arguments (`is_external_effect`), never on whether
+    /// those arguments happen to match a live grant. A malformed/empty
+    /// argument object — missing every field the grant itself was minted
+    /// with — must still be denied under readonly, and the unrelated,
+    /// well-formed grant must still be left intact rather than being touched
+    /// (or the classifier panicking) on the garbage shape.
+    #[tokio::test]
+    async fn a_readonly_denial_on_malformed_arguments_still_leaves_the_grant_intact() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let well_formed_args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", well_formed_args.clone()));
+
+        let locked_down = policy("readonly", &[], None)
+            .with_requests(queue)
+            .with_agent("finance");
+        assert!(
+            matches!(
+                locked_down
+                    .check(&request("payment.send", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly must deny an external-effect call even with a garbage/empty argument \
+             object, not just a well-formed one"
+        );
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released
+                .check(&request("payment.send", well_formed_args))
+                .await,
+            ToolPolicyDecision::Allow,
+            "the well-formed grant must be untouched by a denial evaluated against unrelated, \
+             malformed arguments"
+        );
+    }
+
+    /// CONC-axis (TOOL-004): the brake's early `return` happens strictly
+    /// before `consume_grant` is ever called, so it should be impossible for
+    /// a race to sneak a grant redemption in underneath a readonly deny. Two
+    /// threads hammer the SAME live grant concurrently while readonly, via
+    /// worker threads and a barrier — not `tokio::join!`, which has no
+    /// suspension point here to interleave on and would just run the two
+    /// calls to completion one after the other. Both must be denied, and the
+    /// grant must still redeem exactly once after the brake releases.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_calls_against_a_readonly_denied_grant_never_consume_it() {
+        use std::sync::{Arc, Barrier};
+
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", args.clone()));
+
+        let locked_down = Arc::new(
+            policy("readonly", &[], None)
+                .with_requests(queue)
+                .with_agent("finance"),
+        );
+        let gate = Arc::new(Barrier::new(2));
+
+        let call = |policy: Arc<ApprovalPolicy>, args: serde_json::Value, gate: Arc<Barrier>| {
+            tokio::task::spawn_blocking(move || {
+                gate.wait();
+                tokio::runtime::Handle::current()
+                    .block_on(policy.check(&request("payment.send", args)))
+            })
+        };
+        let a = call(locked_down.clone(), args.clone(), gate.clone());
+        let b = call(locked_down.clone(), args.clone(), gate);
+        let (a, b) = (a.await.expect("joins"), b.await.expect("joins"));
+        assert!(matches!(a, ToolPolicyDecision::Deny { .. }), "{a:?}");
+        assert!(matches!(b, ToolPolicyDecision::Deny { .. }), "{b:?}");
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released.check(&request("payment.send", args.clone())).await,
+            ToolPolicyDecision::Allow,
+            "the grant must still be there, unconsumed by the race"
+        );
+        assert!(
+            matches!(
+                released.check(&request("payment.send", args)).await,
+                ToolPolicyDecision::RequireApproval { .. } | ToolPolicyDecision::Deny { .. }
+            ),
+            "and it must redeem exactly once — a second call must not still be Allow"
+        );
+    }
+
+    /// BOUND-axis (TOOL-004): the brake denies on the tool's classification,
+    /// not on the declared amount, so it must hold at both ends of the amount
+    /// range a grant could carry — a zero-amount call and one carrying an
+    /// enormous declared amount both deny under readonly with their
+    /// respective grants left intact.
+    #[tokio::test]
+    async fn a_readonly_denial_holds_at_zero_and_at_a_very_large_declared_amount() {
+        for amount in [0.0_f64, 1_000_000_000.0_f64] {
+            let queue = ApprovalRequestQueue::default();
+            let grants = queue.grants();
+            let args = serde_json::json!({ "amount_usd": amount });
+            grants.grant(granted("finance", "payment.send", args.clone()));
+
+            let locked_down = policy("readonly", &[], None)
+                .with_requests(queue)
+                .with_agent("finance");
+            assert!(
+                matches!(
+                    locked_down
+                        .check(&request("payment.send", args.clone()))
+                        .await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "amount {amount}: readonly must deny regardless of the amount at either bound"
+            );
+
+            let released = policy("full", &[], None)
+                .with_requests(ApprovalRequestQueue::with_grants(grants))
+                .with_agent("finance");
+            assert_eq!(
+                released.check(&request("payment.send", args)).await,
+                ToolPolicyDecision::Allow,
+                "amount {amount}: the grant must still be redeemable once the brake releases"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4179,6 +4359,74 @@ mod tests {
         );
     }
 
+    /// CONC-axis (TOOL-021): the cap in `the_drain_is_capped_and_empties_the_queue`
+    /// above is proven with sequential pushes — each `check` is awaited before
+    /// the next fires. This drives the same overflow from genuinely concurrent
+    /// pushes, via real worker threads and a barrier (not `tokio::join!`, which
+    /// has no suspension point around `push`'s synchronous body and would just
+    /// serialise the two futures on one task — the exact false confidence this
+    /// lane's brief warns about). `push`'s per-scope `Mutex` must make every
+    /// racing call land exactly once: no card lost to a race, none double
+    /// counted, and `requests.len() + discarded` must equal the number of
+    /// calls that actually raced, every round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_pushes_past_the_cap_are_never_lost_or_double_counted() {
+        use std::sync::{Arc, Barrier};
+
+        const RACERS: usize = MAX_APPROVAL_REQUESTS_PER_TURN + 5;
+
+        for round in 0..20 {
+            let queue = ApprovalRequestQueue::default();
+            let gate = Arc::new(Barrier::new(RACERS));
+
+            let mut handles = Vec::with_capacity(RACERS);
+            for i in 0..RACERS {
+                let queue = queue.clone();
+                let gate = gate.clone();
+                handles.push(tokio::task::spawn_blocking(move || {
+                    gate.wait();
+                    queue.push(ApprovalRequest {
+                        tool: "composio_execute".to_string(),
+                        reason: format!("racer {i}"),
+                        effect: Effect {
+                            kind: format!("composio.call.{i}"),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({ "racer": i }),
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                }));
+            }
+            for handle in handles {
+                handle.await.expect("racer joins");
+            }
+
+            let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(
+                drained.requests.len(),
+                MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: the drain must be exactly full, not short a card a race lost"
+            );
+            assert_eq!(
+                drained.discarded,
+                RACERS - MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: every racer that did not fit must be counted, not silently \
+                 dropped from the tally"
+            );
+            let reasons: std::collections::HashSet<&String> =
+                drained.requests.iter().map(|r| &r.reason).collect();
+            assert_eq!(
+                reasons.len(),
+                MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: no racer's card duplicated another's under the race: {reasons:?}"
+            );
+        }
+    }
+
     /// The ordinary path says nothing. A notice on every turn would train the
     /// operator to ignore the one that matters.
     #[tokio::test]
@@ -5084,6 +5332,189 @@ mod tests {
         assert!(
             !matches!(decision, ToolPolicyDecision::Deny { .. }),
             "a workflow standing denial must not be advertised on the gate path: {decision:?}"
+        );
+    }
+
+    /// An agent-scoped standing deny, for the four cases below. `scope`
+    /// mirrors the URL a `web_fetch` call to `docs.rs` computes through
+    /// `standing_scope_of`, so a call with a different (or absent) `url`
+    /// argument does not fall under it.
+    fn agent_standing_deny(
+        id: &str,
+        agent: &str,
+        expires_at_millis: u64,
+    ) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new(id),
+            agent: agent.to_string(),
+            workflow: None,
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        }
+    }
+
+    /// INPUT-axis (TOOL-006): `standing_deny_applies` derives the call's own
+    /// scope from its arguments (`standing_scope_of`) before matching it
+    /// against the grant's stored scope. A call with no `url` at all — a
+    /// malformed shape relative to what `web_fetch` normally carries —
+    /// resolves to no scope, and a scoped denial requires an EXACT match
+    /// (`admits_scope`), so it must not apply to a scope-less call rather
+    /// than being (mis)treated as a wildcard match either way.
+    #[tokio::test]
+    async fn a_scoped_standing_deny_does_not_apply_to_a_call_with_no_url_argument() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+
+        let p = policy("full", &[], None)
+            .with_requests(queue)
+            .with_agent("engineer");
+        let decision = p.check(&request("web_fetch", serde_json::json!({}))).await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a scoped denial must not match a call whose scope could not be computed at all: \
+             {decision:?}"
+        );
+    }
+
+    /// CONC-axis (TOOL-006): unlike a single-use grant, a standing denial is
+    /// never consumed — two concurrent calls against the SAME live denial
+    /// must both see it, with no race letting one slip through as if the
+    /// first call had "used it up". Driven from real worker threads and a
+    /// barrier, not `tokio::join!` — `check` has no suspension point here to
+    /// interleave two joined futures on, so they would just run serially and
+    /// prove nothing about a race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_calls_against_the_same_standing_deny_are_both_refused() {
+        use std::sync::{Arc, Barrier};
+
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+        let p = Arc::new(
+            policy("full", &[], None)
+                .with_requests(queue)
+                .with_agent("engineer"),
+        );
+        let gate = Arc::new(Barrier::new(2));
+        let call = |p: Arc<ApprovalPolicy>, gate: Arc<Barrier>| {
+            tokio::task::spawn_blocking(move || {
+                gate.wait();
+                tokio::runtime::Handle::current().block_on(p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://docs.rs/x" }),
+                )))
+            })
+        };
+        let a = call(p.clone(), gate.clone());
+        let b = call(p, gate);
+        let (a, b) = (a.await.expect("joins"), b.await.expect("joins"));
+        assert!(matches!(a, ToolPolicyDecision::Deny { .. }), "{a:?}");
+        assert!(matches!(b, ToolPolicyDecision::Deny { .. }), "{b:?}");
+    }
+
+    /// FAIL-axis (TOOL-006): a standing denial past its own TTL is stale data
+    /// — the mint side's sweep may not have gotten to it yet — and must not
+    /// keep enforcing a refusal the operator's decision no longer covers.
+    #[tokio::test]
+    async fn an_expired_standing_deny_no_longer_applies() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis().saturating_sub(1_000),
+        ));
+
+        let p = policy("full", &[], None)
+            .with_requests(queue)
+            .with_agent("engineer");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "an expired standing denial must not still be enforced: {decision:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-006): the expiry boundary is strictly `<`
+    /// (`StandingGrant::is_live_at`) — live comfortably before its deadline,
+    /// already expired exactly AT it. Pinned through the policy entry point,
+    /// not just the grant set directly, so a change to either side of that
+    /// `<` is caught where it is actually consulted.
+    ///
+    /// The "live" side uses a generous window rather than the deadline minus
+    /// one millisecond: `check` calls `now_millis()` again internally, so a
+    /// one-millisecond margin captured before the call is not guaranteed to
+    /// survive the dispatch to `standing_deny_applies` and would make this
+    /// test flaky on nothing but scheduling noise. The "expired" side has no
+    /// such problem — real time only moves forward, so a deadline equal to a
+    /// `now` captured strictly before the call is guaranteed to have already
+    /// passed by the time `check` reads the clock again.
+    #[tokio::test]
+    async fn a_standing_deny_expires_exactly_at_its_deadline_not_after() {
+        let live_grants = GrantSet::default();
+        live_grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+        let live = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(live_grants))
+            .with_agent("engineer");
+        assert!(
+            matches!(
+                live.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://docs.rs/x" })
+                ))
+                .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "comfortably before its deadline the denial must still be live"
+        );
+
+        let now = crate::ports::now_millis();
+        let expired_grants = GrantSet::default();
+        expired_grants.grant_standing(agent_standing_deny("deny-1", "engineer", now));
+        let expired = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(expired_grants))
+            .with_agent("engineer");
+        assert!(
+            !matches!(
+                expired
+                    .check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/x" })
+                    ))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "at the deadline instant itself (now already >= expires_at_millis by the time \
+             `check` reads the clock) the denial must already read as expired"
         );
     }
 
@@ -6970,6 +7401,189 @@ mod tests {
                 "{tool} must be deflected to Composio, got {decision:?}"
             );
         }
+    }
+
+    /// INPUT-axis (TOOL-003): the deflection reads `arguments["url"]` as a
+    /// plain string. A call missing `url` entirely — despite every deflectable
+    /// tool declaring it required — must not read as "nothing to check" and
+    /// walk past the guardrail; it must fail CLOSED, the same as a real
+    /// connected-provider hit would.
+    #[tokio::test]
+    async fn s2_deflection_fails_closed_when_url_is_missing() {
+        let p = full_with_connected(&["github"]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "method": "GET" }),
+            ))
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a missing `url` must not walk past the guardrail unchecked: {decision:?}"
+        );
+    }
+
+    /// The other half: `url` present but not a plain string — a number, an
+    /// object, an array — is exactly as unreadable to `.as_str()` as a missing
+    /// key, so it must fail CLOSED on the same terms rather than silently
+    /// passing through because the type did not match.
+    #[tokio::test]
+    async fn s2_deflection_fails_closed_when_url_is_not_a_string() {
+        let p = full_with_connected(&["github"]);
+        for bad_url in [
+            serde_json::json!(12345),
+            serde_json::json!({ "host": "api.github.com" }),
+            serde_json::json!(["https://api.github.com"]),
+            serde_json::json!(null),
+        ] {
+            let decision = p
+                .check(&request(
+                    "http_request",
+                    serde_json::json!({ "url": bad_url }),
+                ))
+                .await;
+            assert!(
+                matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "a non-string `url` ({bad_url:?}) must not walk past the guardrail unchecked: \
+                 {decision:?}"
+            );
+        }
+    }
+
+    /// Requirement #2 still holds once the arm fails closed: with NO connected
+    /// toolkits at all, a missing/malformed `url` is not this guardrail's
+    /// business — the arm's outer condition (`!connected_composio_toolkits.is_empty()`)
+    /// never engages, so the call falls through to whatever the ordinary
+    /// policy decides for an `http_request`/`curl`/`web_fetch` with no
+    /// bounded target. That ordinary decision may reasonably be a park (an
+    /// unbounded target is not automatically safe) — the property this pins
+    /// is narrower and precise: it must never be a DENY manufactured by THIS
+    /// arm, since with nothing connected the arm has nothing to deny it for.
+    #[tokio::test]
+    async fn s2_missing_url_passes_through_with_no_connected_toolkits() {
+        for tool in ["http_request", "curl", "web_fetch"] {
+            let decision = full_with_connected(&[])
+                .check(&request(tool, serde_json::json!({ "method": "GET" })))
+                .await;
+            assert!(
+                !matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "with nothing connected, a missing `url` on `{tool}` must not be denied by this \
+                 arm: {decision:?}"
+            );
+        }
+    }
+
+    /// STATE-axis (TOOL-003): the "connected" state a company record supplies
+    /// is free text an operator or an upstream sync wrote, not a normalised
+    /// key, so it can arrive with stray casing or whitespace. Deflection must
+    /// still recognise it — the same normalisation
+    /// `http_request_to_a_connected_provider_is_denied_with_the_composio_route`
+    /// relies on implicitly, pinned here explicitly against a messy entry.
+    #[tokio::test]
+    async fn s2_deflection_normalises_a_messily_cased_connected_toolkit_entry() {
+        let p = full_with_connected(&["  GitHub  "]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a connected entry with stray case/whitespace must still be recognised: {decision:?}"
+        );
+    }
+
+    /// FAIL-axis (TOOL-003): a `url` that IS a plain string but does not parse
+    /// as one (unlike the INPUT-axis cases above, which are the wrong JSON
+    /// *type*) intentionally passes through — `url::Url::parse` fails,
+    /// `web_call_deflection` has no host to check, and nothing this call could
+    /// reach depends on that host either, since the underlying web tool cannot
+    /// make an unparseable string into a request. Fail-open here is the
+    /// deliberate, safe direction; pinned so it is not confused with the
+    /// missing/wrong-type cases that were fixed to fail closed.
+    #[tokio::test]
+    async fn s2_deflection_passes_through_an_unparseable_url_string() {
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "not a url" }),
+            ))
+            .await;
+        let guarded = full_with_connected(&["github"])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "not a url" }),
+            ))
+            .await;
+        assert_eq!(
+            guarded, baseline,
+            "a syntactically invalid url string cannot resolve to any host, so it must pass \
+             through exactly as if nothing were connected: {guarded:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-003): the path-prefix boundary on a toolkit whose
+    /// table requires one (`gmail`'s `www.googleapis.com` entry). A path that
+    /// starts with the required prefix is caught; a path one character short
+    /// of it — missing the trailing slash the table requires — is not, and
+    /// must pass through rather than being caught by a looser `starts_with`.
+    #[tokio::test]
+    async fn s2_deflection_respects_the_path_prefix_boundary() {
+        let p = full_with_connected(&["gmail"]);
+        let inside = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail/v1/users/me" }),
+            ))
+            .await;
+        assert!(
+            matches!(inside, ToolPolicyDecision::Deny { .. }),
+            "a path starting with the required prefix must be caught: {inside:?}"
+        );
+
+        let one_short = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail" }),
+            ))
+            .await;
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail" }),
+            ))
+            .await;
+        assert_eq!(
+            one_short, baseline,
+            "a path one character short of the required prefix (no trailing slash) must not be \
+             caught by a looser match: {one_short:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-003), the other edge: a connected-toolkit list that is
+    /// non-empty but holds only blank entries must behave like the empty-list
+    /// baseline — a stray blank string must not accidentally become a
+    /// wildcard that matches every host.
+    #[tokio::test]
+    async fn s2_deflection_skips_blank_connected_entries_without_matching_everything() {
+        let p = full_with_connected(&["", "   "]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        assert_eq!(
+            decision, baseline,
+            "blank connected entries must not match any host: {decision:?}"
+        );
     }
 
     /// The deflection outranks a single-use grant: a grant is an operator
