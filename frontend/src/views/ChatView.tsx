@@ -3069,6 +3069,10 @@ export function ChatView({
                   />
                 )}
                 <MessageComposer
+                  // Passed straight through from `AppShell` — see the prop's
+                  // note on `MessageComposer`. This view learns nothing about
+                  // policy; it only knows where the control goes.
+                  autonomy={autonomy}
                   suppressed={readOnly}
                   placeholder={`Message ${channelTitle(channel)}`}
                   disabled={sending}
