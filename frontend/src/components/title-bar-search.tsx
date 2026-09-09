@@ -25,16 +25,18 @@ const SEARCH_TITLE = "Search is not available yet";
 
 export function TitleBarSearch() {
   return (
-    // `max-w-md` on a `flex-1` box: it fills the middle of a roomy window
-    // without becoming a 700px field on a wide one, and it gives up its width
-    // first when the row is crowded, because the two groups beside it are
-    // `flex-none` and this is not. `min-w-0` so it can actually shrink rather
-    // than flooring the row at its own content width.
-    <div className="flex min-w-0 flex-1 justify-center px-2">
-      <div className="relative w-full max-w-md">
+    // Takes the middle, whatever the middle is. It was capped at `max-w-md`
+    // (28rem), which on a 1440px window left the field a third the width of the
+    // gap it sat in and reading as a chip that had drifted to the centre rather
+    // than as the row's search. No cap: the two groups beside it are `flex-none`
+    // and this is not, so it takes exactly what they leave and gives it back
+    // first when the row is crowded. `min-w-0` is what lets it actually shrink
+    // rather than flooring the row at its own content width.
+    <div className="flex min-w-0 flex-1 justify-center px-3">
+      <div className="relative w-full">
         <Search
           aria-hidden="true"
-          className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+          className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
         />
         <input
           type="search"
@@ -44,10 +46,12 @@ export function TitleBarSearch() {
           aria-label={SEARCH_PLACEHOLDER}
           title={SEARCH_TITLE}
           className={
-            // The same 30px height the autonomy pill settled on, so the three
-            // things in this row that are not 32px glyphs agree with each
-            // other rather than each picking a number.
-            "h-[30px] w-full rounded-lg border bg-card pr-2.5 pl-8 text-xs " +
+            // Taller than the 30px pill beside it and a rung up in type. A
+            // field is a thing you aim a cursor at and read your own words
+            // back from, which is not what a status pill has to do — matching
+            // the pill's height made the one editable control in the row the
+            // least substantial-looking thing in it.
+            "h-9 w-full rounded-lg border bg-card pr-3 pl-9 text-sm " +
             "text-foreground placeholder:text-muted-foreground " +
             "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none " +
             // Not greyed to the point of looking broken: it is a real control
