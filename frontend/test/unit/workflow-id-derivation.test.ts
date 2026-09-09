@@ -279,7 +279,7 @@ describe("deriving stops the moment the id is somebody's (#1053)", () => {
     await openCreateForm();
 
     await type(field("name"), "Second automation");
-    expect(field("id").value).toBe("second-workflow");
+    expect(field("id").value).toBe("second-automation");
   });
 
   it("never derives over the id a copilot correction came back to", async () => {
