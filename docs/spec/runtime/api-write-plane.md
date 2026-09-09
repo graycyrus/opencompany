@@ -487,9 +487,8 @@ guarantee, and which surfaces are deliberately outside it.
 
 ### Retired native OAuth callback
 
-`/api/v1/oauth/callback` stays reachable for a browser that began consent
-immediately before a deploy. It returns a non-caching `410 Gone` HTML page
-saying the authorization was not saved, why native OAuth cannot make agents able
+`/api/v1/oauth/callback` stays reachable for a browser that began consent just
+before a deploy. It returns a non-caching `410 Gone` HTML page saying the authorization was not saved, why native OAuth cannot make agents able
 to use the provider, and to use Composio instead — ignoring the provider's
 `code` and `state` rather than exchanging or storing them.
 
