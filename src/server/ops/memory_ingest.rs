@@ -67,6 +67,13 @@ const MAX_LINK_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "documents")]
 const LINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How long one host may take to resolve before the link is refused.
+///
+/// Separate from [`LINK_TIMEOUT`], which bounds the fetch and starts only once
+/// the guard has answered. Well under it, because a name that has not resolved
+/// in five seconds is not going to be fetched inside the remaining ten.
+const DNS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Builds the ingest route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/memory/ingest", post(ingest))
@@ -432,13 +439,23 @@ fn is_internal_address(address: std::net::IpAddr) -> bool {
                 || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])
         }
         std::net::IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_internal_address(std::net::IpAddr::V4(v4));
-            }
-            v6.is_loopback()
+            // `::1` and `::` are judged as themselves before any v4 reading of
+            // them: `to_ipv4` maps `::1` to `0.0.0.1`, which is not internal by
+            // v4 rules, so testing that first would admit loopback.
+            if v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.segments()[0] & 0xfe00 == 0xfc00
                 || v6.segments()[0] & 0xffc0 == 0xfe80
+            {
+                return true;
+            }
+            // `to_ipv4`, not `to_ipv4_mapped`: the mapped form (`::ffff:a.b.c.d`)
+            // is only half of it. The deprecated IPv4-compatible form
+            // (`::a.b.c.d`) carries the same address, is not `is_loopback`, and
+            // `to_ipv4_mapped` answers `None` for it — so reading only the
+            // mapped form admits `::127.0.0.1`.
+            v6.to_ipv4()
+                .is_some_and(|v4| is_internal_address(std::net::IpAddr::V4(v4)))
         }
     }
 }
@@ -495,9 +512,17 @@ async fn guard_link(url: &str) -> Result<(), String> {
         Some("https") => 443,
         _ => 80,
     });
-    let resolved = tokio::net::lookup_host((lowered.as_str(), port))
-        .await
-        .map_err(|e| format!("that host could not be resolved: {e}"))?;
+    // `LINK_TIMEOUT` belongs to the request built after this returns, so it
+    // does not bound the lookup. Without its own ceiling a name whose resolver
+    // blackholes queries holds this handler for a retry period, and the route
+    // walks its URLs one at a time — so a list of such names costs their sum.
+    let resolved = tokio::time::timeout(
+        DNS_TIMEOUT,
+        tokio::net::lookup_host((lowered.as_str(), port)),
+    )
+    .await
+    .map_err(|_| format!("`{lowered}` took too long to resolve"))?
+    .map_err(|e| format!("that host could not be resolved: {e}"))?;
     let mut any = false;
     for socket in resolved {
         any = true;

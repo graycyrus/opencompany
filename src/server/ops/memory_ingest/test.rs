@@ -304,6 +304,56 @@ async fn a_host_that_resolves_into_this_network_is_refused_on_what_it_resolves_t
     );
 }
 
+/// The same address written the long way is the same address.
+///
+/// `::ffff:127.0.0.1` and `::127.0.0.1` both carry 127.0.0.1 — the first the
+/// mapped form, the second the deprecated IPv4-compatible one. Neither answers
+/// `is_loopback`, and `to_ipv4_mapped` answers `None` for the second, so a
+/// guard reading only the mapped form admits it.
+#[cfg(feature = "documents")]
+#[tokio::test]
+async fn an_internal_address_written_as_ipv6_is_still_refused() {
+    for refused in [
+        "http://[::ffff:127.0.0.1]/admin",
+        "http://[::127.0.0.1]/admin",
+        "http://[::ffff:169.254.169.254]/latest/meta-data/",
+        "http://[::ffff:10.0.0.5]/",
+        "http://[fd00::1]/",
+        "http://[fe80::1]/",
+    ] {
+        assert!(
+            super::guard_link(refused).await.is_err(),
+            "{refused} must be refused"
+        );
+    }
+    // A public v6 literal still passes, so the check is not refusing all of v6.
+    assert!(super::guard_link("https://[2606:4700::1]/").await.is_ok());
+}
+
+/// A name that will not resolve does not hold the request open.
+///
+/// `LINK_TIMEOUT` bounds the fetch, which starts only once this guard has
+/// answered, so the lookup needs its own ceiling: the route walks its URLs one
+/// at a time, and a list of names whose resolver blackholes queries would
+/// otherwise cost their sum.
+#[cfg(feature = "documents")]
+#[tokio::test]
+async fn a_host_that_will_not_resolve_is_refused_rather_than_waited_on() {
+    let started = std::time::Instant::now();
+    let refusal = super::guard_link("http://this-name-does-not-exist.invalid/x")
+        .await
+        .expect_err("an unresolvable host must be refused");
+    assert!(
+        refusal.contains("could not be resolved") || refusal.contains("too long to resolve"),
+        "the refusal must say the name did not resolve: {refusal}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the lookup must be bounded, took {:?}",
+        started.elapsed()
+    );
+}
+
 /// Dropping the wrong folder is a mistake an operator makes once; without a
 /// forget, the only remedy would be the company's whole memory.
 #[tokio::test]
