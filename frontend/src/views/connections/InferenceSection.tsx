@@ -857,15 +857,26 @@ export function InferenceSection({
    * `wouldSaveProxied` false again) and a new one opens — which is exactly
    * the set of transitions (`pickProvider`, typing then clearing a key) this
    * effect exists to catch.
+   *
+   * Latched on the **provider identity**, not just whether it is
+   * OpenRouter-like — since `draftProviderIsOpenRouter` folded `managed` in
+   * alongside `openrouter`, "leaves openrouter" above is no longer the only
+   * way to close a window: switching `managed` → `openrouter` (both true
+   * under that boolean) is *also* a new window, because each provider can
+   * carry catalog-derived models the other has never had a chance to check.
+   * A ref that only asked "have I stripped since the boolean last flipped
+   * false" stayed latched true across exactly that switch and skipped
+   * stripping the destination provider's freshly-seeded (and possibly
+   * proxy-incompatible) preset.
    */
-  const strippedForWindow = useRef(false);
+  const strippedForProvider = useRef<InferenceProvider | null>(null);
   useEffect(() => {
     if (!draftProviderIsOpenRouter || !wouldSaveProxied) {
-      strippedForWindow.current = false;
+      strippedForProvider.current = null;
       return;
     }
-    if (strippedForWindow.current) return;
-    strippedForWindow.current = true;
+    if (strippedForProvider.current === provider) return;
+    strippedForProvider.current = provider;
     const next = stripProxyIncompatible(models);
     const changedTiers = TIERS.filter((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
     if (changedTiers.length === 0) return;
@@ -877,7 +888,7 @@ export function InferenceSection({
         ...Object.fromEntries(changedTiers.map((tier) => [tier, next[tier]])),
       },
     }));
-  }, [draftProviderIsOpenRouter, wouldSaveProxied, models]);
+  }, [draftProviderIsOpenRouter, wouldSaveProxied, models, provider]);
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
