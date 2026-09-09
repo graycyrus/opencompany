@@ -67,6 +67,12 @@ export function ConnectionsSection({ client, company, sub }: Props) {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {page === "apps" && <OAuthView client={client} company={company} />}
       {page === "mcp" && <McpServersView client={client} company={company} />}
+      {page === "inference" && <InferenceView client={client} company={company} />}
+      {/* Remounted per company, the same rule `SettingsSection` applied while
+          this page lived on its rail: `canManage` and the Add dialog's draft
+          must not carry one company's admin authority into another's
+          still-resolving read. */}
+      {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
     </div>
   );
 }
