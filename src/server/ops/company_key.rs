@@ -329,6 +329,22 @@ async fn finish_link(
     crate::company::inference::store_key(runtime.id(), runtime.secrets().as_ref(), &key)
         .await
         .map_err(ApiError)?;
+    // The key alone does not arm inference: with no runtime declaration the
+    // status route reports the platform default and `keyConfigured: false`, so
+    // an operator would see a company that is connected but still cannot think.
+    // Declaring `managed` is what makes the stored key the one its turns are
+    // billed to — the same provider the Inference page's TinyHumans option sets.
+    crate::company::inference::save_runtime_config(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &crate::company::inference::RuntimeInference {
+            provider: "managed".to_string(),
+            base_url: None,
+            models: Default::default(),
+        },
+    )
+    .await
+    .map_err(ApiError)?;
 
     super::composio::evict_catalog_cache(runtime);
     journal(&company, "company_key_set").await?;
