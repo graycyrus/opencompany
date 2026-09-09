@@ -2925,11 +2925,38 @@ export function ChatView({
                     `role="status"` (not `alert`) for the reason
                     `components/ui/alert.tsx` gives — a notice present on mount should
                     not interrupt a screen reader. */}
+                {/* The composer and the notice that floats over it.
+
+                    `relative` so the banner below can anchor to this box rather
+                    than to the pane: it is `absolute bottom-full`, which puts it
+                    immediately above the composer wherever the composer happens
+                    to be, with no second number to keep in step. */}
+                <div className="relative shrink-0">
                 {echoing && (
                   <p
                     role="status"
                     data-testid="chat-cognition-banner"
-                    className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+                    // Hovering over the composer, not stacked above it.
+                    //
+                    // It was a full-bleed strip in the flow — `border-t`, square
+                    // corners, edge to edge — which made it look like a
+                    // permanent part of the composer's chrome, so an operator
+                    // read it once as furniture and stopped seeing it. It is a
+                    // *condition*, and conditions in this console are cards that
+                    // sit on top of things.
+                    //
+                    // `bottom-full mb-2` lifts it clear of the composer's top
+                    // edge; `inset-x-3` insets it from both sides so it reads as
+                    // an object on the pane rather than another band across it.
+                    // It overlaps the last line of the transcript rather than
+                    // displacing it — which is the trade, and the right one: the
+                    // transcript can be scrolled, and this cannot be missed.
+                    //
+                    // `pointer-events-none` on the box with `pointer-events-auto`
+                    // back on the link inside it, so hovering the strip does not
+                    // steal a click meant for the message underneath while the
+                    // one thing here that IS clickable still works.
+                    className="pointer-events-none absolute inset-x-3 bottom-full z-10 mb-2 flex items-start gap-1.5 rounded-lg border border-chrome-border bg-popover px-3 py-2 text-xs text-muted-foreground shadow-md [&_a]:pointer-events-auto"
                   >
                     <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                     <span className="min-w-0">
@@ -3072,6 +3099,7 @@ export function ChatView({
                   mentionables={mentionables}
                   channelMemberIds={inChannel?.map((m) => m.id)}
                 />
+                </div>
               </div>
 
               {parent && (
