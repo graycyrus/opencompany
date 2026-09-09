@@ -35,7 +35,9 @@ use crate::company::credentials::CredentialSource;
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
 use crate::server::error::ApiError;
+use crate::error::OpenCompanyError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
+use crate::server::users::token::OsTokens;
 
 /// The reminder attached to every mutating response.
 ///
@@ -205,6 +207,132 @@ async fn set_key(
         "company_key_set"
     };
     journal(&company, change).await?;
+    Ok(Json(MutationResponse {
+        status: effective_status(&state, runtime).await?,
+        note: SWITCH_NOTE.to_string(),
+    }))
+}
+
+/// The name the minted key carries in the person's TinyHumans account.
+///
+/// Names the company, so someone looking at a list of keys can tell which
+/// instance each belongs to and revoke one without guessing.
+fn key_name(company: &CompanyRuntime) -> String {
+    format!("OpenCompany \u2014 {}", company.id())
+}
+
+/// What the console navigates to, and nothing else.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartLinkResponse {
+    /// The hub URL to send the browser to, challenge already attached.
+    authorize_url: String,
+}
+
+/// Finish body: the handle we minted, and the code the hub sent back.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinishLink {
+    state: String,
+    code: String,
+}
+
+/// `POST …/credential/link/start` — begin a one-click key grant.
+///
+/// **Admin-only**, the same authority [`set_key`] needs and for the same reason:
+/// what comes back is the company's identity and its wallet. That the key is
+/// minted rather than pasted changes who types it, not what it does.
+async fn start_link(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+) -> Result<Json<StartLinkResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    // No exchange means nothing could redeem the code that came back, so the
+    // flow cannot complete. Refusing here rather than at `finish` is the
+    // difference between a console that never offers the button and one that
+    // sends an admin through Google to fail on return.
+    if state.hub_identity().is_none() {
+        return Err(ApiError(OpenCompanyError::NotFound(
+            "this host is not part of a TinyHumans ecosystem".to_string(),
+        )));
+    }
+
+    let started = state
+        .hub_links()
+        .start(&OsTokens, &runtime.id().to_string());
+
+    // Where the hub returns to. `key=link` is this console's own marker, kept
+    // distinct from the `key=auth` the hub appends on a sign-in so the two
+    // return legs can never be mistaken for each other in `App.tsx`.
+    let origin = state.config().host_base_url();
+    let callback_url = format!(
+        "{}/?company={}&key=link&state={}",
+        origin.trim_end_matches('/'),
+        runtime.id(),
+        started.state,
+    );
+
+    Ok(Json(StartLinkResponse {
+        authorize_url: crate::server::hub_identity::key_grant_url(
+            &state.config().api_url,
+            &callback_url,
+            &started.challenge,
+            &key_name(runtime),
+        ),
+    }))
+}
+
+/// `POST …/credential/link/finish` — redeem the code and store what comes back.
+///
+/// One key lands in **two** places: `tinyhumans/key`, the company's identity for
+/// everything the platform brokers, and `inference/key` on the `managed`
+/// provider, so the same grant that connects the company also gives its agents
+/// something to think with. That is the whole point of the flow — an admin who
+/// had to run it twice, once per page, would be back to two errands.
+async fn finish_link(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+    Json(body): Json<FinishLink>,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+
+    let Some(exchange) = state.hub_identity().cloned() else {
+        return Err(ApiError(OpenCompanyError::NotFound(
+            "this host is not part of a TinyHumans ecosystem".to_string(),
+        )));
+    };
+
+    // Single-use, and bound to the company it was started for. An expired or
+    // replayed handle is indistinguishable from one that never existed, which
+    // is the right amount to say: the remedy is the same either way.
+    let Some(link) = state
+        .hub_links()
+        .take(&body.state, &runtime.id().to_string())
+    else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "that connection attempt has expired \u2014 start it again".to_string(),
+        )));
+    };
+
+    let key = exchange
+        .redeem_key_grant(&body.code, &link.verifier)
+        .await
+        .map_err(ApiError)?;
+
+    // Stored before anything else can fail. The hub emits the plaintext exactly
+    // once and cannot reissue it, so a key dropped here is a key nobody can
+    // recover — the person would have to run the whole flow again, and the one
+    // they just minted would linger in their account doing nothing.
+    store_key(runtime.id(), runtime.secrets().as_ref(), &key)
+        .await
+        .map_err(ApiError)?;
+    crate::company::inference::store_key(runtime.id(), runtime.secrets().as_ref(), &key)
+        .await
+        .map_err(ApiError)?;
+
+    super::composio::evict_catalog_cache(runtime);
+    journal(&company, "company_key_set").await?;
+
     Ok(Json(MutationResponse {
         status: effective_status(&state, runtime).await?,
         note: SWITCH_NOTE.to_string(),
