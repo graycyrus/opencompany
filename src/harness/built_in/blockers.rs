@@ -735,6 +735,32 @@ mod tool_test {
         assert!(queue.drain(8).requests[0].effect.agent.is_none());
     }
 
+    /// Two agents asking distinct questions in the same turn race through
+    /// `execute` concurrently — nothing upstream of this tool serialises the
+    /// calls — so both must still land their own card rather than one
+    /// silently losing to the other on the shared queue's `Mutex`.
+    #[tokio::test]
+    async fn concurrent_questions_from_different_agents_both_park() {
+        let queue = ApprovalRequestQueue::default();
+        let finance = EscalateToHumanTool::new(queue.clone(), "finance".to_string());
+        let legal = EscalateToHumanTool::new(queue.clone(), "legal".to_string());
+
+        let (a, b) = tokio::join!(
+            finance.execute(serde_json::json!({ "question": "approve the Q3 budget?" })),
+            legal.execute(serde_json::json!({ "question": "sign the NDA as-is?" })),
+        );
+        assert!(!a.expect("runs").is_error);
+        assert!(!b.expect("runs").is_error);
+
+        let drained = queue.drain(8);
+        assert_eq!(
+            drained.requests.len(),
+            2,
+            "both concurrent questions must reach the queue, not just whichever wins the race: {:?}",
+            drained.requests.iter().map(|r| &r.reason).collect::<Vec<_>>()
+        );
+    }
+
     /// The other half of `an_escalation_mints_no_grant`, and the half that is
     /// load-bearing in the opposite direction.
     ///
