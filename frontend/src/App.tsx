@@ -47,6 +47,7 @@ import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
 import { absorbHubSetupHandoff } from "@/setup/state";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 import { AddHostPage } from "@/views/setup/AddHostPage";
+import { captureKeyLink } from "@/lib/pending-key-link";
 import { cn } from "@/lib/utils";
 
 /**
