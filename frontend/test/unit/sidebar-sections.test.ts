@@ -258,9 +258,14 @@ describe("the rendered sidebar", () => {
 
     const groups = [...container.querySelectorAll("[data-sidebar='group']")];
     expect(groups).toHaveLength(2);
-    // Deliberate, not the row rhythm: `py-1` on the group either side of it is
-    // 4px, and the break has to be legible at a glance.
-    expect(groups[1].className).toContain("pt-5");
+    // The row rhythm, and nothing on top of it: the fixed block's `pb-1` plus
+    // `SidebarContent`'s `gap-1` is the same 8px step as any two rows in the
+    // column. This carried a `pt-5` — 24px — on the argument that the break had
+    // to be legible at a glance; it read instead as the channel list having
+    // come loose from the four rows above it, which are one navigation surface
+    // with it. No top padding on either group, so neither can drift back.
+    expect(groups[0].className).not.toContain("pt-");
+    expect(groups[1].className).not.toContain("pt-");
   });
 
   it("keeps the rail on the 3rem icon rail rather than hiding it there", () => {
