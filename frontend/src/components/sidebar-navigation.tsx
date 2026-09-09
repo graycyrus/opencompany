@@ -8,6 +8,7 @@ import {
   Network,
   Plug,
   Wallet,
+  ShieldCheck,
   Workflow,
 } from "lucide-react";
 
@@ -216,15 +217,29 @@ export const NAV_SECTIONS: NavSection[] = [
   // (`WorkflowsView`'s `indexTab`), so it is not a pair of routes and promoting
   // it to a rail would be inventing sub-pages rather than relocating any.
   { view: "workflows", label: "Flows", icon: Workflow },
-  // Overview and Approvals are NOT here, and neither is Observatory. All three
-  // are Rule-6 calls, made explicitly in
-  // `docs/spec/runtime/ledgers-console-ia.md`:
+  // What is waiting on you.
   //
-  //   - Overview and Approvals moved UP, into the window's title row, where
-  //     they are chrome rather than destinations — a place you jump to from
-  //     anywhere, and a count that has to be visible from every page including
-  //     the collapsed rail (issue #1018). Discoverable elsewhere, in Rule 6's
-  //     first sense.
+  // It spent a release as an icon in the window's title row, on the argument
+  // that a count has to be visible from every page including the collapsed
+  // rail (issue #1018) and that chrome is the only place that is true of. The
+  // count is the part that argument was really about, and it is answered here
+  // by the badge/dot pair below rather than by the row's location: the badge
+  // shows the number in the column, the dot survives the 3rem rail, and
+  // `SidebarMenuDot` exists again for exactly that reason.
+  //
+  // What the title row could not give it is what it is: a place you GO. It sat
+  // between an Overview glyph and an autonomy pill as one unlabelled square,
+  // so the one surface in the console that asks the operator to do something
+  // was the hardest of the five to name. A row with the word on it, in the
+  // list of places, is the plainer answer.
+  { view: "approvals", label: "Approvals", icon: ShieldCheck },
+  // Overview is NOT here, and neither is Observatory. Both are Rule-6 calls,
+  // made explicitly in `docs/spec/runtime/ledgers-console-ia.md`:
+  //
+  //   - Overview moved UP, into the window's title row, where it is chrome
+  //     rather than a destination — a place you jump to from anywhere.
+  //     Discoverable elsewhere, in Rule 6's first sense. Approvals went with
+  //     it and has come back; see the row above.
   //   - Observatory moved DOWN, into Settings (`settings-pages.ts`), as a rail
   //     row. The rewrite runs the other way from the one you would guess:
   //     `#/settings/observatory` is rewritten onto `#/observatory`, NOT the
@@ -388,9 +403,16 @@ export function childAnchor(section: NavSection, child: NavChild): string | unde
 export function SidebarNavigation({
   view,
   onNavigate,
+  pending,
 }: {
   view: View;
   onNavigate: (view: View, sub?: string) => void;
+  /**
+   * How many approvals are waiting — `feed.status.pending_approvals`, passed
+   * through unchanged. Zero is an ordinary state: the row stays and neither
+   * the badge nor the dot appears.
+   */
+  pending: number;
 }) {
   const { isMobile, setOpenMobile } = useSidebar();
   const { setElement } = useRoomRailSlot();
@@ -415,13 +437,41 @@ export function SidebarNavigation({
             <SidebarMenuItem key={section.view} data-tour={`nav-${section.view}`}>
               <SidebarMenuButton
                 isActive={section === active}
-                tooltip={section.label}
+                // The count belongs in the tooltip too. On the 3rem rail the
+                // label is gone and the dot says only "something", so without
+                // this the collapsed state can report that approvals are
+                // waiting and offer no way to learn how many short of
+                // navigating. `approvalsLabel` is the same sentence the title
+                // row's button used, kept so the two never drift.
+                tooltip={
+                  section.view === "approvals" ? approvalsLabel(pending) : section.label
+                }
                 onClick={() => navigate(section.view, section.sub)}
                 className={RESTING_ROW}
               >
                 <section.icon />
                 <span>{section.label}</span>
               </SidebarMenuButton>
+              {section.view === "approvals" && pending > 0 && (
+                <>
+                  {/* Read off the row without opening anything, and without
+                      depending on the badge's text — which is capped at
+                      `99+` and therefore is not the number. */}
+                  <SidebarMenuBadge
+                    data-testid="sidebar-approvals-count"
+                    data-pending={pending}
+                    // The row's only piece of colour, deliberately: it is the
+                    // one thing in this column that ever asks for attention.
+                    className="bg-status-blocked-soft text-status-blocked-text"
+                  >
+                    {approvalsCount(pending)}
+                  </SidebarMenuBadge>
+                  {/* The badge's mirror on the icon rail, where the badge
+                      hides itself. Exactly one of the two is ever on screen —
+                      see `SidebarMenuDot`. */}
+                  <SidebarMenuDot data-testid="sidebar-approvals-dot" />
+                </>
+              )}
             </SidebarMenuItem>
           ))}
         </SidebarMenu>
