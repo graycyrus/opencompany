@@ -3312,21 +3312,23 @@ impl<'a> DelegationRunner<'a> {
                 note,
             } => {
                 let Some((tasks, mut card)) = self.load_card(&task_id).await? else {
-                    // Issue #453: the residual case. The tool told the model the
-                    // assignment takes effect as the turn completes, the drain
-                    // ran, and there was no card to write to — so the receipt
-                    // promised something no store hiccup or missing wiring
-                    // explains. Silent no-op is right for the *card* (there is
-                    // nothing to do), and wrong for the operator, who is the
-                    // only one who can tell a mistyped id from a deleted card.
+                    if self.tasks.is_none() {
+                        tracing::warn!(
+                            company = %self.company,
+                            task_id = %task_id,
+                            "[delegation] assign_task could not run: no task store is wired"
+                        );
+                        return Ok(DelegationOutcome::default());
+                    }
                     tracing::warn!(
                         company = %self.company,
                         task_id = %task_id,
-                        "[delegation] assign_task named a card that is not on the board (or no \
-                         task store is wired); nothing was assigned, and the turn was told it \
-                         would be"
+                        "[delegation] assign_task named a card that is not on the board; \
+                         nothing was assigned"
                     );
-                    return Ok(DelegationOutcome::default());
+                    return Err(crate::error::OpenCompanyError::NotFound(format!(
+                        "assign_task: no card with id {task_id:?} on the board"
+                    )));
                 };
                 // Issue #205: the orchestrator writes this `assignee` out of an
                 // LLM tool call, so it is exactly as capable of naming somebody
@@ -3408,21 +3410,25 @@ impl<'a> DelegationRunner<'a> {
                 note,
             } => {
                 let Some((tasks, mut card)) = self.load_card(&task_id).await? else {
-                    // Issue #453, the same residual case one arm up and the more
-                    // consequential of the two: the model has just been told the
-                    // card "moves to done as this turn completes", and this is
-                    // the drain completing with nothing to move. The claim
-                    // guarantees the drain ran; it cannot guarantee the id names
-                    // a real card.
+                    if self.tasks.is_none() {
+                        tracing::warn!(
+                            company = %self.company,
+                            task_id = %task_id,
+                            ?decision,
+                            "[delegation] review_task could not run: no task store is wired"
+                        );
+                        return Ok(DelegationOutcome::default());
+                    }
                     tracing::warn!(
                         company = %self.company,
                         task_id = %task_id,
                         ?decision,
-                        "[delegation] review_task named a card that is not on the board (or no \
-                         task store is wired); the verdict was recorded nowhere, and the turn was \
-                         told the card had moved"
+                        "[delegation] review_task named a card that is not on the board; the \
+                         verdict was recorded nowhere"
                     );
-                    return Ok(DelegationOutcome::default());
+                    return Err(crate::error::OpenCompanyError::NotFound(format!(
+                        "review_task: no card with id {task_id:?} on the board"
+                    )));
                 };
                 card.note = Some(append_note(
                     card.note.as_deref(),
@@ -3441,8 +3447,10 @@ impl<'a> DelegationRunner<'a> {
     }
 
     /// Loads one board card by id, with the store handle. `None` when there is
-    /// no task store wired, or the card has since been deleted — both a silent
-    /// no-op rather than an error (issue #186).
+    /// no task store wired, or the card has since been deleted (issue #186). The
+    /// two callers no longer treat these alike: no store wired stays a silent
+    /// no-op, and a deleted/mistyped card now errors instead of reporting a
+    /// false success (issue #453 residual).
     async fn load_card(
         &self,
         task_id: &str,
@@ -9255,7 +9263,6 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// is told, which is not. A mistyped id and a deleted card are the same
     /// silence, and the turn has already been told it worked.
     #[tokio::test]
-    #[ignore = "assign_task on an unknown task_id is a silent drain-time no-op after a success receipt"]
     async fn assigning_a_card_that_is_not_on_the_board_does_not_report_success() {
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(
@@ -9297,7 +9304,6 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// verdict nowhere, and returns the same empty outcome a real approval
     /// returns.
     #[tokio::test]
-    #[ignore = "review_task on an unknown task_id records the verdict nowhere after a 'moves to done' receipt"]
     async fn approving_a_card_that_is_not_on_the_board_does_not_report_success() {
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(
