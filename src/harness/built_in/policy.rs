@@ -1797,13 +1797,33 @@ impl ToolPolicy for ApprovalPolicy {
         // family lives in `toolbelt`; this arm only joins them.
         if !self.connected_composio_toolkits.is_empty()
             && crate::harness::toolbelt::is_web_request_tool(tool)
-            && let Some(url) = request.arguments.get("url").and_then(|v| v.as_str())
-            && let Some(reason) = crate::harness::composio_catalog::web_call_deflection(
-                &self.connected_composio_toolkits,
-                url,
-            )
         {
-            return ToolPolicyDecision::deny(reason);
+            // Every tool this arm recognises declares `url` as a REQUIRED
+            // string in its own schema, so a call that does not carry one that
+            // way is not a legitimate call this guardrail failed to reach — it
+            // is malformed relative to the tool's own contract. Falling
+            // through silently would let exactly that malformed shape walk
+            // past the one thing standing between `full` autonomy and a
+            // connected provider's API host, so this arm fails CLOSED on it
+            // instead of treating "could not read a url" as "nothing to
+            // check".
+            match request.arguments.get("url").and_then(|v| v.as_str()) {
+                Some(url) => {
+                    if let Some(reason) = crate::harness::composio_catalog::web_call_deflection(
+                        &self.connected_composio_toolkits,
+                        url,
+                    ) {
+                        return ToolPolicyDecision::deny(reason);
+                    }
+                }
+                None => {
+                    return ToolPolicyDecision::deny(format!(
+                        "'{tool}' must be called with `url` as a plain string so it can be \
+                         checked against this company's connected toolkits; retry with a \
+                         string `url`"
+                    ));
+                }
+            }
         }
 
         // 1. `readonly` outranks a grant — the brake wins (issue #243).
@@ -7381,6 +7401,189 @@ mod tests {
                 "{tool} must be deflected to Composio, got {decision:?}"
             );
         }
+    }
+
+    /// INPUT-axis (TOOL-003): the deflection reads `arguments["url"]` as a
+    /// plain string. A call missing `url` entirely — despite every deflectable
+    /// tool declaring it required — must not read as "nothing to check" and
+    /// walk past the guardrail; it must fail CLOSED, the same as a real
+    /// connected-provider hit would.
+    #[tokio::test]
+    async fn s2_deflection_fails_closed_when_url_is_missing() {
+        let p = full_with_connected(&["github"]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "method": "GET" }),
+            ))
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a missing `url` must not walk past the guardrail unchecked: {decision:?}"
+        );
+    }
+
+    /// The other half: `url` present but not a plain string — a number, an
+    /// object, an array — is exactly as unreadable to `.as_str()` as a missing
+    /// key, so it must fail CLOSED on the same terms rather than silently
+    /// passing through because the type did not match.
+    #[tokio::test]
+    async fn s2_deflection_fails_closed_when_url_is_not_a_string() {
+        let p = full_with_connected(&["github"]);
+        for bad_url in [
+            serde_json::json!(12345),
+            serde_json::json!({ "host": "api.github.com" }),
+            serde_json::json!(["https://api.github.com"]),
+            serde_json::json!(null),
+        ] {
+            let decision = p
+                .check(&request(
+                    "http_request",
+                    serde_json::json!({ "url": bad_url }),
+                ))
+                .await;
+            assert!(
+                matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "a non-string `url` ({bad_url:?}) must not walk past the guardrail unchecked: \
+                 {decision:?}"
+            );
+        }
+    }
+
+    /// Requirement #2 still holds once the arm fails closed: with NO connected
+    /// toolkits at all, a missing/malformed `url` is not this guardrail's
+    /// business — the arm's outer condition (`!connected_composio_toolkits.is_empty()`)
+    /// never engages, so the call falls through to whatever the ordinary
+    /// policy decides for an `http_request`/`curl`/`web_fetch` with no
+    /// bounded target. That ordinary decision may reasonably be a park (an
+    /// unbounded target is not automatically safe) — the property this pins
+    /// is narrower and precise: it must never be a DENY manufactured by THIS
+    /// arm, since with nothing connected the arm has nothing to deny it for.
+    #[tokio::test]
+    async fn s2_missing_url_passes_through_with_no_connected_toolkits() {
+        for tool in ["http_request", "curl", "web_fetch"] {
+            let decision = full_with_connected(&[])
+                .check(&request(tool, serde_json::json!({ "method": "GET" })))
+                .await;
+            assert!(
+                !matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "with nothing connected, a missing `url` on `{tool}` must not be denied by this \
+                 arm: {decision:?}"
+            );
+        }
+    }
+
+    /// STATE-axis (TOOL-003): the "connected" state a company record supplies
+    /// is free text an operator or an upstream sync wrote, not a normalised
+    /// key, so it can arrive with stray casing or whitespace. Deflection must
+    /// still recognise it — the same normalisation
+    /// `http_request_to_a_connected_provider_is_denied_with_the_composio_route`
+    /// relies on implicitly, pinned here explicitly against a messy entry.
+    #[tokio::test]
+    async fn s2_deflection_normalises_a_messily_cased_connected_toolkit_entry() {
+        let p = full_with_connected(&["  GitHub  "]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a connected entry with stray case/whitespace must still be recognised: {decision:?}"
+        );
+    }
+
+    /// FAIL-axis (TOOL-003): a `url` that IS a plain string but does not parse
+    /// as one (unlike the INPUT-axis cases above, which are the wrong JSON
+    /// *type*) intentionally passes through — `url::Url::parse` fails,
+    /// `web_call_deflection` has no host to check, and nothing this call could
+    /// reach depends on that host either, since the underlying web tool cannot
+    /// make an unparseable string into a request. Fail-open here is the
+    /// deliberate, safe direction; pinned so it is not confused with the
+    /// missing/wrong-type cases that were fixed to fail closed.
+    #[tokio::test]
+    async fn s2_deflection_passes_through_an_unparseable_url_string() {
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "not a url" }),
+            ))
+            .await;
+        let guarded = full_with_connected(&["github"])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "not a url" }),
+            ))
+            .await;
+        assert_eq!(
+            guarded, baseline,
+            "a syntactically invalid url string cannot resolve to any host, so it must pass \
+             through exactly as if nothing were connected: {guarded:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-003): the path-prefix boundary on a toolkit whose
+    /// table requires one (`gmail`'s `www.googleapis.com` entry). A path that
+    /// starts with the required prefix is caught; a path one character short
+    /// of it — missing the trailing slash the table requires — is not, and
+    /// must pass through rather than being caught by a looser `starts_with`.
+    #[tokio::test]
+    async fn s2_deflection_respects_the_path_prefix_boundary() {
+        let p = full_with_connected(&["gmail"]);
+        let inside = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail/v1/users/me" }),
+            ))
+            .await;
+        assert!(
+            matches!(inside, ToolPolicyDecision::Deny { .. }),
+            "a path starting with the required prefix must be caught: {inside:?}"
+        );
+
+        let one_short = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail" }),
+            ))
+            .await;
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail" }),
+            ))
+            .await;
+        assert_eq!(
+            one_short, baseline,
+            "a path one character short of the required prefix (no trailing slash) must not be \
+             caught by a looser match: {one_short:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-003), the other edge: a connected-toolkit list that is
+    /// non-empty but holds only blank entries must behave like the empty-list
+    /// baseline — a stray blank string must not accidentally become a
+    /// wildcard that matches every host.
+    #[tokio::test]
+    async fn s2_deflection_skips_blank_connected_entries_without_matching_everything() {
+        let p = full_with_connected(&["", "   "]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        assert_eq!(
+            decision, baseline,
+            "blank connected entries must not match any host: {decision:?}"
+        );
     }
 
     /// The deflection outranks a single-use grant: a grant is an operator
