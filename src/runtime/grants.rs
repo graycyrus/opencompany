@@ -1876,9 +1876,7 @@ mod test {
             1,
             "one approval id must seed exactly one live grant, not two"
         );
-        let seeded = set
-            .peek(&ApprovalId::new("a1"))
-            .expect("the id is live");
+        let seeded = set.peek(&ApprovalId::new("a1")).expect("the id is live");
         assert_eq!(
             seeded.tool, "new_tool",
             "the later entry in the replay order wins"
@@ -1893,7 +1891,14 @@ mod test {
     fn rehydrate_seeds_every_grant_in_a_large_replay_batch_with_no_cap() {
         let set = GrantSet::default();
         let calls: Vec<_> = (0..500)
-            .map(|i| call(&format!("a{i}"), "finance", "t", serde_json::json!({ "i": i })))
+            .map(|i| {
+                call(
+                    &format!("a{i}"),
+                    "finance",
+                    "t",
+                    serde_json::json!({ "i": i }),
+                )
+            })
             .collect();
         set.rehydrate(calls);
         assert_eq!(
@@ -1920,7 +1925,14 @@ mod test {
         ));
 
         let batch: Vec<_> = (0..50)
-            .map(|i| call(&format!("new{i}"), "ops", "t", serde_json::json!({ "i": i })))
+            .map(|i| {
+                call(
+                    &format!("new{i}"),
+                    "ops",
+                    "t",
+                    serde_json::json!({ "i": i }),
+                )
+            })
             .collect();
         set.rehydrate(batch);
 

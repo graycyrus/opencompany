@@ -10917,8 +10917,7 @@ members = ["writer"]
         ) -> Result<()> {
             if line.contains("ApprovalGranted") {
                 return Err(crate::error::OpenCompanyError::Store(
-                    "FailGrantedMintStore: forced failure on the single-use grant mint"
-                        .to_string(),
+                    "FailGrantedMintStore: forced failure on the single-use grant mint".to_string(),
                 ));
             }
             self.inner.append_journal(id, line, durability).await
