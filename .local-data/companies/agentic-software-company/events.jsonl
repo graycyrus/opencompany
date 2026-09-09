@@ -21,3 +21,10 @@
 {"seq":20,"company":"agentic-software-company","event":{"kind":"TaskCardChanged","task_id":"set-up-the-release-flow","change":"opened","column":"todo"},"at_millis":1788985511537}
 {"seq":21,"company":"agentic-software-company","event":{"kind":"TaskCardChanged","task_id":"set-up-the-incident-runbook","change":"opened","column":"todo"},"at_millis":1788985511545}
 {"seq":22,"company":"agentic-software-company","event":{"kind":"TaskCardChanged","task_id":"set-up-the-security-review-bar","change":"opened","column":"todo"},"at_millis":1788985511553}
+{"seq":23,"company":"agentic-software-company","event":{"kind":"OnboardingStepCompleted","step":"name_confirmed"},"at_millis":1788987960267}
+{"seq":24,"company":"agentic-software-company","event":{"kind":"OperatorMessage","text":"heya","by":{"kind":"user","id":"01a087e32162-000000000002"},"chat":"main"},"at_millis":1788988086431}
+{"seq":25,"company":"agentic-software-company","event":{"kind":"RunStatusChanged","run_id":"01a087ffd89f-000000000007","attempt":1,"to":"pending"},"at_millis":1788988086442}
+{"seq":26,"company":"agentic-software-company","event":{"kind":"TurnStarted","turn_id":"01a087ffd89f-000000000007","chat_id":"main","by":{"kind":"user","id":"01a087e32162-000000000002"}},"at_millis":1788988086443}
+{"seq":27,"company":"agentic-software-company","event":{"kind":"RunStatusChanged","run_id":"01a087ffd89f-000000000007","attempt":1,"from":"pending","to":"running"},"at_millis":1788988086466}
+{"seq":28,"company":"agentic-software-company","event":{"kind":"AgentReply","chat_id":"main","agent_id":"operator","text":"You said: heya"},"at_millis":1788988086482}
+{"seq":29,"company":"agentic-software-company","event":{"kind":"RunStatusChanged","run_id":"01a087ffd89f-000000000007","attempt":1,"from":"running","to":"succeeded"},"at_millis":1788988086492}
