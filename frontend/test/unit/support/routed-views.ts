@@ -157,7 +157,7 @@ export const NAMED_BY: Record<View, Names> = {
   /** See `FINANCE_NAMED_BY`: `#/finances/<page>` is a three-page section. */
   finances: [{ pageHeader: "FinancesView.tsx" }],
   /**
-   * See `CONNECTIONS_NAMED_BY`: `#/connections/<page>` is a two-page section.
+   * See `CONNECTIONS_NAMED_BY`: `#/connections/<page>` is a six-page section.
    * `ConnectionsSection` is the rail frame; the pages carry the headings. The
    * bare route renders Apps, so that is the leaf named here.
    */
@@ -190,7 +190,7 @@ export const NAMED_BY: Record<View, Names> = {
 
 /**
  * The same question one level down: Settings is a single routed view whose
- * `sub` segment picks one of seven pages, each of which draws its own
+ * `sub` segment picks one of its pages, each of which draws its own
  * `PageHeader`. `#/settings/people` is an address an operator can bookmark, so
  * "the routed views are covered" is not the whole answer — `PeopleView`'s
  * loading state had no `h1` and no routed-view check could have seen it.
@@ -202,10 +202,11 @@ export const NAMED_BY: Record<View, Names> = {
 export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   general: "SettingsView.tsx",
   people: "PeopleView.tsx",
-  inference: "InferenceView.tsx",
-  hosting: "HostingView.tsx",
-  search: "SearchView.tsx",
-  skills: "SkillsView.tsx",
+  // Two cards that were General's and are pages: the standing approval policy,
+  // and the theme. Inference, Skills, Hosting and Search left this table
+  // entirely for `CONNECTIONS_NAMED_BY` below.
+  approvals: "settings/ApprovalsSettingsView.tsx",
+  appearance: "settings/AppearanceView.tsx",
   // The run index is a settings page now; the shell hands the pane in rather
   // than `SettingsSection` importing it, so the lazy boundary and its loading
   // title stay in one place. A single run keeps its own `#/observatory/<runId>`
@@ -216,13 +217,13 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
 
 /**
  * Connections is the third section like Settings: one routed view whose `sub`
- * segment picks one of two pages, each drawing its own `PageHeader`.
+ * segment picks one of six pages, each drawing its own `PageHeader`.
  * `#/connections/mcp` is a bookmarkable address and `mcp` is not a `View`, so
  * the routed-view sweep cannot see it — the same blind spot `#/settings/people`
  * and `#/finances/wallet` have.
  *
- * `Record<ConnectionPage, …>` over `CONNECTION_PAGES`, so a third connections
- * page with no row is a compile error.
+ * `Record<ConnectionPage, …>` over `CONNECTION_PAGES`, so a seventh
+ * connections page with no row is a compile error.
  *
  * Both files were rows in `SETTINGS_NAMED_BY` until the section was built. The
  * pages did not change; only which table has to account for them did — and
@@ -235,6 +236,14 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
 export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
   apps: "OAuthView.tsx",
   mcp: "McpServersView.tsx",
+  // The four that followed them off the settings rail. Each view is
+  // re-parented rather than rewritten, so these rows moved across from
+  // `SETTINGS_NAMED_BY` unchanged — which is the whole point of holding both
+  // tables to the same sweeps.
+  inference: "InferenceView.tsx",
+  skills: "SkillsView.tsx",
+  hosting: "HostingView.tsx",
+  search: "SearchView.tsx",
 };
 
 /**
