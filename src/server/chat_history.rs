@@ -306,6 +306,57 @@ pub struct ReferredFrom {
     /// Whether this is the answer coming home rather than the outbound ask.
     /// Carried from the marker; see `CompanyEvent::ReferralEnqueued`.
     pub returning: bool,
+    /// Whether a PERSON was asked rather than a desk.
+    ///
+    /// The chip names whoever was actually addressed. "Answered by Front Desk"
+    /// for a question put to one person names a room that was never asked — its
+    /// other members had no part in it, and on a direct crossing it holds none
+    /// of the exchange.
+    pub direct: bool,
+}
+
+/// One line of a crossing, in the order it was said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReferralLine {
+    /// The agent that wrote it.
+    pub author_id: String,
+    /// Their display label, captured when the referral was made.
+    pub author_label: String,
+    /// What they said, with any host note to the asker already stripped.
+    pub text: String,
+    /// True when this desk's own agent wrote it — the question going out.
+    pub outbound: bool,
+}
+
+/// The whole exchange between an agent on this desk and somebody who is not,
+/// folded onto the report that brought it home.
+///
+/// The relayed rows themselves are still dropped from the transcript: a desk's
+/// history is the conversation that happened ON it, and an agent who does not
+/// work here did not speak here. But dropping them outright left an operator
+/// able to see that a question crossed and never what was said either way,
+/// with only the asker's paraphrase to go on. This carries the exchange as its
+/// own collapsible line — closed by default, so the desk still reads as its
+/// own conversation and the crossing is one click away rather than gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReferralConversation {
+    /// The agent on this desk that asked.
+    pub asker_id: String,
+    /// Who they asked.
+    pub other_id: String,
+    /// And where that person sits, for the label and the link.
+    pub other_desk_id: String,
+    pub other_desk_name: String,
+    /// Whether a PERSON was asked, rather than a desk.
+    ///
+    /// The two are different acts and the label says which: `@name` went to
+    /// somebody, `#desk` was put to a room. Taken from whether the crossing
+    /// named its own pair conversation — a desk crossing runs on the desk and
+    /// names none.
+    pub direct: bool,
+    /// The exchange, oldest first. Its length is the message count the
+    /// collapsed label shows.
+    pub lines: Vec<ReferralLine>,
 }
 
 /// Who is reading a desk history. `mine` is relative to this.
@@ -366,6 +417,8 @@ pub struct MessageView {
     /// message: the marker is written inside the enqueue transaction, before
     /// the child turn exists, so the message cannot carry it at write time.
     pub referred_from: Option<ReferredFrom>,
+    /// The crossing this report brought home, when it brought one.
+    pub referral_conversation: Option<ReferralConversation>,
     /// Whether this row may reach only administrators (issue #1781 review,
     /// Codex P1).
     ///
@@ -616,6 +669,7 @@ impl MessageView {
                 by_person: false,
                 // Set by the referral fold in `history_for_desk`, never here.
                 referred_from: None,
+                referral_conversation: None,
                 steps,
                 task_id,
                 parent_id: parent.map(|seq| seq.value().to_string()),
@@ -686,6 +740,7 @@ impl MessageView {
                 MessageView {
                     // Set by the referral fold in `history_for_desk`, never here.
                     referred_from: None,
+                    referral_conversation: None,
                     id,
                     channel: voice,
                     admin_only: false,
@@ -755,6 +810,7 @@ impl MessageView {
                 by_person: false,
                 // Set by the referral fold in `history_for_desk`, never here.
                 referred_from: None,
+                referral_conversation: None,
                 steps: Vec::new(),
                 task_id: Some(task_id),
                 // Rendered the same way an `OperatorMessage`'s parent is, a few
@@ -777,6 +833,7 @@ impl MessageView {
                 by_person: false,
                 // Set by the referral fold in `history_for_desk`, never here.
                 referred_from: None,
+                referral_conversation: None,
                 steps: Vec::new(),
                 task_id: None,
                 parent_id: None,
@@ -1221,9 +1278,21 @@ async fn attach_referral_origins(
     else {
         return Ok(());
     };
+    // Two events back was enough while this only needed the marker sitting just
+    // before the first visible row. Reading the crossing itself needs the
+    // OUTBOUND leg too, and that is a round trip earlier — the ask, the far
+    // desk's turn, the answer — with whatever else the company journalled in
+    // between. `LOOKBACK` is a bounded widening, not a guarantee: a crossing
+    // whose ask fell outside it renders with the answer alone, which is what
+    // this showed before the question was captured at all.
+    const LOOKBACK: u64 = 64;
     let page = runtime
         .events()
-        .read_from(runtime.id(), EventSeq::new(oldest.saturating_sub(2)), 4096)
+        .read_from(
+            runtime.id(),
+            EventSeq::new(oldest.saturating_sub(LOOKBACK)),
+            4096,
+        )
         .await?;
     // Relays that a report has superseded, dropped once the scan is done —
     // removing inside the loop would invalidate the positions it is still using.
@@ -1238,6 +1307,8 @@ async fn attach_referral_origins(
             to_desk,
             target,
             returning,
+            answers,
+            conversation,
         } = &stored.event
         else {
             continue;
@@ -1245,17 +1316,45 @@ async fn attach_referral_origins(
         if to_desk != desk_id {
             continue;
         }
-        let Some(child) = page[index + 1..].iter().find(|later| {
-            matches!(
-                &later.event,
-                CompanyEvent::OperatorMessage { chat, by, .. }
-                    if chat.as_deref() == Some(to_desk.as_str())
-                        && by.as_ref().is_some_and(|actor| actor.id == *asker)
-            )
+        // The row the marker is about, in either shape the two paths write.
+        //
+        // A chat-path crossing lands as an `OperatorMessage` on the target desk
+        // authored by the agent that asked — it IS that agent speaking there. A
+        // crossing raised inside a room lands as an `AgentReply` under the
+        // reserved `hive-referral` author, because the room folds it into its
+        // own transcript for the next speaker to read. Same event, two shapes,
+        // and a matcher that knew only the first left every room crossing
+        // unattached: marker on the journal, nothing on the message.
+        let Some(child) = page[index + 1..].iter().find(|later| match &later.event {
+            CompanyEvent::OperatorMessage { chat, by, .. } => {
+                chat.as_deref() == Some(to_desk.as_str())
+                    && by.as_ref().is_some_and(|actor| actor.id == *asker)
+            }
+            CompanyEvent::AgentReply {
+                chat_id, agent_id, ..
+            } => chat_id == to_desk && agent_id == crate::hivemind::HIVE_REFERRAL_AUTHOR,
+            _ => false,
         }) else {
             continue;
         };
         let child_id = child.seq.value().to_string();
+        // Whether this crossing went to a person. Read off the FORWARD, which
+        // is the leg that names a pair conversation; a return names none, so it
+        // cannot answer this about itself.
+        let direct = match returning {
+            true => answers
+                .and_then(|seq| page.iter().find(|st| st.seq.value() == seq))
+                .is_some_and(|fwd| {
+                    matches!(
+                        &fwd.event,
+                        CompanyEvent::ReferralEnqueued {
+                            conversation: Some(_),
+                            ..
+                        }
+                    )
+                }),
+            false => conversation.is_some(),
+        };
         let origin = ReferredFrom {
             desk_id: from_desk.clone(),
             desk_name: from_desk_name.clone(),
@@ -1263,6 +1362,7 @@ async fn attach_referral_origins(
             asker_label: asker_label.clone(),
             sequence: *trigger_sequence,
             returning: *returning,
+            direct,
         };
 
         // On a return, the chip belongs on the ASKER's report — the first thing
@@ -1281,8 +1381,171 @@ async fn attach_referral_origins(
 
         match report {
             Some(id) => {
+                // The answer's own words, before the row is dropped. The host's
+                // note rides the same text and is addressed to the asker alone
+                // ("you are the only one who has seen it"), so it is stripped
+                // here for the same reason the fallback strips it.
+                let answer = strip_relay_note(&child.event);
+                // The question that opened this crossing: the forward leg that
+                // left THIS desk for the desk now answering, addressed to the
+                // agent now speaking. Matched on the pair rather than on
+                // sequence order, because a room may have more than one
+                // crossing open and their legs interleave.
+                // The forward this answers, named by the marker itself when the
+                // host recorded it (`answers`). One event, fetched by sequence:
+                // no window to fall outside of, and no second copy of the match
+                // rules to drift from the host's.
+                // The forward this answers, by the sequence the host recorded.
+                //
+                // Read straight from the journal when the page does not reach
+                // it, which is the whole point of recording a pointer: a
+                // crossing whose ask is older than the window is exactly the
+                // case the scan could not serve. Two events, because a forward
+                // marker is immediately followed by the row it caused.
+                let forward_leg: Vec<StoredEvent> = match answers {
+                    Some(seq) if !page.iter().any(|st| st.seq.value() == *seq) => runtime
+                        .events()
+                        .read_from(runtime.id(), EventSeq::new(*seq), 2)
+                        .await
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let reachable: Vec<&StoredEvent> = page.iter().chain(forward_leg.iter()).collect();
+                let paired = answers.and_then(|seq| {
+                    let forward = reachable.iter().find(|stored| stored.seq.value() == seq)?;
+                    // A crossing that ran in the pair's own thread keeps BOTH
+                    // sides there, in order, and neither desk carries them. That
+                    // is the whole exchange already — no delivered copy to hunt
+                    // for, no trigger row to fall back to.
+                    if let CompanyEvent::ReferralEnqueued {
+                        conversation: Some(thread),
+                        ..
+                    } = &forward.event
+                    {
+                        let said: Vec<String> = reachable
+                            .iter()
+                            .filter(|stored| stored.seq > forward.seq)
+                            .filter(|stored| {
+                                matches!(
+                                    &stored.event,
+                                    CompanyEvent::AgentReply { chat_id, .. } if chat_id == thread
+                                )
+                            })
+                            .filter_map(|stored| strip_relay_note(&stored.event))
+                            .collect();
+                        // The question is the first thing said there; anything
+                        // after it is the answer, which may run to several turns.
+                        if let Some(question) = said.first() {
+                            return Some(question.clone());
+                        }
+                        return None;
+                    }
+                    // The question, in whichever form this crossing left behind.
+                    //
+                    // A chat-path crossing delivers a copy onto the far desk —
+                    // the asking agent speaking there — so that copy is the
+                    // question, already addressed to its reader.
+                    let delivered = reachable
+                        .iter()
+                        .find(|later| {
+                            later.seq > forward.seq
+                                && matches!(
+                                    &later.event,
+                                    CompanyEvent::OperatorMessage { chat, by, .. }
+                                        if chat.as_deref() == Some(from_desk.as_str())
+                                            && by.as_ref().is_some_and(|a| a.id == *target)
+                                )
+                        })
+                        .and_then(|m| strip_relay_note(&m.event));
+                    // A room's crossing delivers no copy: the far seat simply
+                    // takes a turn, and only its answer is journalled. What
+                    // asked is the member's own line back home — the committed
+                    // reply the marker was raised from, which `trigger_sequence`
+                    // names exactly.
+                    delivered.or_else(|| {
+                        let CompanyEvent::ReferralEnqueued {
+                            trigger_sequence, ..
+                        } = &forward.event
+                        else {
+                            return None;
+                        };
+                        reachable
+                            .iter()
+                            .find(|stored| stored.seq.value() == *trigger_sequence)
+                            .and_then(|m| strip_relay_note(&m.event))
+                    })
+                });
+                // Markers written before `answers` existed carry no pointer, so
+                // they still pair by scanning. Same result when the ask is in
+                // range, and the same under-count when it is not — this path is
+                // the old behaviour kept for old rows, not a second opinion.
+                let question = paired.or_else(|| page
+                    .iter()
+                    .take(index)
+                    .rev()
+                    .find_map(|earlier| match &earlier.event {
+                        CompanyEvent::ReferralEnqueued {
+                            from_desk: out_from,
+                            to_desk: out_to,
+                            asker: out_asker,
+                            target: out_target,
+                            returning: false,
+                            ..
+                        } if out_from == desk_id
+                            && out_to == from_desk
+                            && out_asker == target
+                            && out_target == asker =>
+                        {
+                            page[..index]
+                                .iter()
+                                .find(|later| {
+                                    later.seq > earlier.seq
+                                        && matches!(
+                                            &later.event,
+                                            CompanyEvent::OperatorMessage { chat, by, .. }
+                                                if chat.as_deref() == Some(out_to.as_str())
+                                                    && by.as_ref().is_some_and(|a| a.id == *out_asker)
+                                        )
+                                })
+                                .map(|m| strip_relay_note(&m.event))
+                        }
+                        _ => None,
+                    })
+                    .flatten());
+                let mut lines = Vec::new();
+                // A room's question is a committed MOVE — `!question @#triage
+                // …` — because that is how it was said. The move grammar is
+                // addressed to the fold, not to a person reading a transcript,
+                // and it is stripped everywhere else a person sees a room's
+                // words; a crossing is no different.
+                if let Some(text) = question {
+                    lines.push(ReferralLine {
+                        author_id: target.clone(),
+                        author_label: String::new(),
+                        text: readable_moves(text),
+                        outbound: true,
+                    });
+                }
+                if let Some(text) = answer {
+                    lines.push(ReferralLine {
+                        author_id: asker.clone(),
+                        author_label: asker_label.clone(),
+                        text: readable_moves(text),
+                        outbound: false,
+                    });
+                }
                 relayed.push(child_id);
                 if let Some(view) = messages.iter_mut().find(|m| m.id == id) {
+                    if !lines.is_empty() {
+                        view.referral_conversation = Some(ReferralConversation {
+                            direct,
+                            asker_id: target.clone(),
+                            other_id: asker.clone(),
+                            other_desk_id: from_desk.clone(),
+                            other_desk_name: from_desk_name.clone(),
+                            lines,
+                        });
+                    }
                     view.referred_from = Some(origin);
                 }
             }
@@ -1293,10 +1556,14 @@ async fn attach_referral_origins(
                     // FOR the asker — "you are the only one who has seen it" —
                     // in a channel, over the name of an agent that is not even
                     // on this desk. Only the other desk's own words survive.
-                    if let Some((answer, _)) =
-                        view.text.split_once(crate::ports::types::RELAY_NOTE_MARKER)
-                    {
-                        view.text = answer.to_string();
+                    //
+                    // Through the shared helper, not a second copy of the split:
+                    // two readers of one rule is how a marker change leaves one
+                    // path publishing a private note. It also drops a relay
+                    // whose words are only whitespace, which the hand-rolled
+                    // split kept as an empty line.
+                    if let Some(words) = strip_relay_note(&child.event) {
+                        view.text = words;
                     }
                     view.referred_from = Some(origin);
                 }
@@ -1305,6 +1572,27 @@ async fn attach_referral_origins(
     }
     messages.retain(|m| !relayed.contains(&m.id));
     Ok(())
+}
+
+/// An agent line's own words, with the host's private note to the asker removed.
+///
+/// The note is appended to the SAME text the other desk wrote and is addressed
+/// to the asker alone, so anything published to a channel — the relay fallback,
+/// or a crossing folded onto a report — has to cut it off at the marker. One
+/// function, so the two readers cannot disagree about where the words end.
+fn strip_relay_note(event: &CompanyEvent) -> Option<String> {
+    let text = match event {
+        CompanyEvent::OperatorMessage { text, .. } => text,
+        // The shape a room's crossing takes; see the matcher in
+        // `attach_referral_origins`.
+        CompanyEvent::AgentReply { text, .. } => text,
+        _ => return None,
+    };
+    let words = text
+        .split_once(crate::ports::types::RELAY_NOTE_MARKER)
+        .map_or(text.as_str(), |(answer, _)| answer)
+        .trim();
+    (!words.is_empty()).then(|| words.to_string())
 }
 
 /// Renders a deliberation turn for a person, leaving every other reply alone.
@@ -3184,8 +3472,37 @@ mod referral_origin_test {
         returning: bool,
         text: &str,
     ) -> [CompanyEvent; 2] {
+        referral_leg_answering(
+            from_desk,
+            from_desk_name,
+            asker,
+            to_desk,
+            target,
+            returning,
+            text,
+            None,
+        )
+    }
+
+    /// The same, with the forward this return answers named explicitly — the
+    /// pointer the host records so the projection need not scan for it.
+    #[expect(clippy::too_many_arguments, reason = "a journal event's own shape")]
+    fn referral_leg_answering(
+        from_desk: &str,
+        from_desk_name: &str,
+        asker: &str,
+        to_desk: &str,
+        target: &str,
+        returning: bool,
+        text: &str,
+        answers: Option<u64>,
+    ) -> [CompanyEvent; 2] {
         [
             CompanyEvent::ReferralEnqueued {
+                // These fixtures are desk crossings, which run on the target's
+                // own desk and name no pair conversation.
+                conversation: None,
+                answers,
                 from_desk: from_desk.to_string(),
                 from_desk_name: from_desk_name.to_string(),
                 asker: asker.to_string(),
@@ -3542,6 +3859,155 @@ mod referral_origin_test {
         let origin = referred.referred_from.as_ref().expect("origin");
         assert!(origin.returning, "and it reads as an answer, not an ask");
         assert_eq!(origin.desk_name, "Design");
+
+        // **The crossing itself rides the report, both legs of it.**
+        //
+        // The relayed rows still go — that is the assertion above, and the
+        // reason for it — but the exchange they carried is kept here so an
+        // operator can read what was actually asked and answered instead of
+        // only the asker's paraphrase of it. `lines.len()` is the count the
+        // collapsed label shows, which is why the QUESTION has to be captured
+        // too: an answer on its own would always read "1 message".
+        let crossing = referred
+            .referral_conversation
+            .as_ref()
+            .expect("the crossing rides the report that brought it home");
+        assert_eq!(crossing.asker_id, "software_engineer");
+        assert_eq!(crossing.other_id, "product_designer");
+        assert_eq!(crossing.other_desk_name, "Design");
+        assert_eq!(crossing.lines.len(), 2, "{:?}", crossing.lines);
+        assert!(crossing.lines[0].outbound, "the question goes out first");
+        assert_eq!(
+            crossing.lines[0].text,
+            "what would you change about the error messages?"
+        );
+        assert!(!crossing.lines[1].outbound, "then the answer comes back");
+        assert_eq!(
+            crossing.lines[1].text,
+            "error messages look like a copy task and are not one"
+        );
+    }
+
+    /// **The marker names its own forward, so the ask is found however far back
+    /// it is.**
+    ///
+    /// The scan this replaces looked back a fixed number of events from the
+    /// oldest visible row, so a crossing whose ask fell outside that window
+    /// rendered with the answer alone and said "1 message" — quietly wrong, and
+    /// wrong in the direction that looks plausible. The host already located
+    /// that marker to authorize the return and was keeping only a bool;
+    /// `answers` records it instead.
+    ///
+    /// Here the two legs are separated by far more than the scan's `LOOKBACK`,
+    /// so the fallback cannot reach the ask and only the pointer can.
+    #[tokio::test]
+    async fn a_marker_that_names_its_forward_pairs_beyond_the_scan_window() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        // The marker's OWN sequence, not a guess at it: the runtime journals
+        // its own setup rows first, so the first referral event is not
+        // sequence zero. Pointing `answers` at a sequence that happens to hold
+        // something else is the confusion the pointer exists to remove.
+        let mut forward_seq = 0u64;
+        for (i, event) in referral_leg(
+            "engineering",
+            "Engineering",
+            "software_engineer",
+            "design",
+            "product_designer",
+            false,
+            "what would you change about the error messages?",
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let seq = runtime.events().append(&id, event).await.expect("journal");
+            if i == 0 {
+                forward_seq = seq.value();
+            }
+        }
+        // The forward marker is sequence 0, its question 1. Bury them under
+        // enough unrelated traffic that the scan's window cannot reach back.
+        for i in 0..200 {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: "software_engineer".to_string(),
+                        text: format!("unrelated line {i}"),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+        for event in referral_leg_answering(
+            "design",
+            "Design",
+            "product_designer",
+            "engineering",
+            "software_engineer",
+            true,
+            "error messages look like a copy task and are not one",
+            Some(forward_seq),
+        ) {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    chat_id: "engineering".to_string(),
+                    agent_id: "software_engineer".to_string(),
+                    text: "design came back: it is a design-system problem".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    audience: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal");
+
+        // Only the tail is on screen, so the ask is far outside the scan.
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            5,
+            true,
+        )
+        .await
+        .expect("history");
+        let crossing = history
+            .iter()
+            .find_map(|m| m.referral_conversation.as_ref())
+            .expect("the crossing rides the report");
+        assert_eq!(
+            crossing.lines.len(),
+            2,
+            "the pointer reaches an ask the scan cannot: {:?}",
+            crossing.lines
+        );
+        assert!(crossing.lines[0].outbound);
+        assert_eq!(
+            crossing.lines[0].text,
+            "what would you change about the error messages?"
+        );
     }
 
     /// **A rendered relay shows the answer and none of the host's note.**

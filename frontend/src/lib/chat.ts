@@ -224,6 +224,8 @@ export interface ChatMessage {
    * only link back to the conversation that asked.
    */
   referredFrom?: import("@/api/types").ReferredFromDto;
+  /** The crossing this report brought home, rendered as one collapsed line. */
+  referralConversation?: import("@/api/types").ReferralConversationDto;
   /**
    * Who reacted to this line with what — one row per person per emoji, not a
    * count (issue #364).
@@ -581,6 +583,7 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // Straight through, like `byPerson`: only the host knows another desk
       // caused this line, and nothing here may infer it.
       referredFrom: entry.referredFrom,
+      referralConversation: entry.referralConversation,
       // Reactions come through whoever the host said reacted; nothing is
       // inferred here, `mine` included.
       reactions: entry.reactions?.length ? entry.reactions : undefined,
