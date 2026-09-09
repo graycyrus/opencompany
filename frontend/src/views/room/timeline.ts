@@ -777,9 +777,10 @@ function groupEpisodes(items: TimelineItem[], episodes: Episode[]): TimelineItem
     return episodes.find((candidate) => {
       const rows = [...candidate.turns, ...candidate.referrals, ...candidate.failed];
       const first = rows[0]?.at;
-      const last = candidate.reportId
-        ? Math.max(...rows.map((row) => row.at), item.at)
-        : rows.at(-1)?.at;
+      const reportAt = items.find(
+        (row) => row.kind === "message" && row.entry.message.id === candidate.reportId,
+      )?.at;
+      const last = reportAt ?? rows.at(-1)?.at;
       return first !== undefined && last !== undefined && item.at >= first && item.at <= last;
     });
   };
