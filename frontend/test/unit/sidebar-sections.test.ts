@@ -39,7 +39,9 @@ function render(view: View) {
       createElement(
         SidebarProvider,
         null,
-        createElement(SidebarNavigation, { view, onNavigate: () => {} }),
+        // Nothing waiting: this file is about which rows exist, and the
+        // approvals badge/dot pair has `title-bar-jumps.test.ts` to itself.
+        createElement(SidebarNavigation, { view, onNavigate: () => {}, pending: 0 }),
       ),
     ),
   );

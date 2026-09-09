@@ -21,7 +21,11 @@ describe("Settings navigation (issue #1468)", () => {
     // Integrations. Asserted as an absence on both tables — a group with no
     // pages renders a heading over nothing, and a page in a group the rail does
     // not list renders nowhere at all.
-    expect(SETTINGS_PAGES.filter((page) => page.group === "integrations")).toEqual([]);
+    // Widened to `string` for the reason the retired-id assertions below are:
+    // once "integrations" is gone from both tables it is not in either union,
+    // so a narrow comparison is a type error rather than the assertion being
+    // made at all.
+    expect(SETTINGS_PAGES.map((page) => page.group as string)).not.toContain("integrations");
     expect(SETTINGS_PAGE_GROUPS.map((group) => group.id as string)).not.toContain("integrations");
   });
 
