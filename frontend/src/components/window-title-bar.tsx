@@ -91,11 +91,15 @@ export const TITLE_BAR_LADDER = {
    * sentence at any width now (see `AutonomyPill`), so the rung has nothing to
    * govern and is retired rather than left as a class nobody applies.
    */
-  /**
-   * The company's name beside the switcher's glyph. Consumed by `HostSwitcher`'s
-   * `titlebar` variant, which keeps the glyph, the status dot and the chevron.
+  /*
+   * `companyName` used to be the second rung — the company's name beside the
+   * switcher's glyph, hidden below `lg` so the control collapsed to the glyph
+   * alone. The `titlebar` switcher draws no glyph any more (it reads as a
+   * select, with a border and the name in it), so the name is the only thing
+   * identifying the company and there is nothing left to collapse *to*.
+   * Dropping it would leave a bordered box holding a chevron. Retired rather
+   * than left as a class nobody applies.
    */
-  companyName: "hidden lg:flex",
   /**
    * The Overview glyph. Applied by the row itself, to the slot it sits in.
    *
