@@ -4,11 +4,9 @@ import type { OpenCompanyClient } from "@/api/client";
 import { RouteLoading } from "@/components/route-loading";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
-import { InferenceView } from "@/views/InferenceView";
 import { HostingView } from "@/views/HostingView";
 import { SearchView } from "@/views/SearchView";
 import { PeopleView } from "@/views/PeopleView";
-import { SkillsView } from "@/views/SkillsView";
 import { SettingsView } from "@/views/SettingsView";
 import {
   SETTINGS_PAGE_GROUPS,
@@ -167,8 +165,6 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
             can act through is read repeatedly, and a settings rail is where an
             operator changes configuration once. Both old addresses still
             resolve, rewritten by `console-route-rewrites.ts`. Inference stayed:
-            a credential form belongs beside the one thing it unlocks. */}
-        {page === "inference" && <InferenceView client={client} company={company} />}
         {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
             (docs/spec/runtime/finance-console.md): a credential form belongs
             beside the data it unlocks, and "Billing" read as *what OpenCompany
@@ -183,10 +179,6 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
         {page === "search" && (
           <SearchView key={company ?? "self"} client={client} company={company} />
         )}
-        {/* Same remount rule, same reason: canManage (and the Add dialog's
-            draft) must not carry an admin's authority from one company into
-            another's still-resolving read (codeRabbit review). */}
-        {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
         {/* Observatory has a row on this rail but renders nothing here: the row
             is a doorway, and `#/settings/observatory` is rewritten onto
             `#/observatory` before it ever reaches this dispatch.
