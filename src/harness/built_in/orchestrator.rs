@@ -2525,28 +2525,23 @@ fn summarize_event(event: &CompanyEvent) -> String {
         // orchestrator's recent-activity context and read by a model, so the
         // same rule the workflow arms follow applies: no free text, no actor
         // ids, and no configuration.
-        CompanyEvent::TeammateAdded { agent_id, role, .. } => {
-            format!("teammate added: {agent_id} ({role})")
-        }
-        CompanyEvent::DeskCreated { desk_id, name, .. } => {
-            format!("desk created: {name} ({desk_id})")
-        }
-        CompanyEvent::DeskDeleted { desk_id, .. } => format!("desk deleted: {desk_id}"),
+        CompanyEvent::TeammateAdded { .. } => "teammate added".into(),
+        CompanyEvent::DeskCreated { name, .. } => format!("desk created: {name}"),
+        CompanyEvent::DeskDeleted { .. } => "desk deleted".into(),
         CompanyEvent::DeskMembersChanged {
-            desk_id,
             added,
             removed,
             ..
         } => format!(
-            "desk {desk_id} membership: +{} −{}",
+            "desk membership changed: +{} −{}",
             added.len(),
             removed.len()
         ),
-        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => {
+        CompanyEvent::DeskHiveConfigured { reset, .. } => {
             if *reset {
-                format!("desk {desk_id} move grammar restored")
+                "desk move grammar restored".into()
             } else {
-                format!("desk {desk_id} move grammar installed")
+                "desk move grammar installed".into()
             }
         }
         // Issue #276. This one-liner is folded into the orchestrator's

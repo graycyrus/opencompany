@@ -484,7 +484,8 @@ export function AppShell({
   // line a company switch would paint the previous company's conversation onto
   // an identically named channel — the exact mixing bug `connections/registry`
   // opens by warning about.
-  room.enterScope(`${scope.connection}::${scope.company ?? "single"}`);
+  const roomScopeKey = `${scope.connection}::${scope.company ?? "single"}`;
+  room.enterScope(roomScopeKey);
   // Room is where the console opens. An empty hash, a bare `#/`, a bookmark
   // whose view was retired — all of them land in the room the operator talks
   // to their company in, rather than on a dashboard about it.
@@ -639,19 +640,20 @@ export function AppShell({
   // mounts and unmounts `RoomView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
   const transcripts = room.useTranscripts();
-  const setTranscripts = room.setTranscripts;
+  const scopedRoomWriters = room.writersForScope(roomScopeKey);
+  const setTranscripts = scopedRoomWriters.setTranscripts;
   // How far each channel's history rehydration has got. Kept beside
   // `transcripts` rather than inside it because an empty transcript is a
   // legitimate final answer, and the timeline has to tell that apart from not
   // having asked yet before it prints "this is the start of…" (issue #934).
   const hydration = room.useHydration();
-  const setHydration = room.setHydration;
+  const setHydration = scopedRoomWriters.setHydration;
   // Host thread id → chat channel id, for every channel this company has.
   // Resolved by the desks/roster effect below, which already works the pairing
   // out to hydrate each channel and used to throw it away — leaving the shell
   // unable to say which channel an incoming event belongs to (issue #367).
   const chatChannelByThread = room.useChatChannelByThread();
-  const setChatChannelByThread = room.setChatChannelByThread;
+  const setChatChannelByThread = scopedRoomWriters.setChatChannelByThread;
   // This company's first desk channel — the same channel `RoomView` lands on
   // when the hash names none, and so where a line with nowhere else to go is
   // still somewhere the operator will find it.
@@ -715,9 +717,9 @@ export function AppShell({
   // below — nothing increments a counter, so a message that turns out to be a
   // duplicate cannot leave a badge behind for a line that was never added.
   const lastViewedChannel = room.useLastViewedChannel();
-  const setLastViewedChannel = room.setLastViewedChannel;
+  const setLastViewedChannel = scopedRoomWriters.setLastViewedChannel;
   const unreadSince = room.useUnreadSince();
-  const setUnreadSince = room.setUnreadSince;
+  const setUnreadSince = scopedRoomWriters.setUnreadSince;
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) and the board itself
   // (issue #464) refetch live.
@@ -847,7 +849,7 @@ export function AppShell({
   // folded steps — lands. `toolCallId` is a transient key for the running→done
   // in-place flip; it is structurally a superset of `TurnStep`, so these render
   // through the same `StepTimeline` as the final steps.
-  const setLiveStepsByThread = room.setLiveStepsByThread;
+  const setLiveStepsByThread = scopedRoomWriters.setLiveStepsByThread;
   // The same timeline, per **query** rather than per thread, for a frame that
   // says which operator message its turn answers (`messageSeq`). Keyed by that
   // message's console id, so a running turn's rows render under the question
@@ -865,7 +867,7 @@ export function AppShell({
   //
   // Not a replacement: a frame with no `messageSeq` still keys by thread, which
   // is every turn answering no journaled message and every older host.
-  const setLiveStepsByMessage = room.setLiveStepsByMessage;
+  const setLiveStepsByMessage = scopedRoomWriters.setLiveStepsByMessage;
   /**
    * Retires the live rows of every message that now has durable steps of its
    * own, and of every message named in `alsoDrop`.
@@ -905,7 +907,7 @@ export function AppShell({
   // outcome the POST reaches. Its lifecycle mirrors `liveStepsByThread`'s: the
   // reply landing on `onSendEnd` is what clears it, exactly as the reply bubble
   // is appended, so the two swap with no empty frame between them.
-  const setReceiptByThread = room.setReceiptByThread;
+  const setReceiptByThread = scopedRoomWriters.setReceiptByThread;
   // Roster agent id → display name, so the receipt names the teammate rather
   // than rendering a raw id (issue #1934). Populated by the desks/roster read
   // below, which already fetches the roster this is derived from.
@@ -953,7 +955,7 @@ export function AppShell({
   // queued one behind it, and the poll watches them all (issue #1000). The
   // working row is the head; `RoomView` and `Conversation` read `[0]`.
   const openTurns = room.useOpenTurns();
-  const setOpenTurns = room.setOpenTurns;
+  const setOpenTurns = scopedRoomWriters.setOpenTurns;
   // Approval ids THIS console is deciding right now, or just decided a moment
   // ago (issue #1211) — so the generic SSE echo of `approval_resolved` can be
   // suppressed for exactly the decision this tab made, the same way

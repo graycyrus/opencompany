@@ -296,7 +296,7 @@ export function HiveGrammarPanel({
         )}
 
         <div className="flex items-center gap-2">
-          <Button type="button" disabled={busy || problems.length > 0} onClick={save}>
+          <Button type="button" disabled={busy} onClick={save}>
             {busy ? <Loader2 aria-hidden className="size-4 animate-spin" /> : null}
             Install
           </Button>

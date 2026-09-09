@@ -184,6 +184,30 @@ export const setLiveStepsByMessage = liveStepsByMessage.set;
 export const setReceiptByThread = receiptByThread.set;
 export const setOpenTurns = openTurns.set;
 
+/**
+ * Writers bound to the scope that created an asynchronous operation.
+ *
+ * A route switch replaces the module-global state synchronously. Callbacks
+ * retained by the old shell must therefore become no-ops rather than applying
+ * their result to the replacement company's identically named channel.
+ */
+export function writersForScope(key: string) {
+  const guard = <T>(writer: (next: Updater<T>) => void) => (next: Updater<T>): void => {
+    if (scopeKey === key) writer(next);
+  };
+  return {
+    setTranscripts: guard(setTranscripts),
+    setHydration: guard(setHydration),
+    setChatChannelByThread: guard(setChatChannelByThread),
+    setLastViewedChannel: guard(setLastViewedChannel),
+    setUnreadSince: guard(setUnreadSince),
+    setLiveStepsByThread: guard(setLiveStepsByThread),
+    setLiveStepsByMessage: guard(setLiveStepsByMessage),
+    setReceiptByThread: guard(setReceiptByThread),
+    setOpenTurns: guard(setOpenTurns),
+  };
+}
+
 /* ---- readers ---- */
 
 export const useTranscripts = transcripts.use;
