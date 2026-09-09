@@ -27,6 +27,8 @@ use axum::Router;
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
+use axum::extract::State;
+
 use crate::AppState;
 use crate::company::company_key::{key_configured, resolve, store_key};
 use crate::company::credentials::CredentialSource;
@@ -131,7 +133,10 @@ struct SetKey {
 /// company *has*, the Composio one reports what a Composio call *presents*.
 /// Claiming parity between them would be wrong in exactly the case where the
 /// distinction matters.
-async fn effective_status(runtime: &CompanyRuntime) -> Result<CredentialStatusDto, ApiError> {
+async fn effective_status(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+) -> Result<CredentialStatusDto, ApiError> {
     let secrets = runtime.secrets();
     let configured = key_configured(runtime.id(), secrets.as_ref())
         .await
@@ -153,18 +158,25 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CredentialStatusDt
         } else {
             CONSEQUENCE.to_string()
         },
+        hub_link: state.hub_identity().is_some(),
     })
 }
 
 /// `GET …/credential` — whether this company has its own key, and which identity
 /// its brokered calls present.
-async fn get_status(company: ScopedCompany) -> Result<Json<CredentialStatusDto>, ApiError> {
-    Ok(Json(effective_status(company.runtime.as_ref()).await?))
+async fn get_status(
+    State(state): State<AppState>,
+    company: ScopedCompany,
+) -> Result<Json<CredentialStatusDto>, ApiError> {
+    Ok(Json(
+        effective_status(&state, company.runtime.as_ref()).await?,
+    ))
 }
 
 /// `PUT …/credential` — set / rotate / clear the company's write-only TinyHumans
 /// credential. **Admin-only** — see the module docs.
 async fn set_key(
+    State(state): State<AppState>,
     company: AdminScopedCompany,
     Json(body): Json<SetKey>,
 ) -> Result<Json<MutationResponse>, ApiError> {
@@ -194,7 +206,7 @@ async fn set_key(
     };
     journal(&company, change).await?;
     Ok(Json(MutationResponse {
-        status: effective_status(runtime).await?,
+        status: effective_status(&state, runtime).await?,
         note: SWITCH_NOTE.to_string(),
     }))
 }
