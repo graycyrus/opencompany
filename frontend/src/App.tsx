@@ -87,6 +87,61 @@ function readHubToken(): string | null {
   return params.get("token");
 }
 
+/**
+ * Reads `?key=link&state=&code=` off a key-grant landing.
+ *
+ * The console's own marker, deliberately distinct from the hub's `key=auth`:
+ * both legs come back to this same origin, and one mints a session while the
+ * other mints a company credential. Confusing them would mean redeeming a grant
+ * code as a sign-in, or vice versa.
+ *
+ * **Pure**, like its two neighbours, because StrictMode double-invokes the
+ * `useMemo` this runs in — stripping the URL here would make the second
+ * invocation read a cleaned URL and drop the code.
+ *
+ * Not redeemed here. Unlike a magic link this is not a session credential and
+ * does not gate the boot, so it is stashed and left to the page that asked for
+ * it, where the spinner belongs on the card the operator clicked.
+ */
+function readKeyLink(): { state: string; code: string } | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("key") !== "link") return null;
+  const state = params.get("state");
+  const code = params.get("code");
+  if (!state || !code) return null;
+  return { state, code };
+}
+
+/** Whether the hub bounced a key grant back refused (or the person cancelled). */
+function readKeyLinkError(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("key") === "link" && params.get("error") !== null;
+}
+
+/**
+ * Strips the key-grant result out of the address bar.
+ *
+ * Same `replaceState` discipline as `clearHubResultFromUrl`, and for the same
+ * reason: `code` is a live single-use credential, and a back button that
+ * restored it — or a `Referer` that carried it — would hand it to something
+ * else. `company` is kept; it is not a credential and is what scopes the
+ * console.
+ */
+export function clearKeyLinkFromUrl(): void {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("key") !== "link") return;
+  params.delete("state");
+  params.delete("code");
+  params.delete("error");
+  params.delete("key");
+  const query = params.toString();
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
+}
+
 /** Whether the hub bounced the sign-in back with a failure rather than a token. */
 function readHubError(): boolean {
   const params = new URLSearchParams(window.location.search);
