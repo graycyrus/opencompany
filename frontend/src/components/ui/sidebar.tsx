@@ -480,12 +480,20 @@ function SidebarGroup({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-group"
       data-sidebar="group"
-      // `px-3 py-1` — the group's gutter matches the header's, so a nav row's
+      // `px-3 pb-1` — the group's gutter matches the header's, so a nav row's
       // icon and the switcher's glyph stand on the same vertical line, and the
       // group contributes only rhythm vertically. The rail narrows to `px-2`
       // for the reason `SidebarHeader` gives.
+      //
+      // No padding on TOP. `SidebarContent` already separates its children with
+      // `gap-1`, so a `pt-1` here stacked on that gap and pushed every group
+      // away from whatever sits above it — most visibly the first group under
+      // the nav buttons, which read as belonging to a different column than the
+      // rows they follow. Spacing between groups is the parent's job; this
+      // keeps only the trailing breath that stops the last row of one group
+      // touching the next group's label.
       className={cn(
-        "relative flex w-full min-w-0 flex-col px-3 py-1 group-data-[collapsible=icon]:px-2",
+        "relative flex w-full min-w-0 flex-col px-3 pb-1 group-data-[collapsible=icon]:px-2",
         className,
       )}
       {...props}
