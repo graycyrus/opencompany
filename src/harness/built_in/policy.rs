@@ -4385,8 +4385,10 @@ mod tests {
         use openhuman_core::openhuman::tools::traits::Tool as _;
 
         let queue = ApprovalRequestQueue::default();
-        let tool =
-            crate::harness::built_in::blockers::EscalateToHumanTool::new(queue.clone(), "engineer".to_string());
+        let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
+            queue.clone(),
+            "engineer".to_string(),
+        );
 
         let first = tool
             .execute(serde_json::json!({ "question": "staging or prod?" }))
@@ -4411,7 +4413,11 @@ mod tests {
             2,
             "the repeated question collapses into the card already queued, but the distinct \
              question still gets its own: {:?}",
-            drained.requests.iter().map(|r| &r.reason).collect::<Vec<_>>()
+            drained
+                .requests
+                .iter()
+                .map(|r| &r.reason)
+                .collect::<Vec<_>>()
         );
     }
 

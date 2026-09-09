@@ -757,7 +757,11 @@ mod tool_test {
             drained.requests.len(),
             2,
             "both concurrent questions must reach the queue, not just whichever wins the race: {:?}",
-            drained.requests.iter().map(|r| &r.reason).collect::<Vec<_>>()
+            drained
+                .requests
+                .iter()
+                .map(|r| &r.reason)
+                .collect::<Vec<_>>()
         );
     }
 
