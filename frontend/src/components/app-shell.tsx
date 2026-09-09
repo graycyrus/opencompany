@@ -3730,46 +3730,14 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
-          {/* Show/hide the sidebar, on the corner it acts on.
-
-              It used to sit in the sidebar's own header, which put the control
-              that *hides* a panel inside the panel it hides — collapsing the
-              column took the button with it. On the inset's leading corner it
-              stays put through both states and points at the edge that moves.
-
-              Here rather than inside `ContentSurface`: this control needs
-              `useSidebar`, and that card is deliberately free of sidebar
-              context — every page renders it, including ones with no sidebar at
-              all. Centred ON the card's leading border, not inside it:
-              `left-(--frame-inset)` puts it at the edge and `-translate-x-1/2`
-              straddles it. Inside the card it sat over the page's own heading
-              and read as part of the content; on the seam it reads as chrome
-              belonging to the boundary it moves. Absolutely positioned, so it
-              costs the page no layout and no view makes room for it.
-
-              `hidden md:block` — desktop only, and the breakpoint is not an
-              approximation. `useIsMobile` flips at exactly 768px, which is
-              Tailwind's `md`, so this gate is the precise complement of the
-              `!isMobile` that `SidebarCollapseButton` already reasons about:
-              the two agree by construction rather than by coincidence.
-
-              Below it the sidebar is a sheet, not a column, and it already has
-              a control — the `md:hidden` "Toggle sidebar" bar at the foot of
-              this inset. Leaving this one on made that two controls for one
-              job on one viewport, and the second one was wrong in both of its
-              halves: `SidebarCollapseButton` deliberately treats mobile as
-              not-collapsed, so with the sheet closed it read "Collapse
-              sidebar" and showed the close icon while pressing it OPENED the
-              sheet. Teaching it `openMobile` and retiring the bar was the
-              other way out and is the worse one — this button is absolutely
-              positioned over the content, and issue #1265 moved the mobile
-              trigger into a reserved row precisely to stop a floating control
-              winning the hit-test in that corner. */}
-          <div className="pointer-events-none absolute top-4 left-(--frame-inset) z-20 hidden -translate-x-1/2 md:block">
-            <div className="pointer-events-auto">
-              <SidebarCollapseButton />
-            </div>
-          </div>
+          {/* The sidebar toggle was here — absolutely positioned over this
+              inset, straddling the content card's leading edge. It is a glyph
+              in the window's title row now, beside the switcher whose column it
+              acts on: no `pointer-events` dance, no z-index over the page, and
+              a shape it shares with the four controls next to it. The `md`
+              gate travelled with it, unchanged and for the unchanged reason —
+              below that width the sidebar is a sheet with its own trigger in
+              this inset, and both of this button's labels are wrong for one. */}
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the
