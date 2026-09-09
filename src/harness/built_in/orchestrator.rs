@@ -155,6 +155,7 @@ pub const QUERY_COMPANY_TOOL: &str = "query_company";
 // The `spawn_task` / `delegate_to_desk` names are the brain-agnostic canonical
 // constants (issue #176) — re-exported here so the harness path and the hosted
 // path share one definition and cannot drift.
+use crate::runtime::assignee;
 use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::delegation_tools;
 pub use crate::runtime::delegation_tools::{
@@ -2660,12 +2661,22 @@ fn summarize_event(event: &CompanyEvent) -> String {
 /// [`Delegation::SpawnTask`]; the harness brain writes the card on drain.
 pub struct SpawnTaskTool {
     queue: DelegationQueue,
+    company: CompanyId,
+    /// The company store, read at call time so the roster an `assignee` is
+    /// grounded against is the **current** one — the same reasoning as
+    /// [`DelegateToDeskTool::store`].
+    store: Arc<dyn CompanyStore>,
 }
 
 impl SpawnTaskTool {
-    /// Builds the tool over the shared delegation queue.
-    pub fn new(queue: DelegationQueue) -> Self {
-        Self { queue }
+    /// Builds the tool over the shared delegation queue and the company store
+    /// it grounds an `assignee` against.
+    pub fn new(queue: DelegationQueue, company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
+        Self {
+            queue,
+            company,
+            store,
+        }
     }
 }
 
@@ -2708,12 +2719,55 @@ impl Tool for SpawnTaskTool {
             .filter(|a| !a.is_empty())
             .map(str::to_string);
 
+        // Ground the target before queuing anything, on the same terms
+        // `delegate_to_desk`/`delegate_to_teammate` already do (issue #272):
+        // a name that resolves to nobody is refused here, in the model's own
+        // turn, rather than surviving as a queued card the drain silently
+        // opens unowned with no signal anywhere that the assignee was bogus.
+        let owner = match assignee.as_deref() {
+            Some(name) => match self.store.load(&self.company).await {
+                Ok(Some(record)) => {
+                    let resolution = assignee::resolve(&record, name);
+                    if !resolution.names_something_real() {
+                        tracing::info!(
+                            company = %self.company,
+                            "[spawn_task] refused an assignee naming nobody on the roster"
+                        );
+                        return Ok(ToolResult::error(format!(
+                            "Could not open the card: {}",
+                            resolution.rejection().unwrap_or_else(|| format!(
+                                "\"{name}\" is not on this company's roster"
+                            ))
+                        )));
+                    }
+                    resolution.canonical().map(str::to_string)
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        "[spawn_task] could not ground assignee: this company's record is not \
+                         there"
+                    );
+                    Some(name.to_string())
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        error = %err,
+                        "[spawn_task] could not read the company record to ground the assignee"
+                    );
+                    Some(name.to_string())
+                }
+            },
+            None => None,
+        };
+
         let effect = format!("the card \"{title}\" was NOT opened");
         match self.queue.push_within_cap(
             Delegation::SpawnTask {
                 title: title.clone(),
                 note,
-                assignee,
+                assignee: owner,
             },
             MAX_DELEGATIONS_PER_TURN,
             NO_DEPTH_BOUND,
@@ -3548,7 +3602,11 @@ pub fn delegation_tools(
     store: Arc<dyn CompanyStore>,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(SpawnTaskTool::new(queue.clone())),
+        Box::new(SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+        )),
         Box::new(DelegateToDeskTool::new(
             queue.clone(),
             company.clone(),
@@ -3588,7 +3646,11 @@ pub fn member_delegation_tools(
     scope: MemberScope,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(SpawnTaskTool::new(queue.clone())),
+        Box::new(SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+        )),
         Box::new(DelegateToDeskTool::for_member(
             queue.clone(),
             company.clone(),
@@ -6322,7 +6384,11 @@ mod tests {
 
         let cases: Vec<(Box<dyn Tool>, Value, &str)> = vec![
             (
-                Box::new(SpawnTaskTool::new(queue.clone())),
+                Box::new(SpawnTaskTool::new(
+                    queue.clone(),
+                    CompanyId::new("acme"),
+                    store.clone(),
+                )),
                 json!({ "title": "Ship it" }),
                 "the card \"Ship it\" was NOT opened",
             ),
@@ -6381,10 +6447,14 @@ mod tests {
     async fn the_triage_refusal_says_it_read_a_question_and_offers_a_way_forward() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim_answering();
-        let refused = SpawnTaskTool::new(queue.clone())
-            .execute(json!({ "title": "Build the landing page" }))
-            .await
-            .expect("execute");
+        let refused = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        )
+        .execute(json!({ "title": "Build the landing page" }))
+        .await
+        .expect("execute");
         assert!(refused.is_error, "{}", refused.text());
         let text = refused.text();
 
@@ -6424,10 +6494,14 @@ mod tests {
     #[tokio::test]
     async fn the_unwired_refusal_still_says_the_context_cannot_do_board_work() {
         let queue = DelegationQueue::default();
-        let refused = SpawnTaskTool::new(queue.clone())
-            .execute(json!({ "title": "Ship it" }))
-            .await
-            .expect("execute");
+        let refused = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        )
+        .execute(json!({ "title": "Ship it" }))
+        .await
+        .expect("execute");
         let text = refused.text();
         assert!(refused.is_error, "{text}");
         assert!(
@@ -6487,7 +6561,11 @@ mod tests {
     async fn spawn_task_refuses_past_the_cap_instead_of_promising_a_discarded_card() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         for i in 0..MAX_DELEGATIONS_PER_TURN {
             let ok = tool
                 .execute(json!({ "title": format!("item {i}") }))
@@ -6587,7 +6665,14 @@ mod tests {
     async fn spawn_task_tool_enqueues_a_task() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
+        // An empty store loads no record, so assignee grounding fails open and
+        // the string is queued exactly as typed — isolating this test to the
+        // plain enqueue path. Grounding itself is covered separately below.
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         tool.execute(json!({ "title": "Ship it", "note": "soon", "assignee": "eng" }))
             .await
             .expect("execute");
@@ -6605,7 +6690,11 @@ mod tests {
     #[tokio::test]
     async fn spawn_task_tool_requires_a_title() {
         let queue = DelegationQueue::default();
-        let tool = SpawnTaskTool::new(queue.clone());
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         assert!(tool.execute(json!({ "note": "no title" })).await.is_err());
         assert_eq!(queue.queued(), 0);
     }
@@ -13168,52 +13257,26 @@ name = "Morning"
         );
     }
 
-    /// FAIL-axis (HT-074): `spawn_task`'s `assignee` is queued as a raw
-    /// string with no grounding at all — unlike `delegate_to_desk` and
-    /// `delegate_to_teammate`, which refuse an unresolvable target before
-    /// anything is queued (issue #272). This pins the CURRENT behaviour: a
-    /// bogus assignee is staged unchecked.
+    /// INPUT/STATE-axis (HT-074): `spawn_task` now grounds `assignee` on the
+    /// same terms `delegate_to_desk`/`delegate_to_teammate` already do (issue
+    /// #272) — a name that resolves to nobody on the roster is refused here,
+    /// in the model's own turn, rather than surviving as a queued card the
+    /// drain silently opens unowned with no signal anywhere that the assignee
+    /// was bogus.
+    ///
+    /// The store is seeded (not empty) so grounding actually resolves the
+    /// roster rather than taking the fail-open path — an empty store would
+    /// pass this test for the wrong reason.
     #[tokio::test]
-    async fn spawn_task_queues_an_unresolvable_assignee_with_no_grounding_check() {
+    async fn spawn_task_refuses_an_assignee_that_names_nobody_on_the_roster() {
+        let company = CompanyId::new("acme");
         let queue = DelegationQueue::default();
         let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
-
-        let outcome = tool
-            .execute(json!({
-                "title": "Investigate the outage",
-                "assignee": "totally-nonexistent-agent-id",
-            }))
-            .await
-            .unwrap();
-        assert!(
-            !outcome.is_error,
-            "current behaviour: spawn_task accepts a bogus assignee unchecked: {}",
-            outcome.text()
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            Arc::new(MemStore::seeded(seeded_record(&company))),
         );
-        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
-        assert_eq!(
-            drained,
-            vec![Delegation::SpawnTask {
-                title: "Investigate the outage".to_string(),
-                note: None,
-                assignee: Some("totally-nonexistent-agent-id".to_string()),
-            }],
-            "the unresolvable assignee is queued exactly as typed, with nothing having checked \
-             it against the roster"
-        );
-    }
-
-    /// The safe behaviour HT-074 asks for: `spawn_task` should refuse an
-    /// `assignee` naming nobody on the roster, the same way
-    /// `delegate_to_desk`/`delegate_to_teammate` already refuse an ungrounded
-    /// target, rather than queuing it for the drain to discover.
-    #[tokio::test]
-    #[ignore = "spawn_task does not ground `assignee`; a bogus target is queued unchecked (HT-074)"]
-    async fn spawn_task_should_refuse_an_assignee_that_names_nobody_on_the_roster() {
-        let queue = DelegationQueue::default();
-        let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
 
         let outcome = tool
             .execute(json!({
@@ -13226,7 +13289,211 @@ name = "Morning"
             outcome.is_error,
             "an assignee naming nobody on the roster must be refused before queuing"
         );
+        assert!(
+            outcome.text().contains("totally-nonexistent-agent-id"),
+            "the refusal names the target the model typed: {}",
+            outcome.text()
+        );
         assert_eq!(queue.queued(), 0, "nothing should have been staged");
+    }
+
+    /// The other half: a real teammate id grounds and queues under its
+    /// canonical form, and a blank/absent `assignee` opens the card unowned
+    /// without ever touching the store.
+    #[tokio::test]
+    async fn spawn_task_grounds_a_real_teammate_and_leaves_a_blank_assignee_alone() {
+        let company = CompanyId::new("acme");
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "eng"
+role = "Engineer"
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            manifest,
+            ..seeded_record(&company)
+        };
+        let store = Arc::new(MemStore::seeded(record));
+
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), company.clone(), store.clone());
+        let grounded = tool
+            .execute(json!({ "title": "Fix the outage", "assignee": "ENG" }))
+            .await
+            .expect("execute");
+        assert!(!grounded.is_error, "{}", grounded.text());
+
+        let unassigned_tool = SpawnTaskTool::new(queue.clone(), company, store);
+        let unassigned = unassigned_tool
+            .execute(json!({ "title": "Untargeted work" }))
+            .await
+            .expect("execute");
+        assert!(!unassigned.is_error, "{}", unassigned.text());
+
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![
+                Delegation::SpawnTask {
+                    title: "Fix the outage".to_string(),
+                    note: None,
+                    assignee: Some("eng".to_string()),
+                },
+                Delegation::SpawnTask {
+                    title: "Untargeted work".to_string(),
+                    note: None,
+                    assignee: None,
+                },
+            ],
+            "a display name grounds to the canonical roster id, and no assignee is queued as \
+             None rather than being pushed through the resolver at all"
+        );
+    }
+
+    /// A `CompanyStore` that genuinely partitions by company — unlike
+    /// `MemStore`, which ignores the `id` argument and answers for whichever
+    /// company it was seeded with regardless of who asks. Needed to prove
+    /// `spawn_task`'s grounding actually scopes its lookup to `self.company`
+    /// rather than happening to work because every test fixture only ever
+    /// holds one company's record.
+    struct TenantScopedCompanyStore {
+        records: std::collections::HashMap<String, CompanyRecord>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompanyStore for TenantScopedCompanyStore {
+        async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(self.records.get(id.as_ref()).cloned())
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// AUTH-axis (HT-074): `spawn_task`'s grounding must scope its roster
+    /// lookup to the tool's OWN company (`self.company`), never to a
+    /// different one — a teammate id that is real, but only on ANOTHER
+    /// company's roster, must be refused exactly as an invented id would be,
+    /// not accidentally admitted through a leaked cross-tenant read.
+    #[tokio::test]
+    async fn spawn_task_grounds_only_against_its_own_companys_roster() {
+        let acme = CompanyId::new("acme");
+        let beta = CompanyId::new("beta");
+        let beta_manifest = toml::from_str(
+            r#"
+[company]
+name = "Beta"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "eng"
+role = "Engineer"
+"#,
+        )
+        .expect("valid manifest");
+        let mut records = std::collections::HashMap::new();
+        records.insert("acme".to_string(), seeded_record(&acme));
+        records.insert(
+            "beta".to_string(),
+            CompanyRecord {
+                manifest: beta_manifest,
+                ..seeded_record(&beta)
+            },
+        );
+        let store = Arc::new(TenantScopedCompanyStore { records });
+
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), acme, store);
+
+        let outcome = tool
+            .execute(json!({ "title": "Fix the outage", "assignee": "eng" }))
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_error,
+            "a teammate id real only on a DIFFERENT company's roster must be refused, not \
+             leaked in: {}",
+            outcome.text()
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// FAIL-axis (HT-074): when the company record cannot be read at all —
+    /// the same store failure `DelegateToDeskTool`/`DelegateToTeammateTool`
+    /// fail OPEN on for the orchestrator's own unrestricted copy (see
+    /// `Grounding::ungrounded`) — `spawn_task` must fail open too, not refuse
+    /// to open a card just because the roster could not be checked this
+    /// instant. The assignee is queued exactly as typed, unresolved, the same
+    /// as it has always been for a request with no assignee to ground.
+    #[tokio::test]
+    async fn spawn_task_fails_open_when_the_company_record_cannot_be_read() {
+        struct BrokenStore;
+        #[async_trait::async_trait]
+        impl CompanyStore for BrokenStore {
+            async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+                Err(crate::OpenCompanyError::Store("store is down".to_string()))
+            }
+            async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+                Ok(Vec::new())
+            }
+            async fn append_ledger(
+                &self,
+                _id: &CompanyId,
+                _entry: LedgerEntry,
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), company, Arc::new(BrokenStore));
+
+        let outcome = tool
+            .execute(json!({ "title": "Investigate the outage", "assignee": "eng" }))
+            .await
+            .unwrap();
+        assert!(
+            !outcome.is_error,
+            "a store failure must not block opening the card: {}",
+            outcome.text()
+        );
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![Delegation::SpawnTask {
+                title: "Investigate the outage".to_string(),
+                note: None,
+                assignee: Some("eng".to_string()),
+            }],
+            "the assignee is queued as typed, unresolved, when grounding could not run at all"
+        );
     }
 
     /// FAIL-axis (HT-076): every fixture in this module hand-writes its
