@@ -136,27 +136,34 @@ async function openWhateverExists() {
   });
 }
 
-describe("the company switcher is a label, not a menu", () => {
-  it("opens nothing, even with two hosts and two companies to offer", async () => {
+describe("the switcher carries hosts, and only hosts", () => {
+  /**
+   * The asymmetry these pin.
+   *
+   * `HOSTS_HIDDEN` is off and `COMPANY_SWITCHING_HIDDEN` is still on, so the
+   * one control in the title row holds exactly one of its two groups. That is
+   * the arrangement most likely to be broken by accident: the switcher derives
+   * `menu` from both flags at once, so turning either one back on has to leave
+   * the other's group exactly where it was.
+   */
+  it("opens a menu, and is a real button for a keyboard to land on", async () => {
     await show(hosts([CONNECTION, SECOND]));
 
-    // The trigger still names the company — that is the whole surface now.
+    // The trigger still names the company, and now it also opens.
     expect(container.textContent).toContain("Acme");
-    // Nothing to click at all: not a disabled control, not a chevron over an
-    // empty popup, no button element for a keyboard to land on.
-    expect(container.querySelector("button")).toBeNull();
-    expect(container.querySelector("[aria-haspopup]")).toBeNull();
-    expect(container.querySelector("[aria-expanded]")).toBeNull();
+    const trigger = container.querySelector("button");
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute("aria-haspopup")).toBe("menu");
   });
 
-  it("offers no host roster, no way to add one and no way to manage one", async () => {
+  it("offers the host roster, a way to add one and a way to manage one", async () => {
     await show(hosts([CONNECTION, SECOND]));
     await openWhateverExists();
 
-    expect(find("host-row-c1")).toBeNull();
-    expect(find("host-row-c2")).toBeNull();
-    expect(find("host-switcher-add")).toBeNull();
-    expect(find("host-switcher-manage")).toBeNull();
+    expect(find("host-row-c1")).not.toBeNull();
+    expect(find("host-row-c2")).not.toBeNull();
+    expect(find("host-switcher-add")).not.toBeNull();
+    expect(find("host-switcher-manage")).not.toBeNull();
   });
 
   it("offers no company switching and no way to make another company", async () => {
@@ -169,18 +176,18 @@ describe("the company switcher is a label, not a menu", () => {
     expect(container.textContent).not.toContain("All companies");
   });
 
-  it("keeps the trigger a nameplate rather than a chevron over an empty popup", async () => {
-    // The trap this guards: `hostSwitcherMenu` still answers "any host at all
-    // opens a menu", and with every group hidden that would be a chevron over a
-    // popup with nothing in it. The switcher must not consult it alone.
+  it("opens the roster on a single host, not just on two", async () => {
+    // The rule `hostSwitcherMenu` states — any host at all opens a menu —
+    // reaches the rendered tree rather than stopping at the predicate. One
+    // host is the ordinary web console, and "Manage hosts" is the only way to
+    // rename or re-address the one it has.
     expect(hostSwitcherMenu(1)).toBe(true);
 
     await show(hosts([CONNECTION]));
     await openWhateverExists();
 
-    // Nothing was openable, so nothing opened.
-    expect(document.querySelector("[role='menu']")).toBeNull();
-    expect(find("host-switcher-add")).toBeNull();
+    expect(document.querySelector("[role='menu']")).not.toBeNull();
+    expect(find("host-switcher-add")).not.toBeNull();
   });
 });
 
