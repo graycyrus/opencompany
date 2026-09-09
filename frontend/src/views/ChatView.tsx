@@ -946,20 +946,43 @@ export function ChatView({
    * broken `/desks` permanently show `#general` while the URL claimed a real
    * desk (issue #370). Those surface as an error the operator can retry.
    */
+  /**
+   * The `(client, company)` the desks on screen were loaded for.
+   *
+   * What decides whether a reload may blank the list. See `loadDesks`.
+   */
+  const desksLoadedFor = useRef<{ client: unknown; company: string | null } | null>(null);
+
   const loadDesks = useCallback(async () => {
     const run = ++desksRun.current;
-    setDesks(null);
+    // Blank the list only when the SCOPE changed — a different host or a
+    // different company, where the desks on screen belong to somebody else and
+    // showing them for another moment would be a lie.
+    //
+    // A plain revisit is the other caller, and it must not blank anything.
+    // `roomVisits` re-runs this every time an operator returns to Room, and
+    // `setDesks(null)` sent `ChatView` down its `if (!desks)` branch — which
+    // renders a loading pane and, crucially, no rail. The rail is portalled
+    // into the app sidebar, so a refetch of data the operator already had tore
+    // the channel list out of the sidebar and put it back a frame later,
+    // resetting the sidebar's scroll position to the top every time they walked
+    // back into Room. The list is re-rendered from the answer either way; what
+    // is removed here is the empty frame in between.
+    const scope = desksLoadedFor.current;
+    if (!scope || scope.client !== client || scope.company !== company) setDesks(null);
     setDesksError(null);
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
       // An answered read is never the fallback set, empty or not.
       desksAreFallback.current = false;
+      desksLoadedFor.current = { client, company };
       setDesks(dtos.map(deskFromDto));
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
         desksAreFallback.current = true;
+        desksLoadedFor.current = { client, company };
         setDesks(defaultDesks());
         return;
       }
