@@ -559,6 +559,43 @@ export function InferenceSection({
   const storedProviderIsOpenRouter =
     status?.provider === "openrouter" || status?.provider === "managed";
 
+  /**
+   * Whether the **saved** config rides the platform's subscription proxy.
+   *
+   * The same test `wouldSaveProxied` below applies to the draft, minus the key
+   * the operator is currently typing — which is exactly the difference the
+   * catalog effect has to notice. Hoisted here because that effect runs before
+   * `wouldSaveProxied` is computed.
+   */
+  const savedIsProxied = !(status?.provider === "openrouter" && status.keyConfigured);
+
+  /**
+   * Whether typing a key has pointed the draft at a *different endpoint* than
+   * the one the catalog was read from.
+   *
+   * A company on the platform proxy — `managed`, or `openrouter` with no key —
+   * resolves to the platform's own tier-native endpoint, whose catalog
+   * publishes `chat-v1` and friends. The moment an OpenRouter key is typed,
+   * Save would send the config straight to `api.openrouter.ai` instead, and
+   * that endpoint has never heard of `chat-v1` (Codex review on #2045). The
+   * catalog effect does not otherwise depend on the key, so the picker went on
+   * offering the proxy's tier names under a draft that no longer reaches the
+   * proxy; selecting one persisted it as a verbatim override that direct
+   * OpenRouter rejects.
+   *
+   * This is the same class of mistake as the `storedProviderIsOpenRouter`
+   * guard below and gets the same answer: the route can only be asked about the
+   * saved config, so a draft that has moved off it must be told the catalog no
+   * longer applies rather than shown one that does not describe where it is
+   * going.
+   *
+   * On its own this is only half the test — it says the *endpoint* moved, not
+   * that the catalog is unusable there. It is combined with the catalog's own
+   * `tierVocabulary` at the point of use below, because only a tier-native
+   * catalog publishes ids that are categorically wrong at direct OpenRouter.
+   */
+  const draftLeavesSavedEndpoint = savedIsProxied && key.trim().length > 0;
+
   useEffect(() => {
     let current = true;
     if (provider !== "openrouter") {
@@ -607,6 +644,51 @@ export function InferenceSection({
         // picker that reads as "this provider has no models".
         if (catalog.error) {
           setModelCatalog({ kind: "error", message: catalog.error });
+          // A previous successful read's mapping must not survive a failure:
+          // leaving it in state let a later `pickProvider` seed the form from
+          // ids this endpoint never confirmed, and Save persisted them
+          // (CodeRabbit review on #2045).
+          //
+          // Cleared to `null` — "no catalog has been read" — and deliberately
+          // not to the `{}` the failing response literally carries. The two are
+          // different facts here for the same reason `tierVocabulary` is `null`
+          // rather than `"unknown"` when the catalog cannot be read: `{}` is a
+          // *confirmed* empty mapping, which `presetFor` honours by prefilling
+          // nothing at all, whereas an endpoint that did not answer has
+          // confirmed nothing. Collapsing the two discards the host's own
+          // `status.defaultTierModels` fallback on any blip, which is what the
+          // `seeds the switch form from status.defaultTierModels` regression in
+          // `inference-model-picker.test.ts` catches.
+          setCatalogTierDefaults(null);
+          return;
+        }
+        // The catalog describes the **saved** endpoint. When a key has been
+        // typed against a company still saved on the platform proxy, Save would
+        // go direct to OpenRouter instead — and a *tier-native* catalog's ids
+        // are precisely the ones that endpoint cannot resolve, because
+        // resolving a tier server-side is what `tiers` means. Offering them
+        // here let an operator pick `chat-v1` and persist it as a verbatim
+        // override direct OpenRouter rejects (Codex review on #2045).
+        //
+        // Narrowed to `tiers` deliberately. A `concrete` or `unknown` catalog
+        // publishes ordinary `<author>/<model>` ids, which are not categorically
+        // invalid at another endpoint and which the operator may well be
+        // choosing on purpose — and withdrawing the picker for those would break
+        // the deliberate flow where typing a key is what makes the catalog
+        // select safe to offer at all (`useFreeText` below, and the two
+        // `inference.spec.ts` cases that encode it). The tier-native case is the
+        // one where the ids are known-wrong for where the draft is going.
+        if (draftLeavesSavedEndpoint && catalog.tierVocabulary === "tiers") {
+          setModelCatalog({
+            kind: "error",
+            message:
+              "A key sends this company straight to OpenRouter, so the subscription endpoint's " +
+              "tier list no longer applies. Save the key first to pick from OpenRouter's " +
+              "catalog, or enter model ids directly.",
+          });
+          // Nothing was read for the endpoint this draft would actually reach,
+          // so the prefill must not inherit the proxy's tier names either.
+          setCatalogTierDefaults(null);
           return;
         }
         setCatalogTierDefaults(catalog.tierDefaults ?? {});
@@ -627,13 +709,19 @@ export function InferenceSection({
             kind: "error",
             message: "The provider's model list could not be loaded. Enter model ids directly.",
           });
+          // A rejected request carries no answer at all — not even the empty
+          // map a 200-with-`error` supplies — so the prefill goes back to "no
+          // catalog has been read", which is what `null` means here. Holding a
+          // previous read's mapping through a failure is how unconfirmed ids
+          // reached Save (CodeRabbit review on #2045).
+          setCatalogTierDefaults(null);
         }
       });
 
     return () => {
       current = false;
     };
-  }, [client, company, provider, storedProviderIsOpenRouter]);
+  }, [client, company, provider, storedProviderIsOpenRouter, draftLeavesSavedEndpoint]);
 
   /**
    * Whether saving right now would ride the platform's subscription proxy
@@ -651,8 +739,7 @@ export function InferenceSection({
    * that follows can depend on it — hooks cannot come after a conditional
    * return.
    */
-  const wouldSaveProxied =
-    key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
+  const wouldSaveProxied = key.trim().length === 0 && savedIsProxied;
 
   /**
    * Drop a catalog-shaped tier override the moment the form would save

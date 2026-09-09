@@ -1120,3 +1120,126 @@ describe("the catalog belongs to the saved endpoint, not to the draft", () => {
     expect(shown).not.toContain("anthropic/claude-sonnet-5");
   });
 });
+
+describe("the catalog only describes the endpoint the draft would actually reach", () => {
+  function setValue(input: HTMLInputElement | null, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, value);
+    input?.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("refuses the subscription endpoint's catalog once a key points the draft at OpenRouter", async () => {
+    // A company on the platform proxy — `managed`, or `openrouter` with no key
+    // — resolves to the platform's own tier-native endpoint, whose catalog
+    // publishes `chat-v1` and friends. Typing an OpenRouter key sends Save
+    // straight to `api.openrouter.ai`, which has never heard of `chat-v1`.
+    //
+    // The catalog effect did not depend on the key, so the picker went on
+    // offering the proxy's tier names under a draft that no longer reached the
+    // proxy; selecting one persisted a verbatim override direct OpenRouter
+    // rejects (Codex review on #2045).
+    // A tier-native catalog, which is what the platform proxy publishes and the
+    // only kind whose ids are categorically wrong at direct OpenRouter. A
+    // `concrete`/`unknown` catalog is deliberately left alone — see the guard.
+    const inference = status("managed", {}, false);
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) =>
+        path.endsWith("/inference/models")
+          ? {
+              baseUrl: "https://api.tinyhumans.ai/openai/v1",
+              models: [{ id: "chat-v1", name: "Chat v1" }, { id: "agentic-v1", name: "Agentic v1" }],
+              tierVocabulary: "tiers" as const,
+              tierDefaults: { "chat-v1": "chat-v1", "agentic-v1": "agentic-v1" },
+            }
+          : inference,
+      put: async () => ({ status: inference, note: "" }),
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    // Keyless: the proxy's own catalog is the right one to show.
+    expect(container.querySelector("#inference-model-chat-v1")).not.toBeNull();
+
+    const keyInput = container.querySelector<HTMLInputElement>("input#inference-key");
+    expect(keyInput).not.toBeNull();
+    await act(async () => setValue(keyInput, "sk-not-a-real-key"));
+    await act(async () => {});
+
+    // The draft now reaches a different endpoint, so the tier-native catalog is
+    // withdrawn and the tier falls back to free text rather than a select full
+    // of tier names OpenRouter would reject.
+    expect(container.textContent).toContain("straight to OpenRouter");
+    const chat = container.querySelector<HTMLInputElement>("input#inference-model-chat-v1");
+    expect(chat).not.toBeNull();
+    expect(chat?.value ?? "").not.toContain("chat-v1");
+  });
+
+  it("drops a loaded catalog's tier defaults when a later read fails", async () => {
+    // A successful read leaves `catalogTierDefaults` populated. If a later read
+    // fails and that mapping survives, `pickProvider` seeds the form from ids
+    // the endpoint has not confirmed and Save persists them (CodeRabbit review
+    // on #2045).
+    //
+    // Cleared to `null` rather than `{}` on purpose: "we could not ask" is not
+    // "the endpoint confirmed it publishes nothing", and only the first leaves
+    // the host's own `status.defaultTierModels` standing as the fallback.
+    let failNext = false;
+    const inference = status("openrouter", {}, true, {
+      "chat-v1": "host-default/chat",
+      "reasoning-v1": "host-default/reasoning",
+      "agentic-v1": "host-default/agentic",
+      "vision-v1": "host-default/vision",
+    });
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/inference/models")) {
+          if (failNext) throw new Error("connection refused");
+          return catalogBody([{ id: "anthropic/claude-sonnet-5" }]);
+        }
+        return inference;
+      },
+      put: async () => ({ status: inference, note: "" }),
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    async function selectProvider(label: string) {
+      const trigger = container.querySelector("#inference-provider") as HTMLButtonElement;
+      await act(async () => {
+        trigger.click();
+      });
+      await act(async () => {});
+      const item = Array.from(
+        document.body.querySelectorAll('[data-slot="select-item"]'),
+      ).find((el) => el.textContent?.includes(label)) as HTMLElement | undefined;
+      await act(async () => {
+        item?.click();
+      });
+      await act(async () => {});
+    }
+
+    // Leave OpenRouter and come back with the endpoint now unreachable. This
+    // first return still seeds from the mapping the *successful* read left:
+    // `pickProvider` reads state synchronously on the click, before the fetch
+    // it triggers can resolve. What the fix changes is what is left behind
+    // afterwards — the failed read clears the mapping instead of keeping it.
+    failNext = true;
+    await selectProvider("Ollama");
+    await selectProvider("OpenRouter");
+
+    // So the guarantee is about the *next* preset: with the stale mapping
+    // cleared, this one falls back to the host's own defaults rather than ids
+    // the endpoint can no longer vouch for. Before the fix the mapping
+    // survived every failure and seeded this — and every later — switch with
+    // `anthropic/claude-sonnet-5`, which Save then persisted.
+    await selectProvider("Ollama");
+    await selectProvider("OpenRouter");
+
+    const chat = container.querySelector<HTMLInputElement>("input#inference-model-chat-v1");
+    expect(chat).not.toBeNull();
+    expect(chat?.value).toBe("host-default/chat");
+    expect(chat?.value).not.toContain("anthropic/claude-sonnet-5");
+  });
+});
