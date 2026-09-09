@@ -118,6 +118,32 @@ pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> Str
     )
 }
 
+/// Builds the hub URL that starts a **key grant** and comes back to `callback_url`.
+///
+/// The sign-in flow above proves who someone is. This one asks the hub to mint
+/// this company a key, and it is deliberately a different exchange rather than a
+/// reuse of the sign-in token.
+///
+/// The difference is what the tenant ends up holding. A sign-in hands this
+/// tenant a platform JWT carrying the person's whole ecosystem account, used for
+/// one request and dropped ([`HubIdentityExchange::identify`]). A key grant
+/// hands it a one-time code that redeems to exactly one scoped API key, and the
+/// secret that unlocks the code (`verifier`) never leaves this host — only its
+/// SHA-256 goes out, as `challenge`. So a code captured anywhere along the
+/// browser's path — history, a `Referer`, a shoulder — redeems nothing.
+///
+/// Shaped after OpenRouter's PKCE key exchange, which solves the same problem:
+/// give an application a key without a human copying one between two sites.
+pub fn key_grant_url(api_url: &str, callback_url: &str, challenge: &str, name: &str) -> String {
+    format!(
+        "{}/auth/key?callback_url={}&code_challenge={}&code_challenge_method=S256&name={}",
+        api_url.trim_end_matches('/'),
+        percent_encode(callback_url),
+        percent_encode(challenge),
+        percent_encode(name),
+    )
+}
+
 /// Percent-encodes `value` for use as a single query-string value.
 ///
 /// Hand-rolled rather than pulled in: the crate has no direct URL dependency in
@@ -155,6 +181,17 @@ pub trait HubIdentityExchange: Send + Sync {
     /// never store it, and never include it in an error. It is the caller's
     /// only proof of identity and would be replayable by anyone who read it.
     async fn identify(&self, token: &str) -> Result<HubIdentity>;
+
+    /// Trades a one-time grant `code` and its `verifier` for a TinyHumans key.
+    ///
+    /// The other half of [`key_grant_url`]. Returns the plaintext key, which the
+    /// hub emits exactly once and cannot reissue — so a caller that drops it has
+    /// to send the person through the flow again, and must store it before doing
+    /// anything else that can fail.
+    ///
+    /// Implementations must treat both arguments and the returned key as live
+    /// credentials: never log them, never echo them into an error.
+    async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String>;
 }
 
 /// An in-memory [`HubIdentityExchange`] for offline tests and local demos.
