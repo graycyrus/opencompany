@@ -10,13 +10,11 @@
 
 import {
   Activity,
-  BrainCircuit,
   ChartColumnBig,
   Globe,
   Search,
   type LucideIcon,
   Settings2,
-  Sparkles,
   UserCog,
 } from "lucide-react";
 
