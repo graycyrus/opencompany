@@ -282,6 +282,34 @@ export interface CreateDeskInput {
  * reason `SessionAuthor` captures its own: a desk renamed later must not
  * rewrite what the transcript said at the time.
  */
+/** One line of a crossing between a desk and somebody who does not work on it. */
+export interface ReferralLineDto {
+  authorId: string;
+  /** Empty for this desk's own agent, whom the console already names. */
+  authorLabel: string;
+  text: string;
+  /** True for the question going out, false for the answer coming back. */
+  outbound: boolean;
+}
+
+/**
+ * A crossing folded onto the report that brought it home.
+ *
+ * The relayed rows are dropped from the transcript — an agent who does not work
+ * on this desk did not speak on it — so without this the operator could see that
+ * a question crossed and never what was said either way. `lines.length` is the
+ * count the collapsed label shows.
+ */
+export interface ReferralConversationDto {
+  askerId: string;
+  otherId: string;
+  otherDeskId: string;
+  otherDeskName: string;
+  /** Whether a person was asked rather than a desk — `@name` vs `#desk`. */
+  direct: boolean;
+  lines: ReferralLineDto[];
+}
+
 export interface ReferredFromDto {
   deskId: string;
   deskName: string;
@@ -289,6 +317,8 @@ export interface ReferredFromDto {
   askerLabel: string;
   /** The asking message, so the chip can link straight to it. */
   sequence: number;
+  /** Whether a person was asked rather than a desk. */
+  direct?: boolean;
   /**
    * Which leg of the referral this message is: the outbound ask, or the answer
    * arriving home.
@@ -311,6 +341,7 @@ export interface ChatHistoryMessageDto {
   author: string;
   text: string;
   referredFrom?: ReferredFromDto;
+  referralConversation?: ReferralConversationDto;
   atMillis: number;
   mine: boolean;
   /**

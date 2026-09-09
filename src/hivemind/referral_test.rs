@@ -407,6 +407,66 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
     );
 }
 
+/// **Naming a PERSON puts the exchange in their pair thread, not on a desk.**
+///
+/// A crossing addressed to somebody by name is a conversation between the two
+/// of them. Run on the answerer's desk, it published a question that desk was
+/// never asked, in front of colleagues who had no part in it, in a transcript
+/// whose job is to record what THAT desk did.
+///
+/// The sibling test above pins the other half: `@#platform` is a question put
+/// to the desk, and still runs there so the room can settle it. Both forms are
+/// indistinguishable by the time the library hands back a `Referral` — each
+/// carries the target's home desk — so the two tests together are what keep
+/// the distinction from collapsing back into one.
+#[tokio::test]
+async fn naming_a_person_holds_the_exchange_in_their_pair_thread() {
+    let far = FarDesk::answering("The replica lag budget is 400ms.");
+    let (log, _outcome) = run(
+        REFERRING,
+        &[
+            (
+                "planner",
+                "!question #lag What is the replica lag budget? @sre",
+            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
+            ("critic", "!support #stage ^1 Staging fits the lag budget."),
+            ("planner", "!commit #stage ^3 Recorded."),
+        ],
+        Some(&far),
+    )
+    .await;
+
+    let pair = super::referral::pair_conversation("planner", "sre");
+    assert_eq!(pair, "dm:planner+sre", "sorted, so one thread not two");
+
+    // Both sides are there, in order, so the thread reads as the conversation
+    // it was.
+    let said = log.replies(&pair);
+    assert_eq!(said.len(), 2, "question then answer: {said:?}");
+    assert_eq!(said[0].0, "planner", "the asker speaks first");
+    assert!(said[0].1.contains("replica lag budget"), "{said:?}");
+    assert_eq!(said[1].0, "sre", "and the person asked answers");
+    assert!(said[1].1.contains("400ms"), "{said:?}");
+
+    // And the answerer's desk carries none of it. This is the whole point: the
+    // question was put to a person, so their colleagues are not made to read it.
+    assert!(
+        log.replies("platform").is_empty(),
+        "a desk that was never asked holds nothing: {:?}",
+        log.replies("platform")
+    );
+
+    // The room still gets the conclusion, under the room's own author — the
+    // property this must not break.
+    let home = log.replies("eng");
+    let returned = home
+        .iter()
+        .find(|(_, text)| text.contains("400ms"))
+        .expect("the answer still comes home");
+    assert_eq!(returned.0, HIVE_REFERRAL_AUTHOR, "{home:?}");
+}
+
 #[tokio::test]
 async fn the_answer_comes_home_under_the_room_so_it_can_never_be_counted_as_support() {
     // The property the whole design turns on. A row authored by a roster id
