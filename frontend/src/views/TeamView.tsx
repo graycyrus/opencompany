@@ -29,12 +29,6 @@ import { Label } from "@/components/ui/label";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import {
-  designTeammate,
-  draftNewAgentField,
-  refusalNotice,
-  type DraftRefusal,
-} from "@/api/agent-copilot";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
 import {
@@ -44,14 +38,6 @@ import {
   type MissedStep,
 } from "@/lib/member-feedback";
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
-import {
-  addTeammateSurface,
-  carriedDescribe,
-  describeBlocked as blockedReason,
-  designedTeammateFields,
-  heldFields,
-  type DesignedTeammateFields,
-} from "@/lib/team-add-surface";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
