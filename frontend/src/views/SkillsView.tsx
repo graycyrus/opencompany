@@ -48,7 +48,8 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
@@ -80,7 +81,19 @@ function categoryStyle(category: string): string {
  * extend with a custom skill. Every mutation writes through the API and updates
  * optimistically, reverting on error.
  */
+/** What you already have, and what you could add. `id` is what `?tab=` carries. */
+const SKILL_TABS = [
+  { id: "installed", label: "Installed" },
+  { id: "registry", label: "Registry" },
+] as const satisfies readonly PageTab<string>[];
+
+type SkillTab = (typeof SKILL_TABS)[number]["id"];
+
 export function SkillsView({ client, company }: Props) {
+  const [tab, setTab] = useHashTab<SkillTab>(
+    SKILL_TABS.map((t) => t.id),
+    "installed",
+  );
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -249,6 +262,19 @@ export function SkillsView({ client, company }: Props) {
             </Button>
           ) : undefined
         }
+        tabs={
+          <PageTabs
+            tabs={SKILL_TABS.map((t) =>
+              // The count rides the tab it describes rather than the label, so
+              // "Installed (0)" cannot read as a tab named for a number.
+              t.id === "installed" ? { ...t, count: skills.length } : t,
+            )}
+            value={tab}
+            onChange={setTab}
+            idBase="skills"
+            aria-label="Skill views"
+          />
+        }
       />
       <div className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6">
         {!canManage && (
@@ -292,13 +318,8 @@ export function SkillsView({ client, company }: Props) {
           </Alert>
         )}
 
-        <Tabs defaultValue="installed">
-          <TabsList>
-            <TabsTrigger value="installed">Installed ({skills.length})</TabsTrigger>
-            <TabsTrigger value="registry">Registry</TabsTrigger>
-          </TabsList>
 
-          <TabsContent value="installed" className="mt-4">
+        <PageTabPanel idBase="skills" id="installed" value={tab}>
             {loading ? (
               <div className="grid gap-3 sm:grid-cols-2">
                 <Skeleton className="h-32 rounded-xl" />
@@ -322,9 +343,9 @@ export function SkillsView({ client, company }: Props) {
                 </div>
               </>
             )}
-          </TabsContent>
+        </PageTabPanel>
 
-          <TabsContent value="registry" className="mt-4 space-y-3">
+        <PageTabPanel idBase="skills" id="registry" value={tab} className="space-y-3">
             <div className="relative sm:max-w-xs">
               <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search the registry…" className="pl-8" />
@@ -358,8 +379,7 @@ export function SkillsView({ client, company }: Props) {
                 ))}
               </div>
             )}
-          </TabsContent>
-        </Tabs>
+        </PageTabPanel>
       </div>
 
       <AddSkillDialog
