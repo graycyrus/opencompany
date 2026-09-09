@@ -45,7 +45,7 @@ const PER_CALL: Record<string, string> = {
   read_workspace_state: "Check its workspace's git status",
   mcp_call_tool: "Use a tool on a connected server",
   publish_artifact: "Publish a file it produced",
-  run_workflow: "Run one of its saved workflows",
+  run_workflow: "Run one of its saved automations",
 };
 
 /** The four an operator may grant standing on, so the #374 list renders them. */

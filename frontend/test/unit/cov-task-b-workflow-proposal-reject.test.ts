@@ -126,7 +126,7 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-describe("Reject a workflow proposal — offered to every member, not just an admin", () => {
+describe("Reject a automation proposal — offered to every member, not just an admin", () => {
   it("reaches the host's reject on click, with no admin-only gate", async () => {
     const post = vi.fn(async (_path: string, _body?: unknown) => ({ ...task(PROPOSAL), workflowProposal: undefined, column: "todo" }));
     const onReload = await render(clientAs(post));
@@ -157,7 +157,7 @@ describe("Reject a workflow proposal — offered to every member, not just an ad
   });
 });
 
-describe("Reject a workflow proposal — the host refuses it", () => {
+describe("Reject a automation proposal — the host refuses it", () => {
   it("keeps the proposal intact, shows the host's reason, and never claims success", async () => {
     const post = vi.fn(async () => {
       throw new ApiError(409, "conflict", "this card no longer has a proposal to reject", true);

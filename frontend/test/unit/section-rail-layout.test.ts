@@ -83,7 +83,7 @@ describe("which sections get a rail", () => {
     ]);
   });
 
-  it("draws none for Room or Flows, so their pane keeps its full width", () => {
+  it("draws none for Room or Automations, so their pane keeps its full width", () => {
     // Room's sub-navigation is the channel list, which is pinned in the sidebar;
     // Flows has none to move. A rail here would be 240px charged for nothing.
     for (const view of ["chat", "workflows"] as View[]) {

@@ -30,10 +30,10 @@ describe("where a graph node lives in the console", () => {
     });
   });
 
-  it("sends a workflow to the flow it names", () => {
+  it("sends a automation to the flow it names", () => {
     expect(destinationFor("flow:nightly-digest")).toEqual({
       hash: "#/workflows/nightly-digest",
-      label: "Open workflow",
+      label: "Open automation",
     });
   });
 
@@ -81,7 +81,7 @@ describe("where a graph node lives in the console", () => {
       ["tool:slack@desk:eng", "a tool split per desk"],
       // A stage is a node inside a saved graph; the flow has an address, the
       // node within it does not.
-      ["step:nightly-digest:2", "a workflow stage"],
+      ["step:nightly-digest:2", "a automation stage"],
       // The company core is the page you are already on.
       ["self", "the company itself"],
     ])("answers null for %s (%s)", (nodeId) => {

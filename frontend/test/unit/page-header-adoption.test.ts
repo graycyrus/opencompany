@@ -73,8 +73,8 @@ const HAND_ROLLED: Record<string, { count: number; why: string }> = {
     count: 1,
     why:
       "The workflow detail identity row (#1135/#1138), pinned by " +
-      "`workflow-toolbar-layout.test.ts`: two rows, because identity-and-state and " +
-      "act-on-it are different questions. It names the open workflow, not the page — " +
+      "`automation-toolbar-layout.test.ts`: two rows, because identity-and-state and " +
+      "act-on-it are different questions. It names the open automation, not the page — " +
       "the page's own header is the index's, and that one is a `PageHeader`.",
   },
   "chat/ChatHeader.tsx": {

@@ -210,7 +210,7 @@ describe("the copilot's corrections, after a one-box create", () => {
     expect(notesBanner()).toBeNull();
   });
 
-  it("does not follow the operator onto a different workflow", async () => {
+  it("does not follow the operator onto a different automation", async () => {
     // The notes describe one graph. The selection-change sweep clears them the
     // moment the canvas is showing something else, the same way the version
     // conflict banner is cleared (issue #1704).
@@ -230,7 +230,7 @@ describe("the copilot's corrections, after a one-box create", () => {
         createElement(WorkflowsView, { client: c, company: "acme", sub: "other" }),
       );
     });
-    expect(notesBanner(), "corrections belong to the workflow they were made on").toBeNull();
+    expect(notesBanner(), "corrections belong to the automation they were made on").toBeNull();
   });
 
   it("does not follow the operator into another company", async () => {

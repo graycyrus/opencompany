@@ -23,7 +23,7 @@ describe("SKILLS_READ_ONLY_NOTE", () => {
     expect(SKILLS_READ_ONLY_NOTE).toMatch(/\bread\b/i);
   });
 
-  it("names the orchestrator as what executes a workflow", () => {
+  it("names the orchestrator as what executes a automation", () => {
     expect(SKILLS_READ_ONLY_NOTE).toMatch(/orchestrator/i);
   });
 

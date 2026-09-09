@@ -74,12 +74,12 @@ async function mockCompanySwitchApi(page: Page) {
   ];
   const workflows = {
     acme: [
-      { id: "shared-workflow", name: "Acme shared workflow" },
-      { id: "acme-default", name: "Acme default workflow" },
+      { id: "shared-workflow", name: "Acme shared automation" },
+      { id: "acme-default", name: "Acme default automation" },
     ],
     other: [
-      { id: "other-default", name: "Other default workflow" },
-      { id: "shared-workflow", name: "Other shared workflow" },
+      { id: "other-default", name: "Other default automation" },
+      { id: "shared-workflow", name: "Other shared automation" },
     ],
   };
 
@@ -128,7 +128,7 @@ async function mockCompanySwitchApi(page: Page) {
   });
 }
 
-test("workflows tab selection is preserved across tab switches (#864)", async ({ page, request }) => {
+test("automations tab selection is preserved across tab switches (#864)", async ({ page, request }) => {
   const stamp = Date.now();
   const firstId = `e2e-864-first-${stamp}`;
   const secondId = `e2e-864-second-${stamp}`;
@@ -186,14 +186,14 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
 // import `@/product-scope`: this project supplies no `@/*` alias, deliberately
 // (see `tsconfig.e2e.json`). When company switching comes back, clear the flag
 // and drop this `.skip`.
-test.skip("a company switch does not reuse the previous company's workflow route (#864)", async ({
+test.skip("a company switch does not reuse the previous company's automation route (#864)", async ({
   page,
 }) => {
   await mockCompanySwitchApi(page);
   await page.goto("/#/workflows/shared-workflow");
 
   await page.locator('[role="button"]').filter({ hasText: "Acme" }).click();
-  await expect(openWorkflowName(page)).toHaveText("Acme shared workflow", {
+  await expect(openWorkflowName(page)).toHaveText("Acme shared automation", {
     timeout: 30_000,
   });
 
@@ -218,5 +218,5 @@ test.skip("a company switch does not reuse the previous company's workflow route
   await expect(openWorkflowName(page)).toHaveCount(0);
   // `other` has a `shared-workflow` of its own, so a view that merely kept the
   // id would have resolved to a real graph and looked correct.
-  await expect(page.getByText("Other shared workflow", { exact: true })).toBeVisible();
+  await expect(page.getByText("Other shared automation", { exact: true })).toBeVisible();
 });

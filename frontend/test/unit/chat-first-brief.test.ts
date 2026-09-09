@@ -126,7 +126,7 @@ describe("the empty-channel first brief", () => {
       container
         .querySelector('[data-testid="composer-deliverable-workflow"]')
         ?.getAttribute("title"),
-    ).toBe("Turn this into a repeating workflow.");
+    ).toBe("Turn this into a repeating automation.");
   });
 
   it("resets a stale mode when the brief replaces the draft", () => {

@@ -128,7 +128,7 @@ describe("the sidebar's section table", () => {
     ]);
   });
 
-  it("calls the workflow surface Flows, over the view id every address uses", () => {
+  it("calls the automation surface Automations, over the view id every address uses", () => {
     // A view id is an address — every `#/workflows/<id>` a run row points at —
     // and renaming a row is not a reason to break them. "Work" has been the
     // `ledgers` view since #1284 for the same reason. The `data-tour` anchors

@@ -95,7 +95,7 @@ describe("every guided-tour stop can actually anchor", () => {
     expect(anchors).not.toContain("nav-observatory");
   });
 
-  it("says Flows and Room where the sidebar does", () => {
+  it("says Automations and Room where the sidebar does", () => {
     // The tour's prose is the other half of a rename. The anchors follow view
     // ids and so survive one silently — which is exactly how a step titled
     // "Workflows" would have gone on spotlighting a row labelled "Flows".

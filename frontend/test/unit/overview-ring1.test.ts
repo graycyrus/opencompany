@@ -195,7 +195,7 @@ describe("nobody is given a position the company did not declare", () => {
   });
 });
 
-describe("the workflow ring survives desks replacing the hardcoded departments", () => {
+describe("the automation ring survives desks replacing the hardcoded departments", () => {
   // This case used to assert "hangs one routine off every drawn desk": one
   // templated routine was dealt to each desk by position, so the count of flows
   // was the count of desks and every flow carried an `agentIds` list. Issue #601

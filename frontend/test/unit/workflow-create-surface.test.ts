@@ -224,7 +224,7 @@ describe("writeRefusalHandsOverForm", () => {
         // `fromHost` — the fourth argument — is the whole point: this is the
         // host's own `{error, code}` envelope, which is what makes "pick a
         // different id" an instruction rather than a hop's opinion.
-        new ApiError(409, "conflict", "A workflow with id `x` already exists.", true),
+        new ApiError(409, "conflict", "A automation with id `x` already exists.", true),
       ),
     ).toBe(true);
   });
@@ -297,7 +297,7 @@ describe("writeRefusalHandsOverForm", () => {
 describe("draftDecline", () => {
   it("calls a timed-out draft what it was", () => {
     const d = draftDecline(
-      "drafting the workflow ran out of time before a proposal was ready, so nothing " +
+      "drafting the automation ran out of time before a proposal was ready, so nothing " +
         "was drafted — try again, or create it by hand",
     );
     expect(d.kind).toBe("failure");
@@ -307,7 +307,7 @@ describe("draftDecline", () => {
 
   it("calls an errored draft what it was", () => {
     const d = draftDecline(
-      "drafting the workflow could not complete, so nothing was drafted: upstream 500",
+      "drafting the automation could not complete, so nothing was drafted: upstream 500",
     );
     expect(d.kind).toBe("failure");
     // The upstream's own words do not ride along — they are about the model
@@ -318,22 +318,22 @@ describe("draftDecline", () => {
   it("calls an exhausted step budget what it was", () => {
     expect(
       draftDecline(
-        "the workflow copilot reached its step budget before it could draft an " +
-          "acceptable workflow: a workflow needs exactly one `trigger` node",
+        "the automation copilot reached its step budget before it could draft an " +
+          "acceptable automation: a automation needs exactly one `trigger` node",
       ).kind,
     ).toBe("failure");
   });
 
   it("never repeats the gates at the operator", () => {
     const d = draftDecline(
-      "the described workflow could not be drafted into one that would be accepted: " +
-        "invalid request: a workflow needs exactly one `trigger` node to say what " +
+      "the described automation could not be drafted into one that would be accepted: " +
+        "invalid request: a automation needs exactly one `trigger` node to say what " +
         "starts it (found 0).",
     );
     expect(d.kind).toBe("failure");
     expect(d.message).not.toContain("trigger");
     expect(d.message).not.toContain("invalid request");
-    expect(d.message).toContain("could not turn that into a workflow");
+    expect(d.message).toContain("could not turn that into a automation");
     expect(d.message).toContain("start it on the canvas");
   });
 

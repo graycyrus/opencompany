@@ -132,7 +132,7 @@ describe("a agent's run history", () => {
     expect(container.querySelector('[data-testid="agent-run-theirs"]')).toBeNull();
   });
 
-  it("lists every attempt even when the board and workflow reads fail", async () => {
+  it("lists every attempt even when the board and automation reads fail", async () => {
     // The source lists only decide what a run is *called*. Withholding the
     // record because a card title could not be looked up would be withholding
     // the very thing the section exists to show.

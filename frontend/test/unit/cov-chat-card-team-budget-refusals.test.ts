@@ -44,7 +44,7 @@ vi.mock("sonner", () => ({
 }));
 
 const DESK_DTO = { id: "main", name: "main", description: "The main channel", members: [] as string[] };
-const OPERATOR_DTO = { id: "operator", name: "Operator", description: "Workflow reports" };
+const OPERATOR_DTO = { id: "operator", name: "Operator", description: "Automation reports" };
 const MEMBER_DTO = { id: "m1", name: "Ada", role: "engineer" };
 
 interface Overrides {

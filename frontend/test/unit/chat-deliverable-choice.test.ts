@@ -105,7 +105,7 @@ describe("client.chat — what the composer's choice puts on the wire", () => {
     expect(await chatBody(undefined)).toEqual({ text: "morning all" });
   });
 
-  it("still sends `workflow`, unchanged from #580", async () => {
+  it("still sends `automation`, unchanged from #580", async () => {
     expect(await chatBody("workflow")).toEqual({ text: "morning all", deliverable: "workflow" });
   });
 

@@ -42,7 +42,7 @@ import { operatorChannelFrom } from "@/views/chat/model";
 const CHANNEL = operatorChannelFrom({
   id: "operator",
   name: "Operator",
-  description: "Workflow reports and notifications",
+  description: "Automation reports and notifications",
 });
 
 const MEMBERS: TeamMember[] = [];

@@ -41,7 +41,7 @@ import { ChatView } from "@/views/ChatView";
 const OPERATOR_DTO = {
   id: "operator",
   name: "Operator",
-  description: "Workflow reports and notifications",
+  description: "Automation reports and notifications",
 };
 
 const DESK_DTO = {
@@ -207,7 +207,7 @@ describe("a read-only channel renders no composer", () => {
 
     expect(container.querySelector('[aria-label="Send"]')).toBeNull();
     expect(container.querySelector('[aria-label="What this message is for"]')).toBeNull();
-    for (const chip of ["Just chatting", "Do it once", "Build me the workflow"]) {
+    for (const chip of ["Just chatting", "Do it once", "Build me the automation"]) {
       expect(container.textContent).not.toContain(chip);
     }
   });

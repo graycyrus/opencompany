@@ -238,7 +238,7 @@ const OPERATOR_SECTIONS: ChannelSection[] = [
         id: "operator",
         name: "Operator",
         kind: "channel",
-        purpose: "Workflow reports.",
+        purpose: "Automation reports.",
         system: true,
       },
     ],

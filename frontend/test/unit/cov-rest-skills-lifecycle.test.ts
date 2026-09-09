@@ -95,7 +95,7 @@ describe("a refused uninstall puts the skill back", () => {
   it("re-lists the skill and reports the failure when the host refuses the uninstall", async () => {
     const client = clientWith({
       skills: [skill()],
-      post: () => Promise.reject(new Error("skill is pinned by an active workflow")),
+      post: () => Promise.reject(new Error("skill is pinned by an active automation")),
     });
     await show(client);
 

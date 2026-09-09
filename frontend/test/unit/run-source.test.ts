@@ -67,8 +67,8 @@ describe("a run that worked a card", () => {
   });
 });
 
-describe("a run whose card was opened by a workflow", () => {
-  it("is filed under the workflow, with the card on the second line", () => {
+describe("a run whose card was opened by a automation", () => {
+  it("is filed under the automation, with the card on the second line", () => {
     // The ordering that matters: the workflow decided the work and the card is
     // the mechanism. Filing these under the card title would bury the schedule
     // that is actually generating them behind thirty cards nobody wrote.
@@ -87,7 +87,7 @@ describe("a run whose card was opened by a workflow", () => {
     expect(source.href).toBe("#/workflows/wf-nightly?run=wfrun-9");
   });
 
-  it("still says 'workflow' when the workflow list could not be read", () => {
+  it("still says 'automation' when the automation list could not be read", () => {
     const source = runSource(
       run({ taskId: "card-7" }),
       index([task({ originWorkflowId: "wf-nightly" })]),

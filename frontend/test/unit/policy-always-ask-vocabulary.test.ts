@@ -247,7 +247,7 @@ describe("what the always-ask field suggests", () => {
     // now it speaks — scoped to what the served set can prove, not a blanket
     // "not a tool" claim.
     expect(container.textContent).toContain(
-      "shell doesn't match any of the workflow tools wired here.",
+      "shell doesn't match any of the automation tools wired here.",
     );
   });
 
@@ -329,7 +329,7 @@ describe("what the always-ask field suggests", () => {
     expect(container.textContent).not.toContain("match any");
   });
 
-  it("flags a typo against the complete registry, not just the workflow set", async () => {
+  it("flags a typo against the complete registry, not just the automation set", async () => {
     // `shel` gates nothing in `knownTools` (a case-insensitive, segment-bound
     // match), so the note speaks — with the confident wording the full registry
     // earns.

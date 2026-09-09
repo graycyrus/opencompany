@@ -29,7 +29,7 @@ function item(label: string): HTMLElement {
 }
 
 describe("the overview graph legend", () => {
-  it("gives stages a colour distinct from both workflows and AI agents", () => {
+  it("gives stages a colour distinct from both automations and AI agents", () => {
     const workflowIcon = item("Workflow").querySelector("svg");
     const stageIcon = item("Stage").querySelector("svg");
     const employeeIcon = item("AI agent").querySelector("svg");
