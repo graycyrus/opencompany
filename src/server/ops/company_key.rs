@@ -24,7 +24,7 @@
 
 use axum::Json;
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -73,6 +73,8 @@ const DEGRADED: &str = "No credential is set for this company and this instance 
 /// Builds the company-credential route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/credential", get(get_status).put(set_key))
+        .merge(scoped("/credential/link/start", post(start_link)))
+        .merge(scoped("/credential/link/finish", post(finish_link)))
 }
 
 /// The company's credential status as the console renders it. **Never** carries
@@ -90,6 +92,14 @@ struct CredentialStatusDto {
     /// The consequence of setting this key, stated plainly, or the degraded
     /// state when nothing can be presented at all.
     notice: String,
+    /// Whether this host can complete a one-click key grant against the hub.
+    ///
+    /// Reported alongside the status so the console can decide whether to offer
+    /// the button without a second request. `false` on every host with no hub
+    /// wired, which is where the paste field remains the only way in — so the
+    /// console renders exactly what it renders today rather than a button that
+    /// would 404.
+    hub_link: bool,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
