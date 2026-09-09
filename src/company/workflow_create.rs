@@ -7240,6 +7240,7 @@ to = "done"
             description: None,
             members: vec!["assistant".to_string()],
             responder: ResponderMode::default(),
+            hive: Default::default(),
         }];
         store.save(&stale_record).await.unwrap();
 
@@ -7348,6 +7349,7 @@ to = "done"
                 description: None,
                 members: vec!["assistant".to_string()],
                 responder: ResponderMode::default(),
+                hive: Default::default(),
             },
             OverlayDesk {
                 id: "sales_eu".to_string(),
@@ -7355,6 +7357,7 @@ to = "done"
                 description: None,
                 members: vec!["assistant".to_string()],
                 responder: ResponderMode::default(),
+                hive: Default::default(),
             },
         ];
         let store = store_of(MemStore::seeded(seed));

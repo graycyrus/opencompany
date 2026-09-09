@@ -1910,6 +1910,7 @@ mod test {
                 description: Some("Marketing pod".into()),
                 members: vec!["ceo".into()],
                 responder: crate::ports::types::ResponderMode::default(),
+                hive: Default::default(),
             },
             OverlayDesk {
                 id: "launch".into(),
@@ -1917,6 +1918,7 @@ mod test {
                 description: None,
                 members: vec!["ceo".into(), "cto".into()],
                 responder: crate::ports::types::ResponderMode::Auto,
+                hive: Default::default(),
             },
         ];
         // A workflow graph authored at runtime (issue #168). On a hosted tenant

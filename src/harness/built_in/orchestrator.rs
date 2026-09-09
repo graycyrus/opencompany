@@ -2396,6 +2396,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn summarize_event(event: &CompanyEvent) -> String {
     match event {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
+        // Structural only, like every arm here: which desks, never the content.
+        CompanyEvent::ReferralEnqueued {
+            from_desk, to_desk, ..
+        } => format!("referral {from_desk} → {to_desk}"),
         // Issue #983. Structural only, like every arm here: the turn id, which
         // is a minted identifier, and nothing else. Neither the desk nor the
         // failure reason is named — the desk is operator-authored free text on
@@ -3919,6 +3923,20 @@ impl Tool for AddAgentTool {
             .load(&self.company)
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.company.to_string()))?;
+
+        let roster_size = record
+            .manifest
+            .own_agents()
+            .map(|agent| agent.id.as_str())
+            .chain(record.overlay_agents.iter().map(|agent| agent.id.as_str()))
+            .filter(|id| !record.is_retired(id))
+            .count();
+        if roster_size >= crate::company::setup::MAX_AGENTS {
+            return Ok(ToolResult::error(format!(
+                "The company roster has reached its limit of {} teammates, so \"{name}\" was not added.",
+                crate::company::setup::MAX_AGENTS
+            )));
+        }
 
         // The BYO real-money namespaces are not inherited by a minted teammate
         // (#788/#789). What an unstated grant inherits depends on the minter:
@@ -12779,6 +12797,29 @@ name = "Morning"
         );
     }
 
+    /// `ReadTaskTool::description()` promises the model
+    /// "every attempt's status", and `read_task_bounds_rendered_attempts_...`
+    /// right above proves the render is truncated to `READ_TASK_ATTEMPTS_LIMIT`
+    /// rows. Both are real; they contradict each other. Pinning the exact
+    /// claim here means a future wording fix and a future cap change are each
+    /// forced to touch this test, instead of one silently drifting out of step
+    /// with the other the way they did to get here.
+    #[test]
+    fn read_task_description_claims_every_attempt_while_the_render_caps_at_the_limit() {
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), None, None, None);
+        assert!(
+            tool.description().contains("every attempt's status"),
+            "the schema text under test has changed; re-check whether the cap it once \
+             contradicted still exists: {}",
+            tool.description()
+        );
+        assert_eq!(
+            READ_TASK_ATTEMPTS_LIMIT, 10,
+            "the render is capped well under \"every attempt\" whenever a card has more retries \
+             than this"
+        );
+    }
+
     #[tokio::test]
     async fn read_task_bounds_the_rendered_title_so_attempts_and_output_stay_reachable() {
         let dir = tempfile::tempdir().unwrap();
@@ -13282,19 +13323,33 @@ name = "Morning"
         );
     }
 
-    /// FAIL-axis (HT-079): `company::setup::MAX_AGENTS` bounds only the
-    /// initial setup pass. `add_agent` checks name-uniqueness and clamps the
-    /// grant to the minter's own ceiling, but nothing bounds how many
-    /// teammates one company can accumulate afterward — the roster can grow
-    /// without limit.
+    /// The cap counts the company's own roster, and every load appends more.
+    ///
+    /// `apply_globals` puts the host's baseline teammates into `agents` on
+    /// every production load. A cap that counted the whole list would spend
+    /// most of its budget on teammates the company neither added nor can
+    /// remove, and a company with a designed roster would be refused its first
+    /// mint. The manifest here is built the way production builds one, so the
+    /// baseline is present and the count has to see past it.
     #[tokio::test]
-    async fn add_agent_has_no_cap_on_total_roster_size() {
+    async fn add_agent_counts_manifest_teammates_toward_the_roster_cap() {
         let company = CompanyId::new("acme");
-        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let mut record = seeded_record(&company);
+        let mut manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"designer\"\nrole = \"Designer\"\n",
+        )
+        .expect("valid manifest");
+        manifest.apply_globals();
+        assert!(
+            manifest.agents.len() > manifest.own_agents().count(),
+            "this test is only meaningful while the baseline is appended to a roster"
+        );
+        record.manifest = manifest;
+        let store = Arc::new(MemStore::seeded(record));
         let tool = unscoped_add_agent(company.clone(), store.clone());
 
-        let past_the_setup_cap = crate::company::setup::MAX_AGENTS + 10;
-        for i in 0..past_the_setup_cap {
+        for i in 1..crate::company::setup::MAX_AGENTS {
             let result = tool
                 .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
                 .await
@@ -13306,19 +13361,21 @@ name = "Morning"
             );
         }
 
+        let result = tool
+            .execute(json!({ "name": "One too many", "role": "Generalist" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{}", result.text());
         let record = store.load(&company).await.unwrap().expect("persisted");
         assert_eq!(
             record.overlay_agents.len(),
-            past_the_setup_cap,
-            "every mint landed — nothing in add_agent enforces a roster ceiling"
+            crate::company::setup::MAX_AGENTS - 1,
+            "refusal must not persist another teammate"
         );
     }
 
-    /// The safe behaviour HT-079 asks for: a roster already at the
-    /// setup-pass ceiling should refuse further minting, the same ceiling
-    /// `MAX_AGENTS` enforces when a company is first created.
+    /// A roster at the setup cap refuses further minting.
     #[tokio::test]
-    #[ignore = "add_agent enforces no roster-size cap; MAX_AGENTS only bounds the initial setup pass (HT-079)"]
     async fn add_agent_refuses_once_the_roster_reaches_the_setup_cap() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
@@ -13340,6 +13397,63 @@ name = "Morning"
             "a roster already at the setup cap must refuse further minting"
         );
     }
+
+    #[tokio::test]
+    async fn add_agent_does_not_count_retired_teammates_toward_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"designer\"\nrole = \"Designer\"\n",
+        )
+        .expect("valid manifest");
+        record.overlay_retired_agents.push("designer".to_string());
+        let store = Arc::new(MemStore::seeded(record));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        for i in 0..crate::company::setup::MAX_AGENTS {
+            let result = tool
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(!result.is_error, "{}", result.text());
+        }
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_add_agent_calls_cannot_exceed_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(YieldingStore {
+            record: StdMutex::new(Some(seeded_record(&company))),
+        });
+        let first = unscoped_add_agent(company.clone(), store.clone());
+        let second = unscoped_add_agent(company.clone(), store.clone());
+        for i in 1..crate::company::setup::MAX_AGENTS {
+            let result = first
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(!result.is_error, "{}", result.text());
+        }
+
+        let (a, b) = tokio::join!(
+            first.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+            second.execute(json!({ "name": "Alex", "role": "Support Lead" })),
+        );
+        let (a, b) = (a.expect("execute"), b.expect("execute"));
+        assert_eq!([a, b].iter().filter(|result| result.is_error).count(), 1);
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS
+        );
+    }
+
     /// A store that yields between reading a record and writing it back, so two
     /// concurrent `add_agent` calls genuinely interleave their load → push →
     /// save cycle rather than each running to completion uncontended.

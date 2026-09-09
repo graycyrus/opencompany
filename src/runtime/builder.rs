@@ -3110,7 +3110,8 @@ impl RuntimeBuilder {
                             // route both hold — enforces that cap on every run.
                             let supervisor = crate::runtime::RunSupervisor::with_limit(
                                 self.manifest.workflows.max_in_flight_runs,
-                            );
+                            )
+                            .with_emergency_gate(gate.clone());
                             run_supervisor = Some(supervisor.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)
@@ -3284,6 +3285,7 @@ impl RuntimeBuilder {
                                 }),
                             );
                             let mut deps = HarnessDeps {
+                                emergency_gate: Some(gate.clone()),
                                 // Issue #1861: the same store the console's and
                                 // the scheduler's runs badge through, so a run
                                 // the orchestrator's `run_workflow` started
@@ -8773,6 +8775,7 @@ needs_reason = true
                     description: None,
                     members: vec!["ceo".to_string()],
                     responder: crate::ports::types::ResponderMode::default(),
+                    hive: Default::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
@@ -9128,6 +9131,7 @@ needs_reason = true
                     description: None,
                     members: vec!["ceo".to_string()],
                     responder: crate::ports::types::ResponderMode::default(),
+                    hive: Default::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
@@ -9700,6 +9704,7 @@ needs_reason = true
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         record.overlay_desk_members.push(OverlayDeskMember {
             desk_id: "design".to_string(),
@@ -9985,6 +9990,34 @@ needs_reason = true
                 PolicyDecision::RequireApproval
             ),
             "the injected readonly gate must keep its own policy, not the carried override"
+        );
+    }
+
+    /// Issue #1925: approvals are explicit-only in production — the
+    /// manifest-`[policy]` HITL gate is deliberately dead weight, disabled at
+    /// the one construction site nothing else reaches
+    /// (`RuntimeBuilder::build`'s default, uninjected gate). Nothing else in
+    /// the type system pins that wiring: `with_policy_hitl_disabled` is a
+    /// plain builder call on `ManifestApprovalGate`, so deleting it would
+    /// compile clean and silently resurrect policy-driven parking in every
+    /// company that never explicitly injects a gate. Pinned here so that
+    /// deletion instead breaks this test.
+    #[tokio::test]
+    async fn the_default_uninjected_gate_ships_with_policy_hitl_disabled() {
+        let dir = tmp_home("oc-policy-hitl-default-");
+        let manifest = parse(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [policy]\nmode = \"supervised\"\n",
+        );
+        let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            !runtime.approval_gate.policy_hitl_enabled(),
+            "the production default build must disable the manifest-policy HITL gate; a \
+             company that injects no gate of its own must never fall back to it"
         );
     }
 }

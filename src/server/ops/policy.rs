@@ -78,6 +78,21 @@ use crate::server::users::admin::require_admin;
 pub(crate) const TAKES_EFFECT: &str =
     "on the next turn — a turn already running finishes under the previous tier";
 
+/// The largest `alwaysApprove` list `PUT {scope}/policy` accepts.
+///
+/// Well past any real always-ask list — this build declares a few dozen tools
+/// (`known_tools` above) — so it bounds the write without narrowing what an
+/// operator can actually express. The list is stored verbatim and re-served on
+/// every `GET`, so an unbounded one is a standing cost on every read, not just
+/// the write that set it.
+const MAX_ALWAYS_APPROVE_ENTRIES: usize = 200;
+
+/// The largest single `alwaysApprove` entry `PUT {scope}/policy` accepts, in
+/// bytes. A gateable tool name is a short identifier (`payment.send`); this
+/// leaves ample room for one still unknown to this build while refusing an
+/// entry that could not be a tool name by any stretch.
+const MAX_ALWAYS_APPROVE_ENTRY_LEN: usize = 200;
+
 /// Builds the policy route fragment.
 pub fn router() -> Router<AppState> {
     scoped(
@@ -386,6 +401,28 @@ async fn set_policy(
         && !(1..=8_760).contains(&hours)
     {
         return Err(refusal("`approvalTtlHours` must be between 1 hour and 1 year.").into());
+    }
+    if let Some(Some(list)) = &body.always_approve {
+        if list.len() > MAX_ALWAYS_APPROVE_ENTRIES {
+            return Err(refusal(&format!(
+                "`alwaysApprove` may hold at most {MAX_ALWAYS_APPROVE_ENTRIES} entries — you \
+                 sent {}.",
+                list.len()
+            ))
+            .into());
+        }
+        if let Some((index, entry)) = list
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.len() > MAX_ALWAYS_APPROVE_ENTRY_LEN)
+        {
+            return Err(refusal(&format!(
+                "`alwaysApprove[{index}]` is {} characters, over the \
+                 {MAX_ALWAYS_APPROVE_ENTRY_LEN} limit.",
+                entry.len()
+            ))
+            .into());
+        }
     }
 
     let write_lock = company_write_lock(company.id());
@@ -836,6 +873,71 @@ mod tests {
         );
     }
 
+    /// The test above proves the cap reaches the live policy snapshot "for
+    /// reporting", per its own comment. This proves the other half: on the
+    /// gate this route's `state()` fixture actually builds — through
+    /// `RuntimeBuilder`, exactly as production does, policy HITL disabled —
+    /// setting `autoApproveUnderUsd` and applying it does not make a spend
+    /// over that cap require approval. `PUT {scope}/policy` is admin-gated,
+    /// validates the value as non-negative and finite, persists it, and
+    /// carries it to the next turn's snapshot — every one of those steps
+    /// works — but nothing in the currently-shipped evaluation path ever
+    /// reads the snapshot's `auto_approve_under_usd` to decide anything,
+    /// because the disabled-HITL arm of `evaluate` returns before reaching the
+    /// mode dispatch that would consult it (`policy::gate`). A console
+    /// showing "capped at $50" is not currently describing an enforced limit.
+    #[tokio::test]
+    async fn the_persisted_cap_does_not_gate_a_spend_on_the_production_gate() {
+        use crate::ports::ApprovalGate;
+        use crate::ports::types::{CompanyEvent, Effect, EffectGroup};
+
+        let dir = home();
+        let state = state(dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("registered").clone();
+        assert!(
+            !runtime.approval_gate.policy_hitl_enabled(),
+            "this fixture must build the gate the way production does"
+        );
+
+        let (status, _) = call(&state, "PUT", Some(json!({ "autoApproveUnderUsd": 1.0 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        runtime
+            .run_cycle(vec![CompanyEvent::ScheduleFired {
+                cron: "* * * * *".to_string(),
+                prompt: "status".to_string(),
+            }])
+            .await
+            .expect("the next turn applies the snapshot");
+        assert_eq!(
+            runtime.approval_gate.policy().auto_approve_under_usd,
+            Some(1.0),
+            "the cap did reach the live snapshot"
+        );
+
+        let over_cap = Effect {
+            kind: "payment.send".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(1_000_000.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let decision = runtime
+            .approval_gate
+            .evaluate(&id, &over_cap)
+            .await
+            .unwrap();
+        assert_eq!(
+            decision,
+            crate::ports::types::PolicyDecision::Allow,
+            "a $1,000,000 spend against a $1 cap is allowed on the production gate today — \
+             the persisted cap is not currently enforced"
+        );
+    }
+
     /// A deadline `null` releases that one override while preserving the cap,
     /// just as `mode: null` releases only the tier override.
     #[tokio::test]
@@ -883,6 +985,53 @@ mod tests {
         }
 
         // Neither refusal stored anything.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
+    }
+
+    /// `alwaysApprove` is admin-gated and attributed like every other field
+    /// here, but nothing bounded its size: an operator (or a script acting as
+    /// one) could grow the stored list without limit, a standing cost on every
+    /// `GET` from then on. A refusal here, not silent truncation, matching how
+    /// every other invalid field on this route is handled.
+    #[tokio::test]
+    async fn an_oversized_always_approve_list_is_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let too_many: Vec<String> = (0..=MAX_ALWAYS_APPROVE_ENTRIES)
+            .map(|i| format!("tool.{i}"))
+            .collect();
+        let (status, _) = call(&state, "PUT", Some(json!({ "alwaysApprove": too_many }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Refused, not truncated and stored.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
+
+        // Exactly at the cap is accepted.
+        let at_cap: Vec<String> = (0..MAX_ALWAYS_APPROVE_ENTRIES)
+            .map(|i| format!("tool.{i}"))
+            .collect();
+        let (status, body) = call(&state, "PUT", Some(json!({ "alwaysApprove": at_cap }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["alwaysApprove"].as_array().unwrap().len(),
+            MAX_ALWAYS_APPROVE_ENTRIES
+        );
+    }
+
+    /// Same bound, per entry: one absurdly long string is refused rather than
+    /// stored and re-served on every subsequent read.
+    #[tokio::test]
+    async fn an_oversized_always_approve_entry_is_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let huge = "x".repeat(MAX_ALWAYS_APPROVE_ENTRY_LEN + 1);
+        let (status, _) = call(&state, "PUT", Some(json!({ "alwaysApprove": [huge] }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
         let (_, body) = call(&state, "GET", None).await;
         assert_eq!(body["overridden"], false);
     }

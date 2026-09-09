@@ -139,6 +139,7 @@ pub mod publish;
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
 mod publish_turn_test;
+pub mod run_origin;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
@@ -234,6 +235,14 @@ use crate::runtime::builder::agent_scoped_grants;
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
 pub struct HarnessDeps {
+    /// The company's emergency-stop flag, consulted by every agent's
+    /// [`ApprovalPolicy`](crate::harness::built_in::policy::ApprovalPolicy) so a
+    /// harness tool dispatched under `full` autonomy — which reaches no other
+    /// gate — still refuses a consequential call once the switch is pulled.
+    ///
+    /// `None` at every non-harness construction site and every test that has no
+    /// company gate to ask, which keeps them admitting exactly as before.
+    pub emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
     /// The inference model shared across a company's agents. A [`HarnessModel`]
     /// is a tinyinference [`ChatModel<()>`](tinyinference::model::ChatModel)
     /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
@@ -4382,6 +4391,7 @@ impl HarnessPool {
                 raw_message: message.to_string(),
                 events: events.clone(),
                 store: deps.store.clone(),
+                reader: agent_id.to_string(),
                 thread_root: chat.thread_root,
                 current_message_seq: chat.message_seq,
             }),
@@ -5347,6 +5357,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the per-server read-only MCP declaration, so a
             // server-declared read-only bridge call does not park under `auto`.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -5448,6 +5461,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the same per-server read-only MCP declaration the
             // manifest agents get — an overlay teammate calls the same servers.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -5579,6 +5595,7 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        emergency_gate: None,
         provider: Arc::new(provider::MockProvider::default()),
         provider_slug: "mock".to_string(),
         serves: None,
@@ -6421,6 +6438,7 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                emergency_gate: None,
                 notifications: None,
                 ledgers: None,
                 ledger_registry: Default::default(),
@@ -6638,6 +6656,7 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -7769,6 +7788,7 @@ description = "Builds the product."
     fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8601,6 +8621,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8736,6 +8757,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8882,6 +8904,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9015,6 +9038,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9158,6 +9182,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9278,6 +9303,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9389,6 +9415,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9530,6 +9557,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9661,6 +9689,7 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10158,6 +10187,7 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10613,6 +10643,7 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10776,6 +10807,7 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -11297,6 +11329,93 @@ description = "Builds the product."
             ok.contains("hello-marker"),
             "one teammate's exhausted budget must not stop the company: {ok:?}"
         );
+    }
+
+    /// A company whose `treasurer` carries a `budget_usd_daily` of exactly
+    /// `0.0` — the value `validate_cap` in `server::ops::team` accepts as a
+    /// non-negative, finite number with no special-case.
+    fn zero_capped_record() -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "treasurer"
+role = "Treasurer"
+description = "Handles spend."
+budget_usd_daily = 0.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// a cap of exactly `0.0` passes validation as "non-negative and
+    /// finite" and then permanently refuses every dispatch, because `spent >=
+    /// cap` holds even at zero spend on the very first turn — before the
+    /// teammate has ever run once. Setting `0.0` bricks the teammate; it does
+    /// not uncap it, and nothing here says so.
+    #[tokio::test]
+    async fn a_zero_daily_cap_refuses_the_teammates_very_first_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = zero_capped_record();
+
+        // No spend has ever been recorded for this teammate — a fresh day, a
+        // fresh company, or a cap just set to `0.0` from the console.
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let refused = pool
+            .run(
+                &rec.id,
+                "treasurer",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("treasurer", 0.0),
+            "the very first dispatch is refused, though this teammate has spent nothing yet"
+        );
+        assert!(!refused.contains("should-not-echo"));
+
+        // The cap is per-teammate: the uncapped engineer is untouched.
+        let ok = pool
+            .run(
+                &rec.id,
+                "engineer",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(ok.contains("hello-marker"), "{ok:?}");
     }
 
     // --- Console tool grants, live (issue #1796) -----------------------------

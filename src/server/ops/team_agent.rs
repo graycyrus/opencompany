@@ -2579,6 +2579,7 @@ agent = "claude"
             description: None,
             members: vec!["ceo".to_string(), "writer".to_string()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         record.overlay_desks.push(crate::ports::types::OverlayDesk {
             id: "growth".to_string(),
@@ -2586,6 +2587,7 @@ agent = "claude"
             description: None,
             members: vec!["ceo".to_string(), "writer".to_string()],
             responder: crate::ports::types::ResponderMode::Lead,
+            hive: Default::default(),
         });
         store.save(&record).await.unwrap();
 

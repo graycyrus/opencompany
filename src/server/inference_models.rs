@@ -1,21 +1,65 @@
-//! OpenAI-compatible model catalog discovery and the OpenRouter registry cache.
+//! OpenAI-compatible model catalog discovery, cached **per endpoint**.
 //!
 //! Both first-run setup and the inference settings picker consume the standard
 //! `{ "data": [{ "id": ... }] }` model-list shape. Keeping the fetch and parser
 //! here prevents setup from knowing only about the first entry while the picker
 //! grows a second interpretation of the same provider response.
+//!
+//! The cache used to be a single process-wide slot holding OpenRouter's public
+//! registry, because the picker route asked for that registry unconditionally —
+//! whatever endpoint the company had actually been pointed at. Discovery now
+//! follows the configured base URL, so the cache is a registry keyed on it: one
+//! entry per endpoint, each with its own single-flight lock, so two tenants on
+//! two providers neither share a catalog nor queue behind each other.
+//!
+//! An **authenticated** read is additionally partitioned by the company it was
+//! made for, because an endpoint may publish an entitlement-scoped catalog and a
+//! base-URL-only key would then hand one company's model list to the next. A
+//! keyless read stays shared: it is a public property of the endpoint. Neither
+//! path ever puts the credential, or anything derived from it, in the key. See
+//! [`catalog_registry`].
 
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
-/// How long a successful OpenRouter catalog stays fresh in this process.
+use crate::company::inference::TierVocabulary;
+
+/// How long a successful catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// How long a *failed* catalog read is remembered.
+///
+/// Much shorter than the success TTL, and it exists for a different reason: a
+/// failure that stored nothing meant every caller retried, so an unreachable
+/// provider cost a fresh [`MODEL_CATALOG_TIMEOUT`] on every status read and
+/// every turn that consulted the vocabulary. Remembering "this endpoint did not
+/// answer, a minute ago" turns that into one attempt a minute while staying
+/// short enough that a provider coming back up is picked up promptly.
+pub(crate) const MODEL_CATALOG_FAILURE_TTL: Duration = Duration::from_secs(60);
 
 /// Maximum time a console page-load waits for the registry on a cache miss.
 const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum time a **turn** waits for a cold catalog before falling back.
+///
+/// A console page-load can afford [`MODEL_CATALOG_TIMEOUT`]; a turn cannot.
+/// Production triage wraps `ChatModel::invoke` in a two-second timeout
+/// (`src/harness/built_in/triage.rs`), and the selector and title paths use
+/// three. Discovery on the turn path inheriting the console's ten-second budget
+/// would therefore consume the caller's entire deadline before the model
+/// request was ever sent — at an endpoint whose `/chat/completions` is
+/// perfectly healthy and only whose `/models` is slow (Codex review on #2045).
+///
+/// Shorter than the tightest of those deadlines on purpose, so a slow catalog
+/// costs a turn a fraction of its budget rather than all of it. A healthy
+/// endpoint answers `/models` well inside this: it is the same host the turn is
+/// about to call anyway, and the result is then cached for an hour, so this
+/// budget is paid at most once per company per endpoint per hour.
+pub(crate) const TURN_CATALOG_BUDGET: Duration = Duration::from_millis(750);
 
 /// One model exposed to the operator console.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -92,25 +136,77 @@ fn parse_models(payload: RegistryResponse) -> Vec<InferenceModel> {
     models
 }
 
+/// Why a catalog read failed, and — the part that matters to the cache —
+/// whether the answer was about the **endpoint** or about the **credential**.
+///
+/// The negative memo in [`catalog_models`] is keyed on the endpoint alone, the
+/// same as the positive one. That is right for "this endpoint did not answer":
+/// every caller reaching it gets the same result, and remembering it turns an
+/// outage into one attempt a minute instead of one per request. It is *wrong*
+/// for a `401`/`403`, which is a fact about the key that was presented and not
+/// about the endpoint — on a multi-company host, memoizing one company's bad
+/// key would make a second company on the same endpoint read the first's
+/// rejection back out of the cache and fall to the pre-discovery guess without
+/// ever presenting its own valid credential. It would also make a company that
+/// has just rotated a bad key wait out the memo before its good one is tried.
+///
+/// So credential-specific failures are reported and **not** remembered. The
+/// cost of not memoizing them is small in exactly the way that matters: an
+/// auth rejection is a fast round trip, not the [`MODEL_CATALOG_TIMEOUT`] hang
+/// the memo exists to stop paying for repeatedly.
+#[derive(Debug)]
+pub(crate) struct DiscoveryError {
+    message: String,
+    /// `true` for `401`/`403` — an answer about the presented key.
+    credential_specific: bool,
+}
+
+impl DiscoveryError {
+    fn endpoint(message: String) -> Self {
+        Self {
+            message,
+            credential_specific: false,
+        }
+    }
+
+    fn credential(message: String) -> Self {
+        Self {
+            message,
+            credential_specific: true,
+        }
+    }
+}
+
+impl std::fmt::Display for DiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Fetch every model from an OpenAI-compatible `{base_url}/models` endpoint.
 ///
-/// `bearer` is used by local/custom setup probes; OpenRouter's public registry
-/// passes `None`.
+/// `bearer` is the credential the endpoint expects — the company's stored key
+/// for a tenant catalog read, `None` for a public registry (OpenRouter's) or a
+/// keyless local server.
 pub(crate) async fn discover_models(
     base_url: &str,
     bearer: Option<&str>,
-) -> Result<Vec<InferenceModel>, String> {
+) -> Result<Vec<InferenceModel>, DiscoveryError> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     // Bounded here, not left to each caller: reqwest's async client has no
     // default timeout, so an endpoint that accepts the connection but never
     // responds would otherwise hold this open indefinitely. `setup.rs`'s
     // local/custom probe calls this directly (no wrapping timeout of its
-    // own), while `openrouter_models` below also wraps its call in
-    // `tokio::time::timeout` for a friendlier, registry-specific message.
+    // own), while `catalog_models` below also wraps its call in
+    // `tokio::time::timeout` for a friendlier, endpoint-naming message.
     let client = reqwest::Client::builder()
         .timeout(MODEL_CATALOG_TIMEOUT)
         .build()
-        .map_err(|error| format!("failed to build the model-discovery client: {error}"))?;
+        .map_err(|error| {
+            DiscoveryError::endpoint(format!(
+                "failed to build the model-discovery client: {error}"
+            ))
+        })?;
     let mut request = client.get(&url);
     if let Some(bearer) = bearer.filter(|bearer| !bearer.trim().is_empty()) {
         request = request.bearer_auth(bearer);
@@ -118,13 +214,22 @@ pub(crate) async fn discover_models(
     let response = request
         .send()
         .await
-        .map_err(|error| format!("request to {url} failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("request to {url} failed: {error}"))?;
-    let payload = response
-        .json::<RegistryResponse>()
-        .await
-        .map_err(|error| format!("model catalog from {url} was invalid: {error}"))?;
+        .map_err(|error| DiscoveryError::endpoint(format!("request to {url} failed: {error}")))?;
+    let status = response.status();
+    let response = response.error_for_status().map_err(|error| {
+        let message = format!("request to {url} failed: {error}");
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            DiscoveryError::credential(message)
+        } else {
+            DiscoveryError::endpoint(message)
+        }
+    })?;
+    let payload = response.json::<RegistryResponse>().await.map_err(|error| {
+        DiscoveryError::endpoint(format!("model catalog from {url} was invalid: {error}"))
+    })?;
     Ok(parse_models(payload))
 }
 
@@ -133,19 +238,20 @@ struct CacheEntry {
     models: Vec<InferenceModel>,
 }
 
-/// Process-wide OpenRouter catalog cache.
+/// One endpoint's catalog cache.
 #[derive(Default)]
 pub(crate) struct ModelCatalogCache {
     entry: Mutex<Option<CacheEntry>>,
+    /// The last failure and when it happened — see [`MODEL_CATALOG_FAILURE_TTL`].
+    failure: Mutex<Option<(Instant, String)>>,
     /// Serializes cache-miss fetches (issue #1838 follow-up). Held across the
     /// whole `discover_models` await, not just the cache write: without it,
     /// every console request that lands after startup or a TTL expiry sees
     /// the same empty/stale entry and fires its own upstream fetch, so a
-    /// multi-tenant host can burst several identical OpenRouter registry
-    /// calls at once — and any of them that gets rate-limited fails even
-    /// though a sibling fetch is about to populate the cache. A `tokio`
-    /// mutex, not `std`: the guard needs to survive the `.await` inside
-    /// [`openrouter_models`].
+    /// multi-tenant host can burst several identical registry calls at once —
+    /// and any of them that gets rate-limited fails even though a sibling
+    /// fetch is about to populate the cache. A `tokio` mutex, not `std`: the
+    /// guard needs to survive the `.await` inside [`catalog_models`].
     fetch_lock: TokioMutex<()>,
 }
 
@@ -160,81 +266,294 @@ impl ModelCatalogCache {
         if let Ok(mut entry) = self.entry.lock() {
             *entry = Some(CacheEntry { at, models });
         }
+        // A success clears the failure memo: the endpoint is answering again,
+        // and leaving a stale "unreachable" behind would keep reporting it.
+        if let Ok(mut failure) = self.failure.lock() {
+            *failure = None;
+        }
+    }
+
+    /// The remembered failure, while it is still fresh.
+    pub(crate) fn lookup_failure(&self, now: Instant) -> Option<String> {
+        let failure = self.failure.lock().ok()?;
+        let (at, message) = failure.as_ref()?;
+        (now.saturating_duration_since(*at) < MODEL_CATALOG_FAILURE_TTL).then(|| message.clone())
+    }
+
+    pub(crate) fn store_failure(&self, message: String, at: Instant) {
+        if let Ok(mut failure) = self.failure.lock() {
+            *failure = Some((at, message));
+        }
     }
 }
 
-pub(crate) fn openrouter_cache() -> &'static ModelCatalogCache {
-    static CACHE: OnceLock<ModelCatalogCache> = OnceLock::new();
-    CACHE.get_or_init(ModelCatalogCache::default)
+/// The catalog cache registry.
+///
+/// **Never keyed on the credential.** A credential must not become a map key:
+/// hashing one to key a cache would put a derivative of it in process memory
+/// next to the data it guards.
+///
+/// It *is* keyed on who asked, whenever a credential was presented. An
+/// unauthenticated read is a public property of the endpoint and is shared by
+/// every caller reaching it. An **authenticated** read is not: an endpoint may
+/// publish an entitlement-scoped catalog, in which case a base-URL-only key
+/// hands one company's model list to the next company on the same endpoint for
+/// the rest of the hour (CodeRabbit security review on #2045). That only ever
+/// happens inside a single process serving several companies — a local
+/// multi-company host, or hosted shared-single-DB mode; database-per-tenant
+/// gives each tenant its own container and so its own registry — but it is a
+/// real cross-company disclosure in a supported mode, so the partition is the
+/// safe side to err on.
+///
+/// The scope is the **company id**: already non-secret, already the unit of
+/// isolation everywhere else, and it changes when the answer should change. The
+/// cost is one catalog fetch per company per endpoint per hour rather than one
+/// per endpoint — a bounded trade for not sharing an authenticated answer across
+/// a trust boundary.
+fn catalog_registry() -> &'static Mutex<HashMap<String, Arc<ModelCatalogCache>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<ModelCatalogCache>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Return the cached OpenRouter catalog, fetching it on a miss.
+/// Trailing slashes and surrounding space do not make a different endpoint.
+fn cache_key(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+/// The cache slot for an endpoint read within `scope`.
 ///
-/// Single-flight on a miss (issue #1838 follow-up): every caller queues on
-/// [`ModelCatalogCache::fetch_lock`] rather than racing its own request to
-/// OpenRouter, and re-checks the cache after acquiring it, so only the first
-/// caller through actually fetches — everyone behind it reads what that
+/// `scope` is `None` for a read that presented no credential — a public catalog,
+/// shared by everyone — and `Some(company_id)` for an authenticated one. The
+/// separator is a control character no company id or URL can contain, so no
+/// scope-plus-endpoint pair can be spelled two ways.
+pub(crate) fn catalog_cache_scoped(base_url: &str, scope: Option<&str>) -> Arc<ModelCatalogCache> {
+    let endpoint = cache_key(base_url);
+    let key = match scope {
+        Some(scope) => format!("{scope}\u{1}{endpoint}"),
+        None => endpoint,
+    };
+    let mut registry = match catalog_registry().lock() {
+        Ok(registry) => registry,
+        // A poisoned registry must not take the catalog offline for the rest of
+        // the process: hand back an unshared cache, which costs this caller a
+        // fetch and nothing else.
+        Err(_) => return Arc::new(ModelCatalogCache::default()),
+    };
+    Arc::clone(registry.entry(key).or_default())
+}
+
+/// Drop every **authenticated** catalog entry read on `company`'s behalf.
+///
+/// Called when that company's inference credential is written, because a
+/// rotation changes what the endpoint will answer without changing anything in
+/// the cache key — which is made of non-secret ids on purpose, and must stay
+/// that way (see [`catalog_registry`]). Without this, a company that rotated to
+/// a key with different entitlements would keep reading the previous
+/// credential's catalog for the rest of [`MODEL_CATALOG_TTL`], so the new bearer
+/// would never be presented to `/models` at all (Codex review on #2045).
+///
+/// Matches on the `company\u{1}` prefix, which covers both shapes the scope
+/// takes: the console route's `(company, endpoint)` and the turn path's
+/// `(company, harness, endpoint)`. Keyless entries are keyed on the bare
+/// endpoint and are deliberately left alone — an unauthenticated catalog is a
+/// public property of the endpoint and no credential change can alter it. A URL
+/// cannot contain the separator, so the prefix cannot match one by accident.
+pub(crate) fn evict_company_catalogs(company: &str) {
+    let prefix = format!("{company}\u{1}");
+    if let Ok(mut registry) = catalog_registry().lock() {
+        registry.retain(|key, _| !key.starts_with(&prefix));
+    }
+    // A poisoned registry needs no handling here: `catalog_cache_scoped` already
+    // hands out an unshared cache in that state, so nothing stale can be served.
+}
+
+/// The unscoped (public, keyless) cache for an endpoint.
+#[cfg(test)]
+pub(crate) fn catalog_cache(base_url: &str) -> Arc<ModelCatalogCache> {
+    catalog_cache_scoped(base_url, None)
+}
+
+/// Return the cached catalog for `base_url`, fetching it on a miss.
+///
+/// Single-flight per endpoint (issue #1838 follow-up): every caller for one
+/// endpoint queues on its [`ModelCatalogCache::fetch_lock`] rather than racing
+/// its own request, and re-checks the cache after acquiring it, so only the
+/// first caller through actually fetches — everyone behind it reads what that
 /// fetch just stored instead of duplicating the upstream call.
 ///
 /// Bounded across the *whole* queue-wait-plus-fetch, not just the fetch
-/// itself (issue #1838 follow-up): a failed fetch stores nothing, so during
-/// a registry outage each queued caller would otherwise acquire the lock in
-/// turn and run its own fresh `MODEL_CATALOG_TIMEOUT`-bounded attempt — the
-/// Nth caller through the queue waiting roughly `N * MODEL_CATALOG_TIMEOUT`
-/// before ever finding out, breaking the "a console page-load waits at most
-/// [`MODEL_CATALOG_TIMEOUT`]" contract this module documents
-/// (`docs/spec/runtime/providers.md`). Wrapping the lock acquisition and the
-/// fetch in one `tokio::time::timeout` keeps every individual caller's own
-/// wall-clock budget fixed at `MODEL_CATALOG_TIMEOUT`, however many callers
-/// are already ahead of it in the queue.
-pub(crate) async fn openrouter_models() -> Result<Vec<InferenceModel>, String> {
+/// itself (issue #1838 follow-up): during an outage each queued caller would
+/// otherwise acquire the lock in turn and run its own fresh
+/// `MODEL_CATALOG_TIMEOUT`-bounded attempt — the Nth caller through the queue
+/// waiting roughly `N * MODEL_CATALOG_TIMEOUT` before ever finding out,
+/// breaking the "a console page-load waits at most [`MODEL_CATALOG_TIMEOUT`]"
+/// contract this module documents (`docs/spec/runtime/providers.md`). Wrapping
+/// the lock acquisition and the fetch in one `tokio::time::timeout` keeps every
+/// individual caller's own wall-clock budget fixed, however many callers are
+/// already ahead of it in the queue.
+///
+/// A failure is remembered for [`MODEL_CATALOG_FAILURE_TTL`] and replayed to
+/// callers within it, so an unreachable provider costs one attempt a minute
+/// rather than one per request.
+///
+/// `scope` is the company this read is on behalf of. It partitions the cache
+/// whenever a `bearer` is presented, so an authenticated answer is never handed
+/// to a different company — see [`catalog_registry`]. A keyless read carries
+/// `None` and is shared, because an unauthenticated catalog is a public property
+/// of the endpoint.
+pub(crate) async fn catalog_models(
+    base_url: &str,
+    bearer: Option<&str>,
+    scope: Option<&str>,
+) -> Result<Vec<InferenceModel>, String> {
+    // The partition follows the credential, not the caller: a read that presents
+    // nothing has nothing company-specific to leak, and sharing it keeps one
+    // fetch serving every company on a public endpoint.
+    let authenticated_scope = bearer
+        .filter(|bearer| !bearer.trim().is_empty())
+        .and(scope)
+        .filter(|scope| !scope.trim().is_empty());
+    let cache = catalog_cache_scoped(base_url, authenticated_scope);
     let now = Instant::now();
-    if let Some(models) = openrouter_cache().lookup(now) {
+    if let Some(models) = cache.lookup(now) {
         return Ok(models);
     }
+    if let Some(failure) = cache.lookup_failure(now) {
+        return Err(failure);
+    }
 
+    let endpoint = cache_key(base_url);
     let outcome = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, async {
-        let _fetch_guard = openrouter_cache().fetch_lock.lock().await;
+        let _fetch_guard = cache.fetch_lock.lock().await;
         // Another caller may have already refilled the cache while we waited
         // for the lock — re-check before fetching again.
         let now = Instant::now();
-        if let Some(models) = openrouter_cache().lookup(now) {
+        if let Some(models) = cache.lookup(now) {
             return Ok(models);
         }
+        if let Some(failure) = cache.lookup_failure(now) {
+            return Err(FetchError::Failed(failure));
+        }
 
-        let mut models = discover_models(crate::company::inference::OPENROUTER_BASE_URL, None)
-            .await
-            .map_err(FetchError::Failed)?;
+        let mut models = discover_models(base_url, bearer).await.map_err(|error| {
+            if error.credential_specific {
+                FetchError::Credential(error.to_string())
+            } else {
+                FetchError::Failed(error.to_string())
+            }
+        })?;
         if models.is_empty() {
-            return Err(FetchError::Failed(
-                "OpenRouter's model registry returned no models".to_string(),
-            ));
+            return Err(FetchError::Failed(format!(
+                "{endpoint} published an empty model catalog"
+            )));
         }
         // Sorted here, not in `parse_models`: this is the operator-facing
         // catalog picker's own copy, while `parse_models` also serves
         // `setup.rs`'s local/custom probe, which relies on provider order.
         models.sort_by(|a, b| a.id.cmp(&b.id));
-        openrouter_cache().store(models.clone(), now);
+        cache.store(models.clone(), now);
         Ok(models)
     })
     .await;
 
-    match outcome {
-        Ok(Ok(models)) => Ok(models),
-        Ok(Err(FetchError::Failed(message))) => Err(message),
-        Err(_elapsed) => Err(format!(
-            "OpenRouter's model registry did not answer within {} seconds",
+    let result = match outcome {
+        Ok(Ok(models)) => return Ok(models),
+        // An answer about the key that was presented, not about the endpoint.
+        // Reported, never remembered — see [`DiscoveryError`]: memoizing it on
+        // an endpoint key would hand one company's rejection to the next
+        // company reaching the same endpoint with a different credential, and
+        // would make a company that has just rotated a bad key wait the memo
+        // out before its good one is ever tried.
+        Ok(Err(FetchError::Credential(message))) => return Err(message),
+        Ok(Err(FetchError::Failed(message))) => message,
+        Err(_elapsed) => format!(
+            "{endpoint} did not answer within {} seconds",
             MODEL_CATALOG_TIMEOUT.as_secs()
-        )),
+        ),
+    };
+    cache.store_failure(result.clone(), Instant::now());
+    Err(result)
+}
+
+/// What vocabulary `base_url` speaks, or `None` when its catalog cannot be read.
+///
+/// `None` is deliberately not [`TierVocabulary::Unknown`]: "the endpoint told us
+/// it publishes neither vocabulary" and "we could not ask" are different facts
+/// and lead to different operator advice, so the caller keeps its pre-discovery
+/// fallback for the second rather than acting on an answer nobody gave.
+// Both consumers — the turn path (`TenantProvider::resolve`) and the console
+// probe (`test_config`) — live behind the `openhuman` feature, so a default
+// build compiles this and calls it from nowhere. Gating the function itself
+// would put a second `cfg` on a pure, feature-independent helper and make the
+// two builds disagree about what this module offers.
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
+pub(crate) async fn discovered_vocabulary(
+    base_url: &str,
+    bearer: Option<&str>,
+    scope: Option<&str>,
+) -> Option<TierVocabulary> {
+    let models = catalog_models(base_url, bearer, scope).await.ok()?;
+    Some(TierVocabulary::from_catalog_ids(
+        models.iter().map(|model| model.id.as_str()),
+    ))
+}
+
+/// [`discovered_vocabulary`] on a budget a **turn** can afford.
+///
+/// The read is *spawned* rather than awaited inline, and only the waiting is
+/// bounded. That separation is the whole point. A turn's callers impose their
+/// own, much tighter deadlines — triage two seconds, selector and title three —
+/// and when one of them elapses it **cancels** whatever `invoke` was awaiting.
+/// An inline `catalog_models` therefore got dropped mid-flight, which meant the
+/// failure memo that exists to stop the *next* caller paying the same cost was
+/// never written: every subsequent auxiliary call started the same doomed
+/// ten-second read and died the same way (Codex review on #2045).
+///
+/// A spawned task outlives that cancellation. Whoever gives up first, the read
+/// runs to completion on its own and records what it found — a catalog in the
+/// cache, or a failure in the memo that suppresses retries for
+/// [`MODEL_CATALOG_FAILURE_TTL`]. So a slow `/models` costs each turn at most
+/// [`TURN_CATALOG_BUDGET`] once, rather than every turn its whole deadline
+/// forever.
+///
+/// `None` means "no answer within the budget", which the caller treats exactly
+/// as it treats an unreadable catalog: keep the pre-discovery fallback. That is
+/// the behaviour that shipped before discovery existed, so a slow catalog
+/// degrades to the old guess for one turn rather than breaking the turn.
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
+pub(crate) async fn turn_vocabulary(
+    base_url: &str,
+    bearer: Option<&str>,
+    scope: Option<&str>,
+) -> Option<TierVocabulary> {
+    // Owned, because the task has to be able to outlive this future — which is
+    // the entire reason it is spawned. The bearer lives in process memory for
+    // the duration of the read and, as everywhere else in this module, never
+    // reaches a cache key.
+    let base_url = base_url.to_string();
+    let bearer = bearer.map(str::to_string);
+    let scope = scope.map(str::to_string);
+    let read = tokio::spawn(async move {
+        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref()).await
+    });
+    match tokio::time::timeout(TURN_CATALOG_BUDGET, read).await {
+        Ok(Ok(vocabulary)) => vocabulary,
+        // Elapsed, or the task panicked. Either way this turn falls back; a
+        // task that merely ran out of *our* patience is still running and will
+        // have filled the cache or the memo before the next turn asks.
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 
 /// Distinguishes "the fetch itself failed" from the outer
-/// [`tokio::time::timeout`] elapsing in [`openrouter_models`], since both
+/// [`tokio::time::timeout`] elapsing in [`catalog_models`], since both
 /// have to report through the same `Result` and the outer timeout's own
 /// message must win regardless of which inner step it interrupted.
 enum FetchError {
     Failed(String),
+    /// A `401`/`403` — about the credential presented, not the endpoint, so it
+    /// is reported to this caller and never written to the endpoint's memo.
+    Credential(String),
 }
 
 #[cfg(test)]
@@ -247,6 +566,52 @@ mod tests {
             name: None,
             context_length: None,
         }
+    }
+
+    /// A turn gives up on a hanging `/models` inside its own budget, not the
+    /// console's.
+    ///
+    /// The endpoint here accepts the connection and never answers — the case
+    /// that matters, because a refused connection fails fast and costs nobody
+    /// anything. Production triage allows `invoke` two seconds end to end and
+    /// the selector and title paths three, so a discovery that waited out
+    /// `MODEL_CATALOG_TIMEOUT` consumed the caller's whole deadline before the
+    /// model request was ever sent, at an endpoint whose `/chat/completions`
+    /// may be perfectly healthy (Codex review on #2045).
+    ///
+    /// Asserted as a band rather than an exact figure: the floor proves the
+    /// budget is actually waited out rather than the call failing instantly for
+    /// some unrelated reason, and the ceiling proves it is the *turn's* budget
+    /// being honoured and not the console's.
+    #[tokio::test]
+    async fn a_turn_stops_waiting_for_a_hanging_catalog_within_its_own_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        // Accepted connections are held, never answered. Kept in a task that
+        // owns them so nothing is closed early and turned into a fast failure.
+        let _accepting = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let started = Instant::now();
+        let vocabulary = turn_vocabulary(&endpoint, None, None).await;
+        let waited = started.elapsed();
+
+        assert_eq!(
+            vocabulary, None,
+            "an endpoint that never answers leaves the caller on its pre-discovery fallback"
+        );
+        assert!(
+            waited >= TURN_CATALOG_BUDGET,
+            "expected the budget to be waited out, gave up after {waited:?}"
+        );
+        assert!(
+            waited < MODEL_CATALOG_TIMEOUT,
+            "a turn must not inherit the console's {MODEL_CATALOG_TIMEOUT:?} budget, waited {waited:?}"
+        );
     }
 
     #[test]
@@ -366,11 +731,251 @@ mod tests {
         assert_eq!(cache.lookup(stored_at + MODEL_CATALOG_TTL), None);
     }
 
+    /// A failure used to store nothing, so an unreachable provider cost a fresh
+    /// `MODEL_CATALOG_TIMEOUT` on every request that consulted it — once per
+    /// status read and, now that the turn path consults the vocabulary, once
+    /// per turn. Remembering it briefly turns that into one attempt a minute.
+    #[test]
+    fn a_failure_is_remembered_briefly_and_cleared_by_the_next_success() {
+        let cache = ModelCatalogCache::default();
+        let failed_at = Instant::now();
+        cache.store_failure("provider.example did not answer".to_string(), failed_at);
+
+        assert_eq!(
+            cache.lookup_failure(failed_at + MODEL_CATALOG_FAILURE_TTL - Duration::from_secs(1)),
+            Some("provider.example did not answer".to_string()),
+        );
+        assert_eq!(
+            cache.lookup_failure(failed_at + MODEL_CATALOG_FAILURE_TTL),
+            None,
+            "the memo expires far sooner than a success, so a provider coming back up is \
+             picked up promptly"
+        );
+
+        cache.store_failure("still down".to_string(), Instant::now());
+        let recovered_at = Instant::now();
+        cache.store(vec![model("vendor/model")], recovered_at);
+        assert_eq!(
+            cache.lookup_failure(recovered_at),
+            None,
+            "a success clears the memo — leaving it would keep reporting an outage that ended"
+        );
+    }
+
+    /// The seam the turn path and the probe both read: a cached catalog answers
+    /// the vocabulary question with no request of its own.
+    #[tokio::test]
+    async fn a_cached_catalog_answers_the_vocabulary_question() {
+        const ENDPOINT: &str = "https://vocabulary.example/v1";
+        catalog_cache(ENDPOINT).store(vec![model("agentic-v1"), model("chat-v1")], Instant::now());
+        assert_eq!(
+            discovered_vocabulary(ENDPOINT, None, None).await,
+            Some(TierVocabulary::Tiers)
+        );
+    }
+
+    /// An authenticated catalog is not shared across companies.
+    ///
+    /// The positive cache is keyed on the endpoint, which is right for a public
+    /// catalog and wrong for one read with a company's own credential: an
+    /// endpoint may publish an entitlement-scoped list, and a base-URL-only key
+    /// would serve one company's answer to the next for the rest of the hour
+    /// (CodeRabbit security review on #2045). A keyless read stays shared,
+    /// because there is nothing company-specific in it to leak.
+    #[test]
+    fn an_authenticated_catalog_is_partitioned_per_company_and_a_keyless_one_is_not() {
+        const ENDPOINT: &str = "https://shared-gateway.example/v1";
+        // Company ids nothing else uses. The registry is process-global and
+        // `evict_company_catalogs` clears a whole company, so a scope named
+        // `acme` would be wiped by any route test in another module that saves a
+        // key for the company of that name, mid-assertion and at random.
+        const ONE: &str = "partition-one";
+        const TWO: &str = "partition-two";
+        let now = Instant::now();
+
+        let acme = catalog_cache_scoped(ENDPOINT, Some(ONE));
+        let other = catalog_cache_scoped(ENDPOINT, Some(TWO));
+        acme.store(vec![model("acme/entitled-only")], now);
+
+        assert_eq!(acme.lookup(now), Some(vec![model("acme/entitled-only")]));
+        assert_eq!(
+            other.lookup(now),
+            None,
+            "one company's authenticated catalog must not answer for another on the same endpoint"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, None).lookup(now),
+            None,
+            "nor must it answer a keyless read of the same endpoint"
+        );
+
+        // The same company reaching the same endpoint does reuse its own entry,
+        // so the partition costs one fetch per company rather than one per call.
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(ONE)).lookup(now),
+            Some(vec![model("acme/entitled-only")])
+        );
+
+        // A keyless catalog is a public property of the endpoint, and stays
+        // shared by everyone reading it that way.
+        const PUBLIC: &str = "https://public-registry.example/v1";
+        catalog_cache_scoped(PUBLIC, None).store(vec![model("vendor/public")], now);
+        assert_eq!(
+            catalog_cache_scoped(PUBLIC, None).lookup(now),
+            Some(vec![model("vendor/public")])
+        );
+    }
+
+    /// The partition goes one level finer than the company: per **harness**.
+    ///
+    /// `resolve_effective_scoped` resolves config and credentials per
+    /// `HarnessScope`, which is what lets one `built_in` harness ride the
+    /// subscription while another runs on a key of its own. Two harnesses in one
+    /// company can therefore present different credentials to the same endpoint,
+    /// and a company-only key reused the first one's entitlement-scoped catalog
+    /// for the second without its credential ever being presented (Codex review
+    /// on #2045).
+    ///
+    /// This asserts the property at the cache level, on the exact scope strings
+    /// `TenantProvider::catalog_scope` builds — company and harness joined by the
+    /// same control character `catalog_cache_scoped` uses, so a three-field key
+    /// cannot be spelled two ways.
+    #[test]
+    fn two_harnesses_in_one_company_do_not_share_an_authenticated_catalog() {
+        const ENDPOINT: &str = "https://gateway.example/v1";
+        // A company id nothing else uses — see the note in the test above.
+        const COMPANY: &str = "harness-partition-co";
+        let now = Instant::now();
+        let subscription = format!("{COMPANY}\u{1}{}", "default");
+        let own_key = format!("{COMPANY}\u{1}{}", "research");
+
+        catalog_cache_scoped(ENDPOINT, Some(&subscription))
+            .store(vec![model("gateway/subscription-tier")], now);
+
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&own_key)).lookup(now),
+            None,
+            "a second harness's key may reach a different entitlement, so it must read for itself"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&subscription)).lookup(now),
+            Some(vec![model("gateway/subscription-tier")]),
+            "the harness that did the read still reuses its own entry"
+        );
+        // The company-only key is a third, distinct slot — proof the harness
+        // half genuinely participates rather than being absorbed into the id.
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(COMPANY)).lookup(now),
+            None
+        );
+    }
+
+    /// Rotating a credential drops that company's authenticated catalogs, and
+    /// nobody else's.
+    ///
+    /// The cache key holds non-secret ids only, so a rotation is invisible to it
+    /// — the previous credential's catalog would otherwise answer for the rest
+    /// of [`MODEL_CATALOG_TTL`] and the new bearer would never reach `/models`
+    /// (Codex review on #2045). Eviction on the write is what keeps that
+    /// invariant affordable.
+    #[test]
+    fn rotating_a_credential_evicts_only_that_companys_authenticated_catalogs() {
+        const ENDPOINT: &str = "https://rotating-gateway.example/v1";
+        let now = Instant::now();
+        let acme_console = "rot-acme".to_string();
+        let acme_harness = format!("rot-acme\u{1}{}", "research");
+
+        catalog_cache_scoped(ENDPOINT, Some(&acme_console))
+            .store(vec![model("old/entitlement")], now);
+        catalog_cache_scoped(ENDPOINT, Some(&acme_harness))
+            .store(vec![model("old/entitlement")], now);
+        catalog_cache_scoped(ENDPOINT, Some("rot-other"))
+            .store(vec![model("other/entitlement")], now);
+        catalog_cache_scoped(ENDPOINT, None).store(vec![model("public/model")], now);
+
+        evict_company_catalogs("rot-acme");
+
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&acme_console)).lookup(now),
+            None,
+            "the console's own scoped read must be re-fetched with the new credential"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&acme_harness)).lookup(now),
+            None,
+            "and so must every harness scope beneath that company"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some("rot-other")).lookup(now),
+            Some(vec![model("other/entitlement")]),
+            "another company's credential did not change, so its catalog stands"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, None).lookup(now),
+            Some(vec![model("public/model")]),
+            "a keyless catalog is a public property of the endpoint and no \
+             credential change can alter it"
+        );
+    }
+
+    /// A credential-specific rejection is reported and **not** remembered.
+    ///
+    /// The negative memo is keyed on the endpoint, which is right for "this
+    /// endpoint did not answer" and wrong for "this key was rejected". On a
+    /// multi-company host the second would let one company's bad key answer for
+    /// the next company reaching the same endpoint with a valid one, and would
+    /// make a company that has just rotated a bad key wait the memo out before
+    /// its good key is ever presented (Codex review on #2045).
+    ///
+    /// Asserted at the seam rather than over the network: the classification
+    /// lives in [`DiscoveryError`], and [`catalog_models`] is what must not
+    /// write a `Credential` failure into the endpoint's memo.
+    #[test]
+    fn a_credential_rejection_is_not_written_to_the_endpoints_failure_memo() {
+        const ENDPOINT: &str = "https://rejects-one-key.example/v1";
+        let cache = catalog_cache(ENDPOINT);
+        let now = Instant::now();
+        assert_eq!(cache.lookup_failure(now), None, "nothing remembered yet");
+
+        // What an endpoint-level failure does: it is remembered, so an outage
+        // costs one attempt a minute rather than one per request.
+        cache.store_failure(format!("{ENDPOINT} did not answer within 10 seconds"), now);
+        assert!(cache.lookup_failure(now).is_some());
+
+        // And the classification that keeps a 401 out of that path.
+        assert!(
+            DiscoveryError::credential("401 Unauthorized".to_string()).credential_specific,
+            "a 401 is an answer about the key, not about the endpoint"
+        );
+        assert!(
+            !DiscoveryError::endpoint("connection refused".to_string()).credential_specific,
+            "a transport failure is an answer about the endpoint, and is memoized"
+        );
+    }
+
+    /// Two endpoints are two caches. A single process-wide slot is what let one
+    /// company's catalog answer for another's endpoint in the first place.
+    #[test]
+    fn each_endpoint_gets_its_own_cache_and_trailing_slashes_do_not_split_one() {
+        let a = catalog_cache("https://a.example/v1");
+        let b = catalog_cache("https://b.example/v1");
+        let now = Instant::now();
+        a.store(vec![model("a-only")], now);
+
+        assert_eq!(a.lookup(now), Some(vec![model("a-only")]));
+        assert_eq!(b.lookup(now), None, "b must not inherit a's catalog");
+        assert_eq!(
+            catalog_cache("https://a.example/v1/").lookup(now),
+            Some(vec![model("a-only")]),
+            "a trailing slash is the same endpoint"
+        );
+    }
+
     /// Regression for a P2 review finding on #1838's follow-up round: without
     /// `fetch_lock`, every concurrent caller that observed the same
     /// empty/stale entry would independently "fetch" — a multi-tenant host
     /// bursting several identical upstream calls at once. This exercises the
-    /// exact lock-then-recheck sequence [`openrouter_models`] runs (acquire
+    /// exact lock-then-recheck sequence [`catalog_models`] runs (acquire
     /// `fetch_lock`, re-`lookup`, only then do the (here, simulated) fetch),
     /// against the real `ModelCatalogCache`, so a regression that drops the
     /// lock or the re-check fails this test rather than only showing up as
@@ -429,7 +1034,7 @@ mod tests {
     /// through the queue waiting roughly `N * bound` before ever finding out,
     /// which is exactly the docs/spec/runtime/providers.md "at most
     /// `MODEL_CATALOG_TIMEOUT` seconds" promise this test defends. Mirrors
-    /// `openrouter_models`'s real composition (`tokio::time::timeout` wrapped
+    /// `catalog_models`'s real composition (`tokio::time::timeout` wrapped
     /// around lock-acquire + recheck + fetch) against the real
     /// `ModelCatalogCache`, with a simulated fetch standing in for
     /// `discover_models` so the assertion is deterministic instead of racing

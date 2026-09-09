@@ -363,7 +363,17 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
     // specific roster member. The text is sent as-is, exactly as a console DM
     // is; no synthetic `@`-mention is needed, and one would only be dropped by
     // revalidation against a body that does not contain it.
-    let mentions = runtime.resolve_mentions(&text, None, by.as_ref()).await;
+    // Both halves of one resolution, exactly as the REST chat path's
+    // `accept_chat_turn` runs them: who this prompt reached, and every `@name`
+    // that reached more than one thing and therefore reached nobody (B-101).
+    // The ACP surface used to call the plain `resolve_mentions` here and never
+    // report the ambiguous half, so a Zed (or other ACP client) operator whose
+    // `@name` matched two things got the same silent non-ping the console used
+    // to give before B-101, with no durable refusal notice anywhere (codex P2).
+    let resolved = runtime
+        .resolve_mentions_reporting(&text, None, by.as_ref())
+        .await;
+    let mentions = resolved.mentions.clone();
     // Journal the prompt up front so the transcript is right from acceptance
     // and the durable mention rows share its sequence — the same shape as the
     // operator `/chat` route (issue #983). `run_journaled_cycle` then runs the
@@ -393,6 +403,12 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
         // ACP-sent message never has attachments (issue #1682).
         attachments: vec![],
     };
+    // Asked again, immediately before the durable write, for the reason
+    // `chat_and_emit` asks again: the check above sits behind mention and desk
+    // resolution, and a stop landing in that window would leave a transcript
+    // entry no turn will ever answer — and on this ingress no turn row or
+    // failure event explains it either.
+    runtime.ensure_accepting().map_err(|e| e.to_string())?;
     let message_seq = runtime
         .events()
         .append(&session.company, event.clone())
@@ -409,6 +425,14 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
             .notify_mentions(&session.company, mentions, &message_seq, by.as_ref(), &chat)
             .await;
     }
+    // The other half of the same resolution (B-101): every `@name` that
+    // reached two things and therefore reached nobody, on the same not-fatal
+    // terms as the notification above. Every ACP prompt is unrooted (this
+    // session model has no thread concept), matching the `parent: None` on
+    // the event just journaled above.
+    runtime
+        .post_mention_ambiguity_note(&chat, None, &resolved.ambiguous)
+        .await;
     let report = runtime
         .run_journaled_cycle(vec![(message_seq, event)], None)
         .await
@@ -488,13 +512,19 @@ mod test {
     use async_trait::async_trait;
     use serde_json::json;
 
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
     use crate::company::CompanyManifest;
     use crate::ports::EventSeq;
     use crate::ports::types::{ApprovalId, CompressedTrace, CycleRequest, CycleResult, TokenUsage};
     use crate::ports::users::{UserRecord, UserRole, UserStatus};
-    use crate::ports::{Brain, CompanyStore, CycleHost};
+    use crate::ports::{Brain, CompanyStore, CycleHost, SessionKind, SessionRecord};
     use crate::server::graphql::auth::UserPrincipal;
     use crate::server::platform_auth::PlatformClaims;
+    use crate::server::users::cookie::session_cookie_name;
+    use crate::server::users::token::{OsTokens, mint_session_token, sha256_hex};
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, ports::types::CompanyRecord};
 
@@ -666,9 +696,18 @@ name = "Acme"
 id = "product_manager"
 role = "Product Manager"
 
+[[agent]]
+id = "writer"
+role = "Writer"
+
 [[group_chat]]
 id = "engineering"
 name = "Engineering"
+members = []
+
+[[group_chat]]
+id = "writer"
+name = "Writer desk"
 members = []
 
 [policy]
@@ -714,6 +753,81 @@ mode = "full"
         let state = AppState::new(AppConfig::default());
         state.registry().insert(id, std::sync::Arc::new(runtime));
         state
+    }
+
+    /// Same as [`acp_state`], but the sole company is `[users] mode = "none"`
+    /// — the packaged-desktop shape with no sign-in, reachable by anyone who
+    /// can reach the loopback bind at all.
+    async fn acp_state_none_mode(home: &std::path::Path) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = []
+
+[policy]
+mode = "full"
+
+[users]
+mode = "none"
+"#,
+        )
+        .unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_brain(std::sync::Arc::new(SilentBrain))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        state
+    }
+
+    /// Builds a bare JSON-RPC `POST /acp` request with no auth headers.
+    fn acp_call_request(body: Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/acp")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
     }
 
     /// An `@alice-smith` ACP prompt must badge alice exactly as a console
@@ -789,6 +903,95 @@ mode = "full"
             .await
             .expect("list");
         assert!(admin_rows.is_empty(), "{admin_rows:?}");
+    }
+
+    /// B-101, on the ACP ingress (codex P2): a `@writer` that names both the
+    /// `writer` teammate and the `writer` desk must be refused and reported,
+    /// exactly as the REST chat path's `accept_chat_turn` does it. Before this
+    /// fix the ACP `session/prompt` handler called the plain `resolve_mentions`
+    /// and never posted the ambiguity note, so an ACP client (e.g. Zed) sending
+    /// an ambiguous `@name` pinged nobody with no durable refusal anywhere.
+    #[tokio::test]
+    async fn a_prompt_ambiguous_mention_is_reported_in_the_channel() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-ambiguous-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).expect("company");
+        let admin = seed_user(&state, &company, "u-admin", "Admin Person").await;
+        let auth = GqlAuth::User(UserPrincipal {
+            company: company.clone(),
+            user_id: admin,
+            email: "admin@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
+        });
+
+        state
+            .acp_sessions()
+            .open(
+                "conn-1",
+                &owner(&auth),
+                crate::server::acp::AcpSession {
+                    id: "s-1".to_string(),
+                    company: company.clone(),
+                    chat: "engineering".to_string(),
+                    agent_id: None,
+                },
+                crate::ports::now_millis(),
+            )
+            .expect("open session");
+
+        let result = prompt(
+            &state,
+            &auth,
+            &json!({
+                "sessionId": "s-1",
+                "prompt": [
+                    { "type": "text", "text": "@writer can you draft the autumn brief?" },
+                ],
+                "_meta": { "opencompany/connectionId": "conn-1" },
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "prompt failed: {result:?}");
+
+        // The durable refusal notice: the same `AgentReply` the REST chat path
+        // posts, attributed to the runtime and landing in the channel the
+        // prompt ran in.
+        let events = runtime
+            .events()
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let advisories: Vec<(String, String)> = events
+            .into_iter()
+            .filter_map(|stored| match stored.event {
+                CompanyEvent::AgentReply {
+                    agent_id,
+                    chat_id,
+                    text,
+                    ..
+                } if agent_id == crate::ports::SYSTEM_AUTHOR => Some((chat_id, text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            advisories.len(),
+            1,
+            "exactly one ambiguity note, cross-ingress: {advisories:?}"
+        );
+        let (chat, text) = &advisories[0];
+        assert_eq!(chat, "engineering");
+        assert!(text.contains("@writer"), "names the literal typed: {text}");
+        assert!(
+            text.contains("pinged nobody"),
+            "states what happened: {text}"
+        );
     }
 
     /// A runtime being replaced refuses the prompt *before* it is journaled
@@ -1095,6 +1298,211 @@ mode = "full"
                 .as_array()
                 .expect("updates array")
                 .is_empty()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // PLAT-057 / PLAT-060: the `call` HTTP handler itself. Every test above
+    // this point calls `open_session`/`prompt`/etc. directly, bypassing the
+    // axum extraction, method dispatch and JSON-RPC envelope that only `call`
+    // (mounted by `router()`) actually implements.
+    // -----------------------------------------------------------------
+
+    /// PLAT-060 (AUTH): a `none`-mode company's local owner is reachable over
+    /// the real HTTP `call` handler with zero credentials — no cookie, no
+    /// bearer — same as every other credential-less surface that mode grants.
+    #[tokio::test]
+    async fn call_handler_authenticates_a_credential_less_none_mode_request() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-call-none-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state_none_mode(home.path()).await;
+        let app = router().with_state(state);
+
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let response = app.oneshot(acp_call_request(body)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["jsonrpc"], "2.0");
+        assert_eq!(value["id"], 1);
+        assert_eq!(value["result"]["protocolVersion"], 1);
+    }
+
+    /// PLAT-057 (AUTH): a company with real sign-in refuses an unauthenticated
+    /// `call`, over HTTP — not just at the level of the extractor unit tests.
+    #[tokio::test]
+    async fn call_handler_refuses_an_unauthenticated_request() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-call-auth-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let app = router().with_state(state);
+
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let response = app.oneshot(acp_call_request(body)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// PLAT-057 (STATE): a user who must change their password is refused
+    /// *before* any ACP method runs, over the real HTTP path — the same
+    /// boundary `ScopedCompany` enforces for the operator API.
+    #[tokio::test]
+    async fn call_handler_refuses_a_temporary_password_user_before_running_any_method() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-call-temp-pw-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).expect("company");
+        let now = crate::ports::now_millis();
+        runtime
+            .users()
+            .upsert_user(
+                &company,
+                &UserRecord {
+                    id: "u-temp".to_string(),
+                    email: "temp@example.test".to_string(),
+                    display_name: None,
+                    avatar: None,
+                    role: UserRole::Admin,
+                    status: UserStatus::Active,
+                    password_hash: None,
+                    must_change_password: true,
+                    created_at_millis: now,
+                    last_seen_at_millis: None,
+                    updated_at_millis: now,
+                },
+            )
+            .await
+            .expect("seed temp-password user");
+        let token = mint_session_token(&OsTokens);
+        runtime
+            .sessions()
+            .create(
+                &company,
+                &SessionRecord {
+                    id: "s-temp".to_string(),
+                    token_hash: sha256_hex(&token),
+                    user_id: "u-temp".to_string(),
+                    created_at_millis: now,
+                    expires_at_millis: now + 60_000,
+                    user_agent: None,
+                    kind: SessionKind::Browser,
+                    label: None,
+                },
+            )
+            .await
+            .expect("seed session");
+        let cookie_name = session_cookie_name(&company).expect("cookie name");
+
+        let app = router().with_state(state);
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let mut request = acp_call_request(body);
+        request.headers_mut().insert(
+            axum::http::header::COOKIE,
+            format!("{cookie_name}={token}").parse().unwrap(),
+        );
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// PLAT-057 (FAIL): an unsupported ACP method comes back as a `-32602`
+    /// JSON-RPC error envelope, over the real HTTP path — not a raw error, not
+    /// an HTTP-level 4xx/5xx.
+    #[tokio::test]
+    async fn call_handler_reports_an_unsupported_method_as_a_json_rpc_error() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-call-fail-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state_none_mode(home.path()).await;
+        let app = router().with_state(state);
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": "req-9",
+            "method": "session/frobnicate",
+            "params": {},
+        });
+        let response = app.oneshot(acp_call_request(body)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["id"], "req-9");
+        assert_eq!(value["error"]["code"], -32602);
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("session/frobnicate")
+        );
+    }
+
+    /// PLAT-057 (BOUND): the JSON-RPC `id` round-trips exactly, including the
+    /// boundary case of a request that omits it entirely (must answer `null`,
+    /// not fail or invent one).
+    #[tokio::test]
+    async fn call_handler_echoes_the_request_id_including_when_absent() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-call-bound-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state_none_mode(home.path()).await;
+        let app = router().with_state(state);
+
+        let body = json!({ "jsonrpc": "2.0", "id": 42, "method": "initialize", "params": {} });
+        let response = app.clone().oneshot(acp_call_request(body)).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["id"], 42);
+
+        let body = json!({ "jsonrpc": "2.0", "method": "initialize", "params": {} });
+        let response = app.oneshot(acp_call_request(body)).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["id"], Value::Null);
+        assert_eq!(value["result"]["protocolVersion"], 1);
+    }
+
+    /// PLAT-057 (INPUT): a body that is not valid JSON at all must not panic
+    /// or hang the handler — it is rejected before `call`'s body even runs.
+    #[tokio::test]
+    async fn call_handler_rejects_a_body_that_is_not_valid_json() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-call-input-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state_none_mode(home.path()).await;
+        let app = router().with_state(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/acp")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(b"{ this is not json".to_vec()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert!(
+            response.status().is_client_error(),
+            "a malformed JSON body must be rejected, got {:?}",
+            response.status()
         );
     }
 }
