@@ -2943,7 +2943,7 @@ export function ChatView({
                           they appear under. Choose a provider in{" "}
                           <a
                             className="font-medium text-foreground underline-offset-4 hover:underline"
-                            href={settingsHref("inference")}
+                            href={connectionsHref("inference")}
                           >
                             Settings → Inference
                           </a>
@@ -2968,7 +2968,7 @@ export function ChatView({
                           the switch in{" "}
                           <a
                             className="font-medium text-foreground underline-offset-4 hover:underline"
-                            href={settingsHref("inference")}
+                            href={connectionsHref("inference")}
                           >
                             Settings → Inference
                           </a>

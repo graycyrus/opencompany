@@ -841,7 +841,7 @@ function InferenceNotice({
                 This said `#/settings/connections`, which named no settings
                 page and was repaired onto General, where neither action is. */}
             <a
-              href={settingsHref("inference")}
+              href={connectionsHref("inference")}
               onClick={onLeave}
               className="font-medium underline underline-offset-4"
             >
@@ -997,7 +997,7 @@ function BuildOut({
           */}
           {fallback === "no_model" && harnessReachable && canManage === true && (
             <a
-              href={settingsHref("inference")}
+              href={connectionsHref("inference")}
               onClick={onRedesign}
               data-testid="setup-add-model"
               className={buttonVariants({ variant: "outline" })}
@@ -1035,7 +1035,7 @@ function BuildOut({
               </Button>
               {canManage === true && (
                 <a
-                  href={settingsHref("inference")}
+                  href={connectionsHref("inference")}
                   onClick={onRedesign}
                   data-testid="setup-check-connection"
                   className={buttonVariants({ variant: "outline" })}

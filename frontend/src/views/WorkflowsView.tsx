@@ -3225,7 +3225,7 @@ export function WorkflowsView({
                   it recurring. */}
               {runRefusal.code === "inference_required" && (
                 <a
-                  href={settingsHref("inference")}
+                  href={connectionsHref("inference")}
                   className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                   data-testid="workflow-run-inference-cta"
                 >

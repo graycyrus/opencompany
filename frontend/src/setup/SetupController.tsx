@@ -34,7 +34,7 @@ import {
  * `onModelSettings` below compares the live hash against this, so the two
  * cannot drift: the check is the same string as the destination.
  */
-const MODEL_SETTINGS = settingsHref("inference");
+const MODEL_SETTINGS = connectionsHref("inference");
 
 /**
  * How long the gate's roster read (`client.listTeam`, just below) is allowed
