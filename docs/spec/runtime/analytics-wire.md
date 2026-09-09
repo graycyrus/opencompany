@@ -131,3 +131,52 @@ UUIDv4 requirement on the client id, and never the credential.
 `a_refused_credential_stops_the_drain` and `a_refused_event_does_not_stop_the_drain`
 are the same collector, the same three events and one status code apart, with
 opposite outcomes. Neither means much without the other.
+
+## Where the credential is allowed to travel
+
+The client id and secret are **default headers on every request**, which is what
+makes the two rules below load-bearing in a way they were not under Mixpanel: a
+token in a request body, to one fixed `https` address this crate chose, had no
+configuration that could redirect or downgrade it.
+
+**A `3xx` is treated like a `401`, and the client follows no redirect.** The
+client is built with `reqwest::redirect::Policy::none()`. Its default policy
+follows up to ten hops, and its cross-origin sanitization
+(`redirect.rs::remove_sensitive_headers`, reqwest 0.12.28, read rather than
+assumed) strips exactly `Authorization`, `Cookie`, `cookie2`,
+`Proxy-Authorization` and `WWW-Authenticate`. The `openpanel-client-*` headers
+are none of those, so one `302` — a reverse proxy sending unauthenticated
+callers to an SSO host is the ordinary way one arrives — handed this instance's
+long-lived write secret to a host the operator never named.
+`HeaderValue::set_sensitive` is not a defence and looks like one: it governs
+`Debug` output and HPACK indexing, not redirect handling.
+
+That sanitization also compares only host and port, never the scheme, so an
+`https` endpoint redirecting to `http://` on the same host would have carried
+the secret across in cleartext.
+
+A same-origin policy would also be safe, but it is a predicate to keep correct
+rather than an invariant to state, and all it buys is a collector that 301s
+`/track` to `/api/track` — an endpoint the operator can type correctly once.
+Following none of them makes "the credential only ever goes to the configured
+endpoint" a property of the client. So a redirecting endpoint sends nothing,
+abandons the drain like a `401` does, and warns **once**, naming the variable to
+fix. It never prints the `Location`: that is a URL the *collector* chose, and a
+URL is exactly where a credential hides — the same reason
+`loggable_send_error` strips the URL from a transport error.
+
+`a_redirect_never_carries_the_credential_to_another_host` points the tracker at
+a collector that `307`s to a second one on another port and asserts the second
+was never touched. Its control,
+`the_redirect_destination_would_have_recorded_the_credential`, sends to that
+same second collector directly and asserts it records three requests *and* the
+secret header — without it, the zero would also hold for a collector that counts
+nothing.
+
+**The endpoint itself must be `https`, or loopback.** Plain `http` to a
+non-loopback host would put the secret on the wire in cleartext once per event
+([CWE-319](https://cwe.mitre.org/data/definitions/319.html)), so it resolves to
+silence with its own reason rather than reporting. Loopback is the exception
+because the traffic never reaches a network interface. The rule, its cost, and
+why it is silence rather than a warning are in
+[analytics.md](analytics.md#why-https-is-required-and-why-loopback-is-the-exception).

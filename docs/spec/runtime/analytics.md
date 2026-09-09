@@ -204,7 +204,7 @@ symptom in analytics is inflated install counts, not lost data.
 | `OPENCOMPANY_ANALYTICS` | `on` forces reporting; `off` forbids it and outranks everything else. |
 | `OPENCOMPANY_ANALYTICS_CLIENT_ID` | the OpenPanel client id — a **UUIDv4** naming a `write` or `root` client. |
 | `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` | that client's secret. **Configuration, never a compiled-in constant** — a secret baked into a public binary is a secret everyone has. |
-| `OPENCOMPANY_ANALYTICS_ENDPOINT` | the collector URL. **Required; there is no default.** Must be an absolute `http`/`https` URL with a host. |
+| `OPENCOMPANY_ANALYTICS_ENDPOINT` | the collector URL. **Required; there is no default.** Must be an absolute URL with a host, and must be **`https`** — plain `http` is accepted only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`). |
 | `OPENCOMPANY_ANALYTICS_ID_KEY` | the secret a hosted tenant's analytics id is derived under. Injected by the platform, never given to the collector. Absent means the host is known by its random instance id instead. |
 
 For a self-hosted OpenPanel behind its bundled Caddy, the endpoint is
@@ -218,7 +218,8 @@ Reporting happens only when **all** of these hold:
 3. the deployment is `hosted-tenant`, **or** `OPENCOMPANY_ANALYTICS=on`;
 4. both halves of the client credential are configured;
 5. both halves are values that can go in an HTTP header;
-6. an endpoint is configured, and it is one a client could actually POST to.
+6. an endpoint is configured, and it is one a client could actually POST to;
+7. and it is one the credential can safely cross — `https`, or `http` to loopback.
 
 ### Why there is no default endpoint
 
@@ -231,10 +232,37 @@ telemetry to a third party nobody named. That is the same accident condition 6
 already refuses to make from the other direction, and it is worse, because the
 boot line would name a destination that is perfectly real.
 
-So an absent or blank endpoint is silence with its own reason. A **malformed**
-one is a different reason, because the two call for different edits — "you never
-set this" and "what you set will not parse" send an operator to different
-places.
+So an absent or blank endpoint is silence with its own reason, a **malformed**
+one a second and an **insecure** one a third: "you never set this", "what you
+set will not parse" and "what you set would leak the secret" are three different
+edits, and send an operator to three different places.
+
+### Why HTTPS is required, and why loopback is the exception
+
+Mixpanel's token rode in the body of a request to one fixed `https` address this
+crate chose; nothing could downgrade it. The OpenPanel secret is a **header on
+every request**, to an address the operator types, so
+`OPENCOMPANY_ANALYTICS_ENDPOINT=http://collector.internal/track` puts a
+long-lived write credential on the wire in cleartext, once per event, for the
+life of the tenant ([CWE-319](https://cwe.mitre.org/data/definitions/319.html)),
+and a container cannot verify anyone's claim that the network in between is
+private. So it is **silence with its own reason**, not a warning-and-send: a
+warning is a line nobody reads while the secret ships regardless.
+
+**Loopback is the exception**, and a real one rather than a concession: traffic
+to `127.0.0.0/8`, `::1` or `localhost` never reaches a network interface. It is
+how the collector runs beside the workload in development, and how every gated
+test here reaches its own. Two costs. `http://openpanel-api:3000/track`
+between two services on one Docker network is **refused** — a container network
+is not a boundary this process can check — so terminate TLS at the collector (its
+bundled Caddy does, the documented deployment) or use loopback. And **`localhost`
+is matched by exact name, not by suffix**: RFC 6761 also reserves `*.localhost`
+and a resolver may honour it, but "may" is not something to rest a credential on,
+and the strict subset only ever refuses an endpoint that would have worked,
+loudly and by name. Configuration alone cannot enforce this, so the client also
+**follows no redirect** — `reqwest` strips neither `openpanel-client-*` header
+across a hop, and never compares the scheme:
+[analytics-wire.md](analytics-wire.md#where-the-credential-is-allowed-to-travel).
 
 ### Why both credential halves, and why a header check
 

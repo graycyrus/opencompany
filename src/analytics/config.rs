@@ -156,6 +156,35 @@ pub enum Silence {
     /// proxy's URL is exactly where a credential lives — see
     /// `crate::analytics::boot`.
     UnusableEndpoint,
+    /// `OPENCOMPANY_ANALYTICS_ENDPOINT` is a plain `http://` URL to a host that
+    /// is not loopback, so the client credential would cross a network in the
+    /// clear.
+    ///
+    /// New with OpenPanel, and it exists because of *where* the credential
+    /// travels now. Mixpanel's token rode in the request body to one fixed,
+    /// TLS-only address that this crate chose; there was no configuration that
+    /// could downgrade it. OpenPanel's address is whatever the operator types,
+    /// and its credential rides in a request **header** on every single
+    /// request — so `OPENCOMPANY_ANALYTICS_ENDPOINT=http://collector.internal/track`
+    /// puts a long-lived write secret on the wire, in cleartext, once per event,
+    /// for the life of the tenant (CWE-319). "Internal network" is not a defence
+    /// a container can verify, and this module does not get to assume one.
+    ///
+    /// **Loopback is the documented exception.** `http://127.0.0.1:3000/track`,
+    /// `http://[::1]:3000/track` and `http://localhost:3000/track` never leave
+    /// the host, so there is no wire to read; that is the shape a developer
+    /// running the collector beside the workload actually uses, and every gated
+    /// test in this crate. Refusing it would refuse the only http case that is
+    /// genuinely safe.
+    ///
+    /// Silence rather than a warning-and-send, for the reason
+    /// [`Self::UnusableEndpoint`] gives one level down: the alternative is a
+    /// boot line nobody reads while the secret ships anyway, and a credential
+    /// disclosed is not a thing an operator can un-disclose after noticing. The
+    /// fix is one character in one variable, and the reason names it.
+    ///
+    /// The reason never quotes the value, like every other reason here.
+    InsecureEndpoint,
 }
 
 impl Silence {
@@ -178,6 +207,11 @@ impl Silence {
             Self::Unreadable => "the OPENCOMPANY_ANALYTICS value is not recognised",
             Self::UnusableEndpoint => {
                 "the OPENCOMPANY_ANALYTICS_ENDPOINT value is not a usable http(s) URL"
+            }
+            Self::InsecureEndpoint => {
+                "OPENCOMPANY_ANALYTICS_ENDPOINT is a plain http:// URL to a non-loopback \
+                 host, which would send the collector credential in the clear on every \
+                 request; use https, or a loopback address"
             }
         }
     }
@@ -235,6 +269,11 @@ impl Decision {
 ///    says [`Decision::Report`] is a promise the boot line then repeats out
 ///    loud, so an endpoint that cannot be sent to is silence with a reason,
 ///    not reporting — see [`is_usable_endpoint`].
+/// 7. **And one the credential can safely cross.** The client secret is a
+///    request header on every request, so a plain `http://` endpoint to a
+///    non-loopback host puts it on the wire in cleartext once per event. That
+///    is silence with its own reason too — see [`is_secure_endpoint`] and
+///    [`Silence::InsecureEndpoint`].
 pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
     // Read through `get_os`, not `get`. [`EnvSource::get`] maps a non-Unicode
     // value to `None`, which here would read as "the operator said nothing" and
@@ -308,8 +347,17 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
             Ok(value) => match value.trim() {
                 // Blank is absent, as it is for the credential and the switch.
                 "" => return Decision::Silent(Silence::NoEndpoint),
-                configured if is_usable_endpoint(configured) => configured.to_string(),
-                _ => return Decision::Silent(Silence::UnusableEndpoint),
+                // Shape before transport security, and the order matters for
+                // the reason an operator is given: a value that does not parse
+                // has no host to judge, and "this will not parse" sends them
+                // somewhere different from "this would leak the secret".
+                configured if !is_usable_endpoint(configured) => {
+                    return Decision::Silent(Silence::UnusableEndpoint);
+                }
+                configured if !is_secure_endpoint(configured) => {
+                    return Decision::Silent(Silence::InsecureEndpoint);
+                }
+                configured => configured.to_string(),
             },
         },
     };
@@ -375,6 +423,60 @@ fn is_usable_endpoint(raw: &str) -> bool {
     };
     matches!(parsed.scheme(), "http" | "https")
         && parsed.host_str().is_some_and(|host| !host.is_empty())
+}
+
+/// Whether the client credential can cross `raw` without being readable on the
+/// wire: `https`, or `http` to a loopback host.
+///
+/// This asks a different question from [`is_usable_endpoint`] — that one is
+/// "can a client send here at all", this one is "may this client's secret go
+/// there" — and they are kept apart because they resolve to different reasons
+/// and send an operator to different edits.
+///
+/// The rule exists because of where the OpenPanel credential travels.
+/// Mixpanel's token rode in the body of a request to one fixed `https` address
+/// this crate chose; no configuration could downgrade it. OpenPanel's address
+/// is typed by the operator and its secret is a **request header on every
+/// request**, so `http://collector.internal/track` writes a long-lived write
+/// credential to the network in cleartext once per event, forever
+/// ([CWE-319](https://cwe.mitre.org/data/definitions/319.html)). A container
+/// cannot verify anyone's claim that the network in between is private, so this
+/// does not assume it.
+///
+/// **Loopback is the exception, and it is a real one.** Traffic to
+/// `127.0.0.0/8`, `::1` or `localhost` never reaches a network interface, so
+/// there is nothing to read; it is also how the collector is run beside the
+/// workload in development and in every gated test in this crate. Refusing it
+/// would refuse the one `http` case that is actually safe.
+///
+/// `localhost` is matched **by exact name**, not by suffix. RFC 6761 reserves
+/// `*.localhost` for loopback as well, and a resolver may honour that — but
+/// "may" is not a property this check can rest a credential on, and the strict
+/// subset is the safe direction: it can only refuse an endpoint that would have
+/// worked, loudly, with a named reason and a one-character fix. Widening it
+/// later costs nothing; narrowing it after a secret has shipped costs the
+/// secret.
+///
+/// Matched on `Url::host()` rather than on the raw string, so that
+/// `http://127.0.0.1:3000/track`, `http://[::1]/track` and
+/// `http://user@localhost/track` are all judged on the host `url` actually
+/// parsed out, and a value like `http://127.0.0.1.evil.example/track` — which
+/// merely *starts* with a loopback address — is not.
+fn is_secure_endpoint(raw: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return false;
+    };
+    // `Url` lower-cases the scheme while parsing, so `HTTPS://…` arrives here
+    // as `https` and needs no case handling of its own.
+    if parsed.scheme() == "https" {
+        return true;
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
 }
 
 /// Whether `raw` is something the transport could put in an HTTP header.
@@ -998,79 +1100,271 @@ mod test {
     /// `is_usable_endpoint` exists to prevent.
     #[test]
     fn the_endpoint_check_matches_what_the_transport_accepts() {
-        // (endpoint, usable) — `false` means `reqwest` cannot send to it.
-        let measured: &[(&str, bool)] = &[
+        // (endpoint, refusal) — `None` reports, `Some(reason)` is silence with
+        // that reason. `UnusableEndpoint` means `reqwest` cannot send to it at
+        // all; `InsecureEndpoint` means it could, and must not, because the
+        // credential would be readable on the way.
+        let measured: &[(&str, Option<Silence>)] = &[
             // Rejected by `Url::parse`. Each of these was accepted by the
             // hand-rolled check this replaced.
-            ("http://[::1/track", false),  // unclosed IPv6 bracket
-            ("http://]::1[/track", false), // brackets inside out
-            ("http://collector.internal:99999/track", false), // port out of range
-            ("http://collector.internal:65536/track", false), // one past the top
-            ("http://collector.internal:abc/track", false), // port not a number
-            ("http://host:8080:9090/track", false), // two ports
-            ("http://127.0.0.1.5/track", false), // IPv4-shaped, invalid
-            ("http://999.999.999.999/track", false), // IPv4-shaped, invalid
+            ("http://[::1/track", Some(Silence::UnusableEndpoint)), // unclosed IPv6 bracket
+            ("http://]::1[/track", Some(Silence::UnusableEndpoint)), // brackets inside out
+            (
+                "http://collector.internal:99999/track",
+                Some(Silence::UnusableEndpoint),
+            ), // port out of range
+            (
+                "http://collector.internal:65536/track",
+                Some(Silence::UnusableEndpoint),
+            ), // one past the top
+            (
+                "http://collector.internal:abc/track",
+                Some(Silence::UnusableEndpoint),
+            ), // port not a number
+            (
+                "http://host:8080:9090/track",
+                Some(Silence::UnusableEndpoint),
+            ), // two ports
+            ("http://127.0.0.1.5/track", Some(Silence::UnusableEndpoint)), // IPv4-shaped, invalid
+            (
+                "http://999.999.999.999/track",
+                Some(Silence::UnusableEndpoint),
+            ), // IPv4-shaped, invalid
             // Rejected by `Url::parse` and by the hand-rolled check alike.
-            ("collector.internal/track", false),
-            ("collector.internal", false),
-            ("/track", false),
-            ("://collector.internal/track", false),
-            ("https://", false),
-            ("http://someone:hunter2@/track", false),
-            ("http://collector internal/track", false),
+            ("collector.internal/track", Some(Silence::UnusableEndpoint)),
+            ("collector.internal", Some(Silence::UnusableEndpoint)),
+            ("/track", Some(Silence::UnusableEndpoint)),
+            (
+                "://collector.internal/track",
+                Some(Silence::UnusableEndpoint),
+            ),
+            ("https://", Some(Silence::UnusableEndpoint)),
+            (
+                "http://someone:hunter2@/track",
+                Some(Silence::UnusableEndpoint),
+            ),
+            (
+                "http://collector internal/track",
+                Some(Silence::UnusableEndpoint),
+            ),
             // Parsed happily by `url` — and even built by `reqwest` — but not
             // sendable, so checked on top of the parse.
-            ("ftp://collector.internal/track", false), // scheme refused at send
-            ("file:///tmp/track", false),
+            (
+                "ftp://collector.internal/track",
+                Some(Silence::UnusableEndpoint),
+            ), // scheme refused at send
+            ("file:///tmp/track", Some(Silence::UnusableEndpoint)),
             // NOT here: `http:///track`. It looks like an empty host and is
             // not one — `url` normalizes it to `http://track/`, taking the
             // first path segment as the host, and `reqwest` sends to it. A
             // collector named `track` that does not resolve is an unreachable
             // collector like any other, which #1739 makes a no-op on purpose.
-            // Accepted, and the ones a deployment actually uses.
-            (TEST_ENDPOINT, true),
-            ("http://127.0.0.1:9/track", true),
-            ("http://127.0.0.1:9", true),
-            ("http://collector.internal:65535/track", true), // the top of the range
-            ("http://collector.internal:/track", true),      // empty port is legal
-            ("https://collector.internal/track", true),
-            ("HTTPS://collector.internal/track", true),
+            //
+            // Sendable, but plain `http` to a host that is not loopback: the
+            // client secret is a header on every request, so these would put it
+            // on the wire in the clear. Each was accepted before the
+            // `InsecureEndpoint` rule.
+            (
+                "http://collector.internal:65535/track",
+                Some(Silence::InsecureEndpoint),
+            ), // the top of the range
+            (
+                "http://collector.internal:/track",
+                Some(Silence::InsecureEndpoint),
+            ), // empty port is legal
+            ("http://exa_mple.com/track", Some(Silence::InsecureEndpoint)),
+            ("http://-example.com/track", Some(Silence::InsecureEndpoint)),
+            (
+                "http://\u{4f8b}\u{3048}.jp/track",
+                Some(Silence::InsecureEndpoint),
+            ),
+            // A host that merely *starts* with a loopback address is not one.
+            (
+                "http://127.0.0.1.evil.example/track",
+                Some(Silence::InsecureEndpoint),
+            ),
+            (
+                "http://localhost.evil.example/track",
+                Some(Silence::InsecureEndpoint),
+            ),
+            // Accepted, and the ones a deployment actually uses: `https`
+            // anywhere, and `http` only to loopback.
+            (TEST_ENDPOINT, None),
+            ("http://127.0.0.1:9/track", None),
+            ("http://127.0.0.1:9", None),
+            ("http://localhost:9/track", None),
+            ("http://LOCALHOST:9/track", None),
+            ("https://collector.internal/track", None),
+            ("HTTPS://collector.internal/track", None),
             (
                 "https://collector.internal/track?key=NotARealCollectorKey",
-                true,
+                None,
             ),
             (
                 "https://someone:NotARealCollectorKey@collector.internal/track",
-                true,
+                None,
             ),
-            ("https://[::1]:8443/track", true),
-            ("http://[::1]/track", true),
-            ("https://collector.internal:8443/track#frag", true),
-            // Odd but legal, and deliberately still accepted: rejecting these
-            // would silence a working deployment, which is the direction that
-            // costs more than it saves.
-            ("http://exa_mple.com/track", true),
-            ("http://-example.com/track", true),
-            ("http://\u{4f8b}\u{3048}.jp/track", true),
+            ("https://[::1]:8443/track", None),
+            ("http://[::1]/track", None),
+            ("https://collector.internal:8443/track#frag", None),
         ];
 
-        for (endpoint, usable) in measured {
+        for (endpoint, refusal) in measured {
             let decision = resolve(
                 Deployment::HostedTenant,
                 &configured(&[(ENDPOINT_ENV, endpoint)]),
             );
-            if *usable {
-                match decision {
+            match refusal {
+                None => match decision {
                     Decision::Report { endpoint: got, .. } => assert_eq!(&got, endpoint),
                     other => panic!("{endpoint:?} must still report: {other:?}"),
-                }
-            } else {
-                assert_eq!(
+                },
+                Some(reason) => assert_eq!(
                     decision,
-                    Decision::Silent(Silence::UnusableEndpoint),
-                    "{endpoint:?} cannot be sent to, so it must not resolve to a report"
-                );
+                    Decision::Silent(*reason),
+                    "{endpoint:?} must resolve to silence with {reason:?}"
+                ),
             }
+        }
+    }
+
+    /// **A plain `http` endpoint to a non-loopback host is silence, not a
+    /// credential in the clear.**
+    ///
+    /// The OpenPanel client secret is a request header on *every* request, so
+    /// `OPENCOMPANY_ANALYTICS_ENDPOINT=http://collector.internal/track` writes a
+    /// long-lived write credential to the network in cleartext once per event
+    /// for the life of the tenant (CWE-319). Mixpanel had no equivalent
+    /// exposure: its token rode in the body of a request to one fixed `https`
+    /// address this crate chose, and no configuration could downgrade it.
+    ///
+    /// Silence rather than a warning-and-send, because a warning is a line
+    /// nobody reads while the secret ships anyway, and a disclosed credential
+    /// cannot be un-disclosed once noticed. The reason names the variable and
+    /// the two ways out.
+    #[test]
+    fn a_cleartext_endpoint_is_silence_rather_than_a_credential_on_the_wire() {
+        for insecure in [
+            "http://collector.internal/track",
+            "http://collector.internal:8080/track",
+            "http://10.0.0.5:3000/track",
+            "http://192.168.1.10/track",
+            "http://[2001:db8::1]/track",
+            "http://collector.example.com/api/track",
+            // Not loopback, however much it looks like it.
+            "http://127.0.0.1.evil.example/track",
+            "http://localhost.evil.example/track",
+        ] {
+            let decision = resolve(
+                Deployment::HostedTenant,
+                &configured(&[(ENDPOINT_ENV, insecure)]),
+            );
+            assert_eq!(
+                decision,
+                Decision::Silent(Silence::InsecureEndpoint),
+                "{insecure:?} would send the client secret in the clear"
+            );
+            assert!(!decision.reports(), "{insecure:?}");
+        }
+    }
+
+    /// The control that keeps the test above from passing by rejecting every
+    /// `http` URL: **loopback `http` is the documented exception and still
+    /// reports.**
+    ///
+    /// It is not a concession — it is the only `http` case that is actually
+    /// safe, because the traffic never reaches a network interface. It is also
+    /// how the collector is run beside the workload in development, and how
+    /// every gated transport test in this crate points at its own local
+    /// collector; without this arm those tests would be asserting against a
+    /// tracker that resolve had already silenced.
+    #[test]
+    fn loopback_http_is_the_one_cleartext_endpoint_that_still_reports() {
+        for loopback in [
+            "http://127.0.0.1:3000/track",
+            "http://127.0.0.1/track",
+            "http://127.1.2.3:9/track",
+            "http://[::1]:3000/track",
+            "http://[::1]/track",
+            "http://localhost:3000/track",
+            "http://LocalHost:3000/track",
+        ] {
+            match resolve(
+                Deployment::HostedTenant,
+                &configured(&[(ENDPOINT_ENV, loopback)]),
+            ) {
+                Decision::Report { endpoint, .. } => assert_eq!(endpoint, loopback),
+                other => panic!("{loopback:?} is loopback and must still report: {other:?}"),
+            }
+        }
+    }
+
+    /// The insecure reason names the variable and the fix, and — like every
+    /// other reason here — **never quotes the value**.
+    ///
+    /// This one matters more than most: the endpoint it is rejecting is by
+    /// definition one an operator typed, and a self-hosted collector is
+    /// routinely fronted by an authenticated proxy that carries its key in the
+    /// URL. Quoting the rejected value would print that key in the boot line of
+    /// every tenant the new rule silences.
+    #[test]
+    fn the_insecure_endpoint_reason_never_quotes_the_endpoint() {
+        const SECRET: &str = "NotARealCollectorKey";
+        let reason = Silence::InsecureEndpoint.as_str();
+        assert!(
+            reason.contains("OPENCOMPANY_ANALYTICS_ENDPOINT"),
+            "the reason must name the variable to act on: {reason}"
+        );
+        assert!(
+            reason.contains("https") && reason.contains("loopback"),
+            "the reason must name both ways out: {reason}"
+        );
+
+        let raw = format!("http://collector.internal/track?key={SECRET}");
+        assert_eq!(
+            resolve(
+                Deployment::HostedTenant,
+                &configured(&[(ENDPOINT_ENV, raw.as_str())])
+            ),
+            Decision::Silent(Silence::InsecureEndpoint)
+        );
+        let printed = format!("{:?} {}", Silence::InsecureEndpoint, reason);
+        assert!(
+            !printed
+                .to_ascii_lowercase()
+                .contains(&SECRET.to_ascii_lowercase()),
+            "the reason leaked the endpoint credential: {printed}"
+        );
+        // The self-check: the needle really is findable in the unredacted
+        // value, or the guard above is vacuous.
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains(&SECRET.to_ascii_lowercase()),
+            "the needle must be findable before redaction: {raw}"
+        );
+    }
+
+    /// **Shape is judged before transport security**, so the two reasons stay
+    /// distinguishable and each sends an operator to the edit it names.
+    ///
+    /// `http://collector.internal:99999/track` is both unparseable *and* plain
+    /// http; it must be reported as unusable, because there is no host to judge
+    /// until it parses and "this will not parse" is the more actionable half.
+    #[test]
+    fn an_unparseable_cleartext_endpoint_is_unusable_rather_than_insecure() {
+        for both in [
+            "http://collector.internal:99999/track",
+            "http://collector internal/track",
+            "http://[::1/track",
+        ] {
+            assert_eq!(
+                resolve(
+                    Deployment::HostedTenant,
+                    &configured(&[(ENDPOINT_ENV, both)])
+                ),
+                Decision::Silent(Silence::UnusableEndpoint),
+                "{both:?} does not parse, so the reason must be about the parse"
+            );
         }
     }
 
