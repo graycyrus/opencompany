@@ -739,30 +739,49 @@ mod tool_test {
     /// `execute` concurrently — nothing upstream of this tool serialises the
     /// calls — so both must still land their own card rather than one
     /// silently losing to the other on the shared queue's `Mutex`.
-    #[tokio::test]
+    ///
+    /// Driven from two worker threads through a [`Barrier`], not from
+    /// `tokio::join!`: `execute` has no suspension point around its
+    /// synchronous `push`, so joined futures are polled to completion one
+    /// after the other on a single task. That arrangement exercises two serial
+    /// inserts and would pass unchanged if simultaneous calls could lose a
+    /// card — which is the only thing this test exists to rule out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_questions_from_different_agents_both_park() {
+        use std::sync::{Arc, Barrier};
+
         let queue = ApprovalRequestQueue::default();
         let finance = EscalateToHumanTool::new(queue.clone(), "finance".to_string());
         let legal = EscalateToHumanTool::new(queue.clone(), "legal".to_string());
+        let gate = Arc::new(Barrier::new(2));
 
-        let (a, b) = tokio::join!(
-            finance.execute(serde_json::json!({ "question": "approve the Q3 budget?" })),
-            legal.execute(serde_json::json!({ "question": "sign the NDA as-is?" })),
-        );
-        assert!(!a.expect("runs").is_error);
-        assert!(!b.expect("runs").is_error);
+        let ask = |tool: EscalateToHumanTool, question: &'static str, gate: Arc<Barrier>| {
+            tokio::task::spawn_blocking(move || {
+                gate.wait();
+                tokio::runtime::Handle::current()
+                    .block_on(tool.execute(serde_json::json!({ "question": question })))
+            })
+        };
+        let a = ask(finance, "approve the Q3 budget?", gate.clone());
+        let b = ask(legal, "sign the NDA as-is?", gate.clone());
+        assert!(!a.await.expect("joins").expect("runs").is_error);
+        assert!(!b.await.expect("joins").expect("runs").is_error);
 
         let drained = queue.drain(8);
+        let reasons: Vec<&String> = drained.requests.iter().map(|r| &r.reason).collect();
         assert_eq!(
             drained.requests.len(),
             2,
-            "both concurrent questions must reach the queue, not just whichever wins the race: {:?}",
-            drained
-                .requests
-                .iter()
-                .map(|r| &r.reason)
-                .collect::<Vec<_>>()
+            "both concurrent questions must reach the queue, not just whichever wins the \
+             race: {reasons:?}"
         );
+        for question in ["approve the Q3 budget?", "sign the NDA as-is?"] {
+            assert!(
+                reasons.iter().any(|reason| reason.contains(question)),
+                "the queue must hold each agent's own question, not one of them twice: \
+                 {reasons:?}"
+            );
+        }
     }
 
     /// The other half of `an_escalation_mints_no_grant`, and the half that is
