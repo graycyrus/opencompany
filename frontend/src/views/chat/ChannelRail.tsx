@@ -178,7 +178,7 @@ export function ChannelRail({
             channel={section.channels[0]}
             active={section.channels[0]?.id === activeId}
             activeAria={activeAria}
-              onPage={onPage}
+            onPage={onPage}
             unread={section.channels[0] ? (unread[section.channels[0].id] ?? 0) : 0}
             onSelect={onSelect}
           />
@@ -210,7 +210,7 @@ export function ChannelRail({
             }
             activeId={activeId}
             activeAria={activeAria}
-              onPage={onPage}
+            onPage={onPage}
             unread={unread}
             mentions={mentions}
             onSelect={onSelect}
@@ -482,7 +482,7 @@ function Section({
                 channel={channel}
                 active={channel.id === activeId}
                 activeAria={activeAria}
-              onPage={onPage}
+                onPage={onPage}
                 unread={unread[channel.id] ?? 0}
                 mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
