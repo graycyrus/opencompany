@@ -269,29 +269,31 @@ export function SidebarCollapseButton() {
               // unlabelled button is the only thing saying where the keyboard
               // is. (`RESTING_ROW` also carries `data-active:opacity-100`,
               // which is a nav row's business and never this one's.)
-                // Filled at REST, not only on hover.
-                //
-                // In the sidebar's header this was one icon among four, and the
-                // resting dim kept it from shouting over its neighbours. It now
-                // sits alone, centred on the seam between the rail and the
-                // content card — no neighbours to belong to and no surface
-                // behind it — and at ghost weight it read there as a stray
-                // glyph drawn on the border rather than as something pressable.
-                // Carrying its own fill is what makes it legible as a control
-                // where it now lives; hover then deepens the fill instead of
-                // being the only thing that draws it — the rest state is the token
-                // at 70%, hover the full strength, so the press feedback still
-                // moves in the direction it always did.
-                "shrink-0 bg-sidebar-accent/70 text-sidebar-accent-foreground",
-              // Three classes replacing exactly one of `ghost`'s each, so
-              // tailwind-merge drops the original rather than leaving the two
-              // to race: `hover:bg-muted`, `hover:text-foreground` and
-              // `dark:hover:bg-muted/50`. The muted tint is tuned against the
-              // canvas; this button is on the sidebar's surface, which is a
-              // different rung and moving again in issue #1178. The accent is
-              // also what every row in this column already hovers to.
-                "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent",
-              "focus-visible:ring-sidebar-ring/50",
+              // A primary FAB, not a tinted one.
+              //
+              // In the sidebar's header this was one icon among four, and a
+              // resting dim kept it from shouting over its neighbours. It now
+              // sits alone, centred on the seam between the rail and the
+              // content card — no neighbours to belong to and no surface behind
+              // it. Ghost weight read there as a stray glyph drawn on the
+              // border; `bg-sidebar-accent/70` fixed that but only barely,
+              // because the accent IS the column's own hover tint, so at rest
+              // the control looked like a row that happened to be hovered and
+              // at a glance like nothing at all.
+              //
+              // Primary settles it: the one button floating over the seam is
+              // the one button in the console that owns its own colour. The
+              // shadow is what makes it read as floating ABOVE the two surfaces
+              // rather than as a chip stamped into the border between them —
+              // this is the only control in the shell that sits over the join,
+              // and the only one that needs to say so.
+              "shrink-0 shadow-md",
+              // Replaces `ghost`'s `hover:bg-muted` / `hover:text-foreground` /
+              // `dark:hover:bg-muted/50` one for one, so tailwind-merge drops
+              // the originals rather than leaving the two to race. Hover
+              // deepens the fill in the same direction it always did.
+              "bg-primary text-primary-foreground hover:bg-primary/80 dark:hover:bg-primary/80",
+              "focus-visible:ring-primary/50",
               // No `group-data-[collapsible=icon]:size-8` any more, and its
               // absence is the point. `group` is on `[data-slot=sidebar]`
               // (`ui/sidebar.tsx`) and this button is no longer inside it, so
