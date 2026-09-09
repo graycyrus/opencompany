@@ -30,7 +30,6 @@ import { CONNECTION_PAGES } from "@/views/connection-pages";
 // `InvoicingView`, `WalletView` and the lazy `FinancesView` into the module the
 // sidebar renders on every route. Same reason `connection-pages.ts` exists.
 import { FINANCE_PAGES } from "@/views/finance/finance-pages";
-import { BRAIN_PAGES } from "@/views/memory/brain-pages";
 import { cn } from "@/lib/utils";
 
 /**
@@ -187,24 +186,13 @@ export const NAV_SECTIONS: NavSection[] = [
       // row and not one per list.
       { view: "ledgers", label: "Work", icon: BookText, hint: "Tasks, and every list it declared" },
       { view: "workspace", label: "Workspace", icon: FolderClosed, hint: "The files it keeps" },
-      // Three pages, listed under a caption — the same shape Finance takes
-      // below and the Settings rail has always taken. Overview is what a bare
-      // `#/company/brain` lands on; Upload and Settings are the two jobs that
-      // used to sit on top of it in one scrolling column.
-      {
-        view: "brain",
-        label: "Brain",
-        icon: Brain,
-        hint: "What it remembers",
-        group: true,
-        children: BRAIN_PAGES.map((page) => ({
-          view: "brain" as const,
-          sub: page.id,
-          label: page.label,
-          icon: page.icon,
-          hint: page.hint,
-        })),
-      },
+      // One row, not a three-row caption group. Brain's Overview, Upload and
+      // Settings are tabs in the page's own header now
+      // (`views/memory/brain-pages.ts` argues why): one subject looked at three
+      // ways, rather than three destinations worth three of the sidebar's
+      // scarce rows. The addresses are unchanged — the row still opens
+      // `#/company/brain`, and `#/company/brain/upload` still opens Upload.
+      { view: "brain", label: "Brain", icon: Brain, hint: "What it remembers" },
       // A row under Company, with sub-pages of its own — the table's one
       // grandchild list.
       //
