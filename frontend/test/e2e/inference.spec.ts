@@ -49,25 +49,29 @@ async function openConnections(page: Page) {
     });
 }
 
-test("the managed brain is not offered as something to switch to", async ({ page }) => {
+test("the managed brain is offered as something to switch to", async ({ page }) => {
   await openConnections(page);
 
   // The company has no `[inference]` section, so the host still answers
-  // `provider: "managed"` — unchanged, this is a console-only change. What the
-  // card must not do is render that as a route: the header reports the state,
-  // and the form opens on something the operator can actually finish.
-  await expect(page.getByTestId("inference-current-provider")).toHaveText("Not configured", {
-    timeout: 30_000,
-  });
-  await expect(page.locator("#inference-provider")).toHaveText(/OpenRouter/);
-  await expect(page.locator("body")).not.toContainText("Managed (TinyHumans)");
+  // `provider: "managed"`. `INFERENCE_MANAGED_HIDDEN` used to make the console
+  // pretend that was "Not configured" and fall the form back to OpenRouter,
+  // because choosing it meant minting a TinyHumans key by hand with nowhere in
+  // the console to do it. The one-click connect flow (`ConnectTinyHumansButton`)
+  // removed that gap, so hiding the route stopped being honest — a company
+  // already on it now sees its own real state, and it is a route an operator
+  // can actually finish setting up from here.
+  await expect(page.getByTestId("inference-current-provider")).toHaveText(
+    "Managed (TinyHumans)",
+    { timeout: 30_000 },
+  );
+  await expect(page.locator("#inference-provider")).toHaveText(/Managed \(TinyHumans\)/);
 
-  // And it is not in the list, so nothing can be switched *to* it.
+  // And it is in the list, so it can be switched *to* as well as reported.
   await page.locator("#inference-provider").click();
   await expect(page.getByRole("option", { name: "OpenRouter", exact: true })).toBeVisible();
   await expect(
     page.getByRole("option", { name: "Managed (TinyHumans)", exact: true }),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await page.keyboard.press("Escape");
 });
 
@@ -82,10 +86,10 @@ test("a key typed for a BYOK provider is not discarded by switching provider", a
   await expect(page.getByTestId("inference-key-note")).toBeVisible();
 
   // Type a key under one provider, then switch to another and back. The value
-  // survives the switch — that is the state that used to lose it. The pair used
-  // to be OpenRouter and managed; managed is no longer selectable, and the
-  // defect was never about *which* two providers, only about crossing between
-  // any of them.
+  // survives the switch — that is the state that used to lose it. The pair
+  // used to be OpenRouter and managed, back when managed was not selectable;
+  // Custom stands in for it here instead, but the defect was never about
+  // *which* two providers, only about crossing between any of them.
   await pickProvider(page, "OpenRouter");
   const typed = `pw-e2e-${Date.now()}`;
   await page.locator("#inference-key").fill(typed);

@@ -16,7 +16,61 @@ backend derives the Composio entity from whatever bearer it is handed, and a
 TinyHumans key is a bearer it recognises. So the key **authorizes Composio
 directly** — there is no provisioning step that trades it for a second token,
 and no per-tenant provider application to register with Google, Slack or GitHub.
-A company with a key set connects Gmail by clicking Connect.
+
+### Not every TinyHumans key reaches Composio
+
+The bearer has to carry the `connections` scope. The backend requires it on
+*every* `/agent-integrations/composio` request, safe methods included, and
+refuses to mint it on `POST /api-keys` — so a key a person created by hand in
+their TinyHumans account, and then pasted into `PUT …/credential`, connects
+nothing. It is a real credential that authenticates fine and is refused at that
+one surface.
+
+Two principals do carry it:
+
+- **An attested hosted tenant.** The manager-issued, audience-bound cluster
+  token the instance authenticates with is granted
+  `read`/`connections`/`inference` automatically. A hosted company therefore
+  reaches Composio with no key set at all.
+- **A key issued by the grant flow below**, when the console that asked for it
+  is a provisioned tenant origin.
+
+This is worth stating plainly because the console cannot tell the difference
+from the outside: `PUT …/credential` accepts any string, and a pasted key
+reports `configured: true` and `source: company` whether or not it can do the
+thing the card describes.
+
+## Getting the key without pasting one
+
+`POST …/credential/link/start` → the hub → `POST …/credential/link/finish`.
+Modelled on OpenRouter's PKCE key exchange, and it exists because the
+alternative was an operator leaving the app to mint a key by hand and carrying
+it back on a clipboard.
+
+1. **Start.** The host mints a `code_verifier`, keeps it in memory
+   (`server::hub_link`), and answers with the hub URL to navigate to — carrying
+   only `base64url(sha256(verifier))` and an opaque `state`.
+2. **The hub.** The person signs in with their provider and approves a consent
+   screen naming the requesting origin and the scopes. The hub decides those
+   scopes from the callback origin: a **provisioned tenant origin** may receive
+   `connections`; a loopback console receives what a human could mint by hand.
+3. **Finish.** The browser returns with a single-use `code`. The host looks up
+   the verifier by `state`, redeems both at the hub, and stores what comes back.
+
+The verifier never leaves the host and the key never reaches the browser. That
+is the reason the exchange is server-side rather than done in the page: whatever
+redeems the code receives the key, and a `connections` key passing through a tab
+is a credential in a place nobody can account for.
+
+**One grant arms two credentials.** The minted key is stored as both
+`tinyhumans/key` and `inference/key`, and the company's inference provider is
+declared `managed`. An admin who had to run the flow once per page — once for
+Connections, once for Inference — would be back to two errands, which is the
+thing this replaces.
+
+The paste field stays. A host with no hub wired reports `hubLink: false` on
+`GET …/credential`, the console renders no button, and the screen is exactly
+what it was before this existed.
 
 ## Where a connection lives
 

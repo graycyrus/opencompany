@@ -145,8 +145,9 @@ FROM debian:bookworm-slim AS runtime
 # files must be present to load the binary). No-ops for the small builds.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl libssl3 \
+       ca-certificates curl git libssl3 \
        libx11-6 libxi6 libxtst6 libxrandr2 libxcb1 libxkbcommon0 \
+    && git --version \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
