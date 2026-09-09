@@ -128,7 +128,7 @@ test("#1440 agents on a desk show the desk's name on the card", async ({ page })
   await expect(mayaDesks.getByTestId("team-card-desk-research")).toContainText("(lead)");
 });
 
-test("#1440 a agent on no desk says so on the card", async ({ page }) => {
+test("#1440 an agent on no desk says so on the card", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
 

@@ -116,7 +116,7 @@ describe("ring 1 is the company's desks", () => {
     expect(dept.id).toBe(`desk:${UNPLACED}`);
   });
 
-  it("seats a agent by their desk, not by their job title", () => {
+  it("seats an agent by their desk, not by their job title", () => {
     // The whole point: hedy is a Designer on the Engineering desk. The old
     // keyword table put her in Design on the strength of the word "Designer".
     const { agents, departments } = adapt({ ...BASE, members: ROSTER, desks: DESKS });
@@ -128,7 +128,7 @@ describe("ring 1 is the company's desks", () => {
     expect(ada.departmentId).toBe("desk:front-of-house");
   });
 
-  it("gives a agent on several desks the first one, and never two", () => {
+  it("gives an agent on several desks the first one, and never two", () => {
     const both: DeskDto = { id: "both", name: "Both", members: ["hedy"] };
     // Host order decides: engineering is served first, so engineering wins.
     expect(deskOfMember("hedy", [ENGINEERING, both])).toBe("desk:engineering");
@@ -143,7 +143,7 @@ describe("ring 1 is the company's desks", () => {
 });
 
 describe("nobody is given a position the company did not declare", () => {
-  it("leaves a agent on no desk unplaced rather than in Operations", () => {
+  it("leaves an agent on no desk unplaced rather than in Operations", () => {
     // grace is on neither desk. The old code read "Growth Marketer" and filed
     // her under Growth; a role matching nothing at all fell back to Operations.
     const { agents, departments } = adapt({ ...BASE, members: ROSTER, desks: DESKS });

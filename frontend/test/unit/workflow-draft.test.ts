@@ -63,7 +63,7 @@ describe("draftBanners", () => {
     expect(withReason.reason).toBe("this only runs once");
 
     const noReason = draftBanners({ automatable: false });
-    expect(noReason.reason).toBe("This is better done once than built into a automation.");
+    expect(noReason.reason).toBe("This is better done once than built into an automation.");
   });
 });
 

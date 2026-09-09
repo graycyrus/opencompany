@@ -226,7 +226,7 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
  * had no coverage was the one refusal the host still enforces (a company's
  * last teammate) and an ordinary write failure, neither silently swallowed.
  */
-describe("removing a agent from the chat member pane", () => {
+describe("removing an agent from the chat member pane", () => {
   async function openRemove() {
     const toggle = [...container.querySelectorAll("button")].find((b) =>
       (b.textContent ?? "").includes("agent"),

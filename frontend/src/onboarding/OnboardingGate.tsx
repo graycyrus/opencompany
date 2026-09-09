@@ -154,7 +154,7 @@ export function OnboardingGate({
     },
     {
       id: "workflow",
-      label: "Run a automation",
+      label: "Run an automation",
       hint: "One real run — not a test — proves the company actually works.",
       icon: Workflow,
       done: status.workflowRunSucceeded,

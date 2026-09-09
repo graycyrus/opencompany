@@ -59,7 +59,7 @@ describe("sidebar navigation", () => {
     expect(isNavigationActive("chat", "workflows")).toBe(false);
   });
 
-  it("keeps a card under Work and a agent under Agents", () => {
+  it("keeps a card under Work and an agent under Agents", () => {
     // Both are Rule-6 deep-link destinations with no row of their own. Without
     // this the whole section collapses the moment one is opened.
     expect(isNavigationActive("ledgers", "tasks")).toBe(true);

@@ -517,7 +517,7 @@ function PublishStatusRow({ caps }: { caps: CapabilityStatusDto }) {
       <div className="space-y-0.5">
         <span className="font-medium">Publishing deliverables</span>
         <p className="text-xs text-muted-foreground">
-          Handing a file a agent wrote to the board as a deliverable — the only way work in a
+          Handing a file an agent wrote to the board as a deliverable — the only way work in a
           agent&apos;s sandbox becomes something you can open. It rides the same{" "}
           <code className="font-mono">files</code> / <code className="font-mono">docs</code> grant
           as their file tools: add one of those to{" "}

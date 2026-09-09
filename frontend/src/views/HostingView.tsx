@@ -336,7 +336,7 @@ export function HostingView({ client, company }: Props) {
         </Card>
 
         <p className="text-xs text-muted-foreground">
-          A deployment publishes the files in a agent&rsquo;s workspace to the
+          A deployment publishes the files in an agent&rsquo;s workspace to the
           public internet under this account, and provisioning a database is a
           bill this account pays. Nothing else in this app can read the
           connection string a database produces — the provider injects it into

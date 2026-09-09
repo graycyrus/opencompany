@@ -186,7 +186,7 @@ describe("the Automations tab opens on the index", () => {
     expect(window.location.hash).toBe("#/workflows");
   });
 
-  it("opens a automation when one is picked, and pushes its own URL", async () => {
+  it("opens an automation when one is picked, and pushes its own URL", async () => {
     const { client, graphGets } = makeClient();
     await mountAt("#/workflows", client);
 
@@ -220,7 +220,7 @@ describe("the Automations tab opens on the index", () => {
   });
 });
 
-describe("a URL naming a automation opens it", () => {
+describe("a URL naming an automation opens it", () => {
   it("renders the detail view for the id in the hash, with no index in the way", async () => {
     const { client, graphGets } = makeClient();
     await mountAt("#/workflows/alpha", client);
@@ -251,7 +251,7 @@ describe("a URL naming a automation opens it", () => {
   });
 });
 
-describe("leaving a automation behind", () => {
+describe("leaving an automation behind", () => {
   // Both routes back to the index, because the rule lives on the selection
   // rather than on the back button: the one nobody remembers to update is the
   // delete, and it is the one that leaves the drawer open the longest.

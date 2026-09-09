@@ -236,7 +236,7 @@ export function RunTracesList({
           </div>
         ) : runs.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No automation runs yet. Runs appear here once a automation fires —
+            No automation runs yet. Runs appear here once an automation fires —
             including scheduled ones that run while you're away.
           </p>
         ) : sorted.length === 0 ? (
@@ -273,7 +273,7 @@ export function RunTracesList({
               <p className="mt-2 text-2xs text-muted-foreground">
                 Showing the most recent {COMPANY_RUN_PAGE_LIMIT} runs across all
                 workflows{activeFilterCount > 0 ? " before filtering" : ""}. Open
-                a automation's own history for its full trail.
+                an automation's own history for its full trail.
               </p>
             )}
           </>

@@ -831,7 +831,7 @@ export function StandingPermissions({
                   size="sm"
                   /* The subject, not just the grant: two teammates holding the
                      same tool and scope read identically in grantHeadline — and
-                     a automation grant carries no agent at all — so button-only
+                     an automation grant carries no agent at all — so button-only
                      navigation would hear identical "Remove" buttons and could
                      take back the wrong one (#1411). `grantSubject` resolves
                      the automation subject for that second kind. The accessible

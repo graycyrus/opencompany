@@ -431,7 +431,7 @@ describe("whether a payload lead was cut to fit the compact row", () => {
 });
 
 describe("a kind nobody has named", () => {
-  it("says a agent wants a tool rather than inventing one", () => {
+  it("says an agent wants a tool rather than inventing one", () => {
     expect(
       approvalAction(approval({ kind: "some_tool_nobody_declared" })),
     ).toBe("Use one of its tools");

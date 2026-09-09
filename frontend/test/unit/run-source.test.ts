@@ -67,7 +67,7 @@ describe("a run that worked a card", () => {
   });
 });
 
-describe("a run whose card was opened by a automation", () => {
+describe("a run whose card was opened by an automation", () => {
   it("is filed under the automation, with the card on the second line", () => {
     // The ordering that matters: the workflow decided the work and the card is
     // the mechanism. Filing these under the card title would bury the schedule

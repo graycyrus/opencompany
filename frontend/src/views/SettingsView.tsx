@@ -110,7 +110,7 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
             business now — the desktop app holds its session the same way the
             browser does — so there is no machine for this page to pair. */}
 
-        {/* Every coding engine a agent can be bound to, joined against
+        {/* Every coding engine an agent can be bound to, joined against
             whether it can actually run on this machine (issue #1245). Works in
             a browser; the installed-here half only fills in on the desktop. */}
         <ExternalHarnesses client={client} company={company} />

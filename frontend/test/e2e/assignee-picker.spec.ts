@@ -149,7 +149,7 @@ test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
   await expect(created).not.toContainText(/\bengineer\b(?!ing)/);
 });
 
-test("a card can be assigned to a agent, and created for nobody at all", async ({
+test("a card can be assigned to an agent, and created for nobody at all", async ({
   page,
   request,
 }) => {

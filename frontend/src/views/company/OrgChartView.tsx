@@ -990,7 +990,7 @@ function DeskNode({
 
             This was two adjacent controls: a full-width "Add agent" button
             that seated somebody already on the roster, and — flush against it,
-            with no label — a `UserPlus` icon that *created* a agent here.
+            with no label — a `UserPlus` icon that *created* an agent here.
             Three problems, all of them the same problem:
 
             - the labelled one said "Add agent" and meant "add an existing

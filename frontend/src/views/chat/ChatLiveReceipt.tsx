@@ -120,7 +120,7 @@ export function resolveReceiptAgentName(
   channel: Channel,
 ): string | undefined {
   if (!receipt.agentId) return undefined;
-  return agentNames?.[receipt.agentId] ?? channel.voice ?? "a agent";
+  return agentNames?.[receipt.agentId] ?? channel.voice ?? "an agent";
 }
 
 /**

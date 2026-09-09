@@ -148,7 +148,7 @@ test("an away status renders distinctly from online", async ({ page }) => {
 });
 
 /** Teammates are not people: an agent has no session and no machine to be at. */
-test("a agent row carries no presence dot", async ({ page }) => {
+test("an agent row carries no presence dot", async ({ page }) => {
   await mockApi(page, { seed: [{ userId: "u-ada", status: "online", atMillis: Date.now() }] });
   await openChannel(page, "engineering");
   await openPane(page);

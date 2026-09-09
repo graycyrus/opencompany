@@ -198,7 +198,7 @@ const DECLINE_FAILURES: ReadonlyArray<readonly [string, string]> = [
   ],
   [
     "the described automation could not be drafted into one that would be accepted",
-    "The copilot could not turn that into a automation it would accept.",
+    "The copilot could not turn that into an automation it would accept.",
   ],
 ];
 

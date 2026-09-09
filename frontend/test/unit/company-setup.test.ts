@@ -131,7 +131,7 @@ describe("shouldOfferSetup", () => {
    * fifth global has to fall out of the gate the same way — which it does only
    * because the rule reads provenance rather than a copied list.
    */
-  it("keeps offering when the baseline gains a agent", () => {
+  it("keeps offering when the baseline gains an agent", () => {
     const grown = [...BASELINE_ONLY, baseline("scheduler")];
     expect(shouldOfferSetup({ roster: grown, skipped: false })).toBe(true);
   });

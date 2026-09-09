@@ -628,7 +628,7 @@ export function CopilotPanel({
                     Ask for a change and it{" "}
                     <span className="font-medium text-foreground">proposes one you review</span>:
                     you see the diff and decide. Nothing is written until you press Apply, and it
-                    goes through the same save the editor uses, which refuses a automation that
+                    goes through the same save the editor uses, which refuses an automation that
                     moved while you were reading.
                   </>
                 )}

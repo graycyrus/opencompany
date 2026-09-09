@@ -29,7 +29,7 @@ function agent(over: Partial<AgentDetailDto> = {}): AgentDetailDto {
   };
 }
 
-describe("what the panel says a agent is", () => {
+describe("what the panel says an agent is", () => {
   it("shows the instructions in force, not the blueprint they mask", () => {
     const profile = agentProfile(
       agent({
@@ -42,11 +42,11 @@ describe("what the panel says a agent is", () => {
     expect(profile.about).toBe("Confirm the budget before launching anything.");
   });
 
-  it("falls back to the description for a agent with no instructions", () => {
+  it("falls back to the description for an agent with no instructions", () => {
     expect(agentProfile(agent({ instructions: null })).about).toBe("Runs paid acquisition.");
   });
 
-  it("has nothing to say about a agent defined with neither", () => {
+  it("has nothing to say about an agent defined with neither", () => {
     const profile = agentProfile(agent({ description: undefined, instructions: null }));
     expect(profile.about).toBeNull();
     expect(profile.aboutTruncated).toBe(false);

@@ -160,7 +160,7 @@ async function selectWorkflow(page: Page, name: string) {
   await openWorkflow(page, name);
 }
 
-test("a automation authored elsewhere reaches the list, with no reload", async ({
+test("an automation authored elsewhere reaches the list, with no reload", async ({
   page,
   request,
 }) => {
@@ -194,7 +194,7 @@ test("a automation authored elsewhere reaches the list, with no reload", async (
   }
 });
 
-test("a automation renamed elsewhere renames on screen, with no reload", async ({
+test("an automation renamed elsewhere renames on screen, with no reload", async ({
   page,
   request,
 }) => {

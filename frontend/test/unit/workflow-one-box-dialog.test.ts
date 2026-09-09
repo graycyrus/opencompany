@@ -385,7 +385,7 @@ describe("the New-automation dialog when the copilot can draft", () => {
             new ApiError(
               409,
               "conflict",
-              "A automation with id `weekly-digest` already exists. Pick a different id.",
+              "An automation with id `weekly-digest` already exists. Pick a different id.",
               // The host's own envelope. A 409 the client synthesised from a
               // proxy's status line is not an instruction and must not hand
               // over the form — see the `writeRefusalHandsOverForm` unit tests.
@@ -683,7 +683,7 @@ describe("the New-automation dialog when the copilot declines", () => {
             automatable: false,
             reason:
               "the described automation could not be drafted into one that would be accepted: " +
-              "invalid request: a automation needs exactly one `trigger` node to say what " +
+              "invalid request: an automation needs exactly one `trigger` node to say what " +
               "starts it (found 0).",
           }),
       }),
@@ -703,7 +703,7 @@ describe("the New-automation dialog when the copilot declines", () => {
     expect(declined!.textContent).not.toContain("trigger");
     expect(declined!.textContent).not.toContain("invalid request");
     // What is said instead is true, and says what to do next.
-    expect(declined!.textContent).toContain("could not turn that into a automation");
+    expect(declined!.textContent).toContain("could not turn that into an automation");
     expect(declined!.textContent).toContain("start it on the canvas");
     // And the action offered is the canvas, not the overruling of an opinion.
     const action = inDialog<HTMLButtonElement>('[data-testid="workflow-create-anyway"]');
@@ -897,7 +897,7 @@ describe("the New-automation dialog after a write that may have landed", () => {
         reads,
         create: () =>
           Promise.reject(
-            new ApiError(409, "conflict", "A automation with id `x` already exists.", true),
+            new ApiError(409, "conflict", "An automation with id `x` already exists.", true),
           ),
       }),
     );
@@ -1104,7 +1104,7 @@ describe("the New-automation dialog's corrections across a refusal", () => {
                 new ApiError(
                   409,
                   "conflict",
-                  "A automation with id `weekly-digest` already exists. Pick a different id.",
+                  "An automation with id `weekly-digest` already exists. Pick a different id.",
                   true,
                 ),
               )
@@ -1208,7 +1208,7 @@ describe("the New-automation dialog reconciling against a stranger's id", () => 
     };
   }
 
-  it("hands over the form rather than adopting a automation it did not write", async () => {
+  it("hands over the form rather than adopting an automation it did not write", async () => {
     const posted: unknown[] = [];
     await open(
       stubClient({

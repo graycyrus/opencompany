@@ -1524,7 +1524,7 @@ export function previewCron(
  */
 export const NODE_KINDS: readonly { value: string; label: string }[] = [
   { value: "trigger", label: "Trigger — starts the automation" },
-  { value: "agent", label: "Agent — a agent performs a step" },
+  { value: "agent", label: "Agent — an agent performs a step" },
   { value: "condition", label: "Condition — branches on something" },
   { value: "merge", label: "Merge — combines several inputs into one" },
   { value: "transform", label: "Transform — reshapes the data" },

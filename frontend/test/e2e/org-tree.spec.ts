@@ -606,7 +606,7 @@ test("#311 membership can be edited from the chart and survives a reload", async
   await expect(deskNode(page, "Engineering")).not.toContainText("Linus");
 });
 
-test("#839 creates a agent on a selected desk and persists it", async ({
+test("#839 creates an agent on a selected desk and persists it", async ({
   page,
 }) => {
   await mockApi(page);
@@ -743,7 +743,7 @@ test("#1989 a design the host cannot produce writes nothing and hands over the f
   await expect(page).toHaveURL(/#\/company/);
 });
 
-test("#839 creates a agent with no desk as unplaced", async ({ page }) => {
+test("#839 creates an agent with no desk as unplaced", async ({ page }) => {
   await mockApi(page);
   await openChart(page);
 
@@ -782,7 +782,7 @@ test("#839 refuses a company-page agent add when the host has no team write plan
   await expect(chart(page).locator("text=Not Saved")).toHaveCount(0);
 });
 
-test("#1099 a agent added from the company page is confirmed by name", async ({
+test("#1099 an agent added from the company page is confirmed by name", async ({
   page,
 }) => {
   await mockApi(page);
@@ -803,7 +803,7 @@ test("#1099 a agent added from the company page is confirmed by name", async ({
   await expect(toasts(page).first()).toHaveAttribute("data-type", "success");
 });
 
-test("#1099 a agent the chart cannot read back is not confirmed as added", async ({
+test("#1099 an agent the chart cannot read back is not confirmed as added", async ({
   page,
 }) => {
   // The host takes the teammate and then the chart's own read fails. `boot`
@@ -906,7 +906,7 @@ test("a desk offers one add control, and it stays usable when the roster is exha
   ).toBeVisible();
 });
 
-test("#839 a agent created but not placed is still on the chart to place by hand", async ({
+test("#839 an agent created but not placed is still on the chart to place by hand", async ({
   page,
 }) => {
   // The half-done case: the host takes the teammate and then refuses the desk.
@@ -1301,7 +1301,7 @@ test("#311 a seat naming nobody on the roster is shown, not hidden", async ({
   await expect(seats.nth(1)).toContainText("Not on the roster");
 });
 
-test("#1102 a agent on the chart opens their detail page", async ({
+test("#1102 an agent on the chart opens their detail page", async ({
   page,
 }) => {
   await mockApi(page);

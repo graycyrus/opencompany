@@ -73,7 +73,7 @@ describe("newTaskBody", () => {
     expect(body?.assignee).toBe("engineering");
   });
 
-  it("carries the owner alongside a automation deliverable", () => {
+  it("carries the owner alongside an automation deliverable", () => {
     const body = newTaskBody({
       prompt: "ship it",
       deliverable: "workflow",

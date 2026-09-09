@@ -101,7 +101,7 @@ test("opening a run from the traces list shows its transcript without navigating
   await expect(sheet.getByText("NODE OUTPUT")).toBeVisible();
 });
 
-test("running a automation surfaces it in the traces list, and its sheet's canvas link navigates there", async ({
+test("running an automation surfaces it in the traces list, and its sheet's canvas link navigates there", async ({
   page,
 }) => {
   // The two specs above read whatever history the host already holds and

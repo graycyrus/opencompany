@@ -36,7 +36,7 @@ async function openDm(page: Page, agentId: string) {
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
-test("a agent's face opens who they are, without leaving the channel", async ({ page }) => {
+test("an agent's face opens who they are, without leaving the channel", async ({ page }) => {
   await openDm(page, "engineer");
 
   await page.getByRole("button", { name: /Open .*'s profile/ }).first().click();

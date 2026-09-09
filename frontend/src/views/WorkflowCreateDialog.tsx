@@ -1798,7 +1798,7 @@ export function WorkflowCreateDialog({
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
     if (triggerCount !== 1) {
-      return "A automation needs exactly one trigger node to say what starts it.";
+      return "An automation needs exactly one trigger node to say what starts it.";
     }
     for (const e of edges) {
       if (!e.from || !e.to) return "Every edge needs a from-node and a to-node.";
@@ -1988,7 +1988,7 @@ export function WorkflowCreateDialog({
       if (draftEpochRef.current !== requestedEpoch) return;
       // A capability gap (404/409) or a network failure — surface it inline; the
       // operator can still author by hand.
-      setDraftError(e instanceof Error ? e.message : "could not draft a automation");
+      setDraftError(e instanceof Error ? e.message : "could not draft an automation");
     } finally {
       // Issue #1052: only the request that owns the current contents may clear
       // the spinner — a stale one would switch off a draft the operator is
@@ -2294,7 +2294,7 @@ export function WorkflowCreateDialog({
       // an error and the next Create tries again.
       const gap = draftCapabilityGap(e);
       if (gap) setDraftGap(gap);
-      else setDraftError(e instanceof Error ? e.message : "could not draft a automation");
+      else setDraftError(e instanceof Error ? e.message : "could not draft an automation");
       return;
     } finally {
       // Only the request that still owns the dialog may clear the spinner.
@@ -2718,7 +2718,7 @@ export function WorkflowCreateDialog({
             )}
             {/* Nothing was drafted, and WHY decides what this says. A judgment
                 is advice — the copilot's own words, and an operator who
-                disagrees gets a automation anyway rather than an argument. A
+                disagrees gets an automation anyway rather than an argument. A
                 failure is not advice, so it is not dressed as any: it says the
                 copilot did not manage it, in our words rather than in the
                 gates' node-and-trigger vocabulary, and the action beside it
@@ -3347,7 +3347,7 @@ function NodeRow({
               <Label className="mt-1 text-2xs text-muted-foreground">Agent</Label>
               <Select value={node.agent} onValueChange={(v) => onChange({ agent: v ?? "" })}>
                 <SelectTrigger className="h-8" aria-label="Agent">
-                  <SelectValue placeholder="Pick a agent" />
+                  <SelectValue placeholder="Pick an agent" />
                 </SelectTrigger>
                 <SelectContent>
                   {roster.map((m) => (

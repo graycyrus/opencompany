@@ -297,7 +297,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
         <p className="text-muted-foreground text-sm">
           {runId
             ? "This run recorded no agent attempts."
-            : "No agent attempts recorded yet. Run a automation and they will appear here."}
+            : "No agent attempts recorded yet. Run an automation and they will appear here."}
         </p>
       ) : tab === "analytics" ? (
         <AnalyticsLens runs={runs} />

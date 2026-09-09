@@ -98,7 +98,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("a agent's run history", () => {
+describe("an agent's run history", () => {
   it("asks the host for this desk's attempts rather than filtering a company page", async () => {
     const client = makeClient({
       "/runs": [run()],

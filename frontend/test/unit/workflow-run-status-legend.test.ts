@@ -343,13 +343,13 @@ describe("the status dot defines the run's verdict on hover", () => {
   // wired"). The frontend has no field naming which one happened, so telling
   // the operator this "needs a workflow or policy change" is only true for
   // one of the two causes and misdirects them for the other.
-  it("does not unconditionally prescribe a automation change for a call that could not be queued", async () => {
+  it("does not unconditionally prescribe an automation change for a call that could not be queued", async () => {
     await renderHistory(blockedUnparkableRun());
     const dot = container.querySelector(
       '[data-testid="workflow-run-status-dot"]',
     );
     const title = dot?.getAttribute("title") ?? "";
-    expect(title).not.toContain("that case needs a automation or policy change");
+    expect(title).not.toContain("that case needs an automation or policy change");
     // The hedge names the infra cause a workflow edit can't fix.
     expect(title).toContain("approvals queue itself can refuse the write");
   });

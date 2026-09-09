@@ -562,7 +562,7 @@ function ChannelIntro({
       </p>
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
-          offering "add a agent here" over a channel that turns out to be full
+          offering "add an agent here" over a channel that turns out to be full
           of conversation reads as data loss.
 
           Not on the read-only Operator feed (`channel.system`, the same

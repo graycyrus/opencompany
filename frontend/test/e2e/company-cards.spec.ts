@@ -458,7 +458,7 @@ test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await expect.poll(() => page.url()).not.toContain("#/team");
 });
 
-test("#1141 a card opens a agent, breadcrumbed and editable", async ({ page }) => {
+test("#1141 a card opens an agent, breadcrumbed and editable", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
   await card(page, "Maya").getByTestId("team-card-open").click();

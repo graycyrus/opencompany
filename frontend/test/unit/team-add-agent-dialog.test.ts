@@ -246,7 +246,7 @@ describe("the Add-agent dialog", () => {
     });
 
     // Against the id the host answered with, never the typed name: the roster
-    // key is the host's, and navigating to a guess is a 404 on a agent that
+    // key is the host's, and navigating to a guess is a 404 on an agent that
     // was created successfully.
     expect(onOpenAgent).toHaveBeenCalledWith("growth", { edit: true });
   });

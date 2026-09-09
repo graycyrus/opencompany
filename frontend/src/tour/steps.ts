@@ -86,7 +86,7 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="chat-composer"]',
     placement: "top",
     title: "Talk to your company",
-    body: "Ask for an update or hand off a task in plain language — like messaging a agent.",
+    body: "Ask for an update or hand off a task in plain language — like messaging an agent.",
   },
   {
     view: "chat",

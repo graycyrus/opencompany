@@ -117,7 +117,7 @@ async function mockEventsWithCreate(page: Page) {
           seq: 1,
           atMillis: Date.now(),
           workflowId: "wf-e2e",
-          name: "A automation created elsewhere",
+          name: "An automation created elsewhere",
         })}\n\n`,
     }),
   );

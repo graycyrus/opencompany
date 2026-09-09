@@ -219,7 +219,7 @@ test("a copilot that could not draft says so, rather than advising it be done by
       automatable: false,
       reason:
         "the described automation could not be drafted into one that would be accepted: " +
-        "invalid request: a automation needs exactly one `trigger` node to say what " +
+        "invalid request: an automation needs exactly one `trigger` node to say what " +
         "starts it (found 0).",
     },
     drafts,
@@ -237,7 +237,7 @@ test("a copilot that could not draft says so, rather than advising it be done by
   // The vocabulary the one box exists to retire never reaches the operator.
   await expect(declined).not.toContainText("trigger");
   await expect(declined).not.toContainText("invalid request");
-  await expect(declined).toContainText("could not turn that into a automation");
+  await expect(declined).toContainText("could not turn that into an automation");
   // And the offered action is the canvas, not the overruling of a judgement.
   await expect(dialog.getByTestId("workflow-create-anyway")).toContainText(
     "Start it on the canvas",

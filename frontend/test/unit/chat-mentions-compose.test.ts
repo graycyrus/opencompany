@@ -632,7 +632,7 @@ describe("mentionablesFor", () => {
     expect(byLabel["Jane Doe"].inChannel).toBeUndefined();
   });
 
-  it("reaches a agent by id or by display name", () => {
+  it("reaches an agent by id or by display name", () => {
     const rows = mentionablesFor(directory, []);
     expect(rankMentionables(rows, "ada")[0].label).toBe("Ada");
   });
@@ -736,7 +736,7 @@ describe("mentionsOutsideChannel", () => {
     offset: 10,
   };
 
-  it("names a agent who cannot see this channel", () => {
+  it("names an agent who cannot see this channel", () => {
     expect(mentionsOutsideChannel([onChannel, offChannel], ["engineer"])).toEqual([
       "ceo",
     ]);

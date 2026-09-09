@@ -557,7 +557,7 @@ function AddSkillDialog({
           <DialogTitle>Add a skill</DialogTitle>
           {/* Not "a capability your company should have" (issue #569): this is
               where an operator authors one, so it is the earliest point the
-              console can frame a skill as the playbook a agent reads rather
+              console can frame a skill as the playbook an agent reads rather
               than as something the company will carry out. */}
           <DialogDescription>
             Describe a playbook your agents should follow — what to do, and when.

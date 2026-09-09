@@ -172,7 +172,7 @@ describe("the built-in #general channel", () => {
     expect(channels(ROSTER, [])[0].name).toBe(GENERAL_CHANNEL);
   });
 
-  it("holds the whole roster, derived — a agent added later is in it", () => {
+  it("holds the whole roster, derived — an agent added later is in it", () => {
     const before = channels(ROSTER, DESKS)[0];
     expect(channelMembers(before, ROSTER)!.map((m) => m.id)).toEqual(["ceo", "eng"]);
 
@@ -227,11 +227,11 @@ describe("resolving a host thread to the general channel", () => {
     expect(channelIdForThread("engineering", DESKS, ROSTER)).toBe("engineering");
   });
 
-  it("still resolves a agent DM", () => {
+  it("still resolves an agent DM", () => {
     expect(channelIdForThread("eng", DESKS, ROSTER)).toBe("dm:eng");
   });
 
-  it("keeps the line for the company when a agent's id is a General spelling", () => {
+  it("keeps the line for the company when an agent's id is a General spelling", () => {
     // The host reserves `main` and `general` against newly minted teammates
     // (`RESERVED_AGENT_IDS`), but a manifest can still declare one. This used
     // to answer `dm:main` — the roster was consulted before the fold — and the
@@ -276,7 +276,7 @@ describe("resolving a host thread to the general channel", () => {
    * frames it emits under that key. Asserted here because the comment above has
    * claimed this routing since #1743 while nothing held the sender to it.
    */
-  it("reads back the DM of a agent whose id is a General spelling", () => {
+  it("reads back the DM of an agent whose id is a General spelling", () => {
     const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
     expect(channelIdForThread("dm:main", DESKS, withMain)).toBe("dm:main");
     // The bare key still belongs to the company, unchanged by the arm above.

@@ -240,7 +240,7 @@ export function SearchView({ client, company }: Props) {
             testId="search-read-only"
             title="Only an admin can change where this company searches"
           >
-            Whatever a agent types into a search reaches the provider selected
+            Whatever an agent types into a search reaches the provider selected
             here, under that provider&rsquo;s own retention policy &mdash; and the
             calls are billed to whichever account the key belongs to. Both are the
             company&rsquo;s to decide, so an admin decides them. You can see which
@@ -383,10 +383,10 @@ export function SearchView({ client, company }: Props) {
         </Card>
 
         <p className="text-xs text-muted-foreground">
-          Search queries leave this host. Whatever a agent types into a search
+          Search queries leave this host. Whatever an agent types into a search
           reaches the provider selected here, under that provider&rsquo;s own
           retention policy — which is the reason the choice is an
-          administrator&rsquo;s and not a agent&rsquo;s.
+          administrator&rsquo;s and not an agent&rsquo;s.
         </p>
       </div>
     </div>

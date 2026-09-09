@@ -277,7 +277,7 @@ export function ArtifactsTab({
           <div className="rounded-xl border border-dashed py-10 text-center">
             <p className="text-sm font-medium">No deliverables for this task</p>
             <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
-              A agent publishes a file it wrote to put it here, where you can browse, edit and
+              An agent publishes a file it wrote to put it here, where you can browse, edit and
               version it. Plenty of tasks produce no file at all — a question answered, a check
               run — and this stays empty for those. Nothing is captured automatically, so an empty
               tab means nothing was produced, not that something was lost.

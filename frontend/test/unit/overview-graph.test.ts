@@ -121,7 +121,7 @@ describe("adapt", () => {
   });
 });
 
-describe("a agent's tools", () => {
+describe("an agent's tools", () => {
   it("are the grants the host resolved, verbatim", () => {
     const { agents } = adapt({
       ...BASE,

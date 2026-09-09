@@ -331,7 +331,7 @@ function ComposioBody({
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
               Holding several accounts is fine — they are the company&apos;s, and every agent
-              works through them. Which one a agent acts as is set under{" "}
+              works through them. Which one an agent acts as is set under{" "}
               <span className="font-medium">Which account agents act as</span> on the Connections
               page; until one is chosen, Composio resolves it for the company as it always has.
             </span>

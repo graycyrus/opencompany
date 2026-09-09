@@ -141,7 +141,7 @@ describe("the workspace tree's agent provenance badge", () => {
     expect(badges()[0].textContent).toBe("analytics_analyst");
   });
 
-  it("says nothing on a agent's own folder, whose label already names them", async () => {
+  it("says nothing on an agent's own folder, whose label already names them", async () => {
     // The row's label IS the resolved teammate name here, so the pill would
     // repeat it back verbatim — which is the redundancy #1723 opens with, and
     // resolving the pill without suppressing it would only have made both
@@ -266,7 +266,7 @@ describe("the workspace tree's agent provenance badge", () => {
     expect(badges().map((b) => b.textContent)).toEqual(["Frontend Engineer"]);
   });
 
-  it("still badges an agent-authored node inside a agent's own folder", async () => {
+  it("still badges an agent-authored node inside an agent's own folder", async () => {
     // Suppression is scoped to the teammate's own roster folder, not to the
     // subtree beneath it: a deliverable one teammate published into another's
     // folder is exactly the case the marker exists for.

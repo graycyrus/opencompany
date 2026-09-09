@@ -29,7 +29,7 @@ describe("avatarFor", () => {
     expect(distinct.size).toBeGreaterThan(5);
   });
 
-  it("seeds on the id, so renaming a agent keeps its face", () => {
+  it("seeds on the id, so renaming an agent keeps its face", () => {
     // The model calls `avatarFor(dto.id || name)` for exactly this reason.
     expect(avatarFor("agent_maya")).toBe(avatarFor("agent_maya"));
     expect(avatarFor("agent_maya")).not.toBe(avatarFor("agent_maya_renamed"));

@@ -151,7 +151,7 @@ function toastedNoWorkflow(): boolean {
   );
 }
 
-describe("a deep link to a automation authored elsewhere resolves", () => {
+describe("a deep link to an automation authored elsewhere resolves", () => {
   it(
     "re-reads the list and selects the id instead of toasting (decisive)",
     async () => {

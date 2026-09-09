@@ -152,7 +152,7 @@ describe("a Not-on-a-desk chip", () => {
     expect(linkFor("Sam")?.[1]).toBe("#/team/sam");
   });
 
-  it("never renders #/team/undefined for a agent with no id", async () => {
+  it("never renders #/team/undefined for an agent with no id", async () => {
     await render(
       client({
         desks: [],

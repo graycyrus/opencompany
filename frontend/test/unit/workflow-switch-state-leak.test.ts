@@ -433,7 +433,7 @@ describe("WorkflowsView leaves per-automation state behind on a switch", () => {
     expect(inView("workflow-graph-error")).toBeNull();
   });
 
-  it("keeps a automation-LIST failure visible when the operator returns to the index", async () => {
+  it("keeps an automation-LIST failure visible when the operator returns to the index", async () => {
     // Review of PR #1744. `error` was one slot for two unrelated failures, and
     // clearing it on every selection change threw the company-wide one away at
     // the exact moment the operator went back to the list it is about: a stale
@@ -453,7 +453,7 @@ describe("WorkflowsView leaves per-automation state behind on a switch", () => {
     expect(inView("workflow-list-error")?.textContent).toContain("could not load automations");
   });
 
-  it("does not carry a automation-LIST failure onto the next company", async () => {
+  it("does not carry an automation-LIST failure onto the next company", async () => {
     // The other half of the same rule: the list read is keyed on the company,
     // so its failure has to end at a company change. Splitting the two slots
     // must not lose the axis the shared slot got right.

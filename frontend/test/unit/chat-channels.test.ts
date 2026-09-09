@@ -107,7 +107,7 @@ describe("channelIdForThread (issue #367)", () => {
     expect(channelIdForThread("engineering", desks, ROSTER)).toBe("engineering");
   });
 
-  it("maps a agent's agent id to the console-local DM channel id", () => {
+  it("maps an agent's agent id to the console-local DM channel id", () => {
     // The asymmetry that makes this function necessary: the host journals a DM
     // under the teammate's agent id, but the console addresses the channel by
     // `dm:<id>`. Routing the raw thread id would file the message under a

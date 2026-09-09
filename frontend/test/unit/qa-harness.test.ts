@@ -820,7 +820,7 @@ describe("usage-finances against a host that answers without the figures", () =>
   });
 });
 
-describe("probe() will not choose a automation to run for real", () => {
+describe("probe() will not choose an automation to run for real", () => {
   /**
    * A real run fires real deliveries — a report into a channel, mail to a real
    * address. The first version took `flows[0]`, which on a production tenant is

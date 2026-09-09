@@ -76,7 +76,7 @@ const ROLE_ONLY = member({
 });
 
 describe("channelSubtitle on a DM", () => {
-  it("says what the agent does, for a agent the host never named", () => {
+  it("says what the agent does, for an agent the host never named", () => {
     // The #1180 case end to end. The title says who; this says what for, out of
     // the description the roster entry was carrying unused all along.
     expect(channelSubtitle(dmFor(ROLE_ONLY))).toBe("Build and operate the backend and services.");

@@ -1754,8 +1754,8 @@ export function ChatView({
         {header}
         <EmptyPane
           title="No channels yet"
-          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a agent and their direct message shows up here."
-          action={{ label: "Add a agent", onClick: () => setAddOpen(true) }}
+          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add an agent and their direct message shows up here."
+          action={{ label: "Add an agent", onClick: () => setAddOpen(true) }}
           after={
             <AddMemberDialog
               open={addOpen}
@@ -1973,7 +1973,7 @@ export function ChatView({
       if (outside.length) {
         toast.warning(
           outside.length === 1
-            ? "A agent you @-mentioned is not on this channel — they won't see the message."
+            ? "An agent you @-mentioned is not on this channel — they won't see the message."
             : `${outside.length} agents you @-mentioned are not on this channel — they won't see the message.`,
         );
       }

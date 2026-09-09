@@ -386,7 +386,7 @@ export function composeCopilotMessage(
       // and referenced nodes/tools/teammates that didn't exist.
       `### A step's kind and its config`,
       `\`kind\` must be exactly one of: ${WORKFLOW_NODE_KINDS.join(", ")}. Pick the right one:`,
-      `- \`agent\` — a agent does the work. Name them in the top-level \`agent\` field (a roster id above).`,
+      `- \`agent\` — an agent does the work. Name them in the top-level \`agent\` field (a roster id above).`,
       `- \`tool_call\` — run one wired tool. Name it in \`config.slug\` (a tool slug above).`,
       `- \`output\` — report the result back. No tool and no agent.`,
       `- \`condition\` / \`switch\` — branch. \`http_request\` — call a URL. \`sub_workflow\` — run another saved workflow.`,
@@ -401,7 +401,7 @@ export function composeCopilotMessage(
       `- To reference an EXISTING step (updateNode, removeNode, and the from/to of addEdge/removeEdge), use only an id listed under ## Graph above — never one that is not there.`,
       `- An addNode mints a NEW id that is deliberately not yet in the graph: make it short, lower-case and unique. That is the only place a not-yet-present id is allowed.`,
       `- Never rename an id (that is a remove plus an add).`,
-      `- Only name a agent from the roster above, and only a tool slug from the tools above.`,
+      `- Only name an agent from the roster above, and only a tool slug from the tools above.`,
       `- Propose the smallest change that answers the question, and say in your prose what it does and why.`,
       `- If you are not confident enough to propose, say so and describe the change instead — a wrong proposal costs the operator more than no proposal.`,
     );

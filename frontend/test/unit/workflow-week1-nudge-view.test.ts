@@ -214,7 +214,7 @@ describe("the week-1 nudge banner (PR #1878 review)", () => {
   });
 
 
-  it("does not resurrect a nudge off a fetch that was already stale when this session created a automation", async () => {
+  it("does not resurrect a nudge off a fetch that was already stale when this session created an automation", async () => {
     const gate = deferred<{ notifications: NotificationDto[]; unread: number }>();
     const markedRead: string[] = [];
     const client = baseClient({

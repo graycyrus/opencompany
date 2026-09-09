@@ -224,7 +224,7 @@ describe("writeRefusalHandsOverForm", () => {
         // `fromHost` — the fourth argument — is the whole point: this is the
         // host's own `{error, code}` envelope, which is what makes "pick a
         // different id" an instruction rather than a hop's opinion.
-        new ApiError(409, "conflict", "A automation with id `x` already exists.", true),
+        new ApiError(409, "conflict", "An automation with id `x` already exists.", true),
       ),
     ).toBe(true);
   });
@@ -319,7 +319,7 @@ describe("draftDecline", () => {
     expect(
       draftDecline(
         "the automation copilot reached its step budget before it could draft an " +
-          "acceptable automation: a automation needs exactly one `trigger` node",
+          "acceptable automation: an automation needs exactly one `trigger` node",
       ).kind,
     ).toBe("failure");
   });
@@ -327,13 +327,13 @@ describe("draftDecline", () => {
   it("never repeats the gates at the operator", () => {
     const d = draftDecline(
       "the described automation could not be drafted into one that would be accepted: " +
-        "invalid request: a automation needs exactly one `trigger` node to say what " +
+        "invalid request: an automation needs exactly one `trigger` node to say what " +
         "starts it (found 0).",
     );
     expect(d.kind).toBe("failure");
     expect(d.message).not.toContain("trigger");
     expect(d.message).not.toContain("invalid request");
-    expect(d.message).toContain("could not turn that into a automation");
+    expect(d.message).toContain("could not turn that into an automation");
     expect(d.message).toContain("start it on the canvas");
   });
 

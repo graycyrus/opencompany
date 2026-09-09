@@ -78,7 +78,7 @@ async function render(host: OpenCompanyClient) {
 }
 
 describe("the workspace tree", () => {
-  it("names a agent's agents/ folder instead of its raw roster id", async () => {
+  it("names an agent's agents/ folder instead of its raw roster id", async () => {
     const tree = [
       node({ id: "agents-root", name: "Agents", kind: "folder" }),
       node({ id: "n-zeta", name: "zeta-id", kind: "folder", parentId: "agents-root" }),

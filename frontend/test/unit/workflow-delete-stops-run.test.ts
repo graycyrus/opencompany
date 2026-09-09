@@ -148,7 +148,7 @@ function openDeleteConfirm() {
   button("Delete").click();
 }
 
-describe("deleting a automation with a run in flight", () => {
+describe("deleting an automation with a run in flight", () => {
   it("warns about the run in the confirmation, stops it, and says so in the toast", async () => {
     // The host's sweep actually stops one run — the toast now reads THIS,
     // not the pre-request `activeRunId` guess (CodeRabbit review, PR #2053).
@@ -208,7 +208,7 @@ describe("deleting a automation with a run in flight", () => {
   });
 });
 
-describe("deleting a automation with no run in flight", () => {
+describe("deleting an automation with no run in flight", () => {
   it("keeps the plain warning and the plain toast", async () => {
     const { client, deletes } = fakeClient();
     await mount(client);

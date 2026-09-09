@@ -62,7 +62,7 @@ describe("agent mascot seeding", () => {
     }
   });
 
-  it("the name seed is stable, so two surfaces naming a agent alike agree", () => {
+  it("the name seed is stable, so two surfaces naming an agent alike agree", () => {
     // This is the property the Company cards, the detail header and the chat
     // member pane rely on: they all pass the same display name, so they all
     // resolve the same mascot.

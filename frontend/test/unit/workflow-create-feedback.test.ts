@@ -283,7 +283,7 @@ describe("the create dialog while a create is in flight", () => {
 describe("the create dialog when the host refuses", () => {
   it("keeps the dialog open with the draft intact and announces the reason", async () => {
     const post = vi.fn(() =>
-      Promise.reject(new ApiError(409, "conflict", "a automation named “Campaign pipeline” already exists", true)),
+      Promise.reject(new ApiError(409, "conflict", "an automation named “Campaign pipeline” already exists", true)),
     );
     await open(stubClient(post));
     await fillValidDraft();

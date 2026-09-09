@@ -135,7 +135,7 @@ test("the run-history panel opens and shows only the selected automation's runs"
   }
 });
 
-test("running a automation adds it to the durable history and it survives a reload", async ({
+test("running an automation adds it to the durable history and it survives a reload", async ({
   page,
 }) => {
   // Per-test: the two above read history the host already holds and pass on a

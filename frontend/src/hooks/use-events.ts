@@ -1283,7 +1283,7 @@ export function handleEvent(
     case "workflow_run_finished": {
       onWorkflowRunEvent?.(event);
       if (event.error) {
-        toast.error("A automation run failed", {
+        toast.error("An automation run failed", {
           description: `${event.workflowId} — ${event.error}`,
         });
         break;
@@ -1294,7 +1294,7 @@ export function handleEvent(
       // operator who pressed Cancel that the run completed. Checked BEFORE the
       // delivery scan because a cancelled run has no deliveries to scan.
       if (event.cancelled) {
-        toast.info("A automation run was stopped", {
+        toast.info("An automation run was stopped", {
           description: `${event.workflowId} — stopped by an operator. Steps that finished are in the run history.`,
         });
         break;

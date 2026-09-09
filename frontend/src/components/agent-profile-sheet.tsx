@@ -200,7 +200,7 @@ export function AgentProfileSheet({
         {load === "unavailable" && (
           <Message
             title="Can't open this agent."
-            body="Either they've been removed from the roster, or this company host is too old to serve a agent's profile."
+            body="Either they've been removed from the roster, or this company host is too old to serve an agent's profile."
           />
         )}
         {load === "error" && (

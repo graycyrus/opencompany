@@ -23,11 +23,11 @@ describe("SKILLS_READ_ONLY_NOTE", () => {
     expect(SKILLS_READ_ONLY_NOTE).toMatch(/\bread\b/i);
   });
 
-  it("names the orchestrator as what executes a automation", () => {
+  it("names the orchestrator as what executes an automation", () => {
     expect(SKILLS_READ_ONLY_NOTE).toMatch(/orchestrator/i);
   });
 
-  it("never promises that enabling a skill makes a agent run it", () => {
+  it("never promises that enabling a skill makes an agent run it", () => {
     // The exact shape of the old implication: enabling/installing framed as
     // handing a teammate something it will carry out.
     expect(SKILLS_READ_ONLY_NOTE).not.toMatch(/agents? (can|will) (run|execute|use)/i);
@@ -42,7 +42,7 @@ describe("skillReachLabel", () => {
     expect(label).not.toMatch(/run|execute/i);
   });
 
-  it("describes a disabled skill as out of a agent's sight", () => {
+  it("describes a disabled skill as out of an agent's sight", () => {
     expect(skillReachLabel(false)).toMatch(/hidden/i);
   });
 

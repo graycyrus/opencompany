@@ -85,7 +85,7 @@ test("the empty state's call to action is reachable and distinctly named", async
   const create = page.getByRole("button", { name: "New automation" });
   await expect(create).toHaveCount(1);
 
-  const emptyCta = page.getByRole("button", { name: "Create a automation" });
+  const emptyCta = page.getByRole("button", { name: "Create an automation" });
   await expect(emptyCta).toHaveCount(1);
 
   // The call to action still does its job: same dialog, different name.

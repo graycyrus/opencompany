@@ -88,7 +88,7 @@ describe("an agent detail read that fails answers with the right one of three ho
     });
     await show(client);
 
-    expect(container.textContent).toContain("can't open a agent yet");
+    expect(container.textContent).toContain("can't open an agent yet");
   });
 
   it("says the host didn't answer for a transport failure, never blank", async () => {

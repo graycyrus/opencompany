@@ -104,7 +104,7 @@ const RUN_STATUS_DEFINITIONS = {
   stopped:
     "An operator stopped this run before it finished. A step that was mid-flight when the stop landed normally ran to completion — only a step stuck waiting on an outside call is cut off where it was — though its own completion record can go missing if that journal write silently failed. A run stopped before any step began has no such step at all.",
   blocked:
-    "A step is waiting on you before the run can go on — usually a card sitting in Approvals, but a call that could not be queued for approval at all leaves nothing there to decide. That isn't always a automation problem — the approvals queue itself can refuse the write, and no automation change fixes that.",
+    "A step is waiting on you before the run can go on — usually a card sitting in Approvals, but a call that could not be queued for approval at all leaves nothing there to decide. That isn't always an automation problem — the approvals queue itself can refuse the write, and no automation change fixes that.",
   stranded:
     "The run paused for an approval, but nothing is waiting on you any more and no decision left can move it. Run it again if you still need it.",
   "not delivered":

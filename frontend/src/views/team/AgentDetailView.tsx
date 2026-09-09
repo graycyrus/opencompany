@@ -680,8 +680,8 @@ export function AgentDetailView({
 
         {load === "unsupported" && (
           <EmptyState
-            title="This host can't open a agent yet."
-            body="Opening a agent needs a newer host. The roster still works."
+            title="This host can't open an agent yet."
+            body="Opening an agent needs a newer host. The roster still works."
           />
         )}
 
@@ -905,7 +905,7 @@ export function AgentDetailView({
                 <>
                   {/* Labelled, like the persona below it. Unlabelled, this
                       paragraph was read as the standing instructions the card's
-                      heading names — and for a agent with no persona it was
+                      heading names — and for an agent with no persona it was
                       the only thing on the card, so the mistake was the default
                       rather than an edge. */}
                   <div className="space-y-1">
@@ -1074,7 +1074,7 @@ function Identity({
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="flex items-start gap-4 min-w-0">
-        {/* The header of the page a agent *is* — the one screen that should
+        {/* The header of the page an agent *is* — the one screen that should
             never be the one showing letters (issue #1181). 56px. */}
         {/* The tile is the control. A face is a visual thing, so the way to
             change it is to click the one on screen rather than to hunt for a

@@ -606,7 +606,7 @@ function MemberCard({
           {/*
             The shared chat avatar, not a hand-rolled tile (issue #1181). This
             drew `initials()` over a `TEAM_TONES` background — the same visual
-            language as chat, minus the mascot — so a agent had a face in a DM
+            language as chat, minus the mascot — so an agent had a face in a DM
             and letters on the page that is *about* them.
 
             44px, comfortably above the ~24px floor under which a mascot is a
@@ -670,7 +670,7 @@ function MemberCard({
                   budget-editing items ("Set/Change daily budget…", "Remove
                   cap", "Reset to company default") are gone too, for the same
                   reason the Inbox switch left the card in #1190: a card in a
-                  grid of thirteen is for recognising a agent, not
+                  grid of thirteen is for recognising an agent, not
                   configuring one. Editing now lives on the agent's own
                   detail page, beside Inbox — see `AgentDetailView`'s `Budget`
                   section. The card still *shows* the cap and today's spend
@@ -767,7 +767,7 @@ function MemberCard({
 
           The switch was the only control on the card that *wrote* to the host,
           at the same weight as the name, on a grid of thirteen — a card is for
-          recognising a agent, and a mis-click while scanning silently
+          recognising an agent, and a mis-click while scanning silently
           changed a per-agent setting with no confirmation. It moved to the
           agent's own page, which already reported inbox state as a badge and
           offered no way to change it. See `AgentDetailView`.

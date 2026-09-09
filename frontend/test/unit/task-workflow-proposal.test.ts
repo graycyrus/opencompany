@@ -260,7 +260,7 @@ describe("workflowRefusalProblems", () => {
   const problem = {
     node_id: "post_summary",
     field: "destination.target",
-    message: "`engineering-desk` is not a automation delivery channel",
+    message: "`engineering-desk` is not an automation delivery channel",
   };
 
   it("returns the host's breakdown when the refusal carries one", () => {
@@ -271,7 +271,7 @@ describe("workflowRefusalProblems", () => {
 
   it("returns null for a refusal the host sent no breakdown for", () => {
     // Every refusal that is not a workflow refusal: a 409 name clash, a 404.
-    const e = new ApiError(409, "conflict", "A automation named `x` already exists.", true);
+    const e = new ApiError(409, "conflict", "An automation named `x` already exists.", true);
     expect(workflowRefusalProblems(e)).toBeNull();
   });
 

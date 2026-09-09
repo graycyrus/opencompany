@@ -2905,7 +2905,7 @@ export function WorkflowsView({
                 )}
                 {/* Issue #276. Pause stops the SCHEDULE, not the workflow — the title
                     says so, because "pause" on its own reads like "I can't run this",
-                    and an operator debugging a automation needs the opposite. Shown only
+                    and an operator debugging an automation needs the opposite. Shown only
                     for a scheduled workflow: see `isScheduled`. */}
                 {isScheduled && (
                   <Button
@@ -3170,7 +3170,7 @@ export function WorkflowsView({
       {/* Keyed on BOTH axes at render time, not only swept by the effect below.
           The sweep runs after paint, so between a company or selection change
           and that effect there is one committed frame in which these notes are
-          on screen over a automation they are not about. The guard was removed on
+          on screen over an automation they are not about. The guard was removed on
           the reasoning that mutation testing could not kill it — but `act()`
           flushes effects synchronously, so the test harness cannot produce the
           frame the guard exists for, which is a statement about the harness and
@@ -3239,7 +3239,7 @@ export function WorkflowsView({
       )}
 
       {/* Issue #1704 (review): the company-wide list failure, on the index and
-          on a detail view alike — a automation open on screen does not make the
+          on a detail view alike — an automation open on screen does not make the
           list behind it any less stale. First, because it is the wider claim. */}
       {listError && (
         <div className="px-4 pt-3">
@@ -3291,7 +3291,7 @@ export function WorkflowsView({
 
       {/* Issue #1845: the week-1 "save your first automation" nudge. Index only
           (not the canvas detail) — it points at the same CTA the empty state
-          offers, which only exists there, and a nudge to create a automation
+          offers, which only exists there, and a nudge to create an automation
           while one is already open on screen would be an odd thing to say. */}
       {nudge && !detailOpen && (
         <div className="px-4 pt-3">
@@ -3337,7 +3337,7 @@ export function WorkflowsView({
           one full-width column and stays that way; the detail view is a
           `CanvasShell`, which is what adds the left rail slot. Run history is
           per-automation chrome, so it can only exist on the side of this branch
-          that has a automation — a list of automations has no single run to show
+          that has an automation — a list of automations has no single run to show
           history for (#1110). Gating the rail here rather than gating the
           panel makes that structural: the index cannot grow run chrome by
           accident, because the slot it would mount in does not exist there. */}
@@ -3366,7 +3366,7 @@ export function WorkflowsView({
             <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
               <p>This company has no saved automations yet.</p>
               {/* Issue #813: a first-time author has no on-ramp otherwise. One
-                  compact prose block — what a automation is, a worked example
+                  compact prose block — what an automation is, a worked example
                   (mirroring the copilot placeholder), and the create-time
                   copilot as the easiest path. Deliberately no template
                   gallery. */}
@@ -3389,7 +3389,7 @@ export function WorkflowsView({
                 </p>
               </div>
               {/* Issue #341: opens the same dialog as the toolbar button, and
-                  therefore must NOT carry the same name. "Create a automation"
+                  therefore must NOT carry the same name. "Create an automation"
                   rather than "Create the first automation" because this state is
                   also where deleting the last automation lands, and by then there
                   is nothing first about it. */}
@@ -3400,7 +3400,7 @@ export function WorkflowsView({
                 data-testid="workflow-create-empty"
               >
                 <Plus className="mr-1.5 size-4" />
-                Create a automation
+                Create an automation
               </Button>
             </div>
           ) : (
