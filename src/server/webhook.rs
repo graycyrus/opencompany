@@ -306,6 +306,125 @@ mod test {
         assert!(delivered[0].1.starts_with("kh1="));
     }
 
+    /// A sink whose first `fail_first` calls return an error, so `emit`'s
+    /// bounded retry has something real to exercise. Every attempt — failing
+    /// and succeeding alike — is recorded, so a test can tell "retried and
+    /// then delivered" from "delivered on the first try".
+    #[derive(Clone, Default)]
+    struct FlakySink {
+        attempts: Arc<Mutex<u32>>,
+        fail_first: u32,
+    }
+
+    impl FlakySink {
+        fn new(fail_first: u32) -> Self {
+            Self {
+                attempts: Arc::default(),
+                fail_first,
+            }
+        }
+
+        fn attempts(&self) -> u32 {
+            *self.attempts.lock().expect("attempts poisoned")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WebhookSink for FlakySink {
+        async fn deliver(&self, _event: &WebhookEvent, _signature: &str) -> Result<()> {
+            let mut attempts = self.attempts.lock().expect("attempts poisoned");
+            *attempts += 1;
+            if *attempts <= self.fail_first {
+                Err(crate::error::OpenCompanyError::Store(
+                    "flaky sink: simulated failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn event() -> WebhookEvent {
+        WebhookEvent::now(
+            WebhookKind::WorkCompleted,
+            CompanyId::new("acme"),
+            serde_json::Value::Null,
+        )
+    }
+
+    /// A sink that fails on the first attempt but succeeds on the retry must
+    /// end up delivered — `emit`'s "a few bounded attempts" is dead code
+    /// without a sink that ever returns `Err` at all, and `RecordingWebhookSink`
+    /// never does.
+    #[tokio::test]
+    async fn emit_retries_a_transient_failure_and_still_delivers() {
+        let sink = FlakySink::new(2);
+        let config = WebhookConfig {
+            sink: Arc::new(sink.clone()),
+            signer: Arc::new(DefaultHashSigner),
+            secret: "s3cret".to_string(),
+        };
+        config.emit(&event()).await;
+        assert_eq!(
+            sink.attempts(),
+            3,
+            "two failures then a success is three attempts"
+        );
+    }
+
+    /// A sink that fails every attempt must not panic or block the caller —
+    /// `emit` logs and swallows after the bound, exactly as a delivery that
+    /// eventually succeeds does. Bounded, not unbounded: exactly the three
+    /// documented attempts, not one more.
+    #[tokio::test]
+    async fn emit_gives_up_after_the_bound_without_panicking() {
+        let sink = FlakySink::new(u32::MAX);
+        let config = WebhookConfig {
+            sink: Arc::new(sink.clone()),
+            signer: Arc::new(DefaultHashSigner),
+            secret: "s3cret".to_string(),
+        };
+        config.emit(&event()).await;
+        assert_eq!(sink.attempts(), 3, "must stop at the documented bound");
+    }
+
+    /// `RecordingWebhookSink` is `Mutex`-guarded so concurrent cycles across
+    /// different companies can emit webhooks at the same time without losing
+    /// or corrupting a delivery. Prove it under genuine concurrent access
+    /// rather than only the single-threaded call the existing test makes.
+    #[tokio::test]
+    async fn recording_sink_loses_nothing_under_concurrent_emits() {
+        const N: usize = 50;
+        let (config, sink) = WebhookConfig::recording("s3cret");
+        let config = Arc::new(config);
+
+        let mut tasks = Vec::with_capacity(N);
+        for i in 0..N {
+            let config = config.clone();
+            tasks.push(tokio::spawn(async move {
+                let event = WebhookEvent::now(
+                    WebhookKind::FeedbackCreated,
+                    CompanyId::new(format!("company-{i}")),
+                    serde_json::json!({ "i": i }),
+                );
+                config.emit(&event).await;
+            }));
+        }
+        for task in tasks {
+            task.await.expect("a concurrent emit must not panic");
+        }
+
+        assert_eq!(sink.count(), N);
+        let delivered = sink.delivered();
+        let mut seen: Vec<usize> = delivered
+            .iter()
+            .map(|(event, _)| event.company_id.as_ref().to_string())
+            .map(|id| id.strip_prefix("company-").unwrap().parse().unwrap())
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..N).collect::<Vec<_>>(), "every emit must land exactly once");
+    }
+
     #[test]
     fn webhook_event_serializes_type_and_snake_case_kind() {
         let event = WebhookEvent::now(
