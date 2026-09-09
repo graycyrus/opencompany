@@ -539,16 +539,14 @@ async fn finishing_a_link_stores_the_minted_key_as_both_the_company_and_inferenc
     let url = resp["authorizeUrl"].as_str().unwrap().to_string();
     let state_value = state_param(&url);
 
-    // Re-read the pending link to learn the verifier the host kept, then teach
-    // the mock hub the code that unlocks it — standing in for the person having
-    // approved the grant in their browser.
-    let verifier = {
-        let link = state
-            .hub_links()
-            .take(&state_value, "acme")
-            .expect("pending link");
-        link.verifier
-    };
+    // Play the hub: it is the one participant that legitimately learns both the
+    // verifier (from the challenge it was sent, at redemption) and the code it
+    // handed the browser. Peeked rather than taken, so the link is still parked
+    // for the route to spend.
+    let verifier = state
+        .hub_links()
+        .peek_verifier(&state_value)
+        .expect("the start parked a pending link");
     let state = state.with_hub_identity(std::sync::Arc::new(
         crate::server::hub_identity::MockHubIdentityExchange::new().with_grant(
             "grant-code",
@@ -556,34 +554,13 @@ async fn finishing_a_link_stores_the_minted_key_as_both_the_company_and_inferenc
             GRANTED_KEY,
         ),
     ));
-    // `take` above consumed the parked link, so park an equivalent one back.
-    let started = state.hub_links().start(
-        &crate::server::users::token::OsTokens,
-        "acme",
-    );
-    let verifier2 = state
-        .hub_links()
-        .take(&started.state, "acme")
-        .expect("just parked")
-        .verifier;
-    let state = state.with_hub_identity(std::sync::Arc::new(
-        crate::server::hub_identity::MockHubIdentityExchange::new().with_grant(
-            "grant-code",
-            &verifier2,
-            GRANTED_KEY,
-        ),
-    ));
-    let started = state.hub_links().start(
-        &crate::server::users::token::OsTokens,
-        "acme",
-    );
 
     let (status, resp, raw) = send(
         &state,
         "acme",
         "POST",
         "/api/v1/company/credential/link/finish",
-        Some(json!({ "state": started.state, "code": "grant-code" })),
+        Some(json!({ "state": state_value, "code": "grant-code" })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
@@ -602,6 +579,17 @@ async fn finishing_a_link_stores_the_minted_key_as_both_the_company_and_inferenc
         inference["keyConfigured"], true,
         "the same grant must arm inference: {raw}"
     );
+
+    // Single-use: the same handle and code cannot be spent again.
+    let (status, _, raw) = send(
+        &state,
+        "acme",
+        "POST",
+        "/api/v1/company/credential/link/finish",
+        Some(json!({ "state": state_value, "code": "grant-code" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
 }
 
 #[tokio::test]
@@ -627,7 +615,8 @@ async fn a_replayed_or_unknown_state_is_refused() {
 async fn a_member_cannot_start_or_finish_a_link() {
     let home_dir = home();
     let state = state_with_hub(home_dir.path(), "acme").await;
-    let member = crate::server::test_support::seed_fixed_member(&state, "acme").await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+    let member = crate::server::test_support::member_cookie("acme");
 
     // Same authority `PUT /credential` needs. That the key is minted rather
     // than pasted changes who types it, not what it does.
