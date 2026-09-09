@@ -54,8 +54,7 @@ import { cn } from "@/lib/utils";
  * | ≥ 1280  | nothing              |
  * | < 1280  | autonomy's sentence  |
  * | < 1024  | the company's name   |
- * | < 768   | the Overview glyph   |
- * | floor   | approvals + autonomy + you |
+ * | floor   | overview + utilities + autonomy + you |
  *
  * **The autonomy sentence goes first** because it is the longest thing here and
  * the only one whose absence loses no fact: the tier's *name* stays, and the
@@ -91,8 +90,22 @@ export const TITLE_BAR_LADDER = {
    * `titlebar` variant, which keeps the glyph, the status dot and the chevron.
    */
   companyName: "hidden lg:flex",
-  /** The Overview glyph. Applied by the row itself, to the slot it sits in. */
-  overview: "hidden md:inline-flex",
+  /**
+   * The Overview glyph. Applied by the row itself, to the slot it sits in.
+   *
+   * `inline-flex` at every width, and it used to be `hidden md:inline-flex`.
+   * The narrow case was covered by a second Overview row that the sidebar's
+   * footer drew `md:hidden` — the exact complement, so the destination was on
+   * screen once at every width and never twice. That footer is gone: Settings,
+   * Feedback and Discord are glyphs in this row now, and the Overview fallback
+   * had nowhere left to live. Dropping the glyph below `md` with nothing behind
+   * it is the P1 that arrangement was built to answer (zero controls named
+   * Overview at 390px), so the rung goes rather than the fallback moving again.
+   *
+   * The row can afford it: Approvals left this row for a sidebar of its own,
+   * which returned a slot that grew to hold a count.
+   */
+  overview: "inline-flex",
 } as const;
 
 /**
@@ -147,6 +160,7 @@ const TITLE_BAR_DIVIDER = "before:mr-2 before:h-5 before:w-px before:bg-chrome-b
 export function WindowTitleBar({
   switcher,
   overview,
+  utilities,
   approvals,
   autonomy,
   profile,
@@ -172,6 +186,14 @@ export function WindowTitleBar({
    * around it — hairline included. See `AutonomyPill`.
    */
   autonomy?: React.ReactNode;
+  /**
+   * Settings, Feedback and Discord, beside Overview in the first group.
+   *
+   * They were the sidebar's footer until they became what they are: controls
+   * about the console rather than places inside the company. See
+   * `title-bar-utilities.tsx`.
+   */
+  utilities?: React.ReactNode;
   /** The profile / account control, the third group and the far right. */
   profile: React.ReactNode;
 }) {
@@ -237,6 +259,7 @@ export function WindowTitleBar({
           {overview}
         </span>
         {approvals}
+        {utilities}
       </div>
       {/* Group two — what the agents may do. Rendered inside a wrapper on
           purpose, unlike the bare slot this used to be: the wrapper is what

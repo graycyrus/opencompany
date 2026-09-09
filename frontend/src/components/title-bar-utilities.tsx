@@ -106,7 +106,7 @@ export function TitleBarUtilities({
           "hover:text-(--brand-discord-on-light) dark:hover:text-(--brand-discord-on-dark)",
         )}
       >
-        <DiscordIcon aria-hidden="true" className="size-4" />
+        <DiscordIcon className="size-4" />
       </a>
     </>
   );
