@@ -400,7 +400,7 @@ export function KnowledgeGraphFullscreen({
                 {noDesks ? 'No desks yet' : 'Nothing to draw yet'}
               </h2>
               <p className="mt-2 text-sm leading-6 text-os-muted">
-                This graph shows how your company&apos;s desks, agents, work, and workflows connect.
+                This graph shows how your company&apos;s desks, agents, work, and automations connect.
                 {noDesks
                   ? ' Create a desk to add its first pillar.'
                   : ' Nothing has been declared for it to draw.'}
