@@ -11,7 +11,7 @@
 // table inside the section because nothing outside needs to read it. This one
 // is read from two other modules, so it lives on its own.
 
-import { Blocks, LayoutGrid, type LucideIcon } from "lucide-react";
+import { Blocks, BrainCircuit, LayoutGrid, Sparkles, type LucideIcon } from "lucide-react";
 
 /**
  * The sub-pages that live under Connections. The id is the hash's second
