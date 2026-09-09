@@ -1467,12 +1467,12 @@ base_url = "https://byo.example/v1"
     /// partitioned per company — every route test here drives the `acme`
     /// company from [`state_with_company`], and a seed in the shared/keyless
     /// slot would no longer be the entry the route reads.
-    fn seed_catalog(base_url: &str, ids: &[&str]) {
-        seed_catalog_for("acme", base_url, ids);
-    }
-
     /// Seed the authenticated catalog cache for a named company — the scope the
-    /// route reads under. Needed by any test that does not use `acme`.
+    /// route reads under.
+    ///
+    /// Every caller names its own company rather than sharing one: eviction is
+    /// company-wide, so a fixture seeded under an id another test saves a key
+    /// for is thrown away at random.
     fn seed_catalog_for(company: &str, base_url: &str, ids: &[&str]) {
         crate::server::inference_models::catalog_cache_scoped(base_url, Some(company)).store(
             ids.iter()
@@ -1497,10 +1497,17 @@ base_url = "https://byo.example/v1"
     #[tokio::test]
     async fn model_catalog_route_lists_the_configured_endpoints_own_catalog() {
         const ENDPOINT: &str = "http://127.0.0.1:9/tier-native/v1";
+        // Its own company id. Saving a key evicts that company's authenticated
+        // catalogs, and a dozen tests in this module save one under `acme`; with
+        // a shared id, whichever of them libtest happens to run alongside this
+        // one throws the seeded fixture away. Locally the interleaving hid it;
+        // CI's found it (Codex review on #2045).
+        const COMPANY: &str = "catalog-tiers";
         let home_dir = home();
-        let state = state_with_company(home_dir.path()).await;
-        let (status, _, raw) = send(
+        let state = state_with_company_named(home_dir.path(), COMPANY).await;
+        let (status, _, raw) = send_as(
             &state,
+            COMPANY,
             "PUT",
             "/api/v1/company/inference",
             Some(json!({
@@ -1519,13 +1526,20 @@ base_url = "https://byo.example/v1"
         // route fell through to a real request. This order is also what happens
         // in life — the cache is warmed by a read, which comes after the config
         // exists to be read against.
-        seed_catalog(
+        seed_catalog_for(
+            COMPANY,
             ENDPOINT,
             &["agentic-v1", "chat-v1", "reasoning-v1", "vision-v1"],
         );
 
-        let (status, body, raw) =
-            send(&state, "GET", "/api/v1/company/inference/models", None).await;
+        let (status, body, raw) = send_as(
+            &state,
+            COMPANY,
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(
@@ -1558,10 +1572,13 @@ base_url = "https://byo.example/v1"
     #[tokio::test]
     async fn model_catalog_route_keeps_concrete_defaults_for_a_concrete_catalog() {
         const ENDPOINT: &str = "http://127.0.0.1:9/concrete/v1";
+        // Its own company id, for the same reason as the test above.
+        const COMPANY: &str = "catalog-concrete";
         let home_dir = home();
-        let state = state_with_company(home_dir.path()).await;
-        let (status, _, raw) = send(
+        let state = state_with_company_named(home_dir.path(), COMPANY).await;
+        let (status, _, raw) = send_as(
             &state,
+            COMPANY,
             "PUT",
             "/api/v1/company/inference",
             Some(json!({
@@ -1575,7 +1592,8 @@ base_url = "https://byo.example/v1"
 
         // After the save, for the same reason as the test above: storing a key
         // evicts this company's authenticated catalogs.
-        seed_catalog(
+        seed_catalog_for(
+            COMPANY,
             ENDPOINT,
             &[
                 "anthropic/claude-opus-5",
@@ -1585,8 +1603,14 @@ base_url = "https://byo.example/v1"
             ],
         );
 
-        let (status, body, raw) =
-            send(&state, "GET", "/api/v1/company/inference/models", None).await;
+        let (status, body, raw) = send_as(
+            &state,
+            COMPANY,
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(body["tierVocabulary"], "concrete", "{raw}");

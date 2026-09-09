@@ -785,10 +785,16 @@ mod tests {
     #[test]
     fn an_authenticated_catalog_is_partitioned_per_company_and_a_keyless_one_is_not() {
         const ENDPOINT: &str = "https://shared-gateway.example/v1";
+        // Company ids nothing else uses. The registry is process-global and
+        // `evict_company_catalogs` clears a whole company, so a scope named
+        // `acme` would be wiped by any route test in another module that saves a
+        // key for the company of that name, mid-assertion and at random.
+        const ONE: &str = "partition-one";
+        const TWO: &str = "partition-two";
         let now = Instant::now();
 
-        let acme = catalog_cache_scoped(ENDPOINT, Some("acme"));
-        let other = catalog_cache_scoped(ENDPOINT, Some("other"));
+        let acme = catalog_cache_scoped(ENDPOINT, Some(ONE));
+        let other = catalog_cache_scoped(ENDPOINT, Some(TWO));
         acme.store(vec![model("acme/entitled-only")], now);
 
         assert_eq!(acme.lookup(now), Some(vec![model("acme/entitled-only")]));
@@ -806,7 +812,7 @@ mod tests {
         // The same company reaching the same endpoint does reuse its own entry,
         // so the partition costs one fetch per company rather than one per call.
         assert_eq!(
-            catalog_cache_scoped(ENDPOINT, Some("acme")).lookup(now),
+            catalog_cache_scoped(ENDPOINT, Some(ONE)).lookup(now),
             Some(vec![model("acme/entitled-only")])
         );
 
@@ -837,9 +843,11 @@ mod tests {
     #[test]
     fn two_harnesses_in_one_company_do_not_share_an_authenticated_catalog() {
         const ENDPOINT: &str = "https://gateway.example/v1";
+        // A company id nothing else uses — see the note in the test above.
+        const COMPANY: &str = "harness-partition-co";
         let now = Instant::now();
-        let subscription = format!("acme\u{1}{}", "default");
-        let own_key = format!("acme\u{1}{}", "research");
+        let subscription = format!("{COMPANY}\u{1}{}", "default");
+        let own_key = format!("{COMPANY}\u{1}{}", "research");
 
         catalog_cache_scoped(ENDPOINT, Some(&subscription))
             .store(vec![model("gateway/subscription-tier")], now);
@@ -857,7 +865,7 @@ mod tests {
         // The company-only key is a third, distinct slot — proof the harness
         // half genuinely participates rather than being absorbed into the id.
         assert_eq!(
-            catalog_cache_scoped(ENDPOINT, Some("acme")).lookup(now),
+            catalog_cache_scoped(ENDPOINT, Some(COMPANY)).lookup(now),
             None
         );
     }
