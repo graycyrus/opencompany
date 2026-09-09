@@ -252,6 +252,14 @@ mod http {
         /// a verdict on the *endpoint* rather than on one event, every event
         /// behind it gets the same one, and it is a `warn!` said exactly once.
         endpoint_redirects: std::sync::atomic::AtomicBool,
+        /// How many events have been lost to a **cancelled** drain.
+        ///
+        /// Every other way a drain ends states its own count in its own log
+        /// line. Cancellation cannot: the future is dropped, so there is no
+        /// branch to log from. [`CancelledDrain`] reports it on `Drop` and
+        /// records the total here, which makes the loss assertable — a log line
+        /// alone is not something a test can hold to account.
+        lost_to_cancellation: std::sync::atomic::AtomicUsize,
     }
 
     impl HttpOpenPanelTracker {
@@ -324,6 +332,7 @@ mod http {
                 stop: tokio::sync::Notify::new(),
                 credential_refused: std::sync::atomic::AtomicBool::new(false),
                 endpoint_redirects: std::sync::atomic::AtomicBool::new(false),
+                lost_to_cancellation: std::sync::atomic::AtomicUsize::new(0),
             });
 
             // A `Weak` so the loop cannot keep the tracker alive, and
@@ -337,6 +346,19 @@ mod http {
             }
 
             Ok(Self { inner })
+        }
+
+        /// How many events a **cancelled** drain has lost so far.
+        ///
+        /// Exists so the shutdown-budget loss is assertable rather than merely
+        /// logged: a `warn!` is what an operator sees, and a counter is what a
+        /// test can hold to account. Every other way a drain ends already names
+        /// its own count in its own line.
+        #[cfg(test)]
+        pub(super) fn lost_to_cancellation(&self) -> usize {
+            self.inner
+                .lost_to_cancellation
+                .load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -402,6 +424,93 @@ mod http {
                 return;
             }
         }
+    }
+
+    /// Reports the tail of a drain that was **cancelled** rather than finished.
+    ///
+    /// Cancellation is the one way [`Inner::drain`] can end without saying
+    /// anything, because it is not a branch the drain takes — the future is
+    /// dropped out from under it. In practice that means the shutdown flush
+    /// running out of its budget (`server::shutdown::flush_budget`, at most 2s),
+    /// which with one request per event is a routine occurrence for a busy
+    /// tenant rather than an exotic one. Before this, those events vanished and
+    /// the only trace was a `debug!` at the call site that names no count.
+    ///
+    /// `Drop` **is** the cancellation path, so the report lives there. Every
+    /// deliberate exit disarms the guard first, because each of those logs its
+    /// own count and a second line would double-count the same events.
+    ///
+    /// It never prints the raw endpoint — `loggable_endpoint` is applied when
+    /// the guard is built, for the reason [`loggable_send_error`] exists.
+    struct CancelledDrain<'a> {
+        /// Events taken off the queue that have not been sent yet.
+        remaining: usize,
+        /// Already redacted at construction; a `Drop` impl is the last place to
+        /// remember to redact something.
+        endpoint: String,
+        /// Bumped by the total lost, so the loss is observable and not merely
+        /// logged — a test can assert it without standing up a subscriber.
+        lost: &'a std::sync::atomic::AtomicUsize,
+    }
+
+    impl CancelledDrain<'_> {
+        /// The drain ended on a path that reports for itself.
+        fn disarm(&mut self) {
+            self.remaining = 0;
+        }
+    }
+
+    impl Drop for CancelledDrain<'_> {
+        fn drop(&mut self) {
+            if self.remaining == 0 {
+                return;
+            }
+            self.lost
+                .fetch_add(self.remaining, std::sync::atomic::Ordering::Relaxed);
+            // `warn!` rather than `debug!`, and this is the one place in the
+            // module where that is not the transient/permanent rule at work.
+            // It is bounded — a drain is cancelled at most once per shutdown —
+            // and it is the only notice an operator gets that their restarts
+            // are costing them the end of every session's telemetry. A `debug!`
+            // here would be the same silence the count was added to break.
+            tracing::warn!(
+                endpoint = %self.endpoint,
+                dropped = self.remaining,
+                "[analytics] the drain was cancelled before it finished — almost always \
+                 the shutdown flush running out of its budget. These events are lost. \
+                 OpenPanel has no batch endpoint, so a queue costs one request per \
+                 event; a collector that answers slowly, or a busy queue, will not fit \
+                 the budget."
+            );
+        }
+    }
+
+    /// Whether `status` is the collector's answer about **itself** rather than
+    /// about the event that happened to be in flight.
+    ///
+    /// Three statuses reach the drain that are not per-event verdicts, and they
+    /// split by whether they resolve on their own. A `401` and a `3xx` are
+    /// permanent misconfigurations, so each gets its own said-once `warn!`.
+    /// These are the transient half: `429` is the collector or its proxy asking
+    /// for less traffic, and a `5xx` is it failing to serve at all. Neither says
+    /// anything about the body that was posted, so every event behind it in the
+    /// queue would get the same answer.
+    ///
+    /// Without this the drain treated them as a rejected *event* and carried on,
+    /// which is the worst available response to `503`: up to [`MAX_QUEUED`]
+    /// requests aimed at a service that has just said it is overloaded, and
+    /// again at the next [`FLUSH_INTERVAL`], for as long as the collector stays
+    /// down. That is the same runaway [`Inner::report_refused_credential`] was
+    /// added to stop, arriving from the transient direction — an analytics
+    /// client should not be the thing that keeps an operator's collector down.
+    ///
+    /// **`408` and `425` are deliberately not here.** Both are arguably
+    /// retryable, but neither is evidence the collector is unwell, and widening
+    /// this predicate costs a whole drain each time it is wrong. `4xx` other
+    /// than `401` and `429` stays per-event, which is the reading that loses the
+    /// least when it is mistaken: one dropped event rather than a whole drain.
+    pub(super) fn is_collector_wide(status: reqwest::StatusCode) -> bool {
+        status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
     }
 
     /// The one rendering of a transport failure this module is allowed to log.
@@ -485,6 +594,45 @@ mod http {
         /// resolve. It is a verdict on the endpoint, not on the event, so it
         /// abandons the drain and warns once rather than logging a `debug!` per
         /// event for the life of the process.
+        ///
+        /// # The tail a cancelled drain loses, and why it is said out loud
+        ///
+        /// Every path above ends the drain *deliberately* and says how many
+        /// events it dropped. There is one that does not: the shutdown flush is
+        /// wrapped in a [`tokio::time::timeout`] at its call site
+        /// (`src/bin/opencompany.rs`, bounded by
+        /// `server::shutdown::flush_budget`, at most **2s**), so when the budget
+        /// runs out this future is simply **dropped mid-drain**. The events it
+        /// had already taken out of the queue are gone, and nothing in this
+        /// module ever said so — the only trace was a `debug!` at the call site
+        /// that names no count.
+        ///
+        /// That gap is new with OpenPanel, and it is a direct consequence of
+        /// there being no batch endpoint. Mixpanel's whole queue left in **one**
+        /// request, so 2s was never the binding constraint; one request per
+        /// event means a queue of `n` costs `n` round trips, and at a very
+        /// ordinary 25 ms each the budget is spent after about eighty. A busy
+        /// tenant restarting therefore loses the tail of its telemetry, quietly,
+        /// on every rollout.
+        ///
+        /// [`CancelledDrain`] makes that loud instead. It is armed with the
+        /// number of events still unsent, disarmed by every deliberate exit
+        /// above (each of which logs its own line), and on `Drop` — which is
+        /// what cancellation *is* — reports the count that never left.
+        ///
+        /// **The loss itself is not fixed here, on purpose.** The obvious
+        /// remedy is to send with bounded concurrency, which would fit roughly
+        /// `concurrency ×` more events into the same budget. It is declined
+        /// because it is paid for out of the guarantee directly above: a drain
+        /// that issues eight requests at once against a black-holing collector
+        /// opens eight connections rather than one, and
+        /// `an_unreachable_collector_costs_one_timeout_for_the_whole_drain`
+        /// asserts exactly one. Trading a bounded shutdown for a multiplied
+        /// hammering of a collector that is already unreachable is the wrong
+        /// direction, and #1739 is explicit that telemetry loss beats a
+        /// shutdown overrun — the budget exists because an overrun buys a
+        /// `SIGKILL` mid-turn. The real fix is a batch endpoint on the
+        /// collector, which OpenPanel does not have.
         async fn drain(&self) {
             let _sending = self.sending.lock().await;
             let events = {
@@ -496,19 +644,44 @@ mod http {
             };
 
             let total = events.len();
+            // Armed for the whole loop. Every `return` below disarms it first,
+            // because those paths log their own count; what is left for the
+            // guard is the one exit that cannot log for itself — being dropped.
+            let mut cancelled = CancelledDrain {
+                remaining: total,
+                endpoint: crate::analytics::boot::loggable_endpoint(&self.endpoint),
+                lost: &self.lost_to_cancellation,
+            };
             for (sent, event) in events.into_iter().enumerate() {
+                cancelled.remaining = total - sent;
                 match self.client.post(&self.endpoint).json(&event).send().await {
                     Ok(response) if response.status().is_success() => {}
                     // Not a per-event answer: the credential is wrong for every
                     // event behind this one too.
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                        cancelled.disarm();
                         self.report_refused_credential(total - sent);
                         return;
                     }
                     // Also not a per-event answer, and — because this client
                     // follows no redirects — not one that resolves itself.
                     Ok(response) if response.status().is_redirection() => {
+                        cancelled.disarm();
                         self.report_redirected_endpoint(response.status(), total - sent);
+                        return;
+                    }
+                    // Not a per-event answer either — but unlike the two above,
+                    // this one resolves itself, so it gets the transient
+                    // treatment rather than a `warn!`.
+                    Ok(response) if is_collector_wide(response.status()) => {
+                        cancelled.disarm();
+                        tracing::debug!(
+                            endpoint = %crate::analytics::boot::loggable_endpoint(&self.endpoint),
+                            status = %response.status(),
+                            dropped = total - sent,
+                            "[analytics] the collector cannot take traffic right now; \
+                             dropping the rest of this drain"
+                        );
                         return;
                     }
                     Ok(response) => tracing::debug!(
@@ -516,6 +689,7 @@ mod http {
                         "[analytics] the collector refused an event; dropping it"
                     ),
                     Err(error) => {
+                        cancelled.disarm();
                         tracing::debug!(
                             endpoint = %crate::analytics::boot::loggable_endpoint(&self.endpoint),
                             error = %loggable_send_error(error),
@@ -527,6 +701,7 @@ mod http {
                     }
                 }
             }
+            cancelled.disarm();
         }
 
         /// Says once, out loud, that the configured endpoint redirects and that
@@ -1330,6 +1505,193 @@ mod test {
             collector.hits.load(Ordering::SeqCst),
             1,
             "the event really was in flight and really did land"
+        );
+        collector.stop().await;
+    }
+
+    /// **A collector-wide status stops the drain, like a refused credential.**
+    ///
+    /// `429`, `502`, `503` are the collector saying it cannot take traffic —
+    /// not a verdict on the body that happened to be in flight. Treating one as
+    /// a rejected *event* and carrying on is the worst available response: up
+    /// to `MAX_QUEUED` requests aimed at a service that has just said it is
+    /// overloaded, and again at the next `FLUSH_INTERVAL` for as long as it
+    /// stays down. An analytics client must not be the thing that keeps an
+    /// operator's own collector down.
+    ///
+    /// The contrast with `a_refused_event_does_not_stop_the_drain` is the whole
+    /// point, and it is the same contrast a `401` draws: same collector, same
+    /// three events, one status code apart, opposite behaviour.
+    #[tokio::test]
+    async fn a_collector_that_cannot_take_traffic_stops_the_drain() {
+        for refusal in [
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let collector = spawn_collector_with(Duration::ZERO, usize::MAX, refusal).await;
+            let env = env(&collector.url, &[(DEPLOYMENT_ENV, "hosted-tenant")]);
+            let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+
+            for _ in 0..3 {
+                tracker.track(Event::InstanceStarted {
+                    companies: 1,
+                    storage: "fs",
+                    setup_complete: true,
+                });
+            }
+            tracker.flush().await;
+
+            assert_eq!(
+                collector.hits.load(Ordering::SeqCst),
+                1,
+                "{refusal} is the collector's answer about itself, so the two events \
+                 behind it must not be attempted"
+            );
+            collector.stop().await;
+        }
+    }
+
+    /// The control for the test above: a status that really *is* about one
+    /// event must still not stop the drain.
+    ///
+    /// Without it, "stops the drain" would be satisfied by a client that gave
+    /// up on any refusal at all, which is the behaviour
+    /// `a_refused_event_does_not_stop_the_drain` exists to forbid. `400` and
+    /// `404` are the two an operator actually meets — a body OpenPanel will not
+    /// take, and a `/track` path typed wrong — and neither is a reason to
+    /// abandon the events queued behind it.
+    #[tokio::test]
+    async fn a_per_event_refusal_still_does_not_stop_the_drain() {
+        for refusal in [
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::http::StatusCode::NOT_FOUND,
+        ] {
+            let collector = spawn_collector_with(Duration::ZERO, usize::MAX, refusal).await;
+            let env = env(&collector.url, &[(DEPLOYMENT_ENV, "hosted-tenant")]);
+            let tracker = build(&resolve(Deployment::from_env(&env), &env), envelope());
+
+            for _ in 0..3 {
+                tracker.track(Event::InstanceStarted {
+                    companies: 1,
+                    storage: "fs",
+                    setup_complete: true,
+                });
+            }
+            tracker.flush().await;
+
+            assert_eq!(
+                collector.hits.load(Ordering::SeqCst),
+                3,
+                "{refusal} is about one event, so the two behind it must still be tried"
+            );
+            collector.stop().await;
+        }
+    }
+
+    /// **A drain cancelled mid-flight says how many events it lost.**
+    ///
+    /// This is the shutdown budget, reproduced. `src/bin/opencompany.rs` wraps
+    /// the final flush in a `tokio::time::timeout` of at most two seconds
+    /// (`server::shutdown::flush_budget`), and OpenPanel has no batch endpoint,
+    /// so a queue of `n` costs `n` sequential round trips. When the budget runs
+    /// out the future is **dropped mid-drain**: the events already taken off the
+    /// queue are gone, and before `CancelledDrain` nothing in this module said
+    /// so — the only trace was a `debug!` at the call site naming no count.
+    ///
+    /// The loss is not fixed, deliberately (see `Inner::drain` for why bounded
+    /// concurrency is the wrong trade against the black-hole guarantee). What
+    /// is fixed is the silence, so this asserts the **count**, which is the part
+    /// an operator can act on. Asserted on the counter rather than on a log
+    /// line, because a test that needs a subscriber to see a regression is a
+    /// test that stops seeing it the day the subscriber changes.
+    ///
+    /// A 300 ms collector and a 120 ms budget: the first event is still in
+    /// flight when the timeout fires, so four of five are certain to be lost —
+    /// no timing race, because the assertion is a lower bound rather than an
+    /// exact count.
+    #[tokio::test]
+    async fn a_cancelled_drain_reports_the_tail_it_lost() {
+        let collector =
+            spawn_collector_with(Duration::from_millis(300), 0, axum::http::StatusCode::OK).await;
+        // Built directly rather than through `build`, because the counter is on
+        // the concrete type and `build` hands back an `Arc<dyn Tracker>`.
+        let tracker = HttpOpenPanelTracker::new(
+            &collector.url,
+            &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+            envelope(),
+        )
+        .expect("the client builds");
+
+        for _ in 0..5 {
+            tracker.track(Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            });
+        }
+
+        assert_eq!(
+            tracker.lost_to_cancellation(),
+            0,
+            "nothing is lost before a drain is cancelled, or the assertion below is \
+             measuring the wrong thing"
+        );
+
+        // Stands in for the shutdown budget, an order of magnitude smaller so
+        // the test does not take two seconds to prove a two-second bound.
+        let outcome = tokio::time::timeout(Duration::from_millis(120), tracker.flush()).await;
+        assert!(
+            outcome.is_err(),
+            "the flush finished inside the budget, so nothing was cancelled and this \
+             test proves nothing"
+        );
+
+        assert!(
+            tracker.lost_to_cancellation() >= 4,
+            "a cancelled drain lost {} events and reported {} — the tail of a shutdown \
+             flush must be counted, not dropped in silence",
+            5 - collector.hits.load(Ordering::SeqCst),
+            tracker.lost_to_cancellation()
+        );
+        collector.stop().await;
+    }
+
+    /// The control: a drain that **finishes** must report nothing lost.
+    ///
+    /// Without it, `lost_to_cancellation() >= 4` above would also pass for a
+    /// guard that fired on every drain, which would turn a real signal into a
+    /// line an operator learns to ignore — and this module's whole problem is
+    /// notices nobody reads.
+    #[tokio::test]
+    async fn a_drain_that_finishes_reports_nothing_lost() {
+        let collector = spawn_collector().await;
+        let tracker = HttpOpenPanelTracker::new(
+            &collector.url,
+            &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+            envelope(),
+        )
+        .expect("the client builds");
+
+        for _ in 0..3 {
+            tracker.track(Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            });
+        }
+        tracker.flush().await;
+
+        assert_eq!(
+            collector.hits.load(Ordering::SeqCst),
+            3,
+            "the positive control: all three really did land"
+        );
+        assert_eq!(
+            tracker.lost_to_cancellation(),
+            0,
+            "a drain that ran to completion must not report a lost tail"
         );
         collector.stop().await;
     }

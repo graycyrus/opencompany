@@ -444,10 +444,20 @@ fn is_usable_endpoint(raw: &str) -> bool {
 /// does not assume it.
 ///
 /// **Loopback is the exception, and it is a real one.** Traffic to
-/// `127.0.0.0/8`, `::1` or `localhost` never reaches a network interface, so
-/// there is nothing to read; it is also how the collector is run beside the
-/// workload in development and in every gated test in this crate. Refusing it
-/// would refuse the one `http` case that is actually safe.
+/// `127.0.0.0/8`, `::1` or `localhost` **does not leave the host**: it goes over
+/// the host's loopback interface and reaches no link anyone else is on, so there
+/// is no wire between machines for it to be read off. It is also how the
+/// collector is run beside the workload in development and in every gated test
+/// in this crate. Refusing it would refuse the one `http` case that is actually
+/// safe.
+///
+/// That is deliberately narrower than "nobody can see it", because the narrower
+/// claim is the true one: a sufficiently privileged local process can capture
+/// `lo`. It does not weaken the exception, though — anything with that access on
+/// a tenant's host can already read the process environment the credential was
+/// loaded from, so the capture gains it nothing it did not have. The property
+/// this rests on is that the secret never crosses a network **between hosts**,
+/// which is what CWE-319 is about.
 ///
 /// `localhost` is matched **by exact name**, not by suffix. RFC 6761 reserves
 /// `*.localhost` for loopback as well, and a resolver may honour that — but
@@ -1273,7 +1283,8 @@ mod test {
     /// reports.**
     ///
     /// It is not a concession — it is the only `http` case that is actually
-    /// safe, because the traffic never reaches a network interface. It is also
+    /// safe, because that traffic does not leave the host and so never crosses
+    /// a network between machines. It is also
     /// how the collector is run beside the workload in development, and how
     /// every gated transport test in this crate points at its own local
     /// collector; without this arm those tests would be asserting against a

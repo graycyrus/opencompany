@@ -76,8 +76,10 @@ by `profileId`).
 **Responses.** `200` with `{"deviceId", "sessionId"}` on success. `202` also
 means accepted-and-dropped — bot suspicion, or a cloud wind-down — and is
 treated as success here because a `2xx` is the collector's answer either way.
-`401` is a plain-text body, not JSON, and is the one status this transport
-treats as more than a dropped event: see below. Two other behaviours are worth
+`401` is a plain-text body, not JSON. It is one of **three** classes this
+transport treats as more than a dropped event — the others are a `3xx` and a
+`429`/`5xx` — because none of them is an answer about the body that was posted:
+see below. Two other behaviours are worth
 knowing and neither applies to this client, which sends no `Origin` header:
 requests with `ip`, `origin` and a client id are de-duplicated by content hash
 inside a 100 ms window, and a verified secret exempts a request from bot
@@ -109,28 +111,78 @@ accumulated since. `an_unreachable_collector_costs_one_timeout_for_the_whole_dra
 asserts it on connections a black-hole listener actually accepted — one, not
 three — rather than on elapsed time, which would be a flaky test.
 
-**An HTTP status failure does not.** That is a per-event answer — a rejected
-name, a body the collector will not take — and the events behind it may be fine;
-treating the two alike would let one malformed event silence a whole drain.
+**A per-event HTTP status does not.** A `400` for a body the collector will not
+take, a `404` for a `/track` path typed wrong — the events behind it may be
+perfectly good, and treating those like a transport failure would let one
+malformed event silence a whole drain.
 
-**A `401` is the exception on both counts.** It is not a per-event answer at
-all: it is the collector's verdict on this process's credential, so every event
-behind it in the queue gets the same one. Carrying on would fire up to 500
-requests every thirty seconds for the life of a misconfigured tenant — a
-thousand a minute at the operator's own collector — to learn something already
-known, so it abandons the drain like a transport failure does.
+**Three status classes are not per-event answers, and each abandons the drain.**
+The test is always the same question: *is this the collector's answer about the
+body that was posted, or about something that will be equally true of every
+event behind it?*
 
-It is also the one failure said out loud. Every other failure here is transient
-and deserves the `debug!` #1739 settled on. A refused credential resolves itself
-never: every event for the rest of the process's life is dropped, boot said
-"reporting to …", and the only trace is a line nobody has enabled. So it is a
-`warn!` — said **once**, because the condition is permanent and repeating it
-would drown a busy tenant's log — naming the two variables to fix and the
-UUIDv4 requirement on the client id, and never the credential.
+| Status | Why it is not per-event | Said how |
+|---|---|---|
+| `401` | the collector's verdict on this process's **credential** | `warn!`, once |
+| `3xx` | the collector's verdict on the **endpoint** — and this client follows no redirect, so it will never resolve | `warn!`, once |
+| `429`, `5xx` | the collector saying it cannot take **traffic** right now | `debug!` |
 
-`a_refused_credential_stops_the_drain` and `a_refused_event_does_not_stop_the_drain`
-are the same collector, the same three events and one status code apart, with
-opposite outcomes. Neither means much without the other.
+Carrying on through any of them would fire up to 500 requests every thirty
+seconds — a thousand a minute at the operator's own collector — to learn
+something already known. For `429`/`5xx` that is worse than pointless: it aims a
+burst at a service that has just said it is overloaded, so an analytics client
+becomes the thing keeping the operator's collector down.
+
+The `warn!`/`debug!` split is the transient/permanent rule, not a judgement of
+severity. A refused credential and a redirecting endpoint resolve themselves
+**never**: every event for the rest of the process's life is dropped, boot said
+"reporting to …", and the only trace would be a line nobody has enabled. So each
+is a `warn!`, said **once** — the condition is permanent, and repeating it would
+drown a busy tenant's log. The credential warning names the two variables to fix
+and the UUIDv4 requirement on the client id, and never the credential itself; the
+redirect warning never prints the `Location`. A `429` or a `5xx` is a collector
+restarting or under load, resolves itself, and the next interval tries again, so
+it gets the `debug!` #1739 settled on.
+
+`a_refused_credential_stops_the_drain`,
+`a_collector_that_cannot_take_traffic_stops_the_drain`,
+`a_refused_event_does_not_stop_the_drain` and
+`a_per_event_refusal_still_does_not_stop_the_drain` are the same collector and
+the same three events, a status code apart, with opposite outcomes. None of them
+means much without the others: the first pair without the second would also pass
+for a client that gave up on any refusal at all.
+
+## The tail a cancelled drain loses
+
+There is a fourth way a drain ends, and it is the only one that is not a branch
+the drain takes. The shutdown flush is wrapped in a `tokio::time::timeout` at its
+call site (`src/bin/opencompany.rs`, bounded by `server::shutdown::flush_budget`,
+**at most 2s**), so when the budget runs out the drain future is **dropped**
+mid-flight. The events it had already taken off the queue are gone.
+
+That is new with OpenPanel and follows directly from there being no batch
+endpoint. Mixpanel's whole queue left in one request, so 2s was never the binding
+constraint. One request per event means a queue of `n` costs `n` sequential round
+trips, and at a very ordinary 25 ms each the budget is spent after about eighty —
+so a busy tenant loses the tail of its telemetry on every restart.
+
+**The loss is accepted; the silence is not.** `CancelledDrain` is armed with the
+number of events still unsent, disarmed by every deliberate exit above, and on
+`Drop` reports the count as a `warn!` and records it where a test can read it
+(`a_cancelled_drain_reports_the_tail_it_lost`, with
+`a_drain_that_finishes_reports_nothing_lost` as its control). Before it, those
+events vanished behind a `debug!` at the call site that named no count at all.
+
+Sending with bounded concurrency would fit roughly `concurrency ×` more events
+into the same budget, and is **declined**: it is paid for out of the guarantee
+above, because a drain issuing eight requests at once against a black-holing
+collector opens eight connections rather than one, and
+`an_unreachable_collector_costs_one_timeout_for_the_whole_drain` asserts exactly
+one. Multiplying the hammering of an unreachable collector to shorten a shutdown
+is the wrong direction, and #1739 is explicit that telemetry loss beats a
+shutdown overrun — the budget exists because an overrun buys a `SIGKILL`
+mid-turn. The real fix is a batch endpoint on the collector, which OpenPanel does
+not have.
 
 ## Where the credential is allowed to travel
 
@@ -159,11 +211,16 @@ A same-origin policy would also be safe, but it is a predicate to keep correct
 rather than an invariant to state, and all it buys is a collector that 301s
 `/track` to `/api/track` — an endpoint the operator can type correctly once.
 Following none of them makes "the credential only ever goes to the configured
-endpoint" a property of the client. So a redirecting endpoint sends nothing,
-abandons the drain like a `401` does, and warns **once**, naming the variable to
-fix. It never prints the `Location`: that is a URL the *collector* chose, and a
-URL is exactly where a credential hides — the same reason
-`loggable_send_error` strips the URL from a transport error.
+endpoint" a property of the client.
+
+Be precise about what that costs. The request **does** reach the configured
+endpoint, carrying the credential, exactly as the operator asked; it is the
+redirect *destination* that receives nothing. So no event is ever delivered
+while the endpoint redirects — the collector answering `3xx` is not the one
+storing events — and the drain abandons like a `401` and warns **once**, naming
+the variable to fix. It never prints the `Location`: that is a URL the
+*collector* chose, and a URL is exactly where a credential hides — the same
+reason `loggable_send_error` strips the URL from a transport error.
 
 `a_redirect_never_carries_the_credential_to_another_host` points the tracker at
 a collector that `307`s to a second one on another port and asserts the second
@@ -177,6 +234,10 @@ nothing.
 non-loopback host would put the secret on the wire in cleartext once per event
 ([CWE-319](https://cwe.mitre.org/data/definitions/319.html)), so it resolves to
 silence with its own reason rather than reporting. Loopback is the exception
-because the traffic never reaches a network interface. The rule, its cost, and
+because that traffic **does not leave the host**: it goes over the host's
+loopback interface and reaches no link anyone else is on. That is a narrower
+claim than "nobody can see it", deliberately — a sufficiently privileged local
+process can capture `lo`, and anything that has that access on a tenant's host
+already has the environment the credential was read from. The rule, its cost, and
 why it is silence rather than a warning are in
 [analytics.md](analytics.md#why-https-is-required-and-why-loopback-is-the-exception).

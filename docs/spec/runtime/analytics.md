@@ -250,18 +250,17 @@ private. So it is **silence with its own reason**, not a warning-and-send: a
 warning is a line nobody reads while the secret ships regardless.
 
 **Loopback is the exception**, and a real one rather than a concession: traffic
-to `127.0.0.0/8`, `::1` or `localhost` never reaches a network interface. It is
-how the collector runs beside the workload in development, and how every gated
-test here reaches its own. Two costs. `http://openpanel-api:3000/track`
-between two services on one Docker network is **refused** — a container network
-is not a boundary this process can check — so terminate TLS at the collector (its
-bundled Caddy does, the documented deployment) or use loopback. And **`localhost`
-is matched by exact name, not by suffix**: RFC 6761 also reserves `*.localhost`
-and a resolver may honour it, but "may" is not something to rest a credential on,
-and the strict subset only ever refuses an endpoint that would have worked,
-loudly and by name. Configuration alone cannot enforce this, so the client also
-**follows no redirect** — `reqwest` strips neither `openpanel-client-*` header
-across a hop, and never compares the scheme:
+to `127.0.0.0/8`, `::1` or `localhost` does not leave the host, so the secret
+never crosses a network between machines — the claim CWE-319 is about, and
+narrower than "nobody can see it" (a privileged local process can capture `lo`).
+It is how the collector runs beside the workload in development, and how every
+gated test here reaches its own. Two costs: `http://openpanel-api:3000/track`
+between two services on one Docker network is **refused**, so terminate TLS at
+the collector (its bundled Caddy does, the documented deployment) or use
+loopback; and **`localhost` is matched by exact name, not by suffix**, since RFC
+6761's `*.localhost` reservation is something a resolver *may* honour, which is
+not a thing to rest a credential on. Configuration alone cannot enforce any of
+this, so the client also **follows no redirect**:
 [analytics-wire.md](analytics-wire.md#where-the-credential-is-allowed-to-travel).
 
 ### Why both credential halves, and why a header check
@@ -461,9 +460,10 @@ an overrun costs a half-finished turn.
 cannot await a network or branch on a telemetry error. A dead collector drops
 events after one `debug!` line, the queue is bounded at 500 events, and a drain
 that cannot reach the collector abandons the rest of itself rather than paying a
-5s timeout per queued event. The full reasoning — including why the queue
-survived the loss of batching, and why a `401` is treated differently from every
-other refusal — is in
+5s timeout per queued event. Three status classes — `401`, `3xx` and
+`429`/`5xx` — abandon it too, because none is an answer about the event that was
+posted. The full reasoning, and the one loss that is loud rather than silent
+(the tail a cancelled shutdown flush drops), is in
 [analytics-wire.md](analytics-wire.md#failure-is-silent-and-the-drain-gives-up-early).
 
 ## What is deliberately not instrumented yet
