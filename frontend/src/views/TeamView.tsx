@@ -881,6 +881,47 @@ function MemberCard({
 }
 
 /**
+ * What a teammate is on, and how much of it (issue #1141).
+ *
+ * One line for two facts an operator scanning the roster is actually asking:
+ * is anybody working on my behalf right now, and how much is queued behind
+ * them. Neither is a host field — both are derived from the board, and
+ * `lib/team-workload.ts` carries the reasoning.
+ *
+ * Coloured through the console's status vocabulary rather than a palette step,
+ * so `working` is the same cyan as a running workflow node and `idle` the same
+ * neutral as everything that is asking nothing of anyone. Both themes come from
+ * the tokens.
+ */
+function WorkloadLine({ workload }: { workload: Workload }) {
+  const working = workload.status === "working";
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <span
+        className={cn(
+          "size-2 shrink-0 rounded-full",
+          working ? "bg-status-running" : "bg-status-idle",
+        )}
+        aria-hidden
+      />
+      <span
+        className={cn(
+          "font-medium",
+          working ? "text-status-running-text" : "text-status-idle-text",
+        )}
+        data-testid="team-card-status"
+      >
+        {working ? "Working" : "Idle"}
+      </span>
+      <span aria-hidden>·</span>
+      <span data-testid="team-card-tasks">
+        {workload.open === 1 ? "1 open task" : `${workload.open} open tasks`}
+      </span>
+    </p>
+  );
+}
+
+/**
  * Add an agent: a name, a face, and a post.
  *
  * # Why it collects three things
