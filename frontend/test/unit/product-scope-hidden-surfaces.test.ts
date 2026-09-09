@@ -235,14 +235,15 @@ async function mountComposio(status: ComposioStatus) {
 }
 
 describe("Composio offers this company's own account and nothing else", () => {
-  it("offers this company's own Composio key", async () => {
+  it("offers this company's own Composio key, and no route to pick between", async () => {
+    // With one route left there is nothing to choose, so the picker goes and the
+    // credential field for that route is what the operator lands on. A picker of
+    // one is not a choice; it is a click between the operator and the task.
     await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
 
-    // The BYOK field is still the one an operator lands on here. What changed
-    // with the key grant is the *company credential* card above this section,
-    // not this section: a Composio key is Composio's to issue, and no
-    // TinyHumans grant can mint one.
     expect(document.querySelector("#composio-api-key")).not.toBeNull();
+    expect(document.querySelectorAll('[role="radiogroup"]')).toHaveLength(0);
+    expect(find("composio-mode-managed")).toBeNull();
   });
 
   it("cannot leave a radiogroup with nothing checked, because there is none", async () => {
@@ -256,14 +257,12 @@ describe("Composio offers this company's own account and nothing else", () => {
     expect(radios.length === 0 || checked.length === 1).toBe(true);
   });
 
-  it("still names no OpenHuman-managed route on the panel", async () => {
+  it("names nothing about the hidden route anywhere on the panel", async () => {
     await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
 
-    // `COMPOSIO_MANAGED_HIDDEN` going false unhid the company-credential card,
-    // which is a sibling of this section and does name TinyHumans — that is the
-    // point of it. This section itself still offers no OpenHuman-brokered route
-    // to pick, so that is what is pinned here rather than the brand name.
     expect(container.textContent).not.toContain("OpenHuman");
+    expect(container.textContent).not.toContain("TinyHumans");
+    expect(container.textContent).not.toContain("api.tinyhumans.ai");
   });
   it("offers a BYOK company no control that would move it off its own account", async () => {
     // Clearing a key is not "the key goes away". The host derives the route from
