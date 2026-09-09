@@ -51,16 +51,17 @@ import { cn } from "@/lib/utils";
  *
  * | width   | what goes            |
  * |---------|----------------------|
- * | ≥ 1280  | nothing              |
- * | < 1280  | autonomy's sentence  |
+ * | ≥ 1024  | nothing              |
  * | < 1024  | the company's name   |
  * | floor   | overview + utilities + autonomy + you |
  *
- * **The autonomy sentence goes first** because it is the longest thing here and
- * the only one whose absence loses no fact: the tier's *name* stays, and the
- * host's full sentence is one hover away on the trigger's `title`.
+ * The autonomy sentence used to be the first rung, on the argument that it was
+ * the longest thing here and the only one whose absence lost no fact. That was
+ * right, and it turned out to be an argument against printing it at all: the
+ * pill now states the tier and leaves the sentence on its `title`, at every
+ * width, so there is nothing left to drop.
  *
- * **The company's name goes second** because the switcher is the widest item in
+ * **The company's name goes first** because the switcher is the widest item in
  * the row and the most redundant one in it — the window already belongs to one
  * company, and the glyph, the chevron and the hover title all survive.
  *
@@ -84,12 +85,12 @@ import { cn } from "@/lib/utils";
  * however narrow the window gets.
  */
 export const TITLE_BAR_LADDER = {
-  /**
-   * The host's leading sentence on the autonomy pill. Consumed by
-   * `AutonomyPill`; `hidden` rather than truncated, because half a sentence
-   * about what the agents may do would still read as a complete claim.
+  /*
+   * `autonomySentence` used to be the first rung — the host's leading sentence
+   * on the autonomy pill, hidden below `xl`. The pill does not print a
+   * sentence at any width now (see `AutonomyPill`), so the rung has nothing to
+   * govern and is retired rather than left as a class nobody applies.
    */
-  autonomySentence: "hidden xl:inline",
   /**
    * The company's name beside the switcher's glyph. Consumed by `HostSwitcher`'s
    * `titlebar` variant, which keeps the glyph, the status dot and the chevron.

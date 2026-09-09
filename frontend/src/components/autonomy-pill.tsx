@@ -80,7 +80,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { TITLE_BAR_LADDER } from "@/components/window-title-bar";
 import { applyAutonomy } from "@/hooks/use-autonomy";
 import { useConsole } from "@/lib/console-context";
 import { cn } from "@/lib/utils";
@@ -143,30 +142,16 @@ export function tierIcon(mode: string): LucideIcon {
   return TIER_ICONS[mode] ?? ShieldCheck;
 }
 
-/**
- * The host's description cut to its first sentence, for the row itself.
+/*
+ * `leadSentence` used to live here — the host's description clipped to its
+ * first sentence, for a pill that printed it beside the tier name.
  *
- * A **mechanical** cut, not a summary. The host's `auto` text is 114 characters
- * — "Balanced execution autonomy. Approval prompts are explicit through
- * `request_approval` while policy HITL is disabled." — which is a paragraph, not
- * a title-bar clause, and rewriting it shorter is the one thing this component
- * must not do: the prose is server-side so that it tracks the gate, and a
- * paraphrase here would be a second description free to drift.
- *
- * Taking the leading sentence keeps every word the host's own and keeps the
- * full text one hover away. If the description has no sentence break it is used
- * whole, and the title row's own degradation ladder — `TITLE_BAR_LADDER`,
- * which drops this sentence below 1280px — decides whether there is space for
- * it at all.
- *
- * The **menu** does not use this. A row in an opened dropdown has the space for
- * the whole sentence and an operator about to change what the agents may do
- * should read all of it.
+ * The pill prints the tier name and nothing else now: a sentence inside a
+ * chrome pill made it the widest thing in the row, and the sentence it was
+ * clipping is on the trigger's `title` in full. Nothing clips it any more, so
+ * the helper went with the element that needed it rather than being left as an
+ * export nobody calls.
  */
-export function leadSentence(description: string): string {
-  const end = description.indexOf(". ");
-  return end === -1 ? description : description.slice(0, end + 1);
-}
 
 /**
  * The autonomy pill: what the agents may do, and the control that changes it.
