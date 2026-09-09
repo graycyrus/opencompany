@@ -7994,6 +7994,11 @@ mode = "full"
         for (method, uri, body) in [
             (
                 "POST",
+                "/api/v1/company/team",
+                Some(r#"{"name":"Dana","role":"Analyst"}"#),
+            ),
+            (
+                "POST",
                 "/api/v1/company/desks",
                 Some(r#"{"name":"Growth","members":["eng"]}"#),
             ),
@@ -8002,6 +8007,12 @@ mode = "full"
                 "/api/v1/company/desks/growth/members",
                 Some(r#"{"agent_id":"ceo"}"#),
             ),
+            (
+                "PUT",
+                "/api/v1/company/desks/growth/hive",
+                Some(r#"{"quorum":1}"#),
+            ),
+            ("DELETE", "/api/v1/company/desks/growth/hive", None),
             ("DELETE", "/api/v1/company/desks/growth/members/ceo", None),
             ("DELETE", "/api/v1/company/desks/growth", None),
         ] {
@@ -8031,6 +8042,12 @@ mode = "full"
         let kinds: Vec<&str> = rows.iter().map(|row| row.event.kind()).collect();
         assert!(kinds.contains(&"DeskCreated"), "kinds: {kinds:?}");
         assert!(kinds.contains(&"DeskDeleted"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"TeammateAdded"), "kinds: {kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "DeskHiveConfigured").count(),
+            2,
+            "one row for install and one for reset: {kinds:?}"
+        );
         assert_eq!(
             kinds.iter().filter(|k| **k == "DeskMembersChanged").count(),
             2,

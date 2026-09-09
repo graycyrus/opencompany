@@ -9,6 +9,7 @@ import {
   setOpenTurns,
   setTranscripts,
   setUnreadSince,
+  writersForScope,
 } from "@/room/store";
 
 /**
@@ -65,6 +66,18 @@ describe("scope", () => {
     enterScope("conn-a::other");
     // Not the previous company's reading point.
     expect(readRoom().unreadSince).toBeGreaterThan(1);
+  });
+
+  it("drops a late writer retained by an unmounted scope", () => {
+    enterScope("conn-a::acme");
+    const oldScopeWrites = writersForScope("conn-a::acme");
+
+    enterScope("conn-a::other");
+    oldScopeWrites.setTranscripts({
+      general: [{ id: "late", from: "agent", text: "from acme", at: 1 }],
+    });
+
+    expect(readRoom().transcripts).toEqual({});
   });
 });
 
