@@ -26,6 +26,8 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
+import type { ReferralConversationDto } from "@/api/types";
+
 import {
   AWAITING_APPROVAL_LABEL,
   STEP_FAILURE_LABEL,
@@ -92,6 +94,55 @@ export function StepTimeline({
         <ol className="mt-0.5 flex flex-col gap-1 rounded-lg border bg-card/60 px-2.5 py-1.5">
           {steps.map((step, i) => (
             <StepRow key={i} step={step} />
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A crossing with somebody outside this desk, as one collapsed line.
+ *
+ * Same idiom as {@link StepTimeline} and for the same reason: the exchange is
+ * detail behind a report, not part of the desk's own conversation. The relayed
+ * rows are dropped host-side — an agent who does not work here did not speak
+ * here — so this is the only place an operator can read what was actually asked
+ * and answered rather than the asker's paraphrase of it.
+ *
+ * Closed by default. The count is the whole point of the collapsed state: it
+ * says how much was said without saying it.
+ */
+export function ReferralConversation({ crossing }: { crossing: ReferralConversationDto }) {
+  const [open, setOpen] = useState(false);
+  const count = crossing.lines.length;
+  if (count === 0) return null;
+
+  return (
+    <div className="mt-1 w-full max-w-[85%] sm:max-w-[75%]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-accent/60"
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <span>
+          asked @{crossing.otherId} on {crossing.otherDeskName} · {count} message
+          {count === 1 ? "" : "s"}
+        </span>
+      </button>
+      {open && (
+        <ol className="mt-0.5 flex flex-col gap-1.5 rounded-lg border bg-card/60 px-2.5 py-1.5">
+          {crossing.lines.map((line, i) => (
+            <li key={i} className="flex flex-col gap-0.5 text-2xs leading-relaxed">
+              <span className="font-medium text-muted-foreground">
+                {line.outbound
+                  ? `@${crossing.askerId} asked`
+                  : `@${line.authorLabel || line.authorId} on ${crossing.otherDeskName} answered`}
+              </span>
+              <span className="whitespace-pre-wrap">{line.text}</span>
+            </li>
           ))}
         </ol>
       )}

@@ -23,7 +23,12 @@ import {
   type TimelineEntry,
 } from "./model";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
-import { CardChip, ReferralChip, StepTimeline } from "./StepTimeline";
+import {
+  CardChip,
+  ReferralChip,
+  ReferralConversation,
+  StepTimeline,
+} from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
@@ -389,6 +394,12 @@ export function MessageRow({
             // an ask. Falling back to "asked" matches a host too old to say.
             direction={message.referredFrom.direction ?? "asked"}
           />
+        )}
+        {/* And what actually crossed. The chip says a referral happened; this
+            says what was asked and what came back, collapsed so the desk still
+            reads as its own conversation. */}
+        {message.referralConversation && (
+          <ReferralConversation crossing={message.referralConversation} />
         )}
         {message.taskId && (
           <div className="flex flex-wrap items-center gap-2">

@@ -4003,6 +4003,39 @@ struct ChatHistoryQuery {
 /// desk renamed later must not rewrite what the conversation said at the time.
 ///
 /// [`SessionAuthor`]: tinyhivemind::session::SessionAuthor
+/// One line of a crossing, as the console renders it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferralLineDto {
+    /// Who wrote it, by id.
+    author_id: String,
+    /// Their display label when the referral was made; empty for this desk's
+    /// own agent, whom the console already names.
+    author_label: String,
+    /// What they said.
+    text: String,
+    /// True for the question leaving this desk, false for the answer coming
+    /// back — which is what lets the console show the two sides differently.
+    outbound: bool,
+}
+
+/// A crossing folded onto the report that brought it home, so the console can
+/// render it as one collapsed line naming both parties and counting the
+/// messages.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferralConversationDto {
+    /// The agent on this desk that asked.
+    asker_id: String,
+    /// Who they asked.
+    other_id: String,
+    /// And where that person sits — id for the link, name for the label.
+    other_desk_id: String,
+    other_desk_name: String,
+    /// The exchange, oldest first. Its length is the count in the label.
+    lines: Vec<ReferralLineDto>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReferredFromDto {
@@ -4041,6 +4074,10 @@ struct ChatHistoryMessageDto {
     /// ordinary message, so the wire shape is unchanged for them.
     #[serde(skip_serializing_if = "Option::is_none")]
     referred_from: Option<ReferredFromDto>,
+    /// The crossing this report brought home, when it brought one. Absent on
+    /// every ordinary message, so the wire shape is unchanged for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referral_conversation: Option<ReferralConversationDto>,
     /// When it was journaled, epoch millis.
     at_millis: f64,
     /// Whether it is the operator's own message.
@@ -4179,6 +4216,24 @@ impl From<ReactionView> for ChatReactionDto {
 impl From<MessageView> for ChatHistoryMessageDto {
     fn from(view: MessageView) -> Self {
         Self {
+            referral_conversation: view.referral_conversation.map(|crossing| {
+                ReferralConversationDto {
+                    asker_id: crossing.asker_id,
+                    other_id: crossing.other_id,
+                    other_desk_id: crossing.other_desk_id,
+                    other_desk_name: crossing.other_desk_name,
+                    lines: crossing
+                        .lines
+                        .into_iter()
+                        .map(|line| ReferralLineDto {
+                            author_id: line.author_id,
+                            author_label: line.author_label,
+                            text: line.text,
+                            outbound: line.outbound,
+                        })
+                        .collect(),
+                }
+            }),
             referred_from: view.referred_from.map(|origin| ReferredFromDto {
                 desk_id: origin.desk_id,
                 desk_name: origin.desk_name,

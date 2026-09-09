@@ -686,6 +686,25 @@ pub enum CompanyEvent {
         /// than letting the render side infer a second, disagreeing answer.
         #[serde(default)]
         returning: bool,
+        /// On a RETURN, the journal sequence of the forward marker this answers.
+        /// `None` on a forward leg, and on returns written before this field
+        /// existed.
+        ///
+        /// **The host already knew this and was discarding it.** Authorizing a
+        /// return means finding the forward it answers (`answering_a_forward`),
+        /// which locates the exact marker and then kept only a bool — leaving
+        /// the console to re-derive the same pairing at read time, from a
+        /// different window and a separately-written set of match rules. Two
+        /// readers of one fact, free to disagree, and they did: a crossing whose
+        /// ask fell outside the console's window rendered as though the question
+        /// had never been asked.
+        ///
+        /// Recorded here, the pairing is a fact rather than an inference, and
+        /// the projection reads one event instead of scanning for it. Defaulted
+        /// for the reason above, so older markers still deserialize and fall
+        /// back to the scan.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<u64>,
         /// The agent that asked. Defaulted for the reason above.
         #[serde(default)]
         asker: String,

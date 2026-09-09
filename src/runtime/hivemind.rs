@@ -1310,7 +1310,10 @@ impl JournalReferralQueue {
     /// from.desk_id` and named this agent as its target, so a return travelling
     /// the other way is the answer it asked for. Anything else claiming to be a
     /// return has no forward behind it and is refused.
-    async fn answering_a_forward(&self, referral: &tinyhivemind::referral::Referral) -> bool {
+    async fn answering_a_forward(
+        &self,
+        referral: &tinyhivemind::referral::Referral,
+    ) -> Option<u64> {
         const LOOKBACK: usize = 2048;
         let Ok(page) = self
             .runtime
@@ -1318,17 +1321,25 @@ impl JournalReferralQueue {
             .read_before(self.runtime.id(), None, LOOKBACK)
             .await
         else {
-            return false;
+            return None;
         };
-        page.into_iter().any(|stored| {
-            matches!(
-                &stored.event,
-                CompanyEvent::ReferralEnqueued { from_desk, to_desk, target, .. }
-                    if *from_desk == referral.to.desk_id
-                        && *to_desk == referral.from.desk_id
-                        && *target == referral.source_id
-            )
-        })
+        // The SEQUENCE, not just whether one exists. Finding the forward is the
+        // whole of authorizing a return, so this function already had to locate
+        // the exact marker; returning a bool threw that away and left the
+        // console to find the same marker again from a smaller window with its
+        // own copy of the match rules. Handing the sequence back lets the
+        // marker record the pairing, so nothing downstream re-derives it.
+        page.into_iter()
+            .find(|stored| {
+                matches!(
+                    &stored.event,
+                    CompanyEvent::ReferralEnqueued { from_desk, to_desk, target, .. }
+                        if *from_desk == referral.to.desk_id
+                            && *to_desk == referral.from.desk_id
+                            && *target == referral.source_id
+                )
+            })
+            .map(|stored| stored.seq.value())
     }
 
     /// May `source` cause a turn on `to_desk`?
@@ -1395,9 +1406,14 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
             // that conversation to this one, addressed to this agent, must
             // actually be on the journal. The marker that makes the forward
             // idempotent is the same marker that authorizes its answer home.
+            // On a return this is the forward it answers — both the permission
+            // and the pairing the marker records below. On a forward it stays
+            // `None`: there is nothing earlier to point at.
+            let mut answers: Option<u64> = None;
             let permitted = match referral.kind {
                 tinyhivemind::referral::ReferralKind::Return => {
-                    self.answering_a_forward(&referral).await
+                    answers = self.answering_a_forward(&referral).await;
+                    answers.is_some()
                 }
                 tinyhivemind::referral::ReferralKind::Forward => {
                     self.authorized(&referral.source_id, &referral.to.desk_id)
@@ -1471,6 +1487,7 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                             tinyhivemind::referral::ReferralKind::Return
                         ),
                         trigger_sequence: referral.key.trigger_sequence,
+                        answers,
                         to_desk: referral.to.desk_id.clone(),
                         target: referral.target_id.clone(),
                     },
