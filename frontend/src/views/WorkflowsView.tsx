@@ -2060,7 +2060,7 @@ export function WorkflowsView({
         if (res.automatable && res.workflow) {
           setPrefilledDraft({
             summary: res.summary,
-            workflow: res.automation,
+            workflow: res.workflow,
             notes: res.notes,
             readiness: res.readiness,
           });

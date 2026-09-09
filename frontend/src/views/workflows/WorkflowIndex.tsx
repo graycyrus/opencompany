@@ -263,7 +263,7 @@ export function WorkflowIndex({
 /** One workflow as a card: what it is, whether the console can change it, and
  * how its recent runs went. */
 function WorkflowCard({
-  automation,
+  workflow,
   runs,
   runsLoaded,
   onSelect,
@@ -340,7 +340,7 @@ function WorkflowCard({
  * `display: none` cell is not a grid item, so the remaining three cells fall
  * into the three-track template with no second code path. */
 function WorkflowRow({
-  automation,
+  workflow,
   runs,
   runsLoaded,
   onSelect,
