@@ -1,7 +1,9 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { resolveConnectionPage } from "@/views/connection-pages";
+import { InferenceView } from "@/views/InferenceView";
 import { McpServersView } from "@/views/McpServersView";
 import { OAuthView } from "@/views/OAuthView";
+import { SkillsView } from "@/views/SkillsView";
 
 interface Props {
   client: OpenCompanyClient;
