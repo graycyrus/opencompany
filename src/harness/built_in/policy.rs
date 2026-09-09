@@ -2416,6 +2416,138 @@ mod tests {
         );
     }
 
+    /// INPUT-axis (TOOL-004): the brake classifies purely on `tool` and the
+    /// INCOMING call's own arguments (`is_external_effect`), never on whether
+    /// those arguments happen to match a live grant. A malformed/empty
+    /// argument object — missing every field the grant itself was minted
+    /// with — must still be denied under readonly, and the unrelated,
+    /// well-formed grant must still be left intact rather than being touched
+    /// (or the classifier panicking) on the garbage shape.
+    #[tokio::test]
+    async fn a_readonly_denial_on_malformed_arguments_still_leaves_the_grant_intact() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let well_formed_args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", well_formed_args.clone()));
+
+        let locked_down = policy("readonly", &[], None)
+            .with_requests(queue)
+            .with_agent("finance");
+        assert!(
+            matches!(
+                locked_down
+                    .check(&request("payment.send", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly must deny an external-effect call even with a garbage/empty argument \
+             object, not just a well-formed one"
+        );
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released
+                .check(&request("payment.send", well_formed_args))
+                .await,
+            ToolPolicyDecision::Allow,
+            "the well-formed grant must be untouched by a denial evaluated against unrelated, \
+             malformed arguments"
+        );
+    }
+
+    /// CONC-axis (TOOL-004): the brake's early `return` happens strictly
+    /// before `consume_grant` is ever called, so it should be impossible for
+    /// a race to sneak a grant redemption in underneath a readonly deny. Two
+    /// threads hammer the SAME live grant concurrently while readonly, via
+    /// worker threads and a barrier — not `tokio::join!`, which has no
+    /// suspension point here to interleave on and would just run the two
+    /// calls to completion one after the other. Both must be denied, and the
+    /// grant must still redeem exactly once after the brake releases.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_calls_against_a_readonly_denied_grant_never_consume_it() {
+        use std::sync::{Arc, Barrier};
+
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", args.clone()));
+
+        let locked_down = Arc::new(
+            policy("readonly", &[], None)
+                .with_requests(queue)
+                .with_agent("finance"),
+        );
+        let gate = Arc::new(Barrier::new(2));
+
+        let call = |policy: Arc<ApprovalPolicy>, args: serde_json::Value, gate: Arc<Barrier>| {
+            tokio::task::spawn_blocking(move || {
+                gate.wait();
+                tokio::runtime::Handle::current()
+                    .block_on(policy.check(&request("payment.send", args)))
+            })
+        };
+        let a = call(locked_down.clone(), args.clone(), gate.clone());
+        let b = call(locked_down.clone(), args.clone(), gate);
+        let (a, b) = (a.await.expect("joins"), b.await.expect("joins"));
+        assert!(matches!(a, ToolPolicyDecision::Deny { .. }), "{a:?}");
+        assert!(matches!(b, ToolPolicyDecision::Deny { .. }), "{b:?}");
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released.check(&request("payment.send", args.clone())).await,
+            ToolPolicyDecision::Allow,
+            "the grant must still be there, unconsumed by the race"
+        );
+        assert!(
+            matches!(
+                released.check(&request("payment.send", args)).await,
+                ToolPolicyDecision::RequireApproval { .. } | ToolPolicyDecision::Deny { .. }
+            ),
+            "and it must redeem exactly once — a second call must not still be Allow"
+        );
+    }
+
+    /// BOUND-axis (TOOL-004): the brake denies on the tool's classification,
+    /// not on the declared amount, so it must hold at both ends of the amount
+    /// range a grant could carry — a zero-amount call and one carrying an
+    /// enormous declared amount both deny under readonly with their
+    /// respective grants left intact.
+    #[tokio::test]
+    async fn a_readonly_denial_holds_at_zero_and_at_a_very_large_declared_amount() {
+        for amount in [0.0_f64, 1_000_000_000.0_f64] {
+            let queue = ApprovalRequestQueue::default();
+            let grants = queue.grants();
+            let args = serde_json::json!({ "amount_usd": amount });
+            grants.grant(granted("finance", "payment.send", args.clone()));
+
+            let locked_down = policy("readonly", &[], None)
+                .with_requests(queue)
+                .with_agent("finance");
+            assert!(
+                matches!(
+                    locked_down
+                        .check(&request("payment.send", args.clone()))
+                        .await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "amount {amount}: readonly must deny regardless of the amount at either bound"
+            );
+
+            let released = policy("full", &[], None)
+                .with_requests(ApprovalRequestQueue::with_grants(grants))
+                .with_agent("finance");
+            assert_eq!(
+                released.check(&request("payment.send", args)).await,
+                ToolPolicyDecision::Allow,
+                "amount {amount}: the grant must still be redeemable once the brake releases"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn disabled_policy_hitl_keeps_readonly_as_a_hard_denial() {
         let p = policy("readonly", &[], None).with_policy_hitl_disabled();
