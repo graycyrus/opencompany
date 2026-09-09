@@ -1,0 +1,561 @@
+connection = []
+harness = []
+schedule = []
+
+[company]
+name = "Agentic Software Company"
+output = "An entire SaaS product"
+human_role = "Product direction"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+description = "Build and operate the backend and services."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = ["engineering"]
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/backend_engineer.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "incidents"
+access = "record"
+
+[[agent.ledgers]]
+name = "releases"
+access = "record"
+
+[[agent.ledgers]]
+name = "security-findings"
+access = "record"
+
+[[agent]]
+id = "customer_support"
+role = "Customer Support"
+description = "Resolve customer issues and feed insight back."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = []
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/customer_support.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "incidents"
+access = "record"
+
+[[agent.ledgers]]
+name = "releases"
+access = "read"
+
+[[agent]]
+id = "designer"
+role = "Designer"
+description = "Product and UX design."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = []
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/designer.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "releases"
+access = "read"
+
+[[agent]]
+id = "devrel"
+role = "Developer Relations"
+description = "Engage developers with demos, content, and community."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = ["go_to_market"]
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/devrel.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "releases"
+access = "read"
+
+[[agent]]
+id = "docs_writer"
+role = "Documentation Writer"
+description = "Write and maintain product documentation."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = []
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/docs_writer.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "releases"
+access = "read"
+
+[[agent.ledgers]]
+name = "incidents"
+access = "read"
+
+[[agent]]
+id = "frontend_engineer"
+role = "Frontend Engineer"
+description = "Build the user-facing frontend."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = []
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/frontend_engineer.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "incidents"
+access = "record"
+
+[[agent.ledgers]]
+name = "releases"
+access = "read"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+description = "Own the roadmap, specs, and prioritization."
+tier = "orchestrator"
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = ["product_design"]
+prompt_files = ["prompts/product_manager.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent]]
+id = "qa_engineer"
+role = "QA Engineer"
+description = "Test features and catch regressions."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = []
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/qa_engineer.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "incidents"
+access = "record"
+
+[[agent.ledgers]]
+name = "releases"
+access = "record"
+
+[[agent]]
+id = "security_engineer"
+role = "Security Engineer"
+description = "Security review, hardening, and response."
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+delegates_to = []
+context = ["brief.md", "claims.md", { path = "product/billing-v2.md", access = "write" }]
+prompt_files = ["prompts/security_engineer.md"]
+classes = []
+can_declare_ledgers = true
+
+[[agent.ledgers]]
+name = "tasks"
+access = "record"
+
+[[agent.ledgers]]
+name = "goals"
+access = "read"
+
+[[agent.ledgers]]
+name = "decisions"
+access = "read"
+
+[[agent.ledgers]]
+name = "risks"
+access = "record"
+
+[[agent.ledgers]]
+name = "commitments"
+access = "read"
+
+[[agent.ledgers]]
+name = "learnings"
+access = "record"
+
+[[agent.ledgers]]
+name = "security-findings"
+access = "record"
+
+[[agent.ledgers]]
+name = "incidents"
+access = "record"
+
+[[agent]]
+id = "operations"
+role = "Operations"
+description = "Keeps the company's tasks, decisions, and follow-ups current."
+tier = "reasoning"
+tools = ["workspace.*", "workspace.write", "docs.*", "files.*", "search"]
+delegates_to = []
+prompt = """
+You are the company's operations teammate. You keep the record straight: what
+was decided, who owns what, and what is overdue.
+
+The company's ledgers are the record — tasks, goals, and decisions. When
+something is agreed, write it down there rather than leaving it in a thread.
+When something is due and nothing has moved, say so to the person who owns it,
+once, with what is blocking it.
+
+You do not decide the company's direction. You make sure that what was decided
+is written where the next person will find it.
+"""
+prompt_files = []
+classes = []
+can_declare_ledgers = true
+global = true
+
+[[agent]]
+id = "page_builder"
+role = "Page Builder"
+description = "Designs and maintains the company's internal dashboard pages."
+tier = "frontend"
+tools = ["pages.*", "workspace.*"]
+delegates_to = []
+prompt = """
+You are the company's page builder. You design and maintain the small,
+purpose-built internal pages that live inside the dashboard — a metrics view,
+a pipeline board, a status page — whatever the company actually needs to look
+at day to day.
+
+Build with the `@opencompany/site` component set so every page matches the
+rest of the console — don't hand-roll layout primitives that already exist
+there. Keep each page to one focused job; if a page is trying to show two
+unrelated things, that's two pages.
+
+A page that fails to compile is not shipped — read the compiler error `pages_write`
+returns and fix it before moving on.
+"""
+prompt_files = []
+classes = []
+can_declare_ledgers = true
+global = true
+
+[[agent]]
+id = "researcher"
+role = "Researcher"
+description = "Answers a question from independent sources and cites them."
+tier = "reasoning"
+tools = ["workspace.read", "docs.*", "files.*", "web.*", "search"]
+delegates_to = []
+prompt = """
+You are the company's researcher. You answer questions the company cannot
+answer from what it already knows.
+
+Work from sources, not from memory. Find several independent ones, read them,
+and say plainly where each claim came from. When sources disagree, report the
+disagreement rather than picking the more convenient side. When you could not
+find something, say so — an honest gap is worth more to the company than a
+confident guess, because the gap is actionable and the guess is not.
+
+Return the answer first and the sources under it. Keep it short enough that
+somebody reads all of it.
+"""
+prompt_files = []
+classes = []
+can_declare_ledgers = true
+global = true
+
+[[agent]]
+id = "writer"
+role = "Writer"
+description = "Turns notes, findings, and drafts into copy somebody can send."
+tier = "frontend"
+tools = ["workspace.*", "docs.*", "files.*", "web.*", "search"]
+delegates_to = []
+prompt = """
+You are the company's writer. Work arrives as notes, findings, transcripts, or
+a rough draft, and leaves as something a person can read and send.
+
+Write for the reader the piece is actually for, in that reader's vocabulary.
+Lead with what changed or what is being asked; put the reasoning under it.
+Cut anything that survives only because it was already written.
+
+Never invent a fact to smooth a sentence. If the source material has a hole,
+leave the hole visible and name it, so whoever owns the answer can fill it.
+"""
+prompt_files = []
+classes = []
+can_declare_ledgers = true
+global = true
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+description = "Build, test, and secure the product."
+members = ["backend_engineer", "frontend_engineer", "qa_engineer", "security_engineer"]
+tools = []
+
+[[group_chat]]
+id = "product_design"
+name = "Product & Design"
+description = "Roadmap, specs, and the user experience."
+members = ["product_manager", "designer"]
+tools = []
+
+[[group_chat]]
+id = "go_to_market"
+name = "Go-to-Market"
+description = "Docs, developer relations, and customer support."
+members = ["devrel", "docs_writer", "customer_support"]
+tools = []
+
+[[mcp_server]]
+name = "context7"
+endpoint = "https://mcp.context7.com/mcp"
+description = "Version-accurate API and library documentation, so answers match the release in use."
+allowed_tools = []
+disallowed_tools = []
+read_only_tools = []
+timeout_secs = 30
+enabled = true
+
+[[mcp_server]]
+name = "deepwiki"
+endpoint = "https://mcp.deepwiki.com/mcp"
+description = "Documentation and Q&A for any public GitHub repository. Public and no-auth."
+allowed_tools = []
+disallowed_tools = []
+read_only_tools = []
+timeout_secs = 30
+enabled = true
+
+[[mcp_server]]
+name = "linear"
+endpoint = "https://mcp.linear.app/mcp"
+description = "Issues and cycles, when the work is tracked outside this board. Needs a token."
+allowed_tools = []
+disallowed_tools = []
+read_only_tools = []
+timeout_secs = 30
+enabled = false
+auth_secret = "mcp/linear/auth"
+
+[[mcp_server]]
+name = "sentry"
+endpoint = "https://mcp.sentry.dev/mcp"
+description = "Production errors and their stack traces, for diagnosing an incident from evidence. Needs a token."
+allowed_tools = []
+disallowed_tools = []
+read_only_tools = []
+timeout_secs = 30
+enabled = false
+auth_secret = "mcp/sentry/auth"
+
+[workflows]
+enabled = ["feature_pipeline", "incident_response"]
+max_in_flight_runs = 8
+
+[users]
+mode = "email"
+admins = []
+wallets = []
+
+[brain]
+mode = "hosted"
+
+[inference.models]
+
+[channels]
+
+[tools]
+provider = "openhuman"
+allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]
+web_allowed_domains = []
+
+[tools.composio]
+toolkits = []
+
+[policy]
+mode = "auto"
+always_approve = []
+
+[place]
+discoverable = false
+skills = []
+
+[budget]
+
+[plan]
+period = "daily"
+
+[plan.token_budgets]
+
+[globals]
