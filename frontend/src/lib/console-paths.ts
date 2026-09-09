@@ -105,7 +105,13 @@ export function parseConsolePath(segments: readonly string[]): [View, string | n
  * they keep resolving — the router still accepts the old spelling — so nothing
  * fails, and the console quietly ships two spellings of the same page, one of
  * which the address bar rewrites the instant it is followed.
+ *
+ * The segment is percent-encoded here and NOT in `formatConsolePath`, which is
+ * the router's own formatter and is handed a `sub` that has already come off
+ * the address. Encoding there would double-encode a task id on every
+ * `canonicalize`; not encoding here would break the first workspace node whose
+ * id contains a slash.
  */
 export function consoleHref(view: View, sub?: string | null): string {
-  return `#/${formatConsolePath(view, sub ?? null)}`;
+  return `#/${formatConsolePath(view, sub == null ? null : encodeURIComponent(sub))}`;
 }
