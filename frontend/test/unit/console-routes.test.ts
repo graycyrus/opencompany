@@ -193,17 +193,21 @@ describe("resolving an address", () => {
     },
   );
 
-  it("sends the Settings rail's Observatory row to the Observatory's own address", async () => {
-    // The row is a doorway, not a page. The Observatory reads four query keys
-    // of its own straight off `window.location`, keyed on the hash's head being
-    // `observatory` (`views/observatory/hash.ts`), so rendering it under
-    // `#/settings/…` would silently take its analytics tab and its agent/turn
-    // selection out of the address bar. A surface with its own address grammar
-    // keeps its own address.
+  it("keeps the Observatory index on the Settings rail, and does not rewrite it away", async () => {
+    // It used to be a doorway: `#/settings/observatory` rewrote to
+    // `#/observatory`, on the argument that a surface reading four query keys
+    // of its own off `window.location` must keep its own head.
+    //
+    // The index is embedded in Settings now, and `views/observatory/hash.ts`
+    // reads BOTH heads deliberately — `#/settings/observatory` for the index,
+    // `#/observatory/<runId>` for one run, which cannot move because
+    // `useHashView` carries only two segments. So the rewrite would now undo
+    // the embedding on arrival, and the address it produced would render the
+    // index outside the rail it belongs to.
     rewrite = REWRITE_RETIRED;
     await visit("#/settings/observatory");
-    expect(seen).toEqual(["observatory", null]);
-    expect(window.location.hash).toBe("#/observatory");
+    expect(seen).toEqual(["settings", "observatory"]);
+    expect(window.location.hash).toBe("#/settings/observatory");
   });
 
   // The two addresses that rewrite onto the *section* rather than one of its
