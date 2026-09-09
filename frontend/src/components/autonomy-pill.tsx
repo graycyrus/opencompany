@@ -408,20 +408,14 @@ export function AutonomyPill({
               sentence still says which tier is in force, which is the fact this
               element exists to carry. */}
           <span className="flex-none text-foreground">{tierLabel(status)}</span>
-          {/* The host's leading sentence. First to go as the window narrows, and
-              the breakpoint is not chosen here: `TITLE_BAR_LADDER` on
-              `WindowTitleBar` owns the whole order in one place, so this
-              consumes a rung rather than inventing one. `hidden` rather than
-              truncated, because half a sentence about what the agents may do is
-              worse than none: it would still read as a complete claim. */}
-          {description && (
-            <span
-              data-testid="autonomy-consequence"
-              className={cn("whitespace-nowrap", TITLE_BAR_LADDER.autonomySentence)}
-            >
-              {leadSentence(description)}
-            </span>
-          )}
+          {/* The host's leading sentence used to be here, dropped at `xl` by
+              `TITLE_BAR_LADDER.autonomySentence`. It is gone at every width: a
+              whole sentence inside a pill made the pill the widest thing in the
+              row by a distance, and the row is chrome — it states which tier is
+              in force, and the sentence explaining that tier belongs where an
+              operator has gone to read it. Nothing is lost that was not already
+              lost below `xl`: the trigger's `title` still carries the host's
+              full sentence, unabridged, on hover. */}
           {/* The only thing on the pill that says it is a control — so it is
               drawn exactly when the pill IS one. It never drops for width: the
               affordance has to survive the narrow window that already hid the
@@ -434,12 +428,12 @@ export function AutonomyPill({
           )}
         </DropdownMenuTrigger>
         {/* `align="end"`: the pill sits at the right-hand end of the row, beside
-            the profile control, and a menu this wide anchored to its start would
-            hang off the window on an 880px minimum. `w-80` overrides the
-            primitive's default `w-(--anchor-width)` — the trigger shrinks to the
-            tier name below `lg`, and a menu that shrank with it could not hold a
-            sentence. */}
-        <DropdownMenuContent align="end" side="bottom" className="w-80 rounded-lg">
+            the profile control, so a menu anchored to its start would hang off
+            the window on an 880px minimum. No width override any more — the
+            rows are a glyph and a word, which is what the primitive's own
+            sizing is for. It carried `w-80` while each row also held the tier's
+            full description. */}
+        <DropdownMenuContent align="end" side="bottom">
           <DropdownMenuGroup>
             {/* `DropdownMenuLabel` is Base UI's `Menu.GroupLabel`, and it throws
                 outside a `Menu.Group`. */}
@@ -457,23 +451,19 @@ export function AutonomyPill({
                   // marks the company you are already in.
                   aria-current={current}
                   onClick={() => choose(tier)}
-                  className="items-start gap-2 py-1.5"
+                  // The host's description is the row's `title` rather than a
+                  // second line under every label. Three stacked two-line rows
+                  // is a wall to read at the moment an operator wants to pick
+                  // one of three words, and it is what forced the menu to a
+                  // fixed `w-80`.
+                  title={tier.description}
+                  className="gap-2"
                 >
-                  <TierIcon aria-hidden="true" className="mt-0.5 size-4 flex-none" />
-                  <span className="min-w-0 flex-1">
-                    <span className={cn("block", current && "font-medium")}>
-                      {tier.label}
-                    </span>
-                    {/* The host's description in full, not `leadSentence`: an
-                        open menu has the room, and this is the moment the words
-                        actually matter. */}
-                    <span className="mt-0.5 block text-xs whitespace-normal text-muted-foreground">
-                      {tier.description}
-                    </span>
+                  <TierIcon aria-hidden="true" className="size-4 flex-none" />
+                  <span className={cn("min-w-0 flex-1 truncate", current && "font-medium")}>
+                    {tier.label}
                   </span>
-                  {current && (
-                    <Check aria-hidden="true" className="mt-0.5 size-4 flex-none" />
-                  )}
+                  {current && <Check aria-hidden="true" className="size-4 flex-none" />}
                 </DropdownMenuItem>
               );
             })}
