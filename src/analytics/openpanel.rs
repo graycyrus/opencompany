@@ -314,17 +314,55 @@ mod http {
         /// of them makes "the credential only ever goes to the configured
         /// endpoint" a property of this client rather than a claim about a
         /// comparison.
+        ///
+        /// # A cleartext endpoint never goes through a proxy
+        ///
+        /// The same hole as the redirect one, by a different route, and it
+        /// invalidates the loopback exception rather than merely widening it.
+        /// `resolve` permits plain `http` only for a loopback host, and the
+        /// entire justification is that such a request **does not leave the
+        /// host** — so there is no wire between machines for the credential to
+        /// be read off. A proxy makes that false. `reqwest`'s builder defaults
+        /// to `auto_sys_proxy: true` (`async_impl/client.rs:309`), which pushes
+        /// `ProxyMatcher::system()`, and that reads `HTTP_PROXY`/`ALL_PROXY`
+        /// with exclusions taken **only** from `NO_PROXY` — hyper-util 0.1.20's
+        /// matcher has no implicit carve-out for `localhost` or `127.0.0.0/8`,
+        /// checked rather than assumed. So on a host with `HTTP_PROXY` set and
+        /// no matching `NO_PROXY`, `http://localhost:3000/track` was sent to the
+        /// proxy instead, in cleartext, with both credential headers on it.
+        ///
+        /// So the cleartext case builds with
+        /// [`reqwest::ClientBuilder::no_proxy`], which makes "it does not leave
+        /// the host" true by construction instead of by assumption about the
+        /// operator's environment. That is the same move as
+        /// `redirect::Policy::none()`: a security property should be a fact
+        /// about this client, not a prediction about its surroundings.
+        ///
+        /// **`https` keeps its proxy support, deliberately.** A proxied `https`
+        /// request is a `CONNECT` tunnel: the proxy learns the host and port and
+        /// never sees a header, so the credential is not exposed to it, and
+        /// egress-restricted networks genuinely need it to reach a collector at
+        /// all. Disabling proxies outright would break those deployments to fix
+        /// a leak they do not have.
+        ///
+        /// The scheme is the whole test, because by the time a
+        /// [`Decision::Report`](crate::analytics::config::Decision::Report)
+        /// exists, `http` **implies** loopback — `config::is_secure_endpoint`
+        /// has already refused every other `http` endpoint.
         pub fn new(
             endpoint: &str,
             credentials: &ClientCredentials,
             envelope: Envelope,
         ) -> Result<Self, reqwest::Error> {
+            let mut builder = reqwest::Client::builder()
+                .timeout(SEND_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .default_headers(request_headers(credentials));
+            if is_cleartext(endpoint) {
+                builder = builder.no_proxy();
+            }
             let inner = Arc::new(Inner {
-                client: reqwest::Client::builder()
-                    .timeout(SEND_TIMEOUT)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .default_headers(request_headers(credentials))
-                    .build()?,
+                client: builder.build()?,
                 endpoint: endpoint.to_string(),
                 envelope: std::sync::RwLock::new(envelope),
                 queue: Mutex::new(Vec::new()),
@@ -483,6 +521,22 @@ mod http {
                  the budget."
             );
         }
+    }
+
+    /// Whether `endpoint` is a plain `http` URL, and so one whose safety rests
+    /// on the request never leaving the host.
+    ///
+    /// Parsed with `url` rather than matched on a `http://` prefix, for the
+    /// reason `config::is_usable_endpoint` gives at length: the transport's own
+    /// parser is the only one whose answer is the operative one, and `HTTP://`
+    /// is a legal spelling that a prefix match reads as safe.
+    ///
+    /// A value that does not parse answers `false`, which is the harmless
+    /// direction *here* — it can only leave the system proxy enabled for an
+    /// endpoint that `resolve` has already refused to report to, so no request
+    /// is ever built from it.
+    pub(super) fn is_cleartext(endpoint: &str) -> bool {
+        url::Url::parse(endpoint).is_ok_and(|parsed| parsed.scheme() == "http")
     }
 
     /// Whether `status` is the collector's answer about **itself** rather than
@@ -1655,6 +1709,90 @@ mod test {
             5 - collector.hits.load(Ordering::SeqCst),
             tracker.lost_to_cancellation()
         );
+        collector.stop().await;
+    }
+
+    /// **A loopback endpoint does not go through the system proxy.**
+    ///
+    /// The loopback exception in `config::is_secure_endpoint` rests entirely on
+    /// the claim that such a request does not leave the host. A system proxy
+    /// makes that false: `reqwest`'s builder defaults to `auto_sys_proxy: true`,
+    /// which reads `HTTP_PROXY`/`ALL_PROXY` and takes exclusions **only** from
+    /// `NO_PROXY` — hyper-util 0.1.20's matcher has no implicit carve-out for
+    /// `localhost` or `127.0.0.0/8` (read, not assumed). So on a host with a
+    /// proxy configured, `http://127.0.0.1:…/track` went to the proxy in
+    /// cleartext with both credential headers on it, and the endpoint check
+    /// prevented nothing.
+    ///
+    /// Two servers and one variable: a stand-in "proxy" that records anything
+    /// it is handed, and the real collector. With `HTTP_PROXY` pointing at the
+    /// first, the request must still arrive at the second. Asserting the proxy
+    /// saw **zero** is the security property; asserting the collector saw the
+    /// events is what stops that zero from being vacuous.
+    ///
+    /// Mutates the process environment, so it holds the crate-wide
+    /// [`crate::test_support::EnvVarGuard`] — `reqwest` reads these variables
+    /// from the real environment at client-build time, which is the one thing
+    /// this crate's `MapEnv` seam cannot intercept.
+    #[tokio::test]
+    async fn a_loopback_endpoint_never_goes_through_a_system_proxy() {
+        // Stands in for a corporate proxy: records every request and would be
+        // the thing receiving the credential if the client honoured it.
+        let proxy = spawn_collector().await;
+        let collector = spawn_collector().await;
+
+        let tracker = {
+            let env = crate::test_support::EnvVarGuard::capture(&[
+                "HTTP_PROXY",
+                "http_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "NO_PROXY",
+                "no_proxy",
+            ]);
+            // A proxy for everything, and no exclusions at all — the shape that
+            // used to divert this traffic.
+            env.remove("NO_PROXY");
+            env.remove("no_proxy");
+            env.remove("http_proxy");
+            env.remove("all_proxy");
+            env.set("ALL_PROXY", proxy.url.trim_end_matches("/track"));
+            env.set("HTTP_PROXY", proxy.url.trim_end_matches("/track"));
+            // Built inside the guard: `reqwest` samples the environment here,
+            // not at send time.
+            HttpOpenPanelTracker::new(
+                &collector.url,
+                &crate::analytics::config::ClientCredentials::new(
+                    TEST_CLIENT_ID,
+                    TEST_CLIENT_SECRET,
+                ),
+                envelope(),
+            )
+            .expect("the client builds")
+        };
+
+        for _ in 0..2 {
+            tracker.track(Event::InstanceStarted {
+                companies: 1,
+                storage: "fs",
+                setup_complete: true,
+            });
+        }
+        tracker.flush().await;
+
+        assert_eq!(
+            proxy.hits.load(Ordering::SeqCst),
+            0,
+            "a loopback endpoint went through the system proxy, so the client secret \
+             left the host in cleartext and the loopback exception protects nothing"
+        );
+        assert_eq!(
+            collector.hits.load(Ordering::SeqCst),
+            2,
+            "and the events must still reach the collector directly, or the zero above \
+             is a client that simply sent nothing"
+        );
+        proxy.stop().await;
         collector.stop().await;
     }
 

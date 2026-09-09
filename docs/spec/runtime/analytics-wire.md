@@ -241,3 +241,22 @@ process can capture `lo`, and anything that has that access on a tenant's host
 already has the environment the credential was read from. The rule, its cost, and
 why it is silence rather than a warning are in
 [analytics.md](analytics.md#why-https-is-required-and-why-loopback-is-the-exception).
+
+**And a cleartext endpoint never goes through a proxy**, because otherwise that
+exception protects nothing. `reqwest`'s builder defaults to
+`auto_sys_proxy: true`, which reads `HTTP_PROXY`/`ALL_PROXY` and takes exclusions
+**only** from `NO_PROXY` — hyper-util 0.1.20's matcher has no implicit carve-out
+for `localhost` or `127.0.0.0/8` (read, not assumed). So on a host with a proxy
+configured and no matching `NO_PROXY`, `http://localhost:3000/track` went to the
+proxy in cleartext with both credential headers on it, and the endpoint check
+prevented nothing. Measured rather than reasoned about: with the fix reverted,
+`a_loopback_endpoint_never_goes_through_a_system_proxy` records **2** requests at
+the stand-in proxy and 0 at the collector.
+
+So an `http` endpoint builds with `ClientBuilder::no_proxy()`, which makes "it
+does not leave the host" true by construction rather than a prediction about the
+operator's environment — the same move as `Policy::none()` for redirects.
+`https` keeps its proxy support deliberately: a proxied `https` request is a
+`CONNECT` tunnel, so the proxy learns host and port and never sees a header, and
+egress-restricted networks need it to reach a collector at all. The scheme is the
+whole test, because by the time a `Report` exists, `http` **implies** loopback.
