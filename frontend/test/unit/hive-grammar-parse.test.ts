@@ -54,6 +54,19 @@ describe("where a marker is recognised", () => {
     expect(moveOf(body)?.topic).toBe("real");
   });
 
+  it("does not close a long fence on a shorter example or trailing prose", () => {
+    const body = [
+      "````",
+      "```",
+      "!propose #fake",
+      "```` still illustrating",
+      "!support #also-fake ^1",
+      "````",
+      "!support #real ^1",
+    ].join("\n");
+    expect(moveOf(body)?.topic).toBe("real");
+  });
+
   it("finds the move below prose when a turn opened with a greeting", () => {
     const body = "Sure — here is my read.\n!evidence #stage ^2 the last rollout broke checkout";
     expect(moveOf(body)?.kind).toBe("evidence");

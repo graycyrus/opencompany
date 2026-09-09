@@ -108,6 +108,20 @@ describe("a conversation that is not a room", () => {
 });
 
 describe("segmentation", () => {
+  it("keeps turns and reports threaded under their triggering message", () => {
+    seq = 0;
+    const trigger = op("decide the rollout");
+    const threadedTurn = { ...turn("planner", "!propose #stage staging first"), parentId: trigger.id };
+    const threadedReport = {
+      ...report("The desk settled on #stage after 1 turn (backed by planner)."),
+      parentId: trigger.id,
+    };
+    const episodes = foldEpisodes([trigger, threadedTurn, threadedReport], { quorum: 1 });
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0].turns).toHaveLength(1);
+    expect(episodes[0].reportId).toBe(threadedReport.id);
+  });
+
   it("opens at the operator message and closes at the report", () => {
     seq = 0;
     const episodes = foldEpisodes(
