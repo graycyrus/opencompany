@@ -480,7 +480,7 @@ export function ApprovalsView({
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-4 py-6">
+      <div className="w-full px-4 py-6">
         {/* The queue's own count heading below only renders once loaded, so
             it can't be the page's one `h1` — this stays present through
             loading, error and empty states alike (issue #1221). */}

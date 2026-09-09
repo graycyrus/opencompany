@@ -370,7 +370,7 @@ function Reading({
         </Badge>
       </div>
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-6 py-6">
+        <div className="w-full px-6 py-6">
           <div className="mb-4 flex items-center gap-3">
             <Avatar name={sender(message)} />
             <div className="min-w-0">

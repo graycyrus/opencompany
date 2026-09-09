@@ -704,7 +704,7 @@ export function AgentDetailView({
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
+      <div className="w-full space-y-6 px-4 py-6">
         {/*
           A breadcrumb rather than a Back button (issue #1141). Back said where
           the operator had been; this says where they *are* — one teammate,
