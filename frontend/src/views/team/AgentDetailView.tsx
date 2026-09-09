@@ -1437,6 +1437,27 @@ function Tools({
   // `null`/`[]` grant both start from an empty box.
   const requestedGlobs = agent.tools.requested ?? [];
   const [field, setField] = useState(requestedGlobs.join(", "));
+  /**
+   * The ceiling as a list of switches — what this teammate is allowed to hold,
+   * one row each, which is the question an operator actually arrives with.
+   *
+   * It was a comma-separated glob field. That asked the operator to know the
+   * namespace vocabulary before they could change anything, and it let them
+   * type a grant the ceiling does not cover — stored happily, conferring
+   * nothing, which is the failure the card already had two warnings about.
+   * Switches can only express grants that exist.
+   *
+   * The raw field is still here, under Advanced: a wildcard (`docs.*`) is not
+   * one of these rows, and dropping it would take away scoping the toggles
+   * cannot spell.
+   */
+  const ceiling = grantCeiling(agent.tools);
+  // While the grant is standard the teammate inherits the whole ceiling, so
+  // every switch is on — the first one turned off is what converts an inherited
+  // grant into an explicit list.
+  const held = (glob: string) =>
+    summary.standardGrant ? true : draftSet.has(glob);
+  const [advanced, setAdvanced] = useState(false);
 
   // The teammate on screen can change under this card (a slow detail load, a
   // sibling route swap), and a draft left over from the previous one would be
@@ -1447,6 +1468,7 @@ function Tools({
   }, [agent.id, agent.tools.requested]);
 
   const draft = parseToolGlobs(field);
+  const draftSet = new Set(draft);
   const dirty = toolGlobsDiffer(requestedGlobs, draft);
   // Live, before the save rather than after it: the intersection is the thing
   // operators get wrong, and a glob the desk-and-company ceiling does not allow
