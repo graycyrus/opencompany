@@ -77,7 +77,10 @@ export function MovesMatrix({
         </thead>
         <tbody>
           {seats.map((seat) => {
-            const governed = seat.governed;
+            // The response describes the saved grammar, while `moves` is the
+            // operator's draft. A first edit must be possible when neither has
+            // a row yet: toggling then materialises the narrowed row.
+            const governed = seat.governed || Object.hasOwn(moves, seat.agentId);
             const held = new Set(moves[seat.agentId] ?? []);
             return (
               <tr key={seat.agentId} className="border-t border-border">
@@ -102,7 +105,7 @@ export function MovesMatrix({
                       // narrow it — so the box must not accept a click that
                       // would fire `onToggle` for a seat this table does not
                       // govern.
-                      disabled={disabled || !governed}
+                      disabled={disabled}
                       onChange={(e) => onToggle(seat.agentId, kind, e.target.checked)}
                     />
                   </td>

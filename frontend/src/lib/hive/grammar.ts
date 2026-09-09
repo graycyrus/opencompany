@@ -106,16 +106,25 @@ export interface Move {
  */
 export function markerLines(body: string): { line: string; index: number }[] {
   const out: { line: string; index: number }[] = [];
-  let fence: string | null = null;
+  let fence: { character: string; length: number } | null = null;
   body.split("\n").forEach((line, index) => {
     const opener = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
-      // Only the character that opened the fence can close it.
-      if (opener && opener[1][0] === fence) fence = null;
+      // A closer must use the opener's character, be at least as long, and
+      // contain nothing after the fence other than whitespace. This permits a
+      // four-backtick sample to show a three-backtick example without ending
+      // the outer block.
+      if (
+        opener &&
+        opener[1][0] === fence.character &&
+        opener[1].length >= fence.length &&
+        /^\s{0,3}(?:`{3,}|~{3,})\s*$/.test(line)
+      )
+        fence = null;
       return;
     }
     if (opener) {
-      fence = opener[1][0];
+      fence = { character: opener[1][0], length: opener[1].length };
       return;
     }
     out.push({ line, index });

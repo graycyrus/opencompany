@@ -332,7 +332,10 @@ export function foldEpisodes(
   messages: ChatMessage[],
   options: { quorum?: number; members?: number; turnBudget?: number } = {},
 ): Episode[] {
-  const rows = messages.filter((m) => !m.parentId);
+  // Hive turns and their closing report are replies to the triggering operator
+  // message. Parentage is a thread relationship, not evidence that a row is
+  // outside the episode.
+  const rows = messages;
   const hasRoom = rows.some(
     (m) =>
       m.channel === HIVE_REPORT_AUTHOR ||

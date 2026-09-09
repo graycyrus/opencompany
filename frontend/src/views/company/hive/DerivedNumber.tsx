@@ -40,7 +40,7 @@ export function DerivedNumber({
   // Zero is refused rather than clamped, in the host's own terms: an operator
   // who wrote a number meant it, and silently substituting a different one is
   // how a desk behaves in a way its manifest does not describe.
-  const invalid = overridden && declared < min;
+  const invalid = overridden && (!Number.isFinite(declared) || declared < min);
 
   return (
     <div className="space-y-1">
@@ -70,7 +70,8 @@ export function DerivedNumber({
           className={cn("h-8", invalid && "border-status-failed")}
           onChange={(e) => {
             const raw = e.target.value;
-            onChange(raw === "" ? undefined : Number(raw));
+            const next = raw === "" ? undefined : Number(raw);
+            onChange(next === undefined || Number.isFinite(next) ? next : undefined);
           }}
         />
       ) : (
