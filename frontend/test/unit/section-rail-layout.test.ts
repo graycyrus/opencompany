@@ -279,7 +279,11 @@ describe("the tour anchors travelled with the rows", () => {
       el.getAttribute("data-tour"),
     );
     expect(anchors.filter((a) => a === "nav-finances")).toHaveLength(0);
-    expect(anchors).toContain("nav-wallet");
+    // Its pages carry no anchor either: `data-tour` names a tour *step*, and
+    // there is no step pointing inside Finance. The rail's own rows have them
+    // because the tour walks the sections.
+    expect(anchors).not.toContain("nav-wallet");
+    expect(anchors).toContain("nav-agents");
   });
 });
 
