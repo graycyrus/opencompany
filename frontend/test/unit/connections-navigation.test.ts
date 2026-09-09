@@ -115,6 +115,10 @@ describe("the Connections section", () => {
     expect(connections.children?.map((child) => [child.label, child.sub])).toEqual([
       ["Apps", "apps"],
       ["MCP Servers", "mcp"],
+      ["Inference", "inference"],
+      ["Skills", "skills"],
+      ["Hosting", "hosting"],
+      ["Search", "search"],
     ]);
   });
 
