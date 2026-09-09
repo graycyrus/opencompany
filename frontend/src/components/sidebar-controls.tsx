@@ -291,12 +291,10 @@ export function SidebarCollapseButton() {
               // rather than as a chip stamped into the border between them —
               // this is the only control in the shell that sits over the join,
               // and the only one that needs to say so.
+              // The fill, the hover and the disabled state all come from the
+              // `default` variant now; only the two things that are about
+              // sitting on the seam are said here.
               "shrink-0 shadow-md",
-              // Replaces `ghost`'s `hover:bg-muted` / `hover:text-foreground` /
-              // `dark:hover:bg-muted/50` one for one, so tailwind-merge drops
-              // the originals rather than leaving the two to race. Hover
-              // deepens the fill in the same direction it always did.
-              "bg-primary text-primary-foreground hover:bg-primary/80 dark:hover:bg-primary/80",
               "focus-visible:ring-primary/50",
               // No `group-data-[collapsible=icon]:size-8` any more, and its
               // absence is the point. `group` is on `[data-slot=sidebar]`
