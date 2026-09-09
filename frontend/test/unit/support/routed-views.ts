@@ -212,6 +212,10 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   // title stay in one place. A single run keeps its own `#/observatory/<runId>`
   // route, which is why this file is also `NAMED_BY.observatory`.
   observatory: "observatory/ObservatoryView.tsx",
+  // Feedback moved into Settings as a list item — it is not a place inside the
+  // company, which is what the sidebar enumerates, so it left the title row's
+  // glyph group for a settings page of its own.
+  feedback: "FeedbackView.tsx",
   usage: "UsageView.tsx",
 };
 
