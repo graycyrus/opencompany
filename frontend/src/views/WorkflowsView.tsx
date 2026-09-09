@@ -3632,7 +3632,7 @@ export function WorkflowsView({
                 did. An operator who has to guess whether their graph reads this
                 will guess wrong in both directions. */}
             <DialogDescription>
-              What this run should work on. It is handed to the workflow&rsquo;s first
+              What this run should work on. It is handed to the automation&rsquo;s first
               step. Leave it empty to run the automation as its schedule does.
             </DialogDescription>
           </DialogHeader>
