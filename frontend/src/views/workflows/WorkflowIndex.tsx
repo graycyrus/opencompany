@@ -46,7 +46,7 @@ export type IndexMode = "cards" | "list";
  * Named once because a card and a list row both carry it (the same reason
  * {@link NO_RUNS_LABEL} is a constant) and two copies would drift. */
 const PAUSED_TITLE =
-  "This workflow's schedule is off, so it won't start on its own. " +
+  "This automation's schedule is off, so it won't start on its own. " +
   "Open it and press Resume to arm it.";
 
 /**
@@ -169,7 +169,7 @@ const STRIP_RUNS = 5;
  * drift apart. What each one means is argued in {@link HealthLine}. */
 const NO_RUNS_LABEL = "No recent runs";
 const NO_RUNS_TITLE =
-  "No runs in the recent company-wide page. Open the workflow to read its own run history.";
+  "No runs in the recent company-wide page. Open the automation to read its own run history.";
 const LOADING_RUNS_LABEL = "Loading runs…";
 
 export function WorkflowIndex({

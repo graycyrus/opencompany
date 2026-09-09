@@ -281,7 +281,7 @@ export function RunResultPanel({
                   // something that is not there.
                   canDecideHere ? "below or in Approvals" : "in Approvals"
                 } and this run continues on its own — approving re-runs the step, so a changed decision may ask again.`
-              : "Nothing here can be approved; change the policy and run the workflow again."}
+              : "Nothing here can be approved; change the policy and run the automation again."}
           </p>
         )}
         {/* Issue #1014 (PR-B): the gated tool names per blocked node, and a link

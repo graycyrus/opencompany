@@ -459,7 +459,7 @@ function RunTraceFilters({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
           <DropdownMenuGroup>
-            <DropdownMenuLabel>Workflow</DropdownMenuLabel>
+            <DropdownMenuLabel>Automation</DropdownMenuLabel>
             {workflowOptions.length === 0 ? (
               <DropdownMenuItem disabled>No runs yet</DropdownMenuItem>
             ) : (

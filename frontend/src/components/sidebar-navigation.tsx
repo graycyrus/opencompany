@@ -261,7 +261,7 @@ export const NAV_SECTIONS: NavSection[] = [
   // whose state is persisted client-side rather than carried by the address
   // (`WorkflowsView`'s `indexTab`), so it is not a pair of routes and promoting
   // it to a rail would be inventing sub-pages rather than relocating any.
-  { view: "workflows", label: "Flows", icon: Workflow },
+  { view: "workflows", label: "Automations", icon: Workflow },
   // What is waiting on you.
   //
   // It spent a release as an icon in the window's title row, on the argument

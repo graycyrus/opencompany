@@ -428,13 +428,13 @@ export function CopilotPanel({
   function blockedReason(messageId: string, review: Review): string | undefined {
     if (!review.proposal || !review.diff) return undefined;
     if (sourceDefined) {
-      return "This workflow is defined by a file in the company source tree, so a change has to be made in the repository.";
+      return "This automation is defined by a file in the company source tree, so a change has to be made in the repository.";
     }
     if (!thisSession.has(messageId)) {
-      return "This was proposed in an earlier session, so it can't be applied to the workflow as it stands now. Ask again for a fresh proposal.";
+      return "This was proposed in an earlier session, so it can't be applied to the automation as it stands now. Ask again for a fresh proposal.";
     }
     if (proposalIsStale(review.proposal, graph)) {
-      return "The workflow changed after this was proposed, so it no longer describes the graph on screen. Ask again for a fresh proposal.";
+      return "The automation changed after this was proposed, so it no longer describes the graph on screen. Ask again for a fresh proposal.";
     }
     if (isEmptyDiff(review.diff)) {
       return "This proposal would change nothing, so there is nothing to apply.";
@@ -543,8 +543,8 @@ export function CopilotPanel({
   const placeholder = useMemo(
     () =>
       runs.length > 0
-        ? "Ask about this workflow — what it does, or why a run failed."
-        : "Ask about this workflow — what it does, or what it needs to run.",
+        ? "Ask about this automation — what it does, or why a run failed."
+        : "Ask about this automation — what it does, or what it needs to run.",
     [runs.length],
   );
 
@@ -604,7 +604,7 @@ export function CopilotPanel({
               </p>
               <p className="mt-1.5">
                 That is also all the answer is drawn from. This turn runs{" "}
-                <span className="font-medium text-foreground">confined to this workflow</span>:
+                <span className="font-medium text-foreground">confined to this automation</span>:
                 no tools, no company memory, and no reach into the board, your agents or
                 another workflow. Ask something that needs the wider company and it will say so
                 rather than guess.

@@ -620,7 +620,7 @@ const NO_DESTINATION = "__none__";
  * (issue #1006). One string, because every path out of the dialog — Esc, a
  * click outside, Cancel, a hash navigation — has to ask the same question. */
 const DISCARD_PROMPT =
-  "You have unsaved changes to this workflow. Leave without saving them?";
+  "You have unsaved changes to this automation. Leave without saving them?";
 
 /**
  * A stable string covering everything the form can change (issue #1006).
@@ -1749,9 +1749,9 @@ export function WorkflowCreateDialog({
    * surface here instead of round-tripping to the server first. Returns the
    * first problem found, or `null` when the draft is postable. */
   function validate(): string | null {
-    if (!id.trim()) return "Give the workflow an id.";
+    if (!id.trim()) return "Give the automation an id.";
     if (!isSafeId(id.trim())) return "The id can only use letters, numbers, `_`, and `-`.";
-    if (!name.trim()) return "Give the workflow a name.";
+    if (!name.trim()) return "Give the automation a name.";
     if (nodes.length === 0) return "Add at least one node.";
     const ids = new Set<string>();
     for (const n of nodes) {
@@ -1798,7 +1798,7 @@ export function WorkflowCreateDialog({
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
     if (triggerCount !== 1) {
-      return "A workflow needs exactly one trigger node to say what starts it.";
+      return "A automation needs exactly one trigger node to say what starts it.";
     }
     for (const e of edges) {
       if (!e.from || !e.to) return "Every edge needs a from-node and a to-node.";
@@ -1954,7 +1954,7 @@ export function WorkflowCreateDialog({
         if (
           landing === "confirm" &&
           !window.confirm(
-            "Replace what you've started with the drafted workflow? You can still edit it before creating.",
+            "Replace what you've started with the drafted automation? You can still edit it before creating.",
           )
         ) {
           return;
@@ -1988,7 +1988,7 @@ export function WorkflowCreateDialog({
       if (draftEpochRef.current !== requestedEpoch) return;
       // A capability gap (404/409) or a network failure — surface it inline; the
       // operator can still author by hand.
-      setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
+      setDraftError(e instanceof Error ? e.message : "could not draft a automation");
     } finally {
       // Issue #1052: only the request that owns the current contents may clear
       // the spinner — a stale one would switch off a draft the operator is
@@ -2146,8 +2146,8 @@ export function WorkflowCreateDialog({
         e instanceof Error
           ? e.message
           : workflow
-            ? "could not save the workflow"
-            : "could not create the workflow",
+            ? "could not save the automation"
+            : "could not create the automation",
       );
       // A refused write is the one failure the operator can act on, and the
       // action (reload, or pick another name) happens out in the view — so it
@@ -2294,7 +2294,7 @@ export function WorkflowCreateDialog({
       // an error and the next Create tries again.
       const gap = draftCapabilityGap(e);
       if (gap) setDraftGap(gap);
-      else setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
+      else setDraftError(e instanceof Error ? e.message : "could not draft a automation");
       return;
     } finally {
       // Only the request that still owns the dialog may clear the spinner.
@@ -2480,7 +2480,7 @@ export function WorkflowCreateDialog({
       setNodes(starterNodes());
       setEdges([]);
       setWriteRefused(true);
-      showError("Give this workflow a name — the description alone doesn’t make one.");
+      showError("Give this automation a name — the description alone doesn’t make one.");
       return;
     }
     // Issue #1808, and this is the path that needs it most. The id is a
@@ -2613,7 +2613,7 @@ export function WorkflowCreateDialog({
           <DialogTitle>
             {editing
               ? `Edit “${workflow?.name?.trim() || workflow?.id}”`
-              : "New workflow"}
+              : "New automation"}
           </DialogTitle>
           <DialogDescription>
             {editing
@@ -2657,7 +2657,7 @@ export function WorkflowCreateDialog({
               >
                 <AlertDescription>
                   {readiness.ok ? (
-                    "The corrected workflow passes the static authoring checks."
+                    "The corrected automation passes the static authoring checks."
                   ) : (
                     <>
                       <p>
@@ -2849,7 +2849,7 @@ export function WorkflowCreateDialog({
             would be a no-op here anyway (`display: contents` from the class
             outranks the UA `[hidden]` rule), and an off-screen-but-present
             control is exactly the failure this redesign is about: the operator
-            was being told to "Give the workflow an id." by a field they were
+            was being told to "Give the automation an id." by a field they were
             never shown. Unmounting costs nothing — every value lives in state
             above, so a hand-over puts the fields back with their contents. */}
         {!describing && (
@@ -2865,7 +2865,7 @@ export function WorkflowCreateDialog({
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor={`${formId}-id`}>Workflow ID</Label>
+              <Label htmlFor={`${formId}-id`}>Automation ID</Label>
               {/* Read-only in edit mode, not merely rejected on save: the id keys
                   the saved graph, the scheduler and every past run, so the host
                   answers 400 to a rename. Letting an author type a new one and
@@ -2893,7 +2893,7 @@ export function WorkflowCreateDialog({
               rows={2}
               value={description}
               onChange={(e) => changeDescription(e.target.value)}
-              placeholder="What does this workflow do?"
+              placeholder="What does this automation do?"
             />
           </div>
 
@@ -3165,7 +3165,7 @@ export function WorkflowCreateDialog({
                 ? "Creating…"
                 : describing && drafting
                   ? "Drafting…"
-                  : "Create workflow"}
+                  : "Create automation"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -3190,7 +3190,7 @@ export function WorkflowCreateDialog({
         >
           <AlertDialogContent data-testid="workflow-id-confirm">
             <AlertDialogHeader>
-              <AlertDialogTitle>Confirm the workflow ID</AlertDialogTitle>
+              <AlertDialogTitle>Confirm the automation ID</AlertDialogTitle>
               <AlertDialogDescription>
                 The ID is permanent — it keys this workflow’s schedule and run
                 history and can’t be changed after creation. Check it now.

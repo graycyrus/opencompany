@@ -83,7 +83,7 @@ const RUN_STATUS_DEFINITIONS = {
   running: "Still working through its steps — nothing here is final yet.",
   ok: "Finished, with nothing left undelivered and nobody waiting on you — every report either reached its destination or didn't need to (a dry run, or one an earlier run already delivered).",
   failed:
-    "The run ended in error — usually a step that failed and the workflow needs a fix, but sometimes nothing in the graph got the chance to run at all, and the error can be a host restart or a capability that failed to build rather than anything wrong with the workflow. Read the error before assuming the workflow needs correcting.",
+    "The run ended in error — usually a step that failed and the automation needs a fix, but sometimes nothing in the graph got the chance to run at all, and the error can be a host restart or a capability that failed to build rather than anything wrong with the automation. Read the error before assuming the automation needs correcting.",
   // Codex review on #1821 (eleventh pass): this still asserted "the step
   // that was mid-flight" as if every stopped run has one. A run cancelled
   // before it ever reached the graph — `a_run_cancelled_before_it_starts_
@@ -104,7 +104,7 @@ const RUN_STATUS_DEFINITIONS = {
   stopped:
     "An operator stopped this run before it finished. A step that was mid-flight when the stop landed normally ran to completion — only a step stuck waiting on an outside call is cut off where it was — though its own completion record can go missing if that journal write silently failed. A run stopped before any step began has no such step at all.",
   blocked:
-    "A step is waiting on you before the run can go on — usually a card sitting in Approvals, but a call that could not be queued for approval at all leaves nothing there to decide. That isn't always a workflow problem — the approvals queue itself can refuse the write, and no workflow change fixes that.",
+    "A step is waiting on you before the run can go on — usually a card sitting in Approvals, but a call that could not be queued for approval at all leaves nothing there to decide. That isn't always a automation problem — the approvals queue itself can refuse the write, and no automation change fixes that.",
   stranded:
     "The run paused for an approval, but nothing is waiting on you any more and no decision left can move it. Run it again if you still need it.",
   "not delivered":
@@ -784,7 +784,7 @@ export function RunHistoryRow({
             </p>
             <p className="mt-1 text-2xs text-muted-foreground">
               {failedNode
-                ? "Review the error details, then correct the workflow and run it again."
+                ? "Review the error details, then correct the automation and run it again."
                 : nodes.length > 0
                   ? // Codex review on #1821 (ninth pass): `failedNode` null does
                     // NOT mean nothing ran — a host restart can interrupt a run
@@ -985,7 +985,7 @@ export function RunHistoryRow({
               queued for approval" — but these calls WERE queued; the card was
               opened and later lost, which is a different fact and the only one
               of the two an operator can act on differently. The closing clause
-              became "change the policy and run the workflow again" — but no
+              became "change the policy and run the automation again" — but no
               policy refused anything here, so it sends them to edit a setting
               that was never the problem. */}
           Not finished — {blocked.map((b) => `“${b.nodeId}”`).join(", ")}{" "}
@@ -1011,7 +1011,7 @@ export function RunHistoryRow({
                 // cards were lost look identical from here, and claiming
                 // either would be a diagnosis the console cannot make. Re-run
                 // is offered as an option, not as a remedy for a stated cause.
-                "Nothing here is waiting on you any more, and this run cannot be continued. Run the workflow again if you still need it."
+                "Nothing here is waiting on you any more, and this run cannot be continued. Run the automation again if you still need it."
               : // Codex review on #1821 (eighth pass, same site as the sixth):
                 // `parkFailed` fires both when the approvals queue itself
                 // refused the write AND when this runtime never wired one at
@@ -1038,8 +1038,8 @@ export function RunHistoryRow({
                 discardedCalls > 0 && parkFailedCalls === 0
                   ? "Nothing here could be queued for approval — this run's turn asked for more approvals than one batch may raise, so the excess was dropped before the queue ever saw it. Run it again — a turn that asks for fewer approvals at once will queue cleanly."
                   : discardedCalls > 0 && parkFailedCalls > 0
-                    ? "Nothing here could be queued for approval — some were dropped because this run's turn asked for more approvals than one batch may raise, and the rest because the approvals queue itself may have refused them, which no workflow change fixes. Run it again once you've cut how many approvals one turn asks for and confirmed the queue is healthy."
-                    : "Nothing here could be queued for approval — the approvals queue itself may have refused it, which no workflow change fixes. Run it again once that's resolved."}
+                    ? "Nothing here could be queued for approval — some were dropped because this run's turn asked for more approvals than one batch may raise, and the rest because the approvals queue itself may have refused them, which no automation change fixes. Run it again once you've cut how many approvals one turn asks for and confirmed the queue is healthy."
+                    : "Nothing here could be queued for approval — the approvals queue itself may have refused it, which no automation change fixes. Run it again once that's resolved."}
         </p>
         {/* Issue #1014 (PR-B): the gated tool names per blocked node and a link
             per parked card to the Approvals queue — the sentence above says

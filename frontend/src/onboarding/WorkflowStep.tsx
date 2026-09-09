@@ -178,7 +178,7 @@ export function WorkflowStep({
   }, [fetchRuns]);
 
   const label = (run: WorkflowRunOutcome | undefined) =>
-    (run && names.get(run.workflowId)) ?? run?.workflowId ?? "your workflow";
+    (run && names.get(run.workflowId)) ?? run?.workflowId ?? "your automation";
 
   return (
     <div className="space-y-4" data-testid="gate-workflow-step">

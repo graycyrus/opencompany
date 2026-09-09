@@ -1148,7 +1148,7 @@ function askerLabel(
   // A native `workflow.approve` gate carries no agent — the grant's subject is
   // the workflow itself (issue #1098), so naming a "teammate" would tell the
   // operator the wrong grantee right as they pick the broader scope.
-  if (a.workflow_id != null && a.workflow_id !== "") return "this workflow";
+  if (a.workflow_id != null && a.workflow_id !== "") return "this automation";
   if (!a.agent) return "this agent";
   return askerNames.get(a.agent) ?? a.agent;
 }

@@ -60,7 +60,7 @@ const PRIORITIES = ["low", "medium", "high"] as const;
 /** The once-vs-workflow options, in review order (issue #580). */
 const DELIVERABLES: { value: TaskDeliverable; label: string }[] = [
   { value: "once", label: "Do it once" },
-  { value: "workflow", label: "Build me the workflow" },
+  { value: "workflow", label: "Build me the automation" },
 ];
 
 /**

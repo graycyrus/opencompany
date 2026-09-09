@@ -44,7 +44,7 @@ export const CATEGORY_STYLES: Record<SkillCategory, string> = {
  */
 export const SKILLS_READ_ONLY_NOTE =
   "Skills are reference material your agents read — playbooks they follow, not buttons they press. " +
-  "Enabling one puts it in front of every agent; executing a saved workflow stays the orchestrator's job.";
+  "Enabling one puts it in front of every agent; executing a saved automation stays the orchestrator's job.";
 
 /**
  * What an installed skill's on/off state means for the company's teammates.

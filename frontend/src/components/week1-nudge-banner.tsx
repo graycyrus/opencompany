@@ -43,7 +43,7 @@ export function Week1NudgeBanner({
           <Sparkles className="size-3.5" />
         </span>
         <div>
-          <p className="text-sm font-medium leading-tight">Save your first workflow</p>
+          <p className="text-sm font-medium leading-tight">Save your first automation</p>
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
             A workflow is the thing this company actually runs, on a schedule or on
             demand. Describe one in plain words and the copilot drafts it for you.

@@ -631,7 +631,7 @@ export function PolicySettings({ client, company, canManage }: Props) {
       } match any ${
         knownTools
           ? "tool the approval gate recognizes"
-          : "of the workflow tools wired here"
+          : "of the automation tools wired here"
       }. ${
         unmatchedWiredTools.length === 1 ? "It may" : "They may"
       } still be ${

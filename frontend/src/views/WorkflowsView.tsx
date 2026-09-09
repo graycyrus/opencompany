@@ -990,7 +990,7 @@ export function WorkflowsView({
         setListError(null);
       } catch (e) {
         if (!live) return;
-        setListError(e instanceof Error ? e.message : "could not load workflows");
+        setListError(e instanceof Error ? e.message : "could not load automations");
       } finally {
         if (live) setLoadingList(false);
       }
@@ -1082,7 +1082,7 @@ export function WorkflowsView({
         clearWorkflowFromHash();
         toast.error(`This company has no workflow “${target}”.`, {
           description:
-            "It may have been renamed or deleted since the link was made. Showing every workflow this company has instead.",
+            "It may have been renamed or deleted since the link was made. Showing every automation this company has instead.",
         });
       } catch {
         // A failed re-read is not proof the workflow is missing. Leave the id
@@ -1221,7 +1221,7 @@ export function WorkflowsView({
       } catch (e) {
         if (!live) return;
         setGraph(null);
-        setGraphError(e instanceof Error ? e.message : "could not load the workflow graph");
+        setGraphError(e instanceof Error ? e.message : "could not load the automation graph");
       } finally {
         if (live) setLoadingGraph(false);
       }
@@ -1569,7 +1569,7 @@ export function WorkflowsView({
       if (isDetached(res)) {
         setActiveRunId(res.runId);
         setAwaitingRunId(res.runId);
-        toast.success("Workflow started.");
+        toast.success("Automation started.");
       } else {
         setResult(res);
         setAwaitingRunId(res.runId ?? null);
@@ -1579,7 +1579,7 @@ export function WorkflowsView({
           // the SHAPE (`isDryRun`), never on what we asked for, and say so
           // LOUDLY: real effects just fired — tokens spent, reports possibly
           // sent — which is the opposite of what the operator intended.
-          toast.error("This host ran the workflow for real — it doesn't support test runs.", {
+          toast.error("This host ran the automation for real — it doesn't support test runs.", {
             description:
               "Your test run executed real effects (agent turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
           });
@@ -1648,7 +1648,7 @@ export function WorkflowsView({
         setHistoryOpen(true);
         setAwaitingRunId(ownRunIdRef.current);
       } else {
-        toast.error(e instanceof Error ? e.message : "could not run the workflow");
+        toast.error(e instanceof Error ? e.message : "could not run the automation");
         // Issue #1007: the toast is now the *notification*, not the record. The
         // panel is what survives it, built from the structured error rather than
         // from its message — a code the host gave us reads differently from one
@@ -1786,7 +1786,7 @@ export function WorkflowsView({
       if (e instanceof ApiError && e.status === 409) {
         setConflict(e.message);
       } else {
-        toast.error(e instanceof Error ? e.message : "could not delete the workflow");
+        toast.error(e instanceof Error ? e.message : "could not delete the automation");
       }
     } finally {
       setDeleting(false);
@@ -1820,7 +1820,7 @@ export function WorkflowsView({
           : `Resumed “${updated.name}”. It will run on its schedule again.`,
       );
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not change the workflow");
+      toast.error(e instanceof Error ? e.message : "could not change the automation");
     } finally {
       setToggling(false);
     }
@@ -1879,7 +1879,7 @@ export function WorkflowsView({
                   );
                 } catch (e) {
                   toast.error(
-                    e instanceof Error ? e.message : "could not change the workflow",
+                    e instanceof Error ? e.message : "could not change the automation",
                   );
                 }
               })();
@@ -1932,7 +1932,7 @@ export function WorkflowsView({
     if (workflowSavedToast(wasEnabled, saved.enabled) === "disarmed") {
       announceDisarm("Saved, and paused", saved);
     } else {
-      toast.success("Workflow saved.");
+      toast.success("Automation saved.");
     }
   }, [announceDisarm, graph]);
 
@@ -1983,7 +1983,7 @@ export function WorkflowsView({
     if (workflowSavedToast(true, created.enabled) === "disarmed") {
       announceDisarm("Created, and paused", created);
     } else {
-      toast.success("Workflow created.");
+      toast.success("Automation created.");
     }
     // Issue #1845: this console's own create is the clearest possible signal
     // — do not wait for the `workflow_created` SSE round trip to clear the
@@ -2075,7 +2075,7 @@ export function WorkflowsView({
         // A capability gap (404/409) or a network failure — surface it and leave
         // the run row untouched; the operator can still edit by hand.
         toast.error(
-          e instanceof Error ? e.message : "Couldn't reach the workflow copilot.",
+          e instanceof Error ? e.message : "Couldn't reach the automation copilot.",
         );
       } finally {
         // Only the run that set the slot may clear it — if a second Fix started
@@ -2386,9 +2386,9 @@ export function WorkflowsView({
     if (!match) {
       // Never leave the canvas mid-gesture: it keeps painting the live state,
       // and the operator is told why the run they asked for isn't on it.
-      toast.error("That run isn't in this workflow's run history.", {
+      toast.error("That run isn't in this automation's run history.", {
         description:
-          "It may have aged out of the journal, or belong to a different workflow. The canvas is showing the current state instead.",
+          "It may have aged out of the journal, or belong to a different automation. The canvas is showing the current state instead.",
       });
       return;
     }
@@ -2688,7 +2688,7 @@ export function WorkflowsView({
 
                 Issue #1135 dropped the workflow picker that used to sit below
                 it. You are already inside this workflow; its name is right
-                here and "All workflows" goes back. Switching between them is
+                here and "All automations" goes back. Switching between them is
                 what the index is for now. */}
             <div
               className="flex min-w-0 flex-col gap-1"
@@ -2707,7 +2707,7 @@ export function WorkflowsView({
                   className="-ml-2 h-8 shrink-0 px-2 text-muted-foreground hover:text-foreground"
                   onClick={backToIndex}
                   data-testid="workflow-back-to-index"
-                  title="Back to every workflow in this company."
+                  title="Back to every automation in this company."
                 >
                   <ArrowLeft className="mr-1.5 size-4" />
                   All workflows
@@ -2804,7 +2804,7 @@ export function WorkflowsView({
                     disabled={!selectedId || running || loadingGraph}
                     data-testid="workflow-run-with-input"
                     className="rounded-l-none border-l border-primary-foreground/25 px-2"
-                    title="Run this workflow on something specific — a topic, a link, a question. The first step receives it."
+                    title="Run this automation on something specific — a topic, a link, a question. The first step receives it."
                   >
                     <ChevronDown className="size-4" />
                     <span className="sr-only">Run with input…</span>
@@ -2854,7 +2854,7 @@ export function WorkflowsView({
                   onClick={() => void run(true)}
                   disabled={!selectedId || running || loadingGraph}
                   data-testid="workflow-test-run"
-                  title="Test run: walk the real workflow over stubbed effects to prove its routing and output shape. Nothing is sent, and no tokens are spent."
+                  title="Test run: walk the real automation over stubbed effects to prove its routing and output shape. Nothing is sent, and no tokens are spent."
                 >
                   <FlaskConical className="mr-1.5 size-4" />
                   Test run
@@ -2863,7 +2863,7 @@ export function WorkflowsView({
                     opened the index over the canvas, and the index is what the tab
                     opens on now — a button that toggles the surface you arrived
                     through is one control for two states with one name. Its job as a
-                    way back is done by "All workflows" at the head of row 1, where
+                    way back is done by "All automations" at the head of row 1, where
                     a back affordance belongs. */}
                 {/* Issue #303. Needs a loaded graph, not just a selection: the
                     copilot's whole grounding IS the graph, and opening it against a
@@ -2881,7 +2881,7 @@ export function WorkflowsView({
                   disabled={!graph}
                   aria-pressed={copilotOpen}
                   data-testid="workflow-copilot-toggle"
-                  title="Ask about this workflow — what it does, or why a run failed."
+                  title="Ask about this automation — what it does, or why a run failed."
                 >
                   <Bot className="mr-1.5 size-4" />
                   Copilot
@@ -2951,7 +2951,7 @@ export function WorkflowsView({
                     variant="outline"
                     onClick={() => setEditOpen(true)}
                     disabled={!canEdit}
-                    aria-label="Edit workflow"
+                    aria-label="Edit automation"
                     data-testid="workflow-edit"
                   >
                     <Pencil className="mr-1.5 size-4" />
@@ -2966,7 +2966,7 @@ export function WorkflowsView({
                           size="sm"
                           variant="destructive"
                           disabled={!canDelete}
-                          aria-label="Delete workflow"
+                          aria-label="Delete automation"
                           data-testid="workflow-delete"
                         >
                           {deleting ? (
@@ -3012,8 +3012,8 @@ export function WorkflowsView({
                             whether one is in flight or several. */}
                         <AlertDialogDescription data-testid="workflow-delete-consequence">
                           {watchingRun
-                            ? "A run of this workflow is going right now. Deleting it stops every run of it still going — the steps each one finished stay in the run history — and stops it running on its schedule. This can't be undone."
-                            : "This removes the workflow, stops it running on its schedule, and stops any run of it still going that hasn't shown up here yet. Past runs stay in the run history. This can't be undone."}
+                            ? "A run of this automation is going right now. Deleting it stops every run of it still going — the steps each one finished stay in the run history — and stops it running on its schedule. This can't be undone."
+                            : "This removes the automation, stops it running on its schedule, and stops any run of it still going that hasn't shown up here yet. Past runs stay in the run history. This can't be undone."}
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
@@ -3049,7 +3049,7 @@ export function WorkflowsView({
            inline count, actions right-aligned — with the title on the shared
            scale rather than on the `text-sm` that only this one row used. */
         <PageHeader
-          title={indexTab === "runs" ? "Runs" : "Workflows"}
+          title={indexTab === "runs" ? "Runs" : "Automations"}
           count={indexTab === "runs" ? indexRuns.length : workflows.length}
           data-testid="workflow-index-header"
           actions={
@@ -3060,7 +3060,7 @@ export function WorkflowsView({
               <div className="flex items-center gap-1 rounded-lg border p-0.5">
                 {(
                   [
-                    { value: "workflows", label: "Workflows", Icon: WorkflowIcon },
+                    { value: "workflows", label: "Automations", Icon: WorkflowIcon },
                     { value: "runs", label: "Runs", Icon: History },
                   ] as const
                 ).map(({ value, label, Icon }) => (
@@ -3084,7 +3084,7 @@ export function WorkflowsView({
               {/* Issue #1110: the index's Cards/List toggle, in the tab's one
                   toolbar. It used to sit in a header the index drew for itself,
                   which was fine while the index was a panel over the canvas and
-                  wrong the moment it became the page — "Workflows 7" and "All
+                  wrong the moment it became the page — "Automations 7" and "All
                   workflows 7" one above the other, with the toggle stranded under
                   the duplicate.
 
@@ -3120,7 +3120,7 @@ export function WorkflowsView({
                   ))}
                 </div>
               )}
-              {/* Issue #341: THE control named "New workflow" — the one an
+              {/* Issue #341: THE control named "New automation" — the one an
                   operator, a screen reader or a spec should find under that
                   name. The empty-state call to action below is named
                   differently on purpose; two buttons answering to one name is
@@ -3213,7 +3213,7 @@ export function WorkflowsView({
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 {runRefusal.code === "inference_required"
-                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Connections → Inference, then run again."
+                  ? "This company has no inference provider configured, so automations can't run. Set a provider under Connections → Inference, then run again."
                   : runRefusal.message}
               </span>
               {/* Inference, not the accounts page. The sentence above says "Set
@@ -3289,7 +3289,7 @@ export function WorkflowsView({
         </div>
       )}
 
-      {/* Issue #1845: the week-1 "save your first workflow" nudge. Index only
+      {/* Issue #1845: the week-1 "save your first automation" nudge. Index only
           (not the canvas detail) — it points at the same CTA the empty state
           offers, which only exists there, and a nudge to create a workflow
           while one is already open on screen would be an odd thing to say. */}
@@ -3364,7 +3364,7 @@ export function WorkflowsView({
             // rather than inside it, because a Cards/List toggle over nothing
             // is chrome for a decision there is nothing to make.
             <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
-              <p>This company has no saved workflows yet.</p>
+              <p>This company has no saved automations yet.</p>
               {/* Issue #813: a first-time author has no on-ramp otherwise. One
                   compact prose block — what a workflow is, a worked example
                   (mirroring the copilot placeholder), and the create-time
@@ -3389,8 +3389,8 @@ export function WorkflowsView({
                 </p>
               </div>
               {/* Issue #341: opens the same dialog as the toolbar button, and
-                  therefore must NOT carry the same name. "Create a workflow"
-                  rather than "Create the first workflow" because this state is
+                  therefore must NOT carry the same name. "Create a automation"
+                  rather than "Create the first automation" because this state is
                   also where deleting the last workflow lands, and by then there
                   is nothing first about it. */}
               <Button

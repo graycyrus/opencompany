@@ -4170,7 +4170,7 @@ export function AppShell({
                 // see (persisted client-side, not carried by the route) — see
                 // `RouteLoading`'s own doc for why a guess here would be worse
                 // than no bar.
-                <RouteLoading title="Workflows" label="Loading canvas…" />
+                <RouteLoading title="Automations" label="Loading canvas…" />
               }
             >
               <WorkflowsView

@@ -2812,14 +2812,14 @@ export function ChatView({
                     matters (codex review on #2159). `DurableOperatorChannel` journals
                     them under the reserved authors `workflow-report` and
                     `owner-fallback-report` (`runtime/channel.rs`), which `senderOf`
-                    titleizes into "Workflow Report" and "Owner Fallback Report" —
+                    titleizes into "Automation Report" and "Owner Fallback Report" —
                     author lines naming no person at all. That makes the case for the
                     strip stronger, not weaker: `MessageRow` still marks every one of
                     those rows, because `project` sets `by_person: false` on an
                     `AgentReply` whichever brain produced it, and the marker they get
                     is `EchoPlaceholder` — a non-focusable `<span>` whose entire
                     explanation is a `title`, reaching neither keyboard, touch nor
-                    screen reader, and reading "Workflow Report did not write this".
+                    screen reader, and reading "Automation Report did not write this".
                     Without this strip the operator is left with a "Placeholder" pill
                     against a name that is not a person, on a feed that takes no
                     replies, and nothing anywhere saying what did write it.

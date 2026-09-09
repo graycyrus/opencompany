@@ -61,7 +61,7 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="sidebar"]',
     placement: "right",
     title: "Welcome to your company",
-    body: "Four places: the Room you talk in, your Company, what it's Connected to, and the Flows it repeats. Open one and what's inside it appears underneath.",
+    body: "Four places: the Room you talk in, your Company, what it's Connected to, and the Automations it repeats. Open one and what's inside it appears underneath.",
   },
   {
     // `sub` is not optional here, and neither composer stop below may drop it.
