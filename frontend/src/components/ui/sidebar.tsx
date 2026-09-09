@@ -302,7 +302,25 @@ function Sidebar({
           //
           // The mobile sheet above keeps its fill: it is an overlay dragged
           // over the page, not a pane of the shell.
-          className="flex size-full flex-col bg-transparent group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
+          // `overflow-y-auto` HERE, not on an inner region: the whole column
+          // scrolls as one, the way Slack's does. It used to be
+          // `SidebarContent` that scrolled, with the destinations pinned above
+          // it and the channel list scrolling inside its own box — so the
+          // column had two scroll positions and a channel list whose viewport
+          // was whatever was left after the fixed rows, which on a short window
+          // was a few rows tall while the column beside it sat still.
+          //
+          // One scroller means the nav rows scroll away with everything else,
+          // which is the trade and is the right one: they are five rows at the
+          // top of a list you are already scrolling, not chrome. What is
+          // genuinely chrome — the switcher, Overview, Settings, Feedback,
+          // Discord, the autonomy tier and you — is in the window's title row
+          // and never moves.
+          //
+          // `no-scrollbar` for the reason `SidebarContent` carried it: the bar
+          // would sit on the window chrome this column is painted on, and the
+          // column is scrolled by wheel and by trackpad rather than by dragging.
+          className="no-scrollbar flex size-full flex-col overflow-y-auto bg-transparent group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
         >
           {children}
         </div>
@@ -482,7 +500,7 @@ function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
       // for the view every session opens on, and the fix for those is to settle
       // on one header height rather than to average this.
       className={cn(
-        "no-scrollbar flex min-h-0 flex-1 flex-col gap-1 overflow-auto pt-4.5 group-data-[collapsible=icon]:overflow-y-auto",
+        "flex w-full flex-none flex-col gap-1 pt-4.5",
         className
       )}
       {...props}

@@ -507,7 +507,12 @@ export function SidebarNavigation({
           scrolls. */}
       <SidebarGroup
         className={cn(
-          "min-h-0 flex-1",
+          // No `min-h-0 flex-1` any more. It used to claim the column's
+          // leftover height so a long channel list scrolled INSIDE itself
+          // rather than pushing the rows above it away; the whole column is one
+          // scroller now (`sidebar-inner`), so the list grows to its content
+          // and the column scrolls past it.
+          "",
           // On the 3rem rail this group's own `px-2` is the difference between
           // fitting and not. The rail is 48px; the gutter leaves a 32px content
           // box, and `ChannelRail`'s compact rows are `size-9` (36px) with their
@@ -534,7 +539,11 @@ export function SidebarNavigation({
         <div
           ref={setElement}
           data-testid="room-rail-slot"
-          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
+          // Grows to the list it holds. It scrolled itself while the column
+          // had a fixed-height middle; with one scroller on `sidebar-inner`
+          // a second one here would trap the channel list in a box inside a
+          // page that also scrolls.
+          className="flex min-w-0 flex-col"
         />
       </SidebarGroup>
     </>

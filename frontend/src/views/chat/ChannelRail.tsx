@@ -119,7 +119,7 @@ export function ChannelRail({
     return (
       <aside
         className={cn(
-          "w-14 shrink-0 flex-col items-center overflow-y-auto border-r bg-sidebar/40 py-3",
+          "w-14 shrink-0 flex-col items-center border-r bg-sidebar/40 py-3",
           className,
         )}
       >
@@ -153,7 +153,7 @@ export function ChannelRail({
   return (
     <aside
       className={cn(
-        "w-64 shrink-0 flex-col overflow-y-auto border-r bg-sidebar/40 pb-3",
+        "w-64 shrink-0 flex-col border-r bg-sidebar/40 pb-3",
         className,
       )}
     >
