@@ -161,77 +161,108 @@ function type(id: string, value: string) {
   });
 }
 
-describe("adding a agent (issue #1776)", () => {
-  it("sends the persona the dialog collected", async () => {
-    await act(async () => {
-      root.render(
-        createElement(TeamView, {
-          client: fakeClient(),
-          company: "acme",
-          sub: null,
-          onOpenAgent: vi.fn(),
-          refreshKey: 0,
-          onRunSetup: vi.fn(),
-          onManageDesks: vi.fn(),
-          onNavigateToDesk: vi.fn(),
-        }),
-      );
-    });
+/** The footer's own Add agent, which is the last one on screen while open. */
+function submit() {
+  const buttons = Array.from(document.querySelectorAll<HTMLElement>("button")).filter(
+    (el) => el.textContent?.trim() === "Add agent",
+  );
+  return buttons[buttons.length - 1];
+}
 
+async function mount(onOpenAgent = vi.fn()) {
+  await act(async () => {
+    root.render(
+      createElement(TeamView, {
+        client: fakeClient(),
+        company: "acme",
+        sub: null,
+        onOpenAgent,
+        refreshKey: 0,
+        onRunSetup: vi.fn(),
+        onManageDesks: vi.fn(),
+        onNavigateToDesk: vi.fn(),
+      }),
+    );
+  });
+  return onOpenAgent;
+}
+
+describe("the Add-agent dialog", () => {
+  it("asks for a name and a post, and nothing the agent's own page owns", async () => {
+    await mount();
     await openDialog();
-    type("member-name", "Growth");
-    type("member-role", "Growth Marketer");
-    type("member-description", "Owns paid acquisition and reports on ROAS.");
-    type(
-      "member-instructions",
-      "Confirm the budget before launching a campaign. Flag anything under 2x.",
-    );
 
-    // The footer's Add teammate — the dialog is open, so it is the last one.
-    const buttons = Array.from(document.querySelectorAll<HTMLElement>("button")).filter(
-      (el) => el.textContent?.trim() === "Add agent",
-    );
-    await act(async () => {
-      buttons[buttons.length - 1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    expect(added).toHaveLength(1);
-    expect(added[0].instructions).toBe(
-      "Confirm the budget before launching a campaign. Flag anything under 2x.",
-    );
-    expect(added[0].role).toBe("Growth Marketer");
+    expect(document.querySelector("#agent-add-name")).not.toBeNull();
+    expect(document.querySelector("#agent-add-role")).not.toBeNull();
+    // The long form's fields, each of which now lives on the agent's page. Named
+    // individually rather than counted: a count passes if one is swapped for
+    // another, and the failure this guards is the long form coming back.
+    expect(document.querySelector("#member-description")).toBeNull();
+    expect(document.querySelector("#member-instructions")).toBeNull();
+    expect(document.querySelector("#member-budget-new")).toBeNull();
   });
 
-  /// At creation there is no blueprint to override, so an untouched box means
-  /// "no persona" — not an empty one stored as an override.
-  it("leaves the persona off the wire when the box was never filled in", async () => {
-    await act(async () => {
-      root.render(
-        createElement(TeamView, {
-          client: fakeClient(),
-          company: "acme",
-          sub: null,
-          onOpenAgent: vi.fn(),
-          refreshKey: 0,
-          onRunSetup: vi.fn(),
-          onManageDesks: vi.fn(),
-          onNavigateToDesk: vi.fn(),
-        }),
-      );
-    });
-
+  it("holds Create until it has both a name and a post", async () => {
+    await mount();
     await openDialog();
-    type("member-name", "Growth");
-    type("member-role", "Growth Marketer");
 
-    const buttons = Array.from(document.querySelectorAll<HTMLElement>("button")).filter(
-      (el) => el.textContent?.trim() === "Add agent",
-    );
+    expect(submit().hasAttribute("disabled")).toBe(true);
+    type("agent-add-name", "Growth");
+    // A name alone is not enough: the host derives the starting tool belt from
+    // the post, so an agent created without one starts with nothing.
+    expect(submit().hasAttribute("disabled")).toBe(true);
+    type("agent-add-role", "Growth Marketer");
+    expect(submit().hasAttribute("disabled")).toBe(false);
+  });
+
+  it("sends the name and the post, and nothing it no longer collects", async () => {
+    await mount();
+    await openDialog();
+    type("agent-add-name", "Growth");
+    type("agent-add-role", "Growth Marketer");
     await act(async () => {
-      buttons[buttons.length - 1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      submit().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(added).toHaveLength(1);
+    expect(added[0].name).toBe("Growth");
+    expect(added[0].role).toBe("Growth Marketer");
+    // At creation there is no blueprint to override, so an unwritten field is
+    // "no persona" rather than an empty one stored as an override.
     expect(added[0].instructions).toBeUndefined();
+    expect(added[0].description).toBeUndefined();
+    // Both retired from the console entirely, not merely from this dialog.
+    expect(added[0].budgetUsdDaily).toBeUndefined();
+    expect(added[0].inbox).toBeUndefined();
+  });
+
+  it("lands the operator on the new agent's page", async () => {
+    const onOpenAgent = await mount();
+    await openDialog();
+    type("agent-add-name", "Growth");
+    type("agent-add-role", "Growth Marketer");
+    await act(async () => {
+      submit().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // Against the id the host answered with, never the typed name: the roster
+    // key is the host's, and navigating to a guess is a 404 on a agent that
+    // was created successfully.
+    expect(onOpenAgent).toHaveBeenCalledWith("growth", { edit: true });
+  });
+
+  it("writes an unchosen face as no write at all", async () => {
+    await mount();
+    await openDialog();
+    type("agent-add-name", "Growth");
+    type("agent-add-role", "Growth Marketer");
+    await act(async () => {
+      submit().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // Nobody picked one, so there is nothing to send. The roster hashes a
+    // mascot from the id, and sending that back would turn "nobody chose" into
+    // a stored choice — the distinction `avatarRef` exists to keep.
+    expect(patched).toHaveLength(0);
   });
 });
