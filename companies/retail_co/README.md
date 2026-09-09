@@ -60,10 +60,10 @@ Then, against a running host:
 ```bash
 cargo run --features openhuman,hivemind,mcp --bin opencompany -- \
   serve --company companies/retail_co --home /tmp/retail
-python3 scripts/retail-tau2.py --task 0
+python3 scripts/tau2-sim.py --domain retail --task 0
 ```
 
-`scripts/retail-tau2.py` repoints the five entries at loopback, replays the
+`scripts/tau2-sim.py` repoints the five entries at loopback, replays the
 task's opening message into `triage`, and grades the shared retail database
 against tau2's own `evaluation_criteria`. Exit status is the number of tasks
 whose end state did not match.

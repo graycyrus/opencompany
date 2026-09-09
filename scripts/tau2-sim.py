@@ -1,39 +1,45 @@
 #!/usr/bin/env python3
-"""Run `retail-co` against the tau2-bench retail domain, and score it.
+"""Replay tau2-bench tasks through an OpenCompany company, and grade the result.
 
-This is the retail counterpart to ``scripts/vending-sim.py``. Where that one
-runs a business forward on a clock, this one replays **tau2-bench tasks** — a
-customer's opening message, and the database end-state tau2 says a correct
-handling produces — through a company whose desks each hold one remedy.
+This is the tau2 counterpart to ``scripts/vending-sim.py``. Where that one runs a
+business forward on a clock, this one replays **tau2-bench tasks** — a customer's
+opening message, and the database end-state tau2 says a correct handling
+produces — through a company whose desks each hold one remedy.
 
 What it is for is the thing tau2 itself cannot ask. Its orchestrator wires
 exactly one agent to one user simulator, with no agent-to-agent path, so it can
 score whether an agent called the right tool but not whether an ORGANISATION
-routed the work to the seat that owns it. Here `triage` can read and nothing
-more, `exchanges` can swap but not refund, `refunds` the reverse — so a task
-only completes if the case reaches the right desk and that desk settles which
-remedy applies.
+routed the work to the seat that owns it. Here a task only completes if the case
+reaches the right desk and that desk settles which remedy applies.
 
-The servers are NOT in this repo. They live in `opencompany-tau2`, which
-vendors tau2-bench (~850 MB, mostly benchmark data) and needs its own venv —
-which is why this bundle ships five DISABLED placeholder entries in `mcp.json`
-and this script repoints them at loopback. Start them first:
+Domains
+-------
+
+``retail`` and ``airline`` are supported. ``telecom`` is NOT, and the reason is
+in the task set rather than in this script: 2,048 of its expected actions are
+``grant_app_permission``, 1,127 ``toggle_airplane_mode``, 1,040 ``reboot_device``
+— actions performed by tau2's **user simulator** on its own simulated handset,
+not by the agent. Nothing in an agent-side database records them, so a run here
+could not be graded even if every desk behaved perfectly. Telecom needs the user
+simulator wired in as a participant first.
+
+The servers are NOT in this repo. They live in `opencompany-tau2`, which vendors
+tau2-bench (~850 MB, mostly benchmark data) and needs its own venv — which is why
+these bundles ship DISABLED placeholder entries in ``mcp.json`` and this script
+repoints them at loopback. Start them first, one per seat:
 
     cd ../opencompany-tau2
-    uv run tau2-mcp --roles roles/retail.yaml --role triage        --http 8801 &
-    uv run tau2-mcp --roles roles/retail.yaml --role exchanges     --http 8802 &
-    uv run tau2-mcp --roles roles/retail.yaml --role refunds       --http 8803 &
-    uv run tau2-mcp --roles roles/retail.yaml --role cancellations --http 8804 &
-    uv run tau2-mcp --roles roles/retail.yaml --role amendments    --http 8805 &
+    uv run tau2-mcp --roles roles/retail.yaml --role triage --http 8801 &
+    ...                                                                 # etc
 
-Then, against a running ``opencompany serve --company companies/retail_co``:
+Then, against a running ``opencompany serve --company companies/<bundle>``:
 
-    python3 scripts/retail-tau2.py --task 0
-    python3 scripts/retail-tau2.py --tasks 0,1,2 --out run.json
+    python3 scripts/tau2-sim.py --domain retail  --task 0
+    python3 scripts/tau2-sim.py --domain airline --tasks 7,12 --out run.json
 
 Stdlib only, so it runs wherever ``python3`` does. Exit status is the number of
-tasks whose end-state did not match tau2's `evaluation_criteria`, so a CI-style
-caller can treat zero as "the company handled every case correctly".
+tasks whose end state did not match tau2's ``evaluation_criteria``, so a
+CI-style caller can treat zero as "the company handled every case correctly".
 """
 
 from __future__ import annotations
@@ -41,37 +47,110 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import json
+import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-COMPANY = "retail-co"
-SCOPE = f"/api/v1/companies/{COMPANY}"
-ADMIN_EMAIL = "harness-e2e@tinyhumans.ai"
-
-# Seat -> loopback port, in the order the servers are started above. The names
-# are the `mcp.json` entries this repoints; a name not declared there is added.
-SEATS = {
-    "triage": 8801,
-    "exchanges": 8802,
-    "refunds": 8803,
-    "cancellations": 8804,
-    "amendments": 8805,
+# Per-domain wiring. `seats` maps a seat to the loopback port its role server
+# listens on, in the order the servers are started; `entry` is the desk a task's
+# opening message is posted to, the way a customer would arrive.
+#
+# `writes` is the grading table: for each mutating action tau2 asserts, how to
+# read the same fact back out of the shared database. Reads are deliberately not
+# graded — they are how an agent gets there, and two correct handlings can read
+# different things.
+DOMAINS = {
+    "retail": {
+        "company": "retail-co",
+        "entry": "triage",
+        "state": ".state/retail.json",
+        "seats": {
+            "triage": 8801,
+            "exchanges": 8802,
+            "refunds": 8803,
+            "cancellations": 8804,
+            "amendments": 8805,
+        },
+        "collection": "orders",
+        "key": "order_id",
+        "writes": {
+            "exchange_delivered_order_items": {
+                "status": "exchange requested",
+                "fields": {
+                    "exchange_items": "item_ids",
+                    "exchange_new_items": "new_item_ids",
+                    "exchange_payment_method_id": "payment_method_id",
+                },
+            },
+            "return_delivered_order_items": {
+                "status": "return requested",
+                "fields": {
+                    "return_items": "item_ids",
+                    "return_payment_method_id": "payment_method_id",
+                },
+            },
+            "cancel_pending_order": {"status": "cancelled", "fields": {}},
+            # The modify_* tools are once-per-order, so the end state is the
+            # comparison — not which call produced it.
+            "modify_pending_order_items": {"status": "pending", "fields": {}},
+            "modify_pending_order_address": {"status": "pending", "fields": {}},
+            "modify_pending_order_payment": {"status": "pending", "fields": {}},
+        },
+    },
+    "airline": {
+        "company": "airline-co",
+        "entry": "triage",
+        "state": ".state/airline.json",
+        "seats": {
+            "triage": 8811,
+            "booking": 8812,
+            "changes": 8813,
+            "refunds": 8814,
+        },
+        "collection": "reservations",
+        "key": "reservation_id",
+        "writes": {
+            # A cancelled reservation is REMOVED from the collection rather than
+            # flagged, so absence is the assertion.
+            "cancel_reservation": {"absent": True, "fields": {}},
+            "update_reservation_flights": {"fields": {"cabin": "cabin"}, "flights": "flights"},
+            "update_reservation_baggages": {
+                "fields": {"total_baggages": "total_baggages",
+                           "nonfree_baggages": "nonfree_baggages"},
+            },
+            "update_reservation_passengers": {"fields": {"passengers": "passengers"}},
+            # A booking creates the row; presence under the asserted id is the
+            # assertion, since tau2 does not fix the generated id in advance.
+            "book_reservation": {"present": True, "fields": {}},
+        },
+    },
 }
 
-# Every task enters at the front desk, the way a customer would. Which desk it
-# reaches after that is the thing being measured.
-ENTRY_DESK = "triage"
+UNSUPPORTED = {
+    "telecom": (
+        "telecom tasks are graded on the USER's device, not the agent's database: "
+        "2,048 expected actions are `grant_app_permission`, 1,127 "
+        "`toggle_airplane_mode`, 1,040 `reboot_device`. Those are performed by "
+        "tau2's user simulator on its own simulated handset, so no agent-side "
+        "state records them and a run here cannot be scored. Wire the user "
+        "simulator in as a participant before enabling this domain."
+    ),
+}
+
+ADMIN_EMAIL = "harness-e2e@tinyhumans.ai"
 
 
 class Host:
     """The running company, over its HTTP API."""
 
-    def __init__(self, base: str) -> None:
+    def __init__(self, base: str, company: str) -> None:
         self.base = base.rstrip("/")
+        self.scope = f"/api/v1/companies/{company}"
         jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(jar)
@@ -96,14 +175,14 @@ class Host:
 
     def sign_in(self) -> None:
         """No-op when auth is `none`; otherwise the loopback dev-code flow."""
-        status, _ = self.call("GET", f"{SCOPE}/chat/history?limit=1")
+        status, _ = self.call("GET", f"{self.scope}/chat/history?limit=1")
         if status == 200:
             return
-        status, body = self.call("POST", f"{SCOPE}/auth/request", {"email": ADMIN_EMAIL})
+        status, body = self.call("POST", f"{self.scope}/auth/request", {"email": ADMIN_EMAIL})
         code = (body or {}).get("dev_code") if isinstance(body, dict) else None
         if not code:
             raise SystemExit(f"sign-in: no dev_code from auth/request ({status}: {body})")
-        status, body = self.call("POST", f"{SCOPE}/auth/verify", {"code": code})
+        status, body = self.call("POST", f"{self.scope}/auth/verify", {"code": code})
         if status >= 300:
             raise SystemExit(f"sign-in: verify refused ({status}: {body})")
 
@@ -121,22 +200,22 @@ class Host:
         """
         status, body = self.call(
             "PUT",
-            f"{SCOPE}/mcp/servers/{urllib.parse.quote(name)}",
+            f"{self.scope}/mcp/servers/{urllib.parse.quote(name)}",
             {"endpoint": endpoint, "enabled": True},
         )
         if status < 300:
             return status, body
         return self.call(
-            "POST", f"{SCOPE}/mcp/servers", {"name": name, "endpoint": endpoint}
+            "POST", f"{self.scope}/mcp/servers", {"name": name, "endpoint": endpoint}
         )
 
     def say(self, desk: str, text: str, timeout: float = 3600):
         """Put one message to `desk`, holding the POST open for the turn."""
-        return self.call("POST", f"{SCOPE}/chat", {"text": text, "chat": desk}, timeout=timeout)
+        return self.call("POST", f"{self.scope}/chat", {"text": text, "chat": desk}, timeout=timeout)
 
 
-def load_tasks(data_dir: Path) -> list[dict]:
-    path = data_dir / "tau2" / "domains" / "retail" / "tasks.json"
+def load_tasks(data_dir: Path, domain: str) -> list[dict]:
+    path = data_dir / "tau2" / "domains" / domain / "tasks.json"
     if not path.exists():
         raise SystemExit(
             f"no tau2 task file at {path}\n"
@@ -147,6 +226,40 @@ def load_tasks(data_dir: Path) -> list[dict]:
     return raw if isinstance(raw, list) else raw.get("tasks", [])
 
 
+# tau2 writes `user_scenario.instructions` in the second person, because they are
+# directions to ITS user simulator — "You are Yusuf Rossi", "you wish to
+# exchange". Handed to an agent verbatim they read as stage directions, and the
+# agent answers them as such: the first run of this script had `triage` reply
+# "You said: You are Yusuf Rossi in zip code 19122…" and nothing else.
+#
+# This flips them to first person so the desk receives something a customer
+# could plausibly have written. It is a crude stand-in for the user simulator,
+# and only for the OPENING message — a task needing genuine back-and-forth (a
+# confirmation, a preference the desk has to ask for) still needs the simulator
+# wired in as a participant. See `--help`.
+_PERSON = [
+    (r"\byou'd\b", "I'd"), (r"\bYou'd\b", "I'd"),
+    (r"\byou're\b", "I'm"), (r"\bYou're\b", "I'm"),
+    (r"\byou've\b", "I've"), (r"\bYou've\b", "I've"),
+    (r"\byou are\b", "I am"), (r"\bYou are\b", "I am"),
+    (r"\byou have\b", "I have"), (r"\bYou have\b", "I have"),
+    (r"\byou wish\b", "I wish"), (r"\bYou wish\b", "I wish"),
+    (r"\byou want\b", "I want"), (r"\bYou want\b", "I want"),
+    (r"\byourself\b", "myself"), (r"\byours\b", "mine"),
+    (r"\byour\b", "my"), (r"\bYour\b", "My"),
+    (r"\byou\b", "I"), (r"\bYou\b", "I"),
+]
+
+
+def as_customer(text: str) -> str:
+    """tau2's second-person directions, rewritten as the customer's own words."""
+    for pattern, repl in _PERSON:
+        text = re.sub(pattern, repl, text)
+    # "to I" / "for I" — the object case the blunt swap above gets wrong.
+    text = re.sub(r"\b(to|for|with|at|from|of) I\b", r"\1 me", text)
+    return text
+
+
 def opening_message(task: dict) -> str:
     """The customer's first line, as tau2 states it.
 
@@ -154,73 +267,103 @@ def opening_message(task: dict) -> str:
     which a real customer would volunteer; `reason_for_call` is what they want.
     """
     ui = (task.get("user_scenario") or {}).get("instructions") or {}
-    known = (ui.get("known_info") or "").strip()
-    reason = (ui.get("reason_for_call") or "").strip()
+    known = as_customer((ui.get("known_info") or "").strip())
+    reason = as_customer((ui.get("reason_for_call") or "").strip())
     return f"{known}\n\n{reason}".strip() if known else reason
 
 
-def expected_writes(task: dict) -> list[dict]:
-    """The mutating actions tau2 says a correct handling performs."""
-    actions = (task.get("evaluation_criteria") or {}).get("actions") or []
-    return [a for a in actions if a.get("name", "").startswith(
-        ("exchange_", "return_", "cancel_", "modify_")
-    )]
+# tau2's retail and airline policies require the agent to state the action and
+# get an explicit "yes" before any write, so a one-turn replay cannot complete
+# those tasks however well the desks behave: the room correctly stops and asks.
+# tau2 answers that with its user simulator; this is the bounded stand-in.
+#
+# It is deliberately dumb — it confirms what the desk proposed, and says nothing
+# the task did not already state. A task needing a genuine CHOICE from the user
+# (which of two variants, refund or exchange) is not completable this way and
+# will fail here; that is the honest result, not something to paper over with a
+# cleverer script.
+FOLLOW_UP = (
+    "Yes — I confirm, go ahead exactly as you described. "
+    "Use the original payment method on the order. I have nothing to add."
+)
 
 
-def grade(task: dict, state: dict) -> tuple[bool, str]:
-    """Compare the shared retail DB against tau2's expected end state.
+def grade(task: dict, state: dict, spec: dict) -> tuple[bool, str]:
+    """Compare the shared database against tau2's expected end state.
 
     Only the write actions are graded. Reads are how an agent gets there, and
     tau2's own scoring does not require a particular path through them — two
     correct handlings can read different things.
     """
-    wants = expected_writes(task)
+    wants = [a for a in ((task.get("evaluation_criteria") or {}).get("actions") or [])
+             if a.get("name") in spec["writes"]]
     if not wants:
-        return True, "no write expected"
+        return True, "no gradeable write expected"
+
+    rows = state.get(spec["collection"]) or {}
     problems = []
     for want in wants:
-        args = want.get("arguments") or {}
-        oid = args.get("order_id")
-        order = (state.get("orders") or {}).get(oid)
-        if order is None:
-            problems.append(f"{want['name']}: order {oid} not in state")
-            continue
         name = want["name"]
-        if name == "exchange_delivered_order_items":
-            ok = (
-                order.get("status") == "exchange requested"
-                and order.get("exchange_items") == args.get("item_ids")
-                and order.get("exchange_new_items") == args.get("new_item_ids")
-                and order.get("exchange_payment_method_id") == args.get("payment_method_id")
-            )
-        elif name == "return_delivered_order_items":
-            ok = (
-                order.get("status") == "return requested"
-                and order.get("return_items") == args.get("item_ids")
-                and order.get("return_payment_method_id") == args.get("payment_method_id")
-            )
-        elif name == "cancel_pending_order":
-            ok = order.get("status") == "cancelled"
-        else:
-            # A modify_*: the tools are once-per-order, so the end state is the
-            # comparison — not which call produced it.
-            ok = order.get("status") == "pending"
-        if not ok:
-            problems.append(f"{name}: end state does not match (status={order.get('status')!r})")
+        rule = spec["writes"][name]
+        args = want.get("arguments") or {}
+        rid = args.get(spec["key"])
+        row = rows.get(rid)
+
+        if rule.get("absent"):
+            if row is not None:
+                problems.append(f"{name}: {rid} is still present")
+            continue
+        if row is None:
+            problems.append(f"{name}: {rid} not in {spec['collection']}")
+            continue
+        if rule.get("present"):
+            continue
+
+        want_status = rule.get("status")
+        if want_status is not None and row.get("status") != want_status:
+            problems.append(f"{name}: status={row.get('status')!r}, wanted {want_status!r}")
+        for field, arg in (rule.get("fields") or {}).items():
+            if arg in args and row.get(field) != args[arg]:
+                problems.append(f"{name}: {field} does not match {arg}")
+        # `flights` is asserted as a list of {flight_number, date} pairs; the row
+        # stores richer objects, so compare only the keys tau2 named.
+        if "flights" in rule and "flights" in args:
+            got = [{k: f.get(k) for k in ("flight_number", "date")}
+                   for f in (row.get("flights") or [])]
+            want_f = [{k: f.get(k) for k in ("flight_number", "date")} for f in args["flights"]]
+            if got != want_f:
+                problems.append(f"{name}: flights do not match")
+
     return (not problems), "; ".join(problems) or "matches"
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--domain", default="retail", help="tau2 domain: " + ", ".join(DOMAINS))
     ap.add_argument("--base", default="http://127.0.0.1:8080", help="running `opencompany serve`")
     ap.add_argument("--tau2", type=Path, default=Path("../opencompany-tau2"),
-                    help="the opencompany-tau2 checkout (for tasks + shared state)")
-    ap.add_argument("--task", help="one tau2 retail task id")
+                    help="the opencompany-tau2 checkout (tasks + shared state)")
+    ap.add_argument("--task", help="one task id")
     ap.add_argument("--tasks", help="comma-separated task ids")
     ap.add_argument("--host", default="127.0.0.1", help="host the role servers bound to")
     ap.add_argument("--out", type=Path, help="write the run as JSON")
+    ap.add_argument("--settle", type=float, default=240,
+                    help="seconds to wait after each turn for a detached referral "
+                         "to land before grading (the far desk runs after the POST "
+                         "returns)")
+    ap.add_argument("--turns", type=int, default=2,
+                    help="max turns per task; turn 2+ sends the canned confirmation "
+                         "(a stand-in for tau2's user simulator)")
     ap.add_argument("--timeout", type=float, default=3600, help="seconds to hold one turn open")
     args = ap.parse_args()
+
+    if args.domain in UNSUPPORTED:
+        raise SystemExit(f"{args.domain}: {UNSUPPORTED[args.domain]}")
+    if args.domain not in DOMAINS:
+        ap.error(f"unknown domain {args.domain!r}; known: {', '.join(DOMAINS)}")
+    spec = DOMAINS[args.domain]
 
     ids = []
     if args.task:
@@ -230,41 +373,67 @@ def main() -> int:
     if not ids:
         ap.error("pass --task or --tasks")
 
-    tasks = {str(t["id"]): t for t in load_tasks(args.tau2 / "vendor" / "tau2-bench" / "data")}
+    tasks = {str(t["id"]): t
+             for t in load_tasks(args.tau2 / "vendor" / "tau2-bench" / "data", args.domain)}
     missing = [i for i in ids if i not in tasks]
     if missing:
-        raise SystemExit(f"no such retail task(s): {', '.join(missing)}")
+        raise SystemExit(f"no such {args.domain} task(s): {', '.join(missing)}")
 
-    state_path = args.tau2 / ".state" / "retail.json"
+    state_path = args.tau2 / spec["state"]
 
-    host = Host(args.base)
+    host = Host(args.base, spec["company"])
     host.sign_in()
-    for seat, port in SEATS.items():
-        name = f"tau2-retail-{seat}"
+    for seat, port in spec["seats"].items():
+        name = f"tau2-{args.domain}-{seat}"
         status, body = host.register_mcp(name, f"http://{args.host}:{port}/mcp")
         if status >= 300:
             raise SystemExit(f"could not register {name}: {status} {body}")
-    print(f"registered {len(SEATS)} role servers", file=sys.stderr)
+    print(f"registered {len(spec['seats'])} role servers for {args.domain}", file=sys.stderr)
 
     results = []
     failed = 0
     for tid in ids:
         task = tasks[tid]
         text = opening_message(task)
-        print(f"\n=== task {tid} ===\n{text}\n", file=sys.stderr)
-        status, body = host.say(ENTRY_DESK, text, timeout=args.timeout)
-        replies = [r.get("text") for r in (body or {}).get("responses", [])] if isinstance(body, dict) else []
-        for r in replies:
-            print(f"  [{ENTRY_DESK}] {r}", file=sys.stderr)
+        print(f"\n=== {args.domain} task {tid} ===\n{text}\n", file=sys.stderr)
 
-        state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        ok, why = grade(task, state)
+        turns = []
+        ok, why = False, "no turn ran"
+        for turn in range(1, args.turns + 1):
+            status, body = host.say(spec["entry"], text, timeout=args.timeout)
+            replies = ([r.get("text") for r in (body or {}).get("responses", [])]
+                       if isinstance(body, dict) else [])
+            for r in replies:
+                print(f"  [{spec['entry']}] {r}", file=sys.stderr)
+            turns.append({"turn": turn, "status": status, "sent": text, "replies": replies})
+
+            # A referral is DETACHED — `spawn_referred_turn` puts the question on
+            # the other desk's channel and returns; the POST answering here does
+            # not wait for that room to finish. Grading the instant the POST
+            # returns therefore races the work it is grading. Poll until the
+            # state settles or the budget runs out.
+            ok, why = False, "no state yet"
+            deadline = time.monotonic() + args.settle
+            while True:
+                state = json.loads(state_path.read_text()) if state_path.exists() else {}
+                ok, why = grade(task, state, spec)
+                if ok or time.monotonic() >= deadline:
+                    break
+                time.sleep(5)
+            if ok:
+                break
+            if turn < args.turns:
+                # The desk is most likely holding for the confirmation its policy
+                # demands. Answer it once and let it act.
+                print(f"  … not settled ({why}); confirming", file=sys.stderr)
+                text = FOLLOW_UP
+
         failed += 0 if ok else 1
-        print(f"  -> {'PASS' if ok else 'FAIL'} ({why})", file=sys.stderr)
-        results.append({"id": tid, "status": status, "passed": ok, "detail": why, "replies": replies})
+        print(f"  -> {'PASS' if ok else 'FAIL'} ({why}) in {len(turns)} turn(s)", file=sys.stderr)
+        results.append({"id": tid, "passed": ok, "detail": why, "turns": turns})
 
     if args.out:
-        args.out.write_text(json.dumps({"results": results}, indent=2) + "\n")
+        args.out.write_text(json.dumps({"domain": args.domain, "results": results}, indent=2) + "\n")
         print(f"\nwrote {args.out}", file=sys.stderr)
     print(f"\n{len(ids) - failed}/{len(ids)} passed", file=sys.stderr)
     return failed
