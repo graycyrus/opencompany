@@ -342,6 +342,31 @@ pub(crate) fn catalog_cache_scoped(base_url: &str, scope: Option<&str>) -> Arc<M
     Arc::clone(registry.entry(key).or_default())
 }
 
+/// Drop every **authenticated** catalog entry read on `company`'s behalf.
+///
+/// Called when that company's inference credential is written, because a
+/// rotation changes what the endpoint will answer without changing anything in
+/// the cache key — which is made of non-secret ids on purpose, and must stay
+/// that way (see [`catalog_registry`]). Without this, a company that rotated to
+/// a key with different entitlements would keep reading the previous
+/// credential's catalog for the rest of [`MODEL_CATALOG_TTL`], so the new bearer
+/// would never be presented to `/models` at all (Codex review on #2045).
+///
+/// Matches on the `company\u{1}` prefix, which covers both shapes the scope
+/// takes: the console route's `(company, endpoint)` and the turn path's
+/// `(company, harness, endpoint)`. Keyless entries are keyed on the bare
+/// endpoint and are deliberately left alone — an unauthenticated catalog is a
+/// public property of the endpoint and no credential change can alter it. A URL
+/// cannot contain the separator, so the prefix cannot match one by accident.
+pub(crate) fn evict_company_catalogs(company: &str) {
+    let prefix = format!("{company}\u{1}");
+    if let Ok(mut registry) = catalog_registry().lock() {
+        registry.retain(|key, _| !key.starts_with(&prefix));
+    }
+    // A poisoned registry needs no handling here: `catalog_cache_scoped` already
+    // hands out an unshared cache in that state, so nothing stale can be served.
+}
+
 /// The unscoped (public, keyless) cache for an endpoint.
 #[cfg(test)]
 pub(crate) fn catalog_cache(base_url: &str) -> Arc<ModelCatalogCache> {
@@ -834,6 +859,54 @@ mod tests {
         assert_eq!(
             catalog_cache_scoped(ENDPOINT, Some("acme")).lookup(now),
             None
+        );
+    }
+
+    /// Rotating a credential drops that company's authenticated catalogs, and
+    /// nobody else's.
+    ///
+    /// The cache key holds non-secret ids only, so a rotation is invisible to it
+    /// — the previous credential's catalog would otherwise answer for the rest
+    /// of [`MODEL_CATALOG_TTL`] and the new bearer would never reach `/models`
+    /// (Codex review on #2045). Eviction on the write is what keeps that
+    /// invariant affordable.
+    #[test]
+    fn rotating_a_credential_evicts_only_that_companys_authenticated_catalogs() {
+        const ENDPOINT: &str = "https://rotating-gateway.example/v1";
+        let now = Instant::now();
+        let acme_console = "rot-acme".to_string();
+        let acme_harness = format!("rot-acme\u{1}{}", "research");
+
+        catalog_cache_scoped(ENDPOINT, Some(&acme_console))
+            .store(vec![model("old/entitlement")], now);
+        catalog_cache_scoped(ENDPOINT, Some(&acme_harness))
+            .store(vec![model("old/entitlement")], now);
+        catalog_cache_scoped(ENDPOINT, Some("rot-other"))
+            .store(vec![model("other/entitlement")], now);
+        catalog_cache_scoped(ENDPOINT, None).store(vec![model("public/model")], now);
+
+        evict_company_catalogs("rot-acme");
+
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&acme_console)).lookup(now),
+            None,
+            "the console's own scoped read must be re-fetched with the new credential"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&acme_harness)).lookup(now),
+            None,
+            "and so must every harness scope beneath that company"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some("rot-other")).lookup(now),
+            Some(vec![model("other/entitlement")]),
+            "another company's credential did not change, so its catalog stands"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, None).lookup(now),
+            Some(vec![model("public/model")]),
+            "a keyless catalog is a public property of the endpoint and no \
+             credential change can alter it"
         );
     }
 

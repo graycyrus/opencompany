@@ -720,6 +720,15 @@ async fn set_config(
         store_key(runtime.id(), runtime.secrets().as_ref(), key.trim())
             .await
             .map_err(ApiError)?;
+        // A rotation changes what the endpoint will answer without changing the
+        // cache key, which is deliberately made of non-secret ids only. Left
+        // alone, the catalog read with the *previous* credential would keep
+        // answering for up to `MODEL_CATALOG_TTL`, so an entitlement-changing
+        // rotation would never present the new bearer to `/models`: turns could
+        // hold the old vocabulary and the console could offer models the new
+        // account cannot reach (Codex review on #2045). Evicting on the write is
+        // the fix that does not require the credential to become part of the key.
+        crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
     }
 
     let status = effective_status(&state, runtime).await?;
@@ -1135,7 +1144,20 @@ base_url = "https://byo.example/v1"
     }
 
     async fn state_with_company(home: &std::path::Path) -> AppState {
-        let id = CompanyId::new("acme");
+        state_with_company_named(home, "acme").await
+    }
+
+    /// A company under a caller-chosen id.
+    ///
+    /// Almost every test here can share `acme`, but the catalog cache is
+    /// process-global and keyed on the company, and storing a key now evicts
+    /// that company's authenticated entries (Codex review on #2045). A test that
+    /// rotates a credential therefore wipes the seeded fixtures of every sibling
+    /// running beside it under the same id — libtest runs these in parallel — so
+    /// it needs an id of its own rather than an ordering assumption that cannot
+    /// hold.
+    async fn state_with_company_named(home: &std::path::Path, name: &str) -> AppState {
+        let id = CompanyId::new(name);
         save_record(home, &id, &manifest()).await;
         let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
             .with_id(id.clone())
@@ -1144,7 +1166,7 @@ base_url = "https://byo.example/v1"
             .unwrap();
         let state = AppState::new(AppConfig::default());
         state.registry().insert(id, std::sync::Arc::new(runtime));
-        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        crate::server::test_support::seed_fixed_admin(&state, name).await;
         state
     }
 
@@ -1401,10 +1423,22 @@ base_url = "https://byo.example/v1"
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value, String) {
+        send_as(state, "acme", method, uri, body).await
+    }
+
+    /// `send` against a company other than `acme`, for the tests that need an id
+    /// of their own — see `state_with_company_named`.
+    async fn send_as(
+        state: &AppState,
+        company: &str,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value, String) {
         let request = Request::builder()
             .method(method)
             .uri(uri)
-            .header("cookie", crate::server::test_support::fixed_cookie("acme"));
+            .header("cookie", crate::server::test_support::fixed_cookie(company));
         let request = match body {
             Some(body) => request
                 .header("content-type", "application/json")
@@ -1434,7 +1468,13 @@ base_url = "https://byo.example/v1"
     /// company from [`state_with_company`], and a seed in the shared/keyless
     /// slot would no longer be the entry the route reads.
     fn seed_catalog(base_url: &str, ids: &[&str]) {
-        crate::server::inference_models::catalog_cache_scoped(base_url, Some("acme")).store(
+        seed_catalog_for("acme", base_url, ids);
+    }
+
+    /// Seed the authenticated catalog cache for a named company — the scope the
+    /// route reads under. Needed by any test that does not use `acme`.
+    fn seed_catalog_for(company: &str, base_url: &str, ids: &[&str]) {
+        crate::server::inference_models::catalog_cache_scoped(base_url, Some(company)).store(
             ids.iter()
                 .map(|id| crate::server::inference_models::InferenceModel {
                     id: (*id).to_string(),
@@ -1459,11 +1499,6 @@ base_url = "https://byo.example/v1"
         const ENDPOINT: &str = "http://127.0.0.1:9/tier-native/v1";
         let home_dir = home();
         let state = state_with_company(home_dir.path()).await;
-        seed_catalog(
-            ENDPOINT,
-            &["agentic-v1", "chat-v1", "reasoning-v1", "vision-v1"],
-        );
-
         let (status, _, raw) = send(
             &state,
             "PUT",
@@ -1476,6 +1511,18 @@ base_url = "https://byo.example/v1"
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
+
+        // Seeded *after* the save, not before: storing a key evicts this
+        // company's authenticated catalogs, because a rotation changes what the
+        // endpoint will answer without changing the cache key (Codex review on
+        // #2045). Seeding first meant the save threw the fixture away and the
+        // route fell through to a real request. This order is also what happens
+        // in life — the cache is warmed by a read, which comes after the config
+        // exists to be read against.
+        seed_catalog(
+            ENDPOINT,
+            &["agentic-v1", "chat-v1", "reasoning-v1", "vision-v1"],
+        );
 
         let (status, body, raw) =
             send(&state, "GET", "/api/v1/company/inference/models", None).await;
@@ -1513,16 +1560,6 @@ base_url = "https://byo.example/v1"
         const ENDPOINT: &str = "http://127.0.0.1:9/concrete/v1";
         let home_dir = home();
         let state = state_with_company(home_dir.path()).await;
-        seed_catalog(
-            ENDPOINT,
-            &[
-                "anthropic/claude-opus-5",
-                "anthropic/claude-sonnet-5",
-                "openai/gpt-5.6-sol-pro",
-                "qwen/qwen3.8-max",
-            ],
-        );
-
         let (status, _, raw) = send(
             &state,
             "PUT",
@@ -1536,6 +1573,18 @@ base_url = "https://byo.example/v1"
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
 
+        // After the save, for the same reason as the test above: storing a key
+        // evicts this company's authenticated catalogs.
+        seed_catalog(
+            ENDPOINT,
+            &[
+                "anthropic/claude-opus-5",
+                "anthropic/claude-sonnet-5",
+                "openai/gpt-5.6-sol-pro",
+                "qwen/qwen3.8-max",
+            ],
+        );
+
         let (status, body, raw) =
             send(&state, "GET", "/api/v1/company/inference/models", None).await;
 
@@ -1544,6 +1593,88 @@ base_url = "https://byo.example/v1"
         assert_eq!(
             body["tierDefaults"]["agentic-v1"], "anthropic/claude-opus-5",
             "{raw}"
+        );
+    }
+
+    /// Rotating the key does not let the route answer from the catalog the
+    /// *previous* credential fetched.
+    ///
+    /// The cache key holds non-secret ids only, so a rotation is invisible to
+    /// it: without eviction the pre-rotation catalog would answer for the rest
+    /// of `MODEL_CATALOG_TTL` and the new bearer would never reach `/models`,
+    /// so the console could offer models the new account cannot access (Codex
+    /// review on #2045).
+    ///
+    /// Asserted through the route rather than the registry — the registry-level
+    /// boundaries are covered by
+    /// `rotating_a_credential_evicts_only_that_companys_authenticated_catalogs`.
+    /// The endpoint is unreachable on purpose: after the eviction there is
+    /// nothing cached to serve, so the route reports a failure instead of
+    /// handing back the stale ids, and *that* is the observable difference.
+    #[tokio::test]
+    async fn rotating_the_key_does_not_serve_the_previous_credentials_catalog() {
+        const ENDPOINT: &str = "http://127.0.0.1:9/rotated/v1";
+        // Its own company: eviction is company-wide, so rotating under `acme`
+        // would clear the fixtures of every sibling test running in parallel.
+        const COMPANY: &str = "rotator";
+        let home_dir = home();
+        let state = state_with_company_named(home_dir.path(), COMPANY).await;
+
+        let configure = |key: &'static str| {
+            send_as(
+                &state,
+                COMPANY,
+                "PUT",
+                "/api/v1/company/inference",
+                Some(json!({
+                    "provider": "openai_compatible",
+                    "baseUrl": ENDPOINT,
+                    "key": key,
+                })),
+            )
+        };
+
+        let (status, _, raw) = configure("first-token").await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        // What the first credential saw.
+        seed_catalog_for(COMPANY, ENDPOINT, &["entitled/first-only"]);
+
+        let (status, body, raw) = send_as(
+            &state,
+            COMPANY,
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(
+            body["models"][0]["id"], "entitled/first-only",
+            "the first credential's catalog is cached and served: {raw}"
+        );
+
+        // Rotate. The endpoint and the company are unchanged, so nothing in the
+        // cache key moves — only the credential behind it.
+        let (status, _, raw) = configure("second-token").await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) = send_as(
+            &state,
+            COMPANY,
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_ne!(
+            body["models"][0]["id"], "entitled/first-only",
+            "the rotated credential must not be answered from the old key's catalog: {raw}"
+        );
+        assert!(
+            body["error"].is_string(),
+            "with the entry evicted and the endpoint unreachable, the route reports why \
+             rather than replaying stale ids: {raw}"
         );
     }
 
