@@ -67,6 +67,13 @@ curl -X PUT localhost:8099/api/v1/companies/retail-co/inference \
   -d "{\"provider\":\"openrouter\",\"base_url\":\"https://openrouter.ai/api/v1\",\"key\":\"$OPENROUTER_API_KEY\"}"
 ```
 
+**Send the `models` table with the key.** `PUT …/inference` stores the whole
+config, and an omitted `models` becomes an empty map that then *shadows* this
+bundle's `[inference.models]` — the next turn asks the provider for a default
+model nobody chose. Observed: a `PUT` carrying only the key made the probe
+request `anthropic/claude-sonnet-5`, which the account's allowed-providers
+refused. `--check` catches this.
+
 A company declaring `[inference]` consults its own `inference/key` secret, so
 `OPENCOMPANY_INFERENCE_KEY` does **not** stand in for it — the first turn fails
 with a 401 from the platform endpoint rather than from OpenRouter. Hosting
@@ -80,7 +87,16 @@ cargo run --features openhuman,hivemind,mcp --bin opencompany -- \
 python3 scripts/tau2-sim.py --domain retail --task 0
 ```
 
-`scripts/tau2-sim.py` repoints the five entries at loopback, replays the
+Verify the whole rig before spending a model call — role servers reachable with
+the exact tool scope each seat should have, desks staffed as intended, MCP
+registered and reachable *through the host*, the credential probing clean, and
+the tau2 state present:
+
+```bash
+python3 scripts/tau2-sim.py --domain retail --check
+```
+
+Exit status is the number of failed checks. Then `scripts/tau2-sim.py` repoints the five entries at loopback, replays the
 task's opening message into `triage`, and grades the shared retail database
 against tau2's own `evaluation_criteria`. Exit status is the number of tasks
 whose end state did not match.

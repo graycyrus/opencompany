@@ -69,12 +69,21 @@ DOMAINS = {
         "company": "retail-co",
         "entry": "triage",
         "state": ".state/retail.json",
+        # seat -> (port, tools in scope, of which mutating). The counts are the
+        # contract this whole design rests on: `triage` holding a write tool, or
+        # `exchanges` reaching the refund tool, means the scoping silently broke
+        # and every later result is meaningless. `--check` asserts them.
         "seats": {
-            "triage": 8801,
-            "exchanges": 8802,
-            "refunds": 8803,
-            "cancellations": 8804,
-            "amendments": 8805,
+            "triage": (8801, 9, 0),
+            "exchanges": (8802, 9, 1),
+            "refunds": (8803, 8, 1),
+            "cancellations": (8804, 8, 1),
+            "amendments": (8805, 11, 3),
+        },
+        "desks": {
+            "triage": ["triage"],
+            "order_ops": ["cancellations", "amendments"],
+            "returns": ["exchanges", "refunds"],
         },
         "collection": "orders",
         "key": "order_id",
@@ -107,10 +116,15 @@ DOMAINS = {
         "entry": "triage",
         "state": ".state/airline.json",
         "seats": {
-            "triage": 8811,
-            "booking": 8812,
-            "changes": 8813,
-            "refunds": 8814,
+            "triage": (8811, 8, 0),
+            "booking": (8812, 9, 1),
+            "changes": (8813, 11, 3),
+            "refunds": (8814, 10, 2),
+        },
+        "desks": {
+            "triage": ["triage"],
+            "booking": ["booking"],
+            "post_booking": ["changes", "refunds"],
         },
         "collection": "reservations",
         "key": "reservation_id",
@@ -172,6 +186,12 @@ class Host:
                 return err.code, json.loads(raw)
             except ValueError:
                 return err.code, raw.decode(errors="replace")
+        except (urllib.error.URLError, OSError) as err:
+            # Nothing listening, or the host died mid-run. Reported as 0 rather
+            # than raising, so `--check` can say "unreachable" instead of dying
+            # with a traceback — and so it is never mistaken for a 404 from a
+            # host that IS answering.
+            return 0, f"unreachable: {err}"
 
     def sign_in(self) -> None:
         """No-op when auth is `none`; otherwise the loopback dev-code flow."""
@@ -337,6 +357,92 @@ def grade(task: dict, state: dict, spec: dict) -> tuple[bool, str]:
     return (not problems), "; ".join(problems) or "matches"
 
 
+def check(host: "Host", spec: dict, domain: str, state_path: Path) -> int:
+    """Preflight: assert every layer this run depends on, spending no model call.
+
+    Each of these has failed silently at least once while this bundle was being
+    built, and each looked like a model problem from the transcript alone:
+
+    * a role server reading a state file deleted under it — every tool call came
+      back `Error executing tool`, which reads as the agent using them wrong;
+    * `mcp.json` declaring server names the runner never registered, so a desk
+      deliberated confidently with no tools at all;
+    * a scope quietly widening, which makes a pass meaningless rather than loud;
+    * no inference key, which surfaces as a 401 on the first turn rather than at
+      boot;
+    * a desk with one member where two were intended — `deliberates()` needs
+      two, so the room never convenes and one seat decides alone.
+    """
+    bad = 0
+
+    def ok(label: str, good: bool, detail: str = "") -> None:
+        nonlocal bad
+        bad += 0 if good else 1
+        mark = "ok  " if good else "FAIL"
+        print(f"  [{mark}] {label}{(' — ' + detail) if detail else ''}")
+
+    print(f"role servers ({domain})")
+    for seat, (port, want_tools, want_mut) in spec["seats"].items():
+        url = f"http://127.0.0.1:{port}/mcp"
+        body = json.dumps({"jsonrpc": "2.0", "id": 1,
+                           "method": "tools/list", "params": {}}).encode()
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("content-type", "application/json")
+        req.add_header("accept", "application/json, text/event-stream")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode(errors="replace")
+        except Exception as err:  # noqa: BLE001 — any failure is the same verdict
+            ok(f"{seat} :{port}", False, f"unreachable ({err})")
+            continue
+        tools = len(re.findall(r'"name":"[a-z_]+"', raw))
+        mut = raw.count("write/mutates")
+        ok(f"{seat} :{port}", tools == want_tools and mut == want_mut,
+           f"{tools} tools / {mut} mutating, wanted {want_tools}/{want_mut}")
+
+    print("company")
+    status, desks = host.call("GET", f"{host.scope}/desks")
+    ok("desks readable", status == 200, f"HTTP {status}")
+    if status == 200 and isinstance(desks, list):
+        got = {d.get("id"): sorted(d.get("members") or []) for d in desks}
+        for desk, members in spec["desks"].items():
+            ok(f"desk {desk}", got.get(desk) == sorted(members),
+               f"members={got.get(desk)}, wanted {sorted(members)}")
+            if len(members) >= 2:
+                ok(f"desk {desk} can deliberate", len(got.get(desk) or []) >= 2,
+                   "needs two seats")
+
+    print("mcp wiring")
+    status, servers = host.call("GET", f"{host.scope}/mcp/servers")
+    if status != 200 or not isinstance(servers, list):
+        ok("server list", False, f"HTTP {status}")
+    else:
+        by_name = {x.get("name"): x for x in servers}
+        for seat in spec["seats"]:
+            name = f"tau2-{domain}-{seat}"
+            row = by_name.get(name)
+            live = bool(row and row.get("enabled"))
+            ok(f"{name} enabled", live,
+               "" if live else ("not registered" if row is None else "declared but disabled"))
+            if row and row.get("enabled"):
+                st, tools = host.call("GET", f"{host.scope}/mcp/servers/{urllib.parse.quote(name)}/tools")
+                ok(f"{name} reachable from the host", st == 200 and isinstance(tools, list),
+                   f"HTTP {st}")
+
+    print("inference")
+    status, body = host.call("POST", f"{host.scope}/inference/test", {}, timeout=120)
+    fine = status == 200 and isinstance(body, dict) and body.get("ok")
+    ok("credential probes clean", bool(fine),
+       (body or {}).get("error", f"HTTP {status}") if not fine else "")
+
+    print("tau2 state")
+    ok(f"{state_path} present", state_path.exists(),
+       "delete it AND restart the servers to reseed — they seed at boot")
+
+    print(f"\n{'all checks passed' if not bad else str(bad) + ' check(s) failed'}")
+    return bad
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -345,6 +451,9 @@ def main() -> int:
     ap.add_argument("--base", default="http://127.0.0.1:8080", help="running `opencompany serve`")
     ap.add_argument("--tau2", type=Path, default=Path("../opencompany-tau2"),
                     help="the opencompany-tau2 checkout (tasks + shared state)")
+    ap.add_argument("--check", action="store_true",
+                    help="verify servers, desks, mcp wiring, credential and state, "
+                         "then exit — spends no model call")
     ap.add_argument("--task", help="one task id")
     ap.add_argument("--tasks", help="comma-separated task ids")
     ap.add_argument("--host", default="127.0.0.1", help="host the role servers bound to")
@@ -365,6 +474,15 @@ def main() -> int:
         ap.error(f"unknown domain {args.domain!r}; known: {', '.join(DOMAINS)}")
     spec = DOMAINS[args.domain]
 
+    state_path = args.tau2 / spec["state"]
+    host = Host(args.base, spec["company"])
+
+    if args.check:
+        host.sign_in()
+        for seat, (port, _t, _m) in spec["seats"].items():
+            host.register_mcp(f"tau2-{args.domain}-{seat}", f"http://{args.host}:{port}/mcp")
+        return check(host, spec, args.domain, state_path)
+
     ids = []
     if args.task:
         ids = [args.task]
@@ -379,11 +497,8 @@ def main() -> int:
     if missing:
         raise SystemExit(f"no such {args.domain} task(s): {', '.join(missing)}")
 
-    state_path = args.tau2 / spec["state"]
-
-    host = Host(args.base, spec["company"])
     host.sign_in()
-    for seat, port in spec["seats"].items():
+    for seat, (port, _tools, _mut) in spec["seats"].items():
         name = f"tau2-{args.domain}-{seat}"
         status, body = host.register_mcp(name, f"http://{args.host}:{port}/mcp")
         if status >= 300:
