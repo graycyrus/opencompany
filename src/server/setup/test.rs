@@ -11,11 +11,14 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+use async_trait::async_trait;
+
 use crate::app::config::MapEnv;
 use crate::company::CompanyManifest;
+use crate::company::runtime::CompanyRuntime;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
-use crate::runtime::RuntimeBuilder;
+use crate::runtime::{RebuildRequest, RuntimeBuilder, RuntimeRebuilder};
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
@@ -626,6 +629,117 @@ async fn an_existing_company_that_cannot_rebuild_reports_a_restart() {
             .unwrap()
             .contains(&serde_json::json!("auth_mode")),
         "no rebuilder is wired in this fixture, so the honest answer is `restart`: {body}"
+    );
+}
+
+/// A rebuilder that fails for exactly the company ids named in `fails`, and
+/// otherwise behaves like the production one.
+struct SelectiveRebuilder {
+    home: std::path::PathBuf,
+    fails: Vec<String>,
+}
+
+#[async_trait]
+impl RuntimeRebuilder for SelectiveRebuilder {
+    async fn rebuild(
+        &self,
+        _state: &AppState,
+        request: RebuildRequest,
+    ) -> crate::Result<CompanyRuntime> {
+        if self.fails.iter().any(|id| id == request.id.as_ref()) {
+            return Err(crate::error::OpenCompanyError::Config(
+                "simulated rebuild failure".to_string(),
+            ));
+        }
+        RuntimeBuilder::new(self.home.clone(), request.manifest)
+            .with_id(request.id)
+            .with_handover(request.handover)
+            .build()
+            .await
+    }
+}
+
+/// PLAT-052: the rebuild loop is per-company best-effort. A company that
+/// cannot rebuild — in the middle of the list, not just the only one — must
+/// not stop the companies after it, and the honest `restart_required` must
+/// still be reported rather than silently dropped once anything succeeded.
+#[tokio::test]
+async fn a_failed_rebuild_mid_list_does_not_stop_the_rest() {
+    let home_dir = home();
+    let store = crate::store::FsCompanyStore::new(home_dir.path().to_path_buf());
+    let state = fresh_state(home_dir.path());
+    for name in ["acme", "globex", "initech"] {
+        let id = CompanyId::new(name);
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_tool_grants: None,
+                overlay_desk_tools: std::collections::BTreeMap::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        state.registry().insert(id, Arc::new(runtime));
+    }
+    let state = state.with_rebuilder(Arc::new(SelectiveRebuilder {
+        home: home_dir.path().to_path_buf(),
+        fails: vec!["globex".to_string()],
+    }));
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "fields": { "auth_mode": "none" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert_eq!(
+        state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .unwrap()
+            .auth_mode(),
+        crate::app::config::AuthMode::None,
+        "a company before the failing one in the list must still be rebuilt"
+    );
+    assert_eq!(
+        state
+            .registry()
+            .get(&CompanyId::new("initech"))
+            .unwrap()
+            .auth_mode(),
+        crate::app::config::AuthMode::None,
+        "a company after the failing one must still be rebuilt: the loop must not abort mid-list"
+    );
+    assert!(
+        body["restart_required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("auth_mode")),
+        "the failing company means a restart is still genuinely owed, even though two of \
+         three succeeded: {body}"
     );
 }
 
@@ -1379,6 +1493,36 @@ async fn a_routable_host_refuses_an_anonymous_proposal() {
     );
 }
 
+/// CONSOLE-ADMIN-058: `propose_roster` is a pure read gated by the same
+/// [`authorize`](super::authorize) [`apply`](super::apply) is — but unlike
+/// `apply`, it persists nothing, so several proposals in flight at once must
+/// not block on each other (there is nothing to serialize) and must not leave
+/// any of them half-registering a company.
+#[tokio::test]
+async fn concurrent_roster_proposals_do_not_persist_anything() {
+    let home = home();
+    let state = fresh_state(home.path());
+    let request = || serde_json::json!({ "industry": "software", "teamHint": "", "automate": "" });
+
+    let (a, b, c) = tokio::join!(
+        post_roster(state.clone(), request()),
+        post_roster(state.clone(), request()),
+        post_roster(state.clone(), request()),
+    );
+
+    for (status, body) in [&a, &b, &c] {
+        assert_eq!(*status, StatusCode::OK, "{body}");
+    }
+    assert!(
+        state.registry().is_empty(),
+        "concurrent roster proposals must never register a company"
+    );
+    assert!(
+        !state.setup_complete(),
+        "a roster proposal must never mark setup complete"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Applying a company the wizard designed
 // ---------------------------------------------------------------------------
@@ -1585,6 +1729,45 @@ async fn a_second_apply_does_not_seed_another_company() {
         "a host with a company must not be handed a second: {body}"
     );
     assert_eq!(state.registry().list().len(), 1);
+}
+
+/// CONSOLE-ADMIN-056: the re-run guard above holds against a second,
+/// *sequential* apply. It must hold just as well when two first-run applies
+/// land concurrently — the case the guard's own doc comment is really about
+/// ("a re-run must never hand the operator a second starter company"), just
+/// reached by two racing callers instead of one later one.
+#[tokio::test]
+async fn concurrent_first_run_applies_seed_at_most_one_company() {
+    let home = home();
+    let state = fresh_state(home.path());
+    assert!(state.registry().is_empty(), "the premise: nothing yet");
+
+    let body = serde_json::json!({ "company": designed_company(None) });
+    let (first, second) = tokio::join!(
+        post_setup(state.clone(), body.clone()),
+        post_setup(state.clone(), body),
+    );
+
+    assert_eq!(first.0, StatusCode::OK, "{:?}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "{:?}", second.1);
+    assert_eq!(
+        state.registry().list().len(),
+        1,
+        "two concurrent first-run applies must seed exactly one company, not two: \
+         {first:?} {second:?}"
+    );
+
+    // Exactly one of the two responses may report a seed; the other must
+    // accurately report it found the registry already occupied by the time it
+    // ran, not silently invent (or omit) a second one.
+    let seeded = [&first.1, &second.1]
+        .iter()
+        .filter(|body| !body["seeded_company"].is_null())
+        .count();
+    assert_eq!(
+        seeded, 1,
+        "exactly one of the two concurrent calls may report a seed: {first:?} {second:?}"
+    );
 }
 
 /// The roster arrives over the wire after an operator edited it, so neither the
