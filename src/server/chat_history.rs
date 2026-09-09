@@ -1395,8 +1395,24 @@ async fn attach_referral_origins(
                 // host recorded it (`answers`). One event, fetched by sequence:
                 // no window to fall outside of, and no second copy of the match
                 // rules to drift from the host's.
+                // The forward this answers, by the sequence the host recorded.
+                //
+                // Read straight from the journal when the page does not reach
+                // it, which is the whole point of recording a pointer: a
+                // crossing whose ask is older than the window is exactly the
+                // case the scan could not serve. Two events, because a forward
+                // marker is immediately followed by the row it caused.
+                let forward_leg: Vec<StoredEvent> = match answers {
+                    Some(seq) if !page.iter().any(|st| st.seq.value() == *seq) => runtime
+                        .events()
+                        .read_from(runtime.id(), EventSeq::new(*seq), 2)
+                        .await
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let reachable: Vec<&StoredEvent> = page.iter().chain(forward_leg.iter()).collect();
                 let paired = answers.and_then(|seq| {
-                    let forward = page.iter().find(|stored| stored.seq.value() == seq)?;
+                    let forward = reachable.iter().find(|stored| stored.seq.value() == seq)?;
                     // A crossing that ran in the pair's own thread keeps BOTH
                     // sides there, in order, and neither desk carries them. That
                     // is the whole exchange already — no delivered copy to hunt
@@ -1406,7 +1422,7 @@ async fn attach_referral_origins(
                         ..
                     } = &forward.event
                     {
-                        let said: Vec<String> = page
+                        let said: Vec<String> = reachable
                             .iter()
                             .filter(|stored| stored.seq > forward.seq)
                             .filter(|stored| {
@@ -1429,7 +1445,7 @@ async fn attach_referral_origins(
                     // A chat-path crossing delivers a copy onto the far desk —
                     // the asking agent speaking there — so that copy is the
                     // question, already addressed to its reader.
-                    let delivered = page
+                    let delivered = reachable
                         .iter()
                         .find(|later| {
                             later.seq > forward.seq
@@ -1453,7 +1469,8 @@ async fn attach_referral_origins(
                         else {
                             return None;
                         };
-                        page.iter()
+                        reachable
+                            .iter()
                             .find(|stored| stored.seq.value() == *trigger_sequence)
                             .and_then(|m| strip_relay_note(&m.event))
                     })
@@ -1539,10 +1556,14 @@ async fn attach_referral_origins(
                     // FOR the asker — "you are the only one who has seen it" —
                     // in a channel, over the name of an agent that is not even
                     // on this desk. Only the other desk's own words survive.
-                    if let Some((answer, _)) =
-                        view.text.split_once(crate::ports::types::RELAY_NOTE_MARKER)
-                    {
-                        view.text = answer.to_string();
+                    //
+                    // Through the shared helper, not a second copy of the split:
+                    // two readers of one rule is how a marker change leaves one
+                    // path publishing a private note. It also drops a relay
+                    // whose words are only whitespace, which the hand-rolled
+                    // split kept as an empty line.
+                    if let Some(words) = strip_relay_note(&child.event) {
+                        view.text = words;
                     }
                     view.referred_from = Some(origin);
                 }
@@ -3863,6 +3884,128 @@ mod referral_origin_test {
         assert_eq!(
             crossing.lines[1].text,
             "error messages look like a copy task and are not one"
+        );
+    }
+
+    /// **The marker names its own forward, so the ask is found however far back
+    /// it is.**
+    ///
+    /// The scan this replaces looked back a fixed number of events from the
+    /// oldest visible row, so a crossing whose ask fell outside that window
+    /// rendered with the answer alone and said "1 message" — quietly wrong, and
+    /// wrong in the direction that looks plausible. The host already located
+    /// that marker to authorize the return and was keeping only a bool;
+    /// `answers` records it instead.
+    ///
+    /// Here the two legs are separated by far more than the scan's `LOOKBACK`,
+    /// so the fallback cannot reach the ask and only the pointer can.
+    #[tokio::test]
+    async fn a_marker_that_names_its_forward_pairs_beyond_the_scan_window() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        // The marker's OWN sequence, not a guess at it: the runtime journals
+        // its own setup rows first, so the first referral event is not
+        // sequence zero. Pointing `answers` at a sequence that happens to hold
+        // something else is the confusion the pointer exists to remove.
+        let mut forward_seq = 0u64;
+        for (i, event) in referral_leg(
+            "engineering",
+            "Engineering",
+            "software_engineer",
+            "design",
+            "product_designer",
+            false,
+            "what would you change about the error messages?",
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let seq = runtime.events().append(&id, event).await.expect("journal");
+            if i == 0 {
+                forward_seq = seq.value();
+            }
+        }
+        // The forward marker is sequence 0, its question 1. Bury them under
+        // enough unrelated traffic that the scan's window cannot reach back.
+        for i in 0..200 {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: "software_engineer".to_string(),
+                        text: format!("unrelated line {i}"),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+        for event in referral_leg_answering(
+            "design",
+            "Design",
+            "product_designer",
+            "engineering",
+            "software_engineer",
+            true,
+            "error messages look like a copy task and are not one",
+            Some(forward_seq),
+        ) {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    chat_id: "engineering".to_string(),
+                    agent_id: "software_engineer".to_string(),
+                    text: "design came back: it is a design-system problem".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    audience: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal");
+
+        // Only the tail is on screen, so the ask is far outside the scan.
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            5,
+            true,
+        )
+        .await
+        .expect("history");
+        let crossing = history
+            .iter()
+            .find_map(|m| m.referral_conversation.as_ref())
+            .expect("the crossing rides the report");
+        assert_eq!(
+            crossing.lines.len(),
+            2,
+            "the pointer reaches an ask the scan cannot: {:?}",
+            crossing.lines
+        );
+        assert!(crossing.lines[0].outbound);
+        assert_eq!(
+            crossing.lines[0].text,
+            "what would you change about the error messages?"
         );
     }
 

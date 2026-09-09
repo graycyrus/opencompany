@@ -672,11 +672,32 @@ impl<'a> EpisodeReferrals<'a> {
         // far desk is not told it was asked, it is asked, and its transcript
         // records the turn its own member took. Writing the question there too
         // would put a question that desk never received into its history.
-        if by_name {
-            let _ = self
+        //
+        // Whether it actually landed decides what may follow it. A pair thread
+        // is read positionally — the first thing said there IS the question —
+        // so an answer written into a thread whose question failed to append
+        // renders as that question: the reader is shown an answer and told it
+        // was the ask. Better to carry nothing than to carry it mislabelled.
+        let asked = if by_name {
+            match self
                 .journal(&pair, &referral.source_id, referral.content.clone())
-                .await;
-        }
+                .await
+            {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        pair = %pair.desk_id,
+                        error = %error,
+                        "[hive] a crossing's question could not be journaled; the turn still runs \
+                         and its answer still comes home, but the pair thread keeps neither side"
+                    );
+                    false
+                }
+            }
+        } else {
+            true
+        };
         let answer = match self
             .runner
             .refer(&pair.desk_id, &referral.target_id, &prompt)
@@ -716,9 +737,10 @@ impl<'a> EpisodeReferrals<'a> {
         // put to that desk and its colleagues were never asked, so a transcript
         // that is supposed to record what THAT desk did should not be holding
         // somebody else's exchange.
-        if let Err(error) = self
-            .journal(&pair, &referral.target_id, answer.clone())
-            .await
+        if asked
+            && let Err(error) = self
+                .journal(&pair, &referral.target_id, answer.clone())
+                .await
         {
             tracing::warn!(
                 company = %self.company,
