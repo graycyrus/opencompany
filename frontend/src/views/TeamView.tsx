@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mail, MoreHorizontal, Network, Plus, Sparkles, UserPlus, Users } from "lucide-react";
+import { Loader2, MoreHorizontal, Network, Plus, Sparkles, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 
-import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
@@ -27,16 +26,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { AvatarPicker } from "@/components/avatar-picker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { emptyDraft, missingRequired, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
 import {
   designTeammate,
   draftNewAgentField,
   refusalNotice,
   type DraftRefusal,
 } from "@/api/agent-copilot";
-import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
 import {
@@ -45,7 +43,6 @@ import {
   reportAddMember,
   type MissedStep,
 } from "@/lib/member-feedback";
-import { usd } from "@/lib/money";
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import {
   addTeammateSurface,
@@ -56,12 +53,8 @@ import {
   type DesignedTeammateFields,
 } from "@/lib/team-add-surface";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
-import { personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
-import { AgentFields } from "@/views/team/AgentFields";
-import { DescribeTeammate } from "@/views/team/DescribeTeammate";
-import { FieldCopilot } from "@/views/team/FieldCopilot";
 
 interface Props {
   client: OpenCompanyClient;
@@ -144,11 +137,6 @@ export function TeamView({
   const [nameQuery, setNameQuery] = useState("");
   const [workingOnly, setWorkingOnly] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
-  // Who set which cap. Only an admin may read the user directory, so this stays
-  // empty for a member — and the attribution line degrades to "an admin"
-  // rather than disappearing.
-  const [people, setPeople] = useState<Person[]>([]);
   /**
    * Open cards and running state per teammate (issue #1141), or `null` while
    * nothing has been read and for a host that cannot answer.
@@ -167,30 +155,6 @@ export function TeamView({
    */
   const workloadRun = useRef(0);
 
-  /**
-   * Hiding the budget controls from a non-admin is **courtesy, not enforcement**.
-   * The host refuses the write with a 403 whatever this says; showing an
-   * operator a control they cannot use is the only thing this prevents.
-   */
-  const loadViewer = useCallback(async () => {
-    let admin = false;
-    try {
-      admin = (await fetchMe(client, company)).role === "admin";
-    } catch {
-      // No user plane on this host, or not signed in — treat as non-admin.
-    }
-    setIsAdmin(admin);
-    if (!admin) {
-      setPeople([]);
-      return;
-    }
-    try {
-      setPeople(await listPeople(client, company));
-    } catch {
-      // Attribution falls back to "an admin"; not worth a toast.
-      setPeople([]);
-    }
-  }, [client, company]);
 
   /**
    * Re-read the roster. Answers whether it landed.
@@ -283,11 +247,10 @@ export function TeamView({
     setWorkload(null);
     workloadRun.current += 1;
     void boot();
-    void loadViewer();
     void loadWorkload();
     // `refreshKey` re-runs the read after setup staffs the company; without it
     // the operator lands on the roster they had before their team was built.
-  }, [boot, loadViewer, loadWorkload, refreshKey]);
+  }, [boot, loadWorkload, refreshKey]);
 
   /**
    * A "Working" filter is only answerable while the workload is readable.
