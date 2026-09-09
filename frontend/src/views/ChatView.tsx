@@ -828,11 +828,7 @@ export function ChatView({
       // No user plane on this host, or not signed in — treat as non-admin, and
       // leave the composer's own lines on the name-seeded fallback.
     }
-    setIsAdmin(admin);
-    if (!admin) {
-      setPeople([]);
-      return;
-    }
+    if (!admin) return;
     try {
       const people = await listPeople(client, company);
       if (run !== viewerRun.current) return;
