@@ -366,10 +366,10 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
   });
 
   it("names a different next move for each reason", () => {
-    expect(refusalNotice("no_model")).toContain("Settings → Inference");
+    expect(refusalNotice("no_model")).toContain("Connections → Inference");
     expect(refusalNotice("model_unreachable")).toContain("Try again");
     expect(refusalNotice("unreadable")).toContain("add a note");
-    expect(refusalNotice(undefined)).not.toContain("Settings → Inference");
+    expect(refusalNotice(undefined)).not.toContain("Connections → Inference");
   });
 
   /// A spent budget is the one reason with nothing to retry — the ceiling is a

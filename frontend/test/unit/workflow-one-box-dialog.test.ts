@@ -492,7 +492,7 @@ describe("the New-workflow dialog on a company with no model configured", () => 
     const notice = inDialog('[data-testid="workflow-draft-unavailable"]');
     expect(notice, "an operator must not be promised a draft that cannot happen").toBeTruthy();
     expect(notice!.textContent).toContain("no model configured");
-    expect(notice!.textContent).toContain("Settings → Inference");
+    expect(notice!.textContent).toContain("Connections → Inference");
     expect(notice!.textContent).toContain("empty canvas");
     // NOT the copy this path used to carry, which pointed at a form that is no
     // longer under it.

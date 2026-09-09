@@ -151,8 +151,8 @@ describe("the chat cognition banner", () => {
     // the issue is that this is one settings page away and nothing said so.
     const link = notice!.querySelector("a");
     expect(link).not.toBeNull();
-    expect(link!.getAttribute("href")).toBe("#/settings/inference");
-    expect(link!.textContent).toContain("Settings → Inference");
+    expect(link!.getAttribute("href")).toBe("#/connections/inference");
+    expect(link!.textContent).toContain("Connections → Inference");
   });
 
   it("names the host, not a setting, when no harness is available", async () => {
@@ -211,7 +211,7 @@ describe("the chat cognition banner", () => {
     expect(notice!.textContent).not.toContain("has no model configured");
     // The link goes to the card that owns the restart — but the copy stops
     // short of promising a button, which is `canRebuildInPlace`'s to report.
-    expect(notice!.querySelector("a")!.getAttribute("href")).toBe("#/settings/inference");
+    expect(notice!.querySelector("a")!.getAttribute("href")).toBe("#/connections/inference");
   });
 
   /**
