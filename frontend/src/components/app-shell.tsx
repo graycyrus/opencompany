@@ -3652,10 +3652,11 @@ export function AppShell({
         // `SidebarMenuBadge` and its icon-rail mirror `SidebarMenuDot`, so
         // nothing about the signal depends on this row any more. See
         // `NAV_SECTIONS`.
-        {/* No `autonomy` slot. The tier is a control on the composer's
-            toolbar row now (`views/chat/MessageComposer.tsx`): it is a fact
-            about what happens when you press Send, so it belongs beside Send
-            rather than in the band that holds facts about the console. */}
+        //
+        // No `autonomy` slot either. The tier is a control on the composer's
+        // toolbar row now (`views/chat/MessageComposer.tsx`): it is a fact
+        // about what happens when you press Send, so it belongs beside Send
+        // rather than in the band that holds facts about the console.
         profile={
           // Who you are signed in as, and nothing else. It renders nothing
           // where there is nobody to name — a host with no sign-in, or a
