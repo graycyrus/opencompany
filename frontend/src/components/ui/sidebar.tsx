@@ -517,10 +517,16 @@ function SidebarGroup({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-group"
       data-sidebar="group"
-      // `px-3 pb-1` — the group's gutter matches the header's, so a nav row's
-      // icon and the switcher's glyph stand on the same vertical line, and the
-      // group contributes only rhythm vertically. The rail narrows to `px-2`
-      // for the reason `SidebarHeader` gives.
+      // `pl-3` matches the header's gutter, so a nav row's icon and the
+      // switcher's glyph stand on the same vertical line.
+      //
+      // The trailing gutter is the SCROLLBAR's width, not the leading one's.
+      // With `pr-3` the rows stopped 12px short of the column edge and the
+      // 10px scrollbar then sat in that gap with 2px to spare, so a row's right
+      // edge lined up with nothing: not the bar beside it, and not the content
+      // card past it. `--scrollbar-size` puts the row's edge exactly where the
+      // bar begins, which makes the column read as one measure ending at the
+      // card rather than as rows floating inside a wider box.
       //
       // No padding on TOP. `SidebarContent` already separates its children with
       // `gap-1`, so a `pt-1` here stacked on that gap and pushed every group
@@ -530,7 +536,7 @@ function SidebarGroup({ className, ...props }: React.ComponentProps<"div">) {
       // keeps only the trailing breath that stops the last row of one group
       // touching the next group's label.
       className={cn(
-        "relative flex w-full min-w-0 flex-col px-3 pb-1 group-data-[collapsible=icon]:px-2",
+        "relative flex w-full min-w-0 flex-col pb-1 pl-3 pr-(--scrollbar-size) group-data-[collapsible=icon]:px-2",
         className,
       )}
       {...props}

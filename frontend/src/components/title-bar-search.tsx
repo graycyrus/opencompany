@@ -60,7 +60,15 @@ export function TitleBarSearch() {
             // back from, which is not what a status pill has to do — matching
             // the pill's height made the one editable control in the row the
             // least substantial-looking thing in it.
-            "h-9 w-full rounded-lg border bg-card pr-3 pl-9 text-sm " +
+            // `border-chrome-border` and `bg-background`, not the default
+            // border over `bg-card`. This field stands on the window chrome,
+            // and `--card` is close enough to `--chrome` that the box read as a
+            // faint rectangle you had to look for — at a glance the row had a
+            // magnifier floating in the middle of nothing. Those are the two
+            // tokens the content card itself uses to separate from the same
+            // ground, so the field reads as a well cut into the chrome for the
+            // same reason and by the same rule.
+            "h-9 w-full rounded-lg border border-chrome-border bg-background pr-3 pl-9 text-sm " +
             "text-foreground placeholder:text-muted-foreground " +
             "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none " +
             // Not greyed to the point of looking broken: it is a real control
