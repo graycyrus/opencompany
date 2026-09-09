@@ -445,6 +445,10 @@ export function InferenceSection({
    */
   canManage: boolean;
 }) {
+  // Which halves this render draws. `all` draws both, which is what a caller
+  // without tabs gets.
+  const showConnect = view === "all" || view === "connect";
+  const showRouting = view === "all" || view === "routing";
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   // Whether this host can complete a one-click key grant. Read off the
@@ -1342,6 +1346,7 @@ export function InferenceSection({
                 (issue #403). */}
             {canManage && (
               <div className={cn("space-y-3 border-t border-border pt-3", SETTINGS_FIELD_COLUMN)}>
+                {showConnect && (
                 <div className="grid gap-2 sm:grid-cols-2 sm:items-end">
                   <div className="space-y-1">
                     <Label htmlFor="inference-provider" className="text-xs">
@@ -1392,8 +1397,9 @@ export function InferenceSection({
                     </div>
                   )}
                 </div>
+                )}
 
-                {isOffered(provider) && (
+                {showRouting && isOffered(provider) && (
                   <div className="space-y-2">
                     {draftProviderIsOpenRouter && modelCatalog.kind === "error" && (
                       <p
@@ -1600,7 +1606,7 @@ export function InferenceSection({
                 {/* The managed route is the one a grant can fill in, so the
                     button belongs to it alone — an OpenRouter or Ollama key is
                     not something TinyHumans can mint. */}
-                {provider === "managed" && (
+                {showConnect && provider === "managed" && (
                   <ConnectTinyHumansButton
                     client={client}
                     company={company}
@@ -1614,7 +1620,7 @@ export function InferenceSection({
                   />
                 )}
 
-                {isOffered(provider) && PROVIDERS[provider].acceptsKey && (
+                {showConnect && isOffered(provider) && PROVIDERS[provider].acceptsKey && (
                   <div className="space-y-1">
                     <Label htmlFor="inference-key" className="text-xs">
                       API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
