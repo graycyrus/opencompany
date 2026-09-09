@@ -49,12 +49,19 @@ export const SETTINGS_PAGES = [
   // resolve, rewritten onto the section by `console-route-rewrites.ts`, so
   // every link minted while they lived here works.
   //
-  // Inference stayed, and so did Hosting and Search below it, for the reason
-  // stated twice in this file: a credential form belongs beside the one thing
-  // it unlocks. The model, the deploy target and the search provider are three
-  // such things; filing them under a section named for the act of connecting
-  // would separate each credential from what it is for.
-  { id: "inference", label: "Inference", icon: BrainCircuit, hint: "The model teammates think with", group: "integrations" },
+  // Inference followed them, and this file used to say it would not. The
+  // reason given — a credential form belongs beside the one thing it unlocks —
+  // was answering the wrong question: this rail is not "beside the model", it
+  // is configuration an operator visits once, and the model a company thinks
+  // with is the most-read, most-changed thing that was on it. It is
+  // `#/connections/inference` now, rewritten from here so every link minted
+  // while it lived on this rail still works. Skills went with it, for the
+  // matching reason on the capability group below.
+  //
+  // Hosting and Search below did NOT follow, and the difference is the point:
+  // they really are once-a-company credential forms, so the argument that
+  // moved Inference does not reach them. See `connection-pages.ts`.
+  //
   // A credential form belongs beside what it unlocks. An operator looking for
   // "where do I put my Vercel token" searches for hosting, so it sits here
   // rather than inside a third-party-accounts drawer.
