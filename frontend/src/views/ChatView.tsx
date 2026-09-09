@@ -17,7 +17,6 @@ import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
-import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
@@ -61,7 +60,6 @@ import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
-import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
@@ -854,11 +852,6 @@ export function ChatView({
     void loadViewer();
   }, [boot, loadViewer]);
 
-  /** A human label for whoever set a cap — never a raw user id. */
-  function whoSet(userId: string): string {
-    const person = people.find((p) => p.id === userId);
-    return person ? personName(person) : "an admin";
-  }
 
   const budgetError = (error: unknown, fallback: string): string => {
     if (error instanceof ApiError) {
@@ -868,36 +861,7 @@ export function ChatView({
     return error instanceof Error ? error.message : fallback;
   };
 
-  /**
-   * Set, change, or remove a teammate's daily cap.
-   *
-   * `cap` is `null` to remove the cap and a number to set one — `0` included,
-   * which caps the teammate at nothing. The two are different states on the
-   * host and must stay different here, which is why this takes `number |
-   * null` and never an optional.
-   */
-  async function applyBudget(member: TeamMember, cap: number | null) {
-    try {
-      const row = await client.setTeamBudget(member.id, cap, company);
-      // Update the one card from the host's answer rather than refetching the
-      // roster: the response IS the new state, so a refetch could only disagree.
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't change the daily cap."));
-    }
-  }
 
-  /** Drop the override so the company's own default applies again. */
-  async function resetBudget(member: TeamMember) {
-    try {
-      const row = await client.clearTeamBudgetOverride(member.id, company);
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success("Reset to the company default.");
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't reset the daily cap."));
-    }
-  }
 
   // Only the newest load may write. Two loads can be in flight at once — a
   // company switch, or a Retry over a request that is merely slow rather than
@@ -2530,38 +2494,6 @@ export function ChatView({
     }
   }
 
-  /**
-   * Give a teammate an inbox, or take it away, on the host — keyed by the
-   * roster **agent id**, which is the `InboxStore` key the Inbox page reads and
-   * the ingest webhook files mail under. Nothing is persisted client-side: if
-   * the write fails the switch goes back, so the console never claims an inbox
-   * the host doesn't have (issue #173).
-   *
-   * Starter-roster rows are locally-invented placeholders, not host records, so
-   * their ids are not real inbox keys — refuse rather than file mail under one.
-   */
-  async function toggleMemberInbox(member: TeamMember) {
-    if (!fromHost) {
-      toast.error("Add this teammate to your company first — an inbox needs a saved teammate.");
-      return;
-    }
-    const next = !member.inboxEnabled;
-    const apply = (enabled: boolean) =>
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, inboxEnabled: enabled } : m)));
-    apply(next);
-    try {
-      await setInboxEnabled(client, company, member.id, next);
-    } catch (error) {
-      apply(!next);
-      toast.error(
-        error instanceof ApiError && error.status === 404
-          ? "This host doesn't offer teammate inboxes yet."
-          : error instanceof Error
-            ? error.message
-            : "Couldn't change the inbox.",
-      );
-    }
-  }
 
   /**
    * Persist a new teammate through the host (issue #360's Team-page add path),
@@ -3202,7 +3134,6 @@ export function ChatView({
                   }
                   loading={loadingTeam}
                   fromHost={fromHost}
-                  onToggleInbox={(m) => void toggleMemberInbox(m)}
                   onRemove={(id) => {
                     const member = members.find((m) => m.id === id);
                     if (member) void removeMember(member);
@@ -3231,11 +3162,6 @@ export function ChatView({
                         }
                       : undefined
                   }
-                  canEditBudget={isAdmin && fromHost}
-                  onEditBudget={setBudgetFor}
-                  onRemoveCap={(m) => void applyBudget(m, null)}
-                  onResetBudget={(m) => void resetBudget(m)}
-                  setByLabel={(m) => (m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined)}
                 />
               )}
             </div>
@@ -3270,17 +3196,6 @@ export function ChatView({
           setDesks((prev) => (desksAreFallback.current ? [desk] : [...(prev ?? []), desk]));
           desksAreFallback.current = false;
           selectChannel(desk.id);
-        }}
-      />
-      <BudgetDialog
-        member={budgetFor}
-        onOpenChange={(open) => {
-          if (!open) setBudgetFor(null);
-        }}
-        onSave={(cap) => {
-          const target = budgetFor;
-          setBudgetFor(null);
-          if (target) void applyBudget(target, cap);
         }}
       />
     </>
