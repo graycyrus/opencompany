@@ -853,33 +853,6 @@ export function AgentDetailView({
                   : undefined
               }
               avatarBusy={avatarSaving}
-              action={
-                !editing ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setEditing(true)}
-                    // Disabled with the reason, never absent — an operator
-                    // looking for the edit needs to find out *why* there isn't
-                    // one, not to conclude the console forgot to build it. What
-                    // makes a teammate uneditable is the host's own `editable`
-                    // list and nothing this file decides: a current host offers
-                    // at least name, role and instructions on every teammate,
-                    // manifest ones included, so an empty list now means a host
-                    // that does not support the edit rather than a blueprint row
-                    // this console must refuse.
-                    disabled={agent.editable.length === 0}
-                    title={
-                      agent.editable.length === 0
-                        ? "This teammate can't be edited from here."
-                        : undefined
-                    }
-                    data-testid="agent-edit"
-                  >
-                    <Pencil className="size-4" /> Edit
-                  </Button>
-                ) : undefined
-              }
             />
             {/*
               The page's tab strip. `Identity` is this page's header — it draws
@@ -915,10 +888,16 @@ export function AgentDetailView({
               agentId={agent.id}
               agentName={agent.name?.trim() || agent.role}
             />
+            </PageTabPanel>
 
-            {/* The Edit action sits on the teammate's name row (issue #1434) —
-                one editing action, in the place a page's actions live, rather
-                than halfway down inside one of its cards. */}
+            {/* Edit sits in this card, beside the fields it opens (issue #1434
+                revisited). It was on the teammate's name row — right while the
+                page was one column and the name row was the only place a
+                page-level action could go. With the definition split into tabs
+                a single header Edit would have been an action whose form
+                appears on one tab and nowhere else, offered identically from
+                all six. Each tab now carries its own way in. */}
+            <PageTabPanel idBase="agent" id="instructions" value={tab}>
             <Section
               title="Instructions"
               // Names both halves, because the card holds both and the operator
@@ -930,20 +909,44 @@ export function AgentDetailView({
               // persona was empty. See the two labelled blocks below.
               subtitle="What this teammate owns, and the standing instructions that frame every turn they take."
               action={
-                // Reset is offered only when an override is actually masking the
-                // blueprint, and only to a viewer the host will let write
-                // instructions — otherwise it is a control that can only 409.
-                isEditable(agent, "instructions") && agent.instructionsOverridden ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void resetInstructions()}
-                    disabled={saving}
-                    data-testid="agent-instructions-reset"
-                  >
-                    Reset to blueprint
-                  </Button>
-                ) : undefined
+                <div className="flex items-center gap-2">
+                  {/* Reset is offered only when an override is actually masking
+                      the blueprint, and only to a viewer the host will let
+                      write instructions — otherwise it is a control that can
+                      only 409. */}
+                  {isEditable(agent, "instructions") && agent.instructionsOverridden && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void resetInstructions()}
+                      disabled={saving}
+                      data-testid="agent-instructions-reset"
+                    >
+                      Reset to blueprint
+                    </Button>
+                  )}
+                  {!editing && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditing(true)}
+                      // Disabled with the reason, never absent — an operator
+                      // looking for the edit needs to find out *why* there
+                      // isn't one, not to conclude the console forgot to build
+                      // it. What makes a teammate uneditable is the host's own
+                      // `editable` list and nothing this file decides.
+                      disabled={agent.editable.length === 0}
+                      title={
+                        agent.editable.length === 0
+                          ? "This teammate can't be edited from here."
+                          : undefined
+                      }
+                      data-testid="agent-edit"
+                    >
+                      <Pencil className="size-4" /> Edit
+                    </Button>
+                  )}
+                </div>
               }
             >
               {editing ? (
@@ -1100,7 +1103,13 @@ export function AgentDetailView({
               )}
             </Section>
 
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="tools" value={tab}>
             <Tools agent={agent} saving={saving} onSave={(globs) => saveTools(globs)} />
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="model" value={tab}>
             <HarnessAndModel
               agent={agent}
               harnesses={harnesses}
