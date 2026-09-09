@@ -448,7 +448,9 @@ async fn state_with_hub(home: &std::path::Path, company: &str) -> AppState {
 
 /// Pulls `state=` out of the authorize URL the console is told to navigate to.
 fn state_param(authorize_url: &str) -> String {
-    let (_, after) = authorize_url.split_once("state%3D").expect("state in callback");
+    let (_, after) = authorize_url
+        .split_once("state%3D")
+        .expect("state in callback");
     after
         .split(['&', '%'])
         .next()
@@ -498,7 +500,10 @@ async fn starting_a_link_sends_the_console_to_the_hub_with_a_challenge_not_a_sec
     assert_eq!(status, StatusCode::OK, "{raw}");
 
     let url = resp["authorizeUrl"].as_str().expect("authorizeUrl");
-    assert!(url.contains("/auth/key?"), "must start the grant flow: {url}");
+    assert!(
+        url.contains("/auth/key?"),
+        "must start the grant flow: {url}"
+    );
     assert!(
         url.contains("code_challenge_method=S256"),
         "plain must never be offered: {url}"
