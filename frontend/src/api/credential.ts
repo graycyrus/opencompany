@@ -45,6 +45,17 @@ export interface CompanyCredentialStatus {
    * drift from what the host actually does.
    */
   notice: string;
+  /**
+   * Whether this host can complete a one-click key grant against the hub.
+   *
+   * `false` on every host with no hub wired — self-hosted, or a build with no
+   * exchange — and the console then renders exactly what it rendered before this
+   * flow existed: the paste field, alone. Carried on the status rather than
+   * asked for separately so the decision costs no extra request, and absent on a
+   * host predating the field, which `?? false` reads as "no button", the safe
+   * direction.
+   */
+  hubLink?: boolean;
 }
 
 /** A mutating response: the resulting status plus a plain-language note. */
@@ -72,4 +83,49 @@ export function setCompanyCredential(
   key: string,
 ): Promise<CompanyCredentialMutation> {
   return client.put<CompanyCredentialMutation>(`${client.scopeFor(company)}/credential`, { key });
+}
+
+/**
+ * A started key grant: where to send the browser.
+ *
+ * The console navigates to this and nothing more. It never sees the PKCE
+ * verifier, and it never sees the key — both stay on the host, which is the
+ * point of doing the exchange there (see `server::hub_link`).
+ */
+export interface CredentialLinkStart {
+  authorizeUrl: string;
+}
+
+/**
+ * Begin a one-click TinyHumans connection. Admin-only; 404 on a host with no hub.
+ *
+ * The returned URL is a **top-level navigation**, not a fetch: the hub signs the
+ * person in through their provider and shows them a consent screen, and both
+ * need to happen on the hub's own origin with its own address bar visible.
+ */
+export function startCredentialLink(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<CredentialLinkStart> {
+  return client.post<CredentialLinkStart>(`${client.scopeFor(company)}/credential/link/start`, {});
+}
+
+/**
+ * Finish a connection: hand the host the code the hub returned, and the `state`
+ * it started with.
+ *
+ * The host redeems these for a key and stores it as both the company credential
+ * and the inference key. The response is the same shape a paste would have
+ * produced, so the card that called this can repaint from it either way.
+ */
+export function finishCredentialLink(
+  client: OpenCompanyClient,
+  company: string | null,
+  state: string,
+  code: string,
+): Promise<CompanyCredentialMutation> {
+  return client.post<CompanyCredentialMutation>(
+    `${client.scopeFor(company)}/credential/link/finish`,
+    { state, code },
+  );
 }
