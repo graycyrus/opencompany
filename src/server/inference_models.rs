@@ -44,6 +44,23 @@ pub(crate) const MODEL_CATALOG_FAILURE_TTL: Duration = Duration::from_secs(60);
 /// Maximum time a console page-load waits for the registry on a cache miss.
 const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Maximum time a **turn** waits for a cold catalog before falling back.
+///
+/// A console page-load can afford [`MODEL_CATALOG_TIMEOUT`]; a turn cannot.
+/// Production triage wraps `ChatModel::invoke` in a two-second timeout
+/// (`src/harness/built_in/triage.rs`), and the selector and title paths use
+/// three. Discovery on the turn path inheriting the console's ten-second budget
+/// would therefore consume the caller's entire deadline before the model
+/// request was ever sent — at an endpoint whose `/chat/completions` is
+/// perfectly healthy and only whose `/models` is slow (Codex review on #2045).
+///
+/// Shorter than the tightest of those deadlines on purpose, so a slow catalog
+/// costs a turn a fraction of its budget rather than all of it. A healthy
+/// endpoint answers `/models` well inside this: it is the same host the turn is
+/// about to call anyway, and the result is then cached for an hour, so this
+/// budget is paid at most once per company per endpoint per hour.
+pub(crate) const TURN_CATALOG_BUDGET: Duration = Duration::from_millis(750);
+
 /// One model exposed to the operator console.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -456,6 +473,53 @@ pub(crate) async fn discovered_vocabulary(
     ))
 }
 
+/// [`discovered_vocabulary`] on a budget a **turn** can afford.
+///
+/// The read is *spawned* rather than awaited inline, and only the waiting is
+/// bounded. That separation is the whole point. A turn's callers impose their
+/// own, much tighter deadlines — triage two seconds, selector and title three —
+/// and when one of them elapses it **cancels** whatever `invoke` was awaiting.
+/// An inline `catalog_models` therefore got dropped mid-flight, which meant the
+/// failure memo that exists to stop the *next* caller paying the same cost was
+/// never written: every subsequent auxiliary call started the same doomed
+/// ten-second read and died the same way (Codex review on #2045).
+///
+/// A spawned task outlives that cancellation. Whoever gives up first, the read
+/// runs to completion on its own and records what it found — a catalog in the
+/// cache, or a failure in the memo that suppresses retries for
+/// [`MODEL_CATALOG_FAILURE_TTL`]. So a slow `/models` costs each turn at most
+/// [`TURN_CATALOG_BUDGET`] once, rather than every turn its whole deadline
+/// forever.
+///
+/// `None` means "no answer within the budget", which the caller treats exactly
+/// as it treats an unreadable catalog: keep the pre-discovery fallback. That is
+/// the behaviour that shipped before discovery existed, so a slow catalog
+/// degrades to the old guess for one turn rather than breaking the turn.
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
+pub(crate) async fn turn_vocabulary(
+    base_url: &str,
+    bearer: Option<&str>,
+    scope: Option<&str>,
+) -> Option<TierVocabulary> {
+    // Owned, because the task has to be able to outlive this future — which is
+    // the entire reason it is spawned. The bearer lives in process memory for
+    // the duration of the read and, as everywhere else in this module, never
+    // reaches a cache key.
+    let base_url = base_url.to_string();
+    let bearer = bearer.map(str::to_string);
+    let scope = scope.map(str::to_string);
+    let read = tokio::spawn(async move {
+        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref()).await
+    });
+    match tokio::time::timeout(TURN_CATALOG_BUDGET, read).await {
+        Ok(Ok(vocabulary)) => vocabulary,
+        // Elapsed, or the task panicked. Either way this turn falls back; a
+        // task that merely ran out of *our* patience is still running and will
+        // have filled the cache or the memo before the next turn asks.
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 /// Distinguishes "the fetch itself failed" from the outer
 /// [`tokio::time::timeout`] elapsing in [`catalog_models`], since both
 /// have to report through the same `Result` and the outer timeout's own
@@ -477,6 +541,52 @@ mod tests {
             name: None,
             context_length: None,
         }
+    }
+
+    /// A turn gives up on a hanging `/models` inside its own budget, not the
+    /// console's.
+    ///
+    /// The endpoint here accepts the connection and never answers — the case
+    /// that matters, because a refused connection fails fast and costs nobody
+    /// anything. Production triage allows `invoke` two seconds end to end and
+    /// the selector and title paths three, so a discovery that waited out
+    /// `MODEL_CATALOG_TIMEOUT` consumed the caller's whole deadline before the
+    /// model request was ever sent, at an endpoint whose `/chat/completions`
+    /// may be perfectly healthy (Codex review on #2045).
+    ///
+    /// Asserted as a band rather than an exact figure: the floor proves the
+    /// budget is actually waited out rather than the call failing instantly for
+    /// some unrelated reason, and the ceiling proves it is the *turn's* budget
+    /// being honoured and not the console's.
+    #[tokio::test]
+    async fn a_turn_stops_waiting_for_a_hanging_catalog_within_its_own_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        // Accepted connections are held, never answered. Kept in a task that
+        // owns them so nothing is closed early and turned into a fast failure.
+        let _accepting = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let started = Instant::now();
+        let vocabulary = turn_vocabulary(&endpoint, None, None).await;
+        let waited = started.elapsed();
+
+        assert_eq!(
+            vocabulary, None,
+            "an endpoint that never answers leaves the caller on its pre-discovery fallback"
+        );
+        assert!(
+            waited >= TURN_CATALOG_BUDGET,
+            "expected the budget to be waited out, gave up after {waited:?}"
+        );
+        assert!(
+            waited < MODEL_CATALOG_TIMEOUT,
+            "a turn must not inherit the console's {MODEL_CATALOG_TIMEOUT:?} budget, waited {waited:?}"
+        );
     }
 
     #[test]
@@ -682,6 +792,48 @@ mod tests {
         assert_eq!(
             catalog_cache_scoped(PUBLIC, None).lookup(now),
             Some(vec![model("vendor/public")])
+        );
+    }
+
+    /// The partition goes one level finer than the company: per **harness**.
+    ///
+    /// `resolve_effective_scoped` resolves config and credentials per
+    /// `HarnessScope`, which is what lets one `built_in` harness ride the
+    /// subscription while another runs on a key of its own. Two harnesses in one
+    /// company can therefore present different credentials to the same endpoint,
+    /// and a company-only key reused the first one's entitlement-scoped catalog
+    /// for the second without its credential ever being presented (Codex review
+    /// on #2045).
+    ///
+    /// This asserts the property at the cache level, on the exact scope strings
+    /// `TenantProvider::catalog_scope` builds — company and harness joined by the
+    /// same control character `catalog_cache_scoped` uses, so a three-field key
+    /// cannot be spelled two ways.
+    #[test]
+    fn two_harnesses_in_one_company_do_not_share_an_authenticated_catalog() {
+        const ENDPOINT: &str = "https://gateway.example/v1";
+        let now = Instant::now();
+        let subscription = format!("acme\u{1}{}", "default");
+        let own_key = format!("acme\u{1}{}", "research");
+
+        catalog_cache_scoped(ENDPOINT, Some(&subscription))
+            .store(vec![model("gateway/subscription-tier")], now);
+
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&own_key)).lookup(now),
+            None,
+            "a second harness's key may reach a different entitlement, so it must read for itself"
+        );
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some(&subscription)).lookup(now),
+            Some(vec![model("gateway/subscription-tier")]),
+            "the harness that did the read still reuses its own entry"
+        );
+        // The company-only key is a third, distinct slot — proof the harness
+        // half genuinely participates rather than being absorbed into the id.
+        assert_eq!(
+            catalog_cache_scoped(ENDPOINT, Some("acme")).lookup(now),
+            None
         );
     }
 

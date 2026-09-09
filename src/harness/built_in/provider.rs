@@ -1900,6 +1900,28 @@ impl TenantProvider {
         &self.scope.id
     }
 
+    /// The scope an authenticated catalog read on this provider's behalf is
+    /// cached under.
+    ///
+    /// Company **and** harness, not company alone. `resolve_effective_scoped`
+    /// resolves config and credentials per [`inference::HarnessScope`] — that
+    /// is exactly what lets one `built_in` harness ride the subscription while
+    /// another runs on a key of its own — so two harnesses in one company can
+    /// present different credentials to the same endpoint. Keyed on the company
+    /// only, the first harness's entitlement-scoped catalog was reused for the
+    /// second for an hour without its credential ever being presented, and the
+    /// second could then be handed a vocabulary its own key does not reach
+    /// (Codex review on #2045).
+    ///
+    /// Both halves are non-secret ids, and neither is the credential or derived
+    /// from it — the invariant `catalog_registry` documents. The separator is
+    /// the same control character that module uses to join scope to endpoint,
+    /// which no id or URL can contain, so the three-field key cannot be spelled
+    /// two ways.
+    fn catalog_scope(&self) -> String {
+        format!("{}\u{1}{}", self.company.as_ref(), self.harness_id())
+    }
+
     /// Re-resolves the effective config from the secret store and updates the
     /// cached telemetry slug. Errors when no provider is configured at all.
     async fn resolve(&self) -> anyhow::Result<InferenceDecl> {
@@ -1915,17 +1937,25 @@ impl TenantProvider {
         .ok_or_else(|| anyhow::anyhow!("no inference provider is configured for this company"))?;
         *self.slug.write().unwrap() = decl.telemetry_slug();
         // Ask the endpoint what vocabulary it speaks before deciding whether to
-        // rewrite this turn's tier. Cached per endpoint for an hour (and per
-        // failure for a minute), so this is one extra request per provider per
-        // hour rather than one per turn — and it is a request to the same host
-        // the turn is about to call anyway. A catalog we cannot read leaves the
-        // decl on its pre-discovery fallback, i.e. exactly the behaviour that
-        // shipped before, rather than changing how turns resolve on a blip.
+        // rewrite this turn's tier. Cached per company, harness and endpoint for
+        // an hour (and per failure for a minute), so this is one extra request
+        // per provider per hour rather than one per turn — and it is a request
+        // to the same host the turn is about to call anyway.
+        //
+        // `turn_vocabulary`, not `discovered_vocabulary`: this is the turn path,
+        // whose callers time out in two to three seconds, so the read is spawned
+        // and only waited on for `TURN_CATALOG_BUDGET`. A `/models` slower than
+        // that leaves the decl on its pre-discovery fallback for this turn —
+        // exactly the behaviour that shipped before discovery existed — while
+        // the spawned read still finishes and records its answer for the next
+        // one. Awaiting it inline let a caller's own timeout cancel the read
+        // before it could memoize anything, so every later turn repeated it
+        // (Codex review on #2045).
         let bearer = decl.bearer().await.ok().flatten();
-        let vocabulary = crate::server::inference_models::discovered_vocabulary(
+        let vocabulary = crate::server::inference_models::turn_vocabulary(
             &decl.base_url,
             bearer.as_deref(),
-            Some(self.company.as_ref()),
+            Some(&self.catalog_scope()),
         )
         .await;
         Ok(decl.with_vocabulary(vocabulary))
