@@ -105,6 +105,7 @@ import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { formatConsolePath, parseConsolePath } from "@/lib/console-paths";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { DEFAULT_VIEW, isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
@@ -461,6 +462,13 @@ interface Props {
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
+/**
+ * How the console spells an address. See `lib/console-paths.ts` — the prefix
+ * that files Company's pages under `#/company/…`, and the parse that leaves
+ * every other address to the router's ordinary rules.
+ */
+const CONSOLE_PATH = { parse: parseConsolePath, format: formatConsolePath };
+
 export function AppShell({
   client,
   company,
@@ -476,7 +484,16 @@ export function AppShell({
   // Room is where the console opens. An empty hash, a bare `#/`, a bookmark
   // whose view was retired — all of them land in the room the operator talks
   // to their company in, rather than on a dashboard about it.
-  const [view, sub, navigate] = useHashView<View>(VIEWS, DEFAULT_VIEW, REWRITE_RETIRED);
+  // `CONSOLE_PATH` is what files Company's surfaces under `#/company/…`. It is
+  // a module constant rather than an inline object so the router's `resolve`,
+  // `canonicalize` and `navigate` keep a stable dependency — an object literal
+  // here would be a new identity every render and re-arm all three.
+  const [view, sub, navigate] = useHashView<View>(
+    VIEWS,
+    DEFAULT_VIEW,
+    REWRITE_RETIRED,
+    CONSOLE_PATH,
+  );
   const legacyConnectParamsRef = useRef(legacyConnectParams());
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
