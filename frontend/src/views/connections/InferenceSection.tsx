@@ -3,6 +3,7 @@ import { BrainCircuit, Check, Loader2, RotateCcw, Save, Trash2, Zap } from "luci
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { getCompanyCredential, type CompanyCredentialStatus } from "@/api/credential";
 import {
   getInferenceStatus,
   listInferenceModels,
@@ -391,6 +392,11 @@ export function InferenceSection({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
+  // Whether this host can complete a one-click key grant. Read off the
+  // credential plane rather than the inference one, because that is where the
+  // flow lives — the same grant arms both, and asking the surface that owns it
+  // keeps one answer instead of two that could disagree.
+  const [credential, setCredential] = useState<CompanyCredentialStatus | null>(null);
   const [busy, setBusy] = useState<
     "save" | "reset" | "test" | "removeKey" | "restart" | null
   >(null);
@@ -486,10 +492,22 @@ export function InferenceSection({
     }
   }, [client, company, seedFromStatus]);
 
+  const refreshCredential = useCallback(async () => {
+    try {
+      setCredential(await getCompanyCredential(client, company));
+    } catch {
+      // A host with no credential plane, or one that could not answer. Either
+      // way the button stays hidden and the paste field below is unaffected —
+      // this read decides an addition, never whether the section works.
+      setCredential(null);
+    }
+  }, [client, company]);
+
   useEffect(() => {
     setLoad("loading");
     void refresh();
-  }, [refresh]);
+    void refreshCredential();
+  }, [refresh, refreshCredential]);
 
   useEffect(() => {
     let current = true;
@@ -1299,6 +1317,23 @@ export function InferenceSection({
                     route this console does not offer still carries its `keyKind`
                     prose, which names that route — and a key typed against a
                     provider nobody selected has nowhere to be scoped to. */}
+                {/* The managed route is the one a grant can fill in, so the
+                    button belongs to it alone — an OpenRouter or Ollama key is
+                    not something TinyHumans can mint. */}
+                {provider === "managed" && (
+                  <ConnectTinyHumansButton
+                    client={client}
+                    company={company}
+                    available={credential?.hubLink ?? false}
+                    canManage={canManage}
+                    configured={status?.keyConfigured ?? false}
+                    onConnected={() => {
+                      void refresh();
+                      void refreshCredential();
+                    }}
+                  />
+                )}
+
                 {isOffered(provider) && PROVIDERS[provider].acceptsKey && (
                   <div className="space-y-1">
                     <Label htmlFor="inference-key" className="text-xs">
