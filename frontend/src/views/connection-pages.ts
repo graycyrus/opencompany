@@ -43,9 +43,17 @@ import { Blocks, BrainCircuit, LayoutGrid, Sparkles, type LucideIcon } from "luc
  *     act as connecting an app — granting the company a capability it did not
  *     have a minute ago — and it is checked far more often than it is set.
  *
- * Hosting and Search stay in Settings. They are genuinely once-a-company
- * credential forms, and the argument above is a test rather than a licence to
- * move everything with a key field in it.
+ *   - **Hosting** and **Search** are the two remaining halves of the original
+ *     five-subject Connections page, and they come back for the plainest
+ *     reason of the lot: each names an outside service the company acts
+ *     through — a deploy target, a search provider — which is what this
+ *     section is for. Settings kept them on the argument that a credential
+ *     form belongs beside what it unlocks, and the thing each unlocks turns
+ *     out to be the connection itself.
+ *
+ * What is left on the Settings rail is what Settings is actually for: who can
+ * sign in, how the company behaves, what it did, and what it spends. Nothing
+ * with an outside service at the other end of it.
  */
 export const CONNECTION_PAGES = [
   {
