@@ -472,7 +472,7 @@ fn is_usable_endpoint(raw: &str) -> bool {
 /// `http://user@localhost/track` are all judged on the host `url` actually
 /// parsed out, and a value like `http://127.0.0.1.evil.example/track` — which
 /// merely *starts* with a loopback address — is not.
-fn is_secure_endpoint(raw: &str) -> bool {
+pub(crate) fn is_secure_endpoint(raw: &str) -> bool {
     let Ok(parsed) = url::Url::parse(raw) else {
         return false;
     };

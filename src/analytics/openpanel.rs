@@ -349,11 +349,37 @@ mod http {
         /// [`Decision::Report`](crate::analytics::config::Decision::Report)
         /// exists, `http` **implies** loopback — `config::is_secure_endpoint`
         /// has already refused every other `http` endpoint.
-        pub fn new(
+        ///
+        /// # Crate-private, because that implication is the invariant
+        ///
+        /// The sentence above is only true of endpoints that came through
+        /// [`resolve`](crate::analytics::config::resolve). While this
+        /// constructor was `pub` it was also a way around it: the type is
+        /// re-exported from a `pub mod`, so an `analytics`-enabled caller could
+        /// hand it `http://collector.internal/track` directly and get a tracker
+        /// that posts the client secret across a network in cleartext, with
+        /// [`is_cleartext`] dutifully turning off the proxy on the way. A
+        /// safety property enforced only by the route callers happen to take is
+        /// the thing this module keeps arguing against, so the route is now the
+        /// only one there is: [`super::build`] takes a `&Decision`, and a
+        /// `Decision::Report` is what `resolve` produces.
+        ///
+        /// The `debug_assert!` is defence in depth against the same mistake
+        /// arriving from *inside* the crate later. It calls
+        /// `config::is_secure_endpoint` rather than restating the rule, because
+        /// a second reader of a security predicate is a bypass waiting to be
+        /// found — the same reason `is_usable_endpoint` refuses to hand-roll the
+        /// URL grammar `reqwest` already parses.
+        pub(crate) fn new(
             endpoint: &str,
             credentials: &ClientCredentials,
             envelope: Envelope,
         ) -> Result<Self, reqwest::Error> {
+            debug_assert!(
+                crate::analytics::config::is_secure_endpoint(endpoint),
+                "a tracker was built for an endpoint the credential cannot safely cross; \
+                 every endpoint must come through config::resolve"
+            );
             let mut builder = reqwest::Client::builder()
                 .timeout(SEND_TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
@@ -1794,6 +1820,55 @@ mod test {
         );
         proxy.stop().await;
         collector.stop().await;
+    }
+
+    /// **The transport refuses to be built for an endpoint the credential
+    /// cannot safely cross**, even from inside the crate.
+    ///
+    /// `HttpOpenPanelTracker::new` is `pub(crate)` so that
+    /// [`build`] — which takes a `&Decision`, and a `Decision::Report` is what
+    /// `resolve` produces — is the only way to obtain a tracker. That closes the
+    /// route from outside. This closes the route from *inside*: a future caller
+    /// in this crate that reaches past `resolve` with
+    /// `http://collector.internal/track` would otherwise get a tracker that
+    /// posts the client secret across a network in cleartext, with
+    /// `is_cleartext` politely turning off the proxy on the way.
+    ///
+    /// The assertion calls `config::is_secure_endpoint` rather than restating
+    /// the rule, so there is one implementation of it and no second reader to
+    /// drift.
+    #[tokio::test]
+    #[should_panic(expected = "the credential cannot safely cross")]
+    async fn the_transport_refuses_an_endpoint_that_never_passed_resolve() {
+        let _ = HttpOpenPanelTracker::new(
+            "http://collector.internal/track",
+            &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+            envelope(),
+        );
+    }
+
+    /// The control: the same construction with a loopback endpoint must be
+    /// accepted, or the test above would pass for a constructor that refused
+    /// everything.
+    #[tokio::test]
+    async fn the_transport_accepts_an_endpoint_resolve_would_have_allowed() {
+        for allowed in [
+            "http://127.0.0.1:9/track",
+            "https://collector.invalid/track",
+        ] {
+            assert!(
+                HttpOpenPanelTracker::new(
+                    allowed,
+                    &crate::analytics::config::ClientCredentials::new(
+                        TEST_CLIENT_ID,
+                        TEST_CLIENT_SECRET
+                    ),
+                    envelope(),
+                )
+                .is_ok(),
+                "{allowed} is one resolve would allow and must still build"
+            );
+        }
     }
 
     /// The control: a drain that **finishes** must report nothing lost.

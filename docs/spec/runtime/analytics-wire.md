@@ -256,6 +256,15 @@ the stand-in proxy and 0 at the collector.
 So an `http` endpoint builds with `ClientBuilder::no_proxy()`, which makes "it
 does not leave the host" true by construction rather than a prediction about the
 operator's environment — the same move as `Policy::none()` for redirects.
+
+All of which holds only for endpoints that came through `resolve`, so that is
+the only route there is: `HttpOpenPanelTracker::new` is **crate-private** and
+`build` — which takes a `&Decision`, and a `Decision::Report` is what `resolve`
+produces — is the way a tracker is obtained. A `debug_assert!` calling
+`config::is_secure_endpoint` (not a restatement of the rule; one implementation,
+no second reader to drift) catches the same mistake arriving from inside the
+crate later. `the_transport_refuses_an_endpoint_that_never_passed_resolve` and
+its control assert both directions.
 `https` keeps its proxy support deliberately: a proxied `https` request is a
 `CONNECT` tunnel, so the proxy learns host and port and never sees a header, and
 egress-restricted networks need it to reach a collector at all. The scheme is the
