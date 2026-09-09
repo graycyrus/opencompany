@@ -9,7 +9,6 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { PolicyStatus } from "@/api/policy";
 import {
   AutonomyPill,
-  leadSentence,
   tierDescription,
   tierIcon,
   tierLabel,
@@ -143,29 +142,26 @@ describe("reading the tier from the host", () => {
   });
 });
 
-describe("the lead sentence", () => {
-  it("cuts the host's description at its first sentence, keeping the full stop", () => {
-    expect(leadSentence(TIERS[2].description)).toBe("Balanced execution autonomy.");
-  });
-
-  // B-023: read-only's description is deliberately two sentences — the
-  // authority claim, then the billing caveat — because the pill can only carry
-  // the first. What the pill shows must therefore be true standing alone, and
-  // must not be the caveat's other half.
-  it("shows read-only's authority on the pill and leaves the billing caveat to the menu", () => {
-    const lead = leadSentence(TIERS[0].description);
-    expect(lead).toBe(
+describe("the tier descriptions", () => {
+  // B-023, kept after the clipping went away.
+  //
+  // `leadSentence` used to cut the host's description at its first sentence for
+  // a pill that printed it beside the tier name, and this asserted that
+  // read-only's first sentence was the authority claim rather than the billing
+  // caveat's other half. The pill prints the tier name alone now and the full
+  // description is on the trigger's `title`, so nothing clips it.
+  //
+  // The content rule survives the mechanism: read-only's description is
+  // deliberately two sentences, and the authority claim has to be the one that
+  // leads. Anything that reads only the opening of it — a tooltip that
+  // truncates, a screen reader stopping at the first period, a future pill that
+  // clips again — must land on what the agents may do, not on how it is billed.
+  it("leads read-only with the authority claim, not the billing caveat", () => {
+    const [first] = TIERS[0].description.split(/(?<=\.)\s+/);
+    expect(first).toBe(
       "The agents can look at things but change nothing, contact nobody, and use no connected account.",
     );
-    expect(lead).not.toContain("billed");
-  });
-
-  it("uses a single-sentence description whole", () => {
-    expect(leadSentence("Only one sentence.")).toBe("Only one sentence.");
-  });
-
-  it("uses a description with no sentence break whole", () => {
-    expect(leadSentence("No full stop here")).toBe("No full stop here");
+    expect(first).not.toContain("billed");
   });
 });
 
