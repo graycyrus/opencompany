@@ -41,14 +41,12 @@ import {
 } from "@/components/ui/card";
 import { DomainSettings } from "@/components/domain-settings";
 import { ExternalHarnesses } from "@/components/external-harnesses";
-import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
-import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { withHostParam } from "@/hooks/use-host-route";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
-import { useCanManage, useCanManagePolicy } from "@/hooks/use-can-manage";
+import { useCanManage } from "@/hooks/use-can-manage";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { forgetSession } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
@@ -91,7 +89,6 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
   // here would make this page lie in the other direction — the missing guard is
   // the host's to add, and this gate should follow it rather than lead it.
   const canManage = useCanManage(client, company);
-  const canManagePolicy = useCanManagePolicy(client, company);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

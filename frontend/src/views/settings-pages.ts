@@ -10,6 +10,8 @@
 
 import {
   Activity,
+  Palette,
+  ShieldCheck,
   ChartColumnBig,
   type LucideIcon,
   Settings2,
@@ -31,6 +33,31 @@ export const SETTINGS_PAGES = [
     icon: UserCog,
     hint: "Who can sign in, and as what",
     group: "identity",
+  },
+  // The autonomy tier and the always-ask list. It was the second card on
+  // General, high on the page because it is what an operator drowning in
+  // approval cards comes here for — which is a reason to be a row, not a
+  // scroll position.
+  //
+  // NOT `#/approvals`, the sidebar row: that is the queue of decisions waiting
+  // right now, and this is the standing rule that decides what reaches it. The
+  // hints below are written to keep the two apart.
+  {
+    id: "approvals",
+    label: "Approvals",
+    icon: ShieldCheck,
+    hint: "The standing rule for what teammates may do unattended",
+    group: "capability",
+  },
+  // A fact about this browser rather than about the company: the theme is
+  // stored per client, and changing it changes nothing for anyone else who
+  // signs in. That is what separates it from every card left on General.
+  {
+    id: "appearance",
+    label: "Appearance",
+    icon: Palette,
+    hint: "Light, dark, or follow the system",
+    group: "console",
   },
   // One question per page. "Connections" carried five — third-party accounts,
   // MCP servers, inference, channels, repositories — so each was something an
@@ -105,6 +132,7 @@ export type SettingsPage = (typeof SETTINGS_PAGES)[number]["id"];
 export const SETTINGS_PAGE_GROUPS = [
   { id: "identity", label: "Identity & lifecycle" },
   { id: "capability", label: "Capability" },
+  { id: "console", label: "This console" },
   { id: "spend", label: "Spend" },
 ] as const satisfies readonly { id: (typeof SETTINGS_PAGES)[number]["group"]; label: string }[];
 
