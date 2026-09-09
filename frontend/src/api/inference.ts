@@ -183,8 +183,18 @@ export interface InferenceModelCatalog {
   baseUrl: string;
   /** Every model that endpoint publishes, sorted. Empty when `error` is set. */
   models: InferenceModel[];
-  /** How this endpoint spells a tier; absent when the catalog is unreadable. */
-  tierVocabulary?: TierVocabulary;
+  /**
+   * How this endpoint spells a tier.
+   *
+   * `null` when the catalog could not be read — which is a different fact from
+   * `"unknown"` ("the endpoint answered, and publishes neither vocabulary") and
+   * must not be shown as one. The host sends the field either way:
+   * `ModelCatalogDto::tier_vocabulary` is an `Option` with no
+   * `skip_serializing_if`, so the wire carries an explicit `null` rather than
+   * omitting the key (CodeRabbit review on #2045). Optional as well as nullable
+   * because a stub or an older host may omit it; both mean "no vocabulary".
+   */
+  tierVocabulary?: TierVocabulary | null;
   /**
    * The tier → model mapping this endpoint's vocabulary implies. Empty for
    * `unknown` and for an unreadable catalog: prefilling ids the endpoint has
