@@ -54,7 +54,7 @@ import {
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
-import { personAvatar, personName } from "@/lib/person";
+import { personAvatar } from "@/lib/person";
 import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";

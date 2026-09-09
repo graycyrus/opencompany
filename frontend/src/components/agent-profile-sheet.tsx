@@ -250,11 +250,6 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
             <Sparkles className="size-3" aria-hidden /> {profile.tier}
           </Badge>
           <Badge variant="outline">{profile.origin}</Badge>
-          {agent.inboxEnabled && (
-            <Badge variant="outline" className="gap-1">
-              <Mail className="size-3" aria-hidden /> Inbox
-            </Badge>
-          )}
         </div>
       </SheetHeader>
 
