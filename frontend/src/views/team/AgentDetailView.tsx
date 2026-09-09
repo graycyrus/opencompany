@@ -14,7 +14,6 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { setInboxEnabled } from "@/api/inbox";
 import { listTasks, type Task } from "@/api/tasks";
 import { isDesktopRuntime } from "@/api/transport";
 import {
@@ -271,8 +270,6 @@ export function AgentDetailView({
   const [workload, setWorkload] = useState<Workload | null>(null);
   /** The open cards assigned directly to this teammate, when the board is readable. */
   const [openTasks, setOpenTasks] = useState<Task[] | null>(null);
-  /** An inbox write is in flight; the switch is held until the host answers. */
-  const [inboxSaving, setInboxSaving] = useState(false);
   /**
    * The Harness & Model editor (issue #1245's harness-picker follow-up). Its
    * own small state, separate from `draft`/`editing`: both fields are
@@ -306,8 +303,6 @@ export function AgentDetailView({
   // the user directory, so this stays empty for a member and the attribution
   // degrades to "an admin" rather than disappearing.
   const [people, setPeople] = useState<Person[]>([]);
-  /** Whether the daily-budget dialog is open. */
-  const [budgetOpen, setBudgetOpen] = useState(false);
   const [avatarOpen, setAvatarOpen] = useState(false);
 
   useEffect(() => {
@@ -471,101 +466,8 @@ export function AgentDetailView({
     };
   }, [client, company]);
 
-  /**
-   * Give this teammate an inbox, or take it away (issue #1190).
-   *
-   * Moved here from the roster card, where it was the only control that wrote
-   * to the host and sat one mis-click away while scanning thirteen cards. This
-   * page already *reported* inbox state as a badge and offered no way to change
-   * it; the read and the write live together now.
-   *
-   * Optimistic, then reverted on failure — the switch must never be left
-   * claiming a state the host refused. Keyed on the roster agent id, which is
-   * the `InboxStore` key the Inbox page reads and the ingest webhook files mail
-   * under; nothing is persisted client-side.
-   */
-  async function toggleInbox(next: boolean) {
-    if (!agent || inboxSaving) return;
-    // Scoped to the teammate this call is *about*. This screen does not remount
-    // when the hash names a different agent — it re-reads into the same state —
-    // so a slow write for A that fails after the operator has stepped to B would
-    // otherwise roll back B's switch, for a request B never made.
-    const apply = (enabled: boolean) =>
-      setAgent((held) => (held?.id === agentId ? { ...held, inboxEnabled: enabled } : held));
-    apply(next);
-    // One write in flight at a time. Two quick taps otherwise race, and the
-    // host's last-writer-wins can settle on the opposite of what the switch shows.
-    setInboxSaving(true);
-    try {
-      await setInboxEnabled(client, company, agentId, next);
-    } catch (error) {
-      apply(!next);
-      toast.error(
-        error instanceof ApiError && error.status === 404
-          ? "This host doesn't offer teammate inboxes yet."
-          : error instanceof Error
-            ? error.message
-            : "Couldn't change the inbox.",
-      );
-    } finally {
-      setInboxSaving(false);
-    }
-  }
 
-  /**
-   * Set, change, or remove this teammate's daily cap (issue #1206, moved here
-   * from the roster card for the same reason Inbox moved in #1190: a card in
-   * a grid of thirteen is for recognising a teammate, not configuring one).
-   *
-   * `cap` is `null` to remove the cap and a number to set one — `0` included,
-   * which caps the teammate at nothing. The two are different states on the
-   * host and must stay different here, which is why this takes `number | null`
-   * and never an optional.
-   *
-   * Merges the host's answer into `agent` rather than refetching, the same way
-   * `toggleInbox` does — and the same `held?.id === agentId` guard, so a slow
-   * write does not clobber state after the operator has navigated elsewhere.
-   */
-  async function applyBudget(cap: number | null) {
-    try {
-      const row = await client.setTeamBudget(agentId, cap, company);
-      setAgent((held) =>
-        held?.id === agentId
-          ? {
-              ...held,
-              budgetUsdDaily: row.budgetUsdDaily,
-              spentTodayUsd: row.spentTodayUsd,
-              budgetSetBy: row.budgetSetBy,
-              budgetSetAtMillis: row.budgetSetAtMillis,
-            }
-          : held,
-      );
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't change the daily cap."));
-    }
-  }
 
-  /** Drop the override so the company's own default applies again. */
-  async function resetBudget() {
-    try {
-      const row = await client.clearTeamBudgetOverride(agentId, company);
-      setAgent((held) =>
-        held?.id === agentId
-          ? {
-              ...held,
-              budgetUsdDaily: row.budgetUsdDaily,
-              spentTodayUsd: row.spentTodayUsd,
-              budgetSetBy: row.budgetSetBy,
-              budgetSetAtMillis: row.budgetSetAtMillis,
-            }
-          : held,
-      );
-      toast.success("Reset to the company default.");
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't reset the daily cap."));
-    }
-  }
 
   /**
    * Save a chosen face, or `undefined` to go back to the hashed default.
@@ -890,22 +792,6 @@ export function AgentDetailView({
               agentId={agent.id}
               agentName={agent.name?.trim() || agent.role}
             />
-            {/* One switch and one cap. Neither is a tab (see `AGENT_TABS`);
-                both are facts about how this teammate is set up, which is what
-                Overview is. */}
-            <Inbox
-              agent={agent}
-              busy={inboxSaving}
-              onToggle={(next) => void toggleInbox(next)}
-            />
-            <Budget
-              agent={agent}
-              canEdit={isAdmin}
-              setByLabel={agent.budgetSetBy ? whoSet(agent.budgetSetBy) : undefined}
-              onEdit={() => setBudgetOpen(true)}
-              onRemoveCap={() => void applyBudget(null)}
-              onResetBudget={() => void resetBudget()}
-            />
             </PageTabPanel>
 
             {/* Edit sits in this card, beside the fields it opens (issue #1434
@@ -1200,14 +1086,7 @@ export function AgentDetailView({
           void saveAvatar(avatar);
         }}
       />
-      <BudgetDialog
-        agent={budgetOpen ? agent : null}
-        onOpenChange={setBudgetOpen}
-        onSave={(cap) => {
-          setBudgetOpen(false);
-          void applyBudget(cap);
-        }}
-      />
+
     </div>
   );
 }
@@ -1956,160 +1835,8 @@ function HarnessAndModel({
   );
 }
 
-/**
- * Whether mail addressed to this teammate lands anywhere (issue #1190).
- *
- * A per-teammate setting, on the teammate's own page — not a switch in a grid
- * of cards, which is what it was. The subtitle says what turning it on actually
- * does, because "Inbox" alone does not: an inbox is an address the outside
- * world can reach, which is a different kind of decision from the rest of this
- * screen and worth one sentence.
- */
-function Inbox({
-  agent,
-  busy,
-  onToggle,
-}: {
-  agent: AgentDetailDto;
-  /** A write is in flight — the switch is held rather than allowed to race. */
-  busy: boolean;
-  onToggle: (next: boolean) => void;
-}) {
-  return (
-    <Section
-      title="Inbox"
-      subtitle="Give this teammate an address of its own, so mail routed to it arrives here rather than nowhere."
-    >
-      <label className="flex cursor-pointer items-center justify-between gap-3">
-        <span className="flex items-center gap-2 text-sm">
-          <Mail className="size-4 text-muted-foreground" />
-          {agent.inboxEnabled ? "This teammate has an inbox." : "This teammate has no inbox."}
-        </span>
-        <Switch
-          checked={agent.inboxEnabled}
-          disabled={busy}
-          onCheckedChange={onToggle}
-          aria-label="Give this teammate an inbox"
-          data-testid="agent-inbox-toggle"
-        />
-      </label>
-    </Section>
-  );
-}
 
-/**
- * Turns a failed budget write into something worth reading.
- *
- * The 403 is the one an operator will actually hit, and it needs to say *why* —
- * "only an admin can change a spend limit" is the answer, not "request failed".
- */
-function budgetError(error: unknown, fallback: string): string {
-  if (error instanceof ApiError) {
-    if (error.status === 403) return "Only an admin can change a teammate's daily cap.";
-    if (error.status === 404) return "This host doesn't support console budgets yet.";
-    return error.message;
-  }
-  return error instanceof Error ? error.message : fallback;
-}
 
-/**
- * The teammate's daily spend cap, editable (issue #1206).
- *
- * Moved here from the roster card's `⋯` menu, for the same reason Inbox moved
- * in #1190: a card in a grid of thirteen is for recognising a teammate, not
- * configuring one. The card still shows the cap and today's spend — this is
- * where an operator now sets, changes, removes or resets it, beside Inbox.
- *
- * Renders the cap and attribution to everyone (the roster card does too), but
- * only offers the writing controls to an admin — same courtesy-not-enforcement
- * gate `TeamView.tsx` used, so a member sees the same facts without a control
- * that would only 403.
- */
-function Budget({
-  agent,
-  canEdit,
-  setByLabel,
-  onEdit,
-  onRemoveCap,
-  onResetBudget,
-}: {
-  agent: AgentDetailDto;
-  /** Whether to offer the writing controls at all (admins only). */
-  canEdit: boolean;
-  /** Who set the current override, already resolved to something readable. */
-  setByLabel?: string;
-  onEdit: () => void;
-  onRemoveCap: () => void;
-  onResetBudget: () => void;
-}) {
-  const cap = agent.budgetUsdDaily;
-  const capped = cap !== undefined;
-  // An override exists (someone set this deliberately), as opposed to the cap
-  // simply coming from the company's own definition.
-  const overridden = agent.budgetSetBy !== undefined;
-  return (
-    <Section
-      title="Budget"
-      subtitle="The most this teammate may spend per day. It takes effect on their next task — no restart needed."
-      action={
-        canEdit ? (
-          <Button variant="outline" size="sm" onClick={onEdit} data-testid="team-budget-edit">
-            <Wallet className="size-4" />
-            {capped ? "Change…" : "Set…"}
-          </Button>
-        ) : undefined
-      }
-    >
-      <div className="space-y-1 text-sm" data-testid="agent-budget">
-        {capped ? (
-          <>
-            <p className="text-muted-foreground">
-              {usd(cap)}/day · {usd(agent.spentTodayUsd ?? 0)} spent today
-            </p>
-            <p className="text-xs text-muted-foreground" data-testid="agent-budget-scope">
-              Spent today counts everything this teammate has spent since 00:00
-              UTC — chat turns and metered searches included, not only the
-              attempts listed above. This is the total the cap is enforced
-              against.
-            </p>
-          </>
-        ) : (
-          <p className="text-muted-foreground">No daily cap — this teammate spends freely.</p>
-        )}
-        {setByLabel && agent.budgetSetAtMillis !== undefined && (
-          <p className="text-xs text-muted-foreground" data-testid="agent-budget-attribution">
-            {capped ? "Set by" : "Uncapped by"} {setByLabel} ·{" "}
-            {new Date(agent.budgetSetAtMillis).toLocaleDateString()}
-          </p>
-        )}
-      </div>
-      {canEdit && (capped || overridden) && (
-        <div className="flex flex-wrap gap-2">
-          {capped && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onRemoveCap}
-              data-testid="team-budget-remove"
-            >
-              Remove cap
-            </Button>
-          )}
-          {overridden && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onResetBudget}
-              data-testid="team-budget-reset"
-            >
-              Reset to company default
-            </Button>
-          )}
-        </div>
-      )}
-    </Section>
-  );
-}
 
 /**
  * Pick a teammate's icon.
@@ -2163,76 +1890,6 @@ function AvatarDialog({
   );
 }
 
-/**
- * Enter a daily cap for one teammate.
- *
- * Empty input is **not** submittable: "no cap" is the explicit "Remove cap"
- * action, not a blank field, so an operator clearing the box and saving can
- * never silently uncap a teammate. `0` is allowed and means exactly what it
- * says — this teammate may not spend.
- */
-function BudgetDialog({
-  agent,
-  onOpenChange,
-  onSave,
-}: {
-  agent: AgentDetailDto | null;
-  onOpenChange: (open: boolean) => void;
-  onSave: (cap: number) => void;
-}) {
-  const [value, setValue] = useState("");
-
-  useEffect(() => {
-    setValue(agent?.budgetUsdDaily !== undefined ? String(agent.budgetUsdDaily) : "");
-  }, [agent]);
-
-  const parsed = Number(value);
-  const valid = value.trim() !== "" && Number.isFinite(parsed) && parsed >= 0;
-  const name = agent?.name?.trim() || agent?.role || "this teammate";
-
-  return (
-    <Dialog open={agent !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Daily budget</DialogTitle>
-          <DialogDescription>
-            The most {name} may spend per day. It takes effect on their next task — no restart
-            needed.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="grid gap-2">
-          <Label htmlFor="agent-budget">US dollars per day</Label>
-          <Input
-            id="agent-budget"
-            type="number"
-            min={0}
-            step="0.01"
-            inputMode="decimal"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="e.g. 5.00"
-            data-testid="team-budget-input"
-          />
-          <p className="text-xs text-muted-foreground">
-            $0 stops them spending entirely. To let them spend freely, use “Remove cap”.
-          </p>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => valid && onSave(parsed)}
-            disabled={!valid}
-            data-testid="team-budget-save"
-          >
-            Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 function Section({
   title,
