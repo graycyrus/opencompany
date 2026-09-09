@@ -1085,6 +1085,49 @@
         }
     }
 
+    /* ---- Shown only while the region is hovered -------------------------
+     * `.scrollbar-on-hover` — the sidebar column, which is standing furniture
+     * behind every view. A bar held down its edge at all times is a vertical
+     * rule the two-layer shell spent real effort removing, and the column is
+     * scrolled by wheel and trackpad far more often than by dragging. But the
+     * whole column scrolls now rather than a band inside it, so an operator who
+     * DOES reach for the bar has to find one — and hover is where that reach
+     * begins.
+     *
+     * The thumb is made transparent rather than the bar being given zero width:
+     * a width that changes on hover would reflow the column's content sideways
+     * under the cursor. This way the gutter is always reserved and only the ink
+     * appears, so nothing moves.
+     *
+     * `:focus-within` rides along with `:hover` so a keyboard operator tabbing
+     * through the column gets the same feedback a pointer does, and
+     * `[data-scrolling]` overrides both — a bar that is actively moving must be
+     * visible whether or not the pointer happens to be over it.
+     */
+    .scrollbar-on-hover::-webkit-scrollbar-thumb {
+        background-color: transparent;
+    }
+    .scrollbar-on-hover:hover::-webkit-scrollbar-thumb,
+    .scrollbar-on-hover:focus-within::-webkit-scrollbar-thumb,
+    .scrollbar-on-hover[data-scrolling]::-webkit-scrollbar-thumb {
+        background-color: var(--scrollbar-thumb-rest);
+    }
+    /* After the rule above, so the cursor's own weights still win over it. */
+    .scrollbar-on-hover::-webkit-scrollbar-thumb:hover,
+    .scrollbar-on-hover::-webkit-scrollbar-thumb:active {
+        background-color: var(--scrollbar-thumb-grab);
+    }
+    @supports not selector(::-webkit-scrollbar) {
+        .scrollbar-on-hover {
+            scrollbar-color: transparent transparent;
+        }
+        .scrollbar-on-hover:hover,
+        .scrollbar-on-hover:focus-within,
+        .scrollbar-on-hover[data-scrolling] {
+            scrollbar-color: var(--scrollbar-thumb-rest) transparent;
+        }
+    }
+
     /* The global reduced-motion block above cannot reach a scrollbar pseudo
        element (`*` does not match one), and killing the transition alone would
        leave the bar snapping between two weights — motion by another name. So
@@ -1095,6 +1138,17 @@
         ::-webkit-scrollbar-thumb {
             background-color: var(--scrollbar-thumb-active);
             transition: none;
+        }
+        /* The hover surface keeps hiding its bar — that is a visibility rule,
+           not motion — but it stops fading between the two weights, for the
+           reason the block above gives. */
+        .scrollbar-on-hover::-webkit-scrollbar-thumb {
+            background-color: transparent;
+        }
+        .scrollbar-on-hover:hover::-webkit-scrollbar-thumb,
+        .scrollbar-on-hover:focus-within::-webkit-scrollbar-thumb,
+        .scrollbar-on-hover[data-scrolling]::-webkit-scrollbar-thumb {
+            background-color: var(--scrollbar-thumb-active);
         }
         @supports not selector(::-webkit-scrollbar) {
             html,
