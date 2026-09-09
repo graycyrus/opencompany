@@ -6,7 +6,6 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
@@ -14,7 +13,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PresenceStatus } from "@/lib/awareness";
-import { usd } from "@/lib/money";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { PresenceDot } from "@/views/chat/PresenceDot";
@@ -164,7 +162,6 @@ export function MembersPane({
                     <MemberRow
                       member={m}
                       lead={m.id === leadId}
-                      inboxOn={m.inboxEnabled}
                       onRemove={() => onRemove(m.id)}
                       onMessage={() => onMessage(m)}
                     />
@@ -277,19 +274,15 @@ function SectionLabel({ children, className }: { children: ReactNode; className?
 function MemberRow({
   member,
   lead,
-  inboxOn,
   onRemove,
   onMessage,
 }: {
   member: TeamMember;
   /** The desk's lead — badged, since this channel routes to them. */
   lead?: boolean;
-  inboxOn: boolean;
   onRemove: () => void;
   onMessage: () => void;
 }) {
-  const capped = member.budgetUsdDaily !== undefined;
-  const overridden = member.budgetSetBy !== undefined;
   // Issue #1208: only when the role is not the name over again. The roster's
   // name falls back to the role (`fromDto`), so every manifest-declared
   // teammate said it twice here too.
@@ -317,9 +310,6 @@ function MemberRow({
               <span className="shrink-0 rounded border px-1 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                 Lead
               </span>
-            )}
-            {inboxOn && (
-              <Mail className="size-3 shrink-0 text-muted-foreground" aria-label="Has an inbox" />
             )}
           </span>
           {roleLine && (
