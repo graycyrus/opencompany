@@ -403,8 +403,7 @@ export function MemoryView({ client, company, sub }: Props) {
             data-testid="memory-list"
           />
         )}
-        </>
-        )}
+        </PageTabPanel>
       </div>
 
     </div>
