@@ -488,15 +488,14 @@ guarantee, and which surfaces are deliberately outside it.
 ### Retired native OAuth callback
 
 `/api/v1/oauth/callback` stays reachable for a browser that began consent
-immediately before a deploy. It returns a non-caching `410 Gone` HTML page that
-says the authorization was not saved, why native OAuth cannot make agents able
-to use the provider, and to use Composio instead. It ignores the provider's
+immediately before a deploy. It returns a non-caching `410 Gone` HTML page
+saying the authorization was not saved, why native OAuth cannot make agents able
+to use the provider, and to use Composio instead — ignoring the provider's
 `code` and `state` rather than exchanging or storing them.
 
 `POST …/connections/{provider}/start` is likewise a `410 Gone` JSON response
 with stable code `native_oauth_retired`, an explanatory message, and
-`removalAfter: "2026-09-30"`. Both temporary endpoints send `Deprecation:
-true` and a `Sunset: Wed, 30 Sep 2026 00:00:00 GMT` header. #1023 removes the
-bridge after the cache compatibility window established by #979; it keeps
-Disconnect and the read projection so tenants can release credentials written
-before #828.
+`removalAfter: "2026-09-30"`. Both send `Deprecation: true` and a `Sunset: Wed,
+30 Sep 2026 00:00:00 GMT` header. #1023 removes the bridge after the cache
+window established by #979, keeping Disconnect and the read projection so
+tenants can release credentials written before #828.
