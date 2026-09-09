@@ -1437,6 +1437,17 @@ function Tools({
   // `null`/`[]` grant both start from an empty box.
   const requestedGlobs = agent.tools.requested ?? [];
   const [field, setField] = useState(requestedGlobs.join(", "));
+
+  // The teammate on screen can change under this card (a slow detail load, a
+  // sibling route swap), and a draft left over from the previous one would be
+  // saved onto the new teammate. Re-seed whenever the stored list changes.
+  useEffect(() => {
+    setField((agent.tools.requested ?? []).join(", "));
+    setEditing(false);
+  }, [agent.id, agent.tools.requested]);
+
+  const draft = parseToolGlobs(field);
+  const draftSet = new Set(draft);
   /**
    * The ceiling as a list of switches — what this teammate is allowed to hold,
    * one row each, which is the question an operator actually arrives with.
@@ -1458,17 +1469,6 @@ function Tools({
   const held = (glob: string) =>
     summary.standardGrant ? true : draftSet.has(glob);
   const [advanced, setAdvanced] = useState(false);
-
-  // The teammate on screen can change under this card (a slow detail load, a
-  // sibling route swap), and a draft left over from the previous one would be
-  // saved onto the new teammate. Re-seed whenever the stored list changes.
-  useEffect(() => {
-    setField((agent.tools.requested ?? []).join(", "));
-    setEditing(false);
-  }, [agent.id, agent.tools.requested]);
-
-  const draft = parseToolGlobs(field);
-  const draftSet = new Set(draft);
   const dirty = toolGlobsDiffer(requestedGlobs, draft);
   // Live, before the save rather than after it: the intersection is the thing
   // operators get wrong, and a glob the desk-and-company ceiling does not allow
