@@ -104,7 +104,9 @@ export function HiveGrammarPanel({
       }));
     return [...current, ...stale];
   }, [state, draft.moves]);
-  const memberIds = useMemo(() => seats.map((s) => s.agentId), [seats]);
+  // Validation must use the effective roster, not `seats`: the latter also
+  // contains stale authored rows solely so an operator can remove them.
+  const memberIds = useMemo(() => state?.seats.map((seat) => seat.agentId) ?? [], [state]);
   const moves = draft.moves ?? {};
 
   const problems = useMemo(

@@ -606,6 +606,12 @@ impl EpisodeOutcome {
 /// it.
 #[must_use]
 pub fn effective_hive_config(record: &CompanyRecord, desk_id: &str) -> HiveConfig {
+    // An operator-installed grammar is the newest, explicit override. Keep the
+    // older console-desk hive below as a compatibility rung for desks authored
+    // before the dedicated grammar overlay existed.
+    if record.desk_hive_is_installed(desk_id) {
+        return record.effective_desk_hive(desk_id);
+    }
     record
         .overlay_desks
         .iter()

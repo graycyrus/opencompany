@@ -127,6 +127,9 @@ export function markerLines(body: string): { line: string; index: number }[] {
       fence = { character: opener[1][0], length: opener[1].length };
       return;
     }
+    // `parseMove` deliberately accepts leading whitespace for ordinary prose,
+    // but four spaces (or a tab) introduce Markdown's indented code block.
+    if (/^(?: {4}|\t)/.test(line)) return;
     out.push({ line, index });
   });
   return out;
