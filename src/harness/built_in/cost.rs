@@ -400,16 +400,21 @@ mod tests {
     /// and "not".
     #[test]
     fn the_smallest_representable_positive_cost_still_posts_a_ledger_entry() {
+        // The smallest positive `f64` there is: the least subnormal, which is
+        // smaller than `MIN_POSITIVE` (the smallest *normal*). Nothing positive
+        // can sit closer to the gate than this.
+        let smallest = f64::from_bits(1);
+        assert!(smallest.is_subnormal() && smallest > 0.0);
         let turn = TurnUsage {
             input_tokens: 3,
             output_tokens: 1,
             cached_input_tokens: 0,
-            cost_usd: f64::MIN_POSITIVE,
+            cost_usd: smallest,
         };
         let entry = ledger_entry_for(&turn, "ceo").expect(
             "a nonzero cost, however small, still posts — the gate is exact equality to zero",
         );
-        assert_eq!(entry.amount_usd, -f64::MIN_POSITIVE);
+        assert_eq!(entry.amount_usd, -smallest);
 
         let exactly_zero = TurnUsage {
             cost_usd: 0.0,
