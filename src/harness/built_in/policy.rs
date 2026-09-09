@@ -2216,6 +2216,34 @@ mod tests {
         );
     }
 
+    /// BOUND-axis (TOOL-001): the boundary is a `Cell<bool>` that starts at
+    /// `false` inside every fresh `turn_scoped` call — the zero-vs-one
+    /// transition `an_explicit_request_refuses_later_calls_in_the_same_turn`
+    /// above only tests the "one" side of (the second request is denied),
+    /// never asserting that the FIRST request in a brand new turn is not
+    /// itself refused by a boundary nothing has tripped yet.
+    #[tokio::test]
+    async fn the_first_explicit_request_in_a_fresh_turn_is_not_refused() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+
+        let first_request = claim
+            .scoped(queue.turn_scoped(policy.check(&request(
+                crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
+                serde_json::json!({ "title": "Ask", "question": "May I send this?" }),
+            ))))
+            .await;
+        assert_eq!(
+            first_request,
+            ToolPolicyDecision::Allow,
+            "the very first explicit request in a fresh turn must not be refused: \
+             {first_request:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_duplicate_explicit_request_still_establishes_a_fresh_turn_boundary() {
         let queue = ApprovalRequestQueue::default();
