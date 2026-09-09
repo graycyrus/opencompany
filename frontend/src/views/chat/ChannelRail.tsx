@@ -290,6 +290,7 @@ function CompactChannelRow({
   channel,
   active,
   activeAria,
+  onPage,
   unread,
   mentions,
   onSelect,
@@ -297,6 +298,8 @@ function CompactChannelRow({
   channel: Channel;
   active: boolean;
   activeAria: "page" | "true";
+  /** Whether this rail's channel is the page on screen — see `onPage`. */
+  onPage: boolean;
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
@@ -392,6 +395,7 @@ function Section({
   section,
   activeId,
   activeAria,
+  onPage,
   unread,
   mentions,
   onSelect,
@@ -402,6 +406,8 @@ function Section({
   section: ChannelSection;
   activeId: string | null;
   activeAria: "page" | "true";
+  /** Whether this rail's channel is the page on screen — see `onPage`. */
+  onPage: boolean;
   unread: Record<string, number>;
   mentions?: Record<string, number>;
   onSelect: (id: string) => void;
@@ -492,6 +498,7 @@ function ChannelRow({
   channel,
   active,
   activeAria,
+  onPage,
   unread,
   mentions,
   onSelect,
@@ -499,6 +506,8 @@ function ChannelRow({
   channel: Channel;
   active: boolean;
   activeAria: "page" | "true";
+  /** Whether this rail's channel is the page on screen — see `onPage`. */
+  onPage: boolean;
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
