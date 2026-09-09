@@ -1,3 +1,0 @@
-{"record":"CycleStarted","cycle_id":"01a087ffd8af-000000000009","at_millis":1788988086447,"trigger":"operator-message"}
-{"record":"EffectExecuted","key":"01a087ffd8af-000000000009:0","effect":{"kind":"echo.noop","at_millis":1788988086470,"irreversible":false}}
-{"record":"CycleFinished","cycle_id":"01a087ffd8af-000000000009","at_millis":1788988086475}
