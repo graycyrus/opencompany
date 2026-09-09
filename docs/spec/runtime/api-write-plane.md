@@ -427,6 +427,8 @@ credential: the old credential was unreachable by agents.
 ```text
 GET    …/credential                         whether the company has its own key + which tier it presents
 PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
+POST   …/credential/link/start              begin a PKCE key grant; answers the hub URL to navigate to  [admin]
+POST   …/credential/link/finish             redeem the returned code; stores the minted key  [admin]
 GET    …/domain                             the stored domain + records + last verify result, or `null`
 PUT    …/domain                             set the custom domain  [admin]
 POST   …/domain/verify                       server-side DNS check
