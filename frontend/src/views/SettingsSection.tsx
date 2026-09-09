@@ -5,6 +5,8 @@ import { RouteLoading } from "@/components/route-loading";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
 import { PeopleView } from "@/views/PeopleView";
+import { AppearanceView } from "@/views/settings/AppearanceView";
+import { ApprovalsSettingsView } from "@/views/settings/ApprovalsSettingsView";
 import { SettingsView } from "@/views/SettingsView";
 import {
   SETTINGS_PAGE_GROUPS,
@@ -57,14 +59,14 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
         aria-label="Settings"
         className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex"
       >
-        {/* A visual caption for the rail, not a heading. The `nav` is already
-            named by its `aria-label`, so an `h2` here added nothing for a screen
-            reader and broke the document outline: the rail renders before the
-            sub-page, so heading navigation met a section-level heading ahead of
-            the page's own `h1` (issue #1392). */}
-        <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">
-          Settings
-        </div>
+        {/* No "Settings" caption. It was a visual label for a rail that is
+            already unmistakable: you arrive here from the Settings row in the
+            sidebar footer, the page beside it says "General settings", and
+            every group below carries its own heading. A word repeated three
+            times on one screen is furniture. Nothing is lost for a screen
+            reader either — the caption was deliberately a `div` rather than an
+            `h2` (issue #1392), so it was never in the document outline, and
+            the `nav`'s own `aria-label` still names this landmark. */}
         {SETTINGS_PAGE_GROUPS.map((group) => (
           <section key={group.id} aria-labelledby={`settings-group-${group.id}`}>
             {/* Named by `aria-labelledby`, which resolves against any element,
@@ -160,6 +162,9 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
           />
         )}
         {page === "people" && <PeopleView client={client} company={company} />}
+        {/* Both were cards on General. See their own files for why each left. */}
+        {page === "approvals" && <ApprovalsSettingsView client={client} company={company} />}
+        {page === "appearance" && <AppearanceView />}
         {/* OAuth, MCP Servers, Inference and Skills were all here. They are the
             Connections section now (`#/connections/apps`, `/mcp`, `/inference`,
             `/skills`) — each is read repeatedly and changes as the company's
