@@ -257,7 +257,6 @@ mod test {
              ?redirectUri=https%3A%2F%2Fsmoke1.example.com%2F%3Fcompany%3Dsmoke1"
         );
     }
-
 }
 
 /// The real HTTP exchange, compiled only under the `tinyhumans` feature.
