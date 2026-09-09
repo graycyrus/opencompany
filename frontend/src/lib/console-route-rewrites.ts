@@ -40,6 +40,14 @@ export const REWRITE_RETIRED = (
   if (head === "settings" && sub === "oauth") return ["connections", "apps"];
   if (head === "settings" && sub === "mcp") return ["connections", "mcp"];
   if (head === "settings" && sub === "connections") return ["connections", null];
+  // Inference and Skills followed them off the settings rail. Both were live
+  // links in the setup flow, the chat pane's "cannot reach a model" banner and
+  // the workflow canvas when they moved, and `settingsHref` is typed off
+  // `SETTINGS_PAGES` — so every in-tree caller was a compile error and is now
+  // `connectionsHref`. These two lines are for what the compiler cannot reach:
+  // bookmarks, and links already sent to somebody.
+  if (head === "settings" && sub === "inference") return ["connections", "inference"];
+  if (head === "settings" && sub === "skills") return ["connections", "skills"];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
   // page: a bookmark or shared link must say where it actually lands.
