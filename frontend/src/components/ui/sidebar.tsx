@@ -466,8 +466,23 @@ function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
       // reach with no way to get to them. `overflow-y-auto` keeps them
       // reachable by scroll; `no-scrollbar` (already applied above) keeps the
       // rail visually identical when everything already fits.
+      // `pt-4.5` (18px) starts the nav list level with the first row of the
+      // page beside it, instead of at the top of its own column. Both columns
+      // begin at the same y under the title row, but the content surface
+      // spends its first band on a header — `ChatHeader`'s `h-15.5`, 62px with
+      // its title vertically centred — while the sidebar put its first 32px row
+      // flush against the top. The two first rows therefore sat 18px apart, and
+      // the eye reads that as the column having slipped rather than as two
+      // different kinds of thing.
+      //
+      // The number is that gap, derived rather than dialled: centring a 32px
+      // row in the 62px header band is `(62 - 32) / 2` = 15px from the surface's
+      // top edge, which sits 3px below the sidebar's. Views with the shorter
+      // `h-13` header (52px) land 5px high of their own first row — worth it
+      // for the view every session opens on, and the fix for those is to settle
+      // on one header height rather than to average this.
       className={cn(
-        "no-scrollbar flex min-h-0 flex-1 flex-col gap-1 overflow-auto group-data-[collapsible=icon]:overflow-y-auto",
+        "no-scrollbar flex min-h-0 flex-1 flex-col gap-1 overflow-auto pt-4.5 group-data-[collapsible=icon]:overflow-y-auto",
         className
       )}
       {...props}
