@@ -6,7 +6,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -376,10 +376,10 @@ export function TeamView({
         // least one teammate. The host's own message says which teammate and
         // what to do about it, so it is shown rather than restated.
         toast.error(
-          error.message || "You can't remove your company's last teammate.",
+          error.message || "You can't remove your company's last agent.",
         );
       } else {
-        toast.error(error instanceof Error ? error.message : "Couldn't remove teammate.");
+        toast.error(error instanceof Error ? error.message : "Couldn't remove agent.");
       }
     }
   }
@@ -427,7 +427,7 @@ export function TeamView({
         rowTestId="company-header"
         description={
           <>
-            The teammates that make up your company — what each does, and what
+            The agents that make up your company — what each does, and what
             they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
           </>
         }
@@ -439,7 +439,7 @@ export function TeamView({
               </Button>
             )}
             <Button onClick={() => setAddOpen(true)}>
-              <UserPlus className="size-4" /> Add teammate
+              <UserPlus className="size-4" /> Add agent
             </Button>
           </>
         }
@@ -454,7 +454,7 @@ export function TeamView({
 
           The copy says "not been set up" rather than "has no team", and that is
           load-bearing: this prompt now renders directly above the global
-          baseline's teammates, who are real agents on the host (issue #1404).
+          baseline's agents, who are real agents on the host (issue #1404).
           Claiming there is nobody here, over four cards, would be the same lie
           the fabricated starter roster was deleted for — pointing the other way.
         */}
@@ -486,13 +486,13 @@ export function TeamView({
             <div className="flex flex-wrap items-center gap-3" data-testid="team-roster-filters">
               <div className="min-w-52 flex-1">
                 <Label htmlFor="team-roster-search" className="sr-only">
-                  Search teammates by name
+                  Search agents by name
                 </Label>
                 <Input
                   id="team-roster-search"
                   value={nameQuery}
                   onChange={(event) => setNameQuery(event.target.value)}
-                  placeholder="Search teammates by name…"
+                  placeholder="Search agents by name…"
                   data-testid="team-roster-search"
                 />
               </div>
@@ -501,7 +501,7 @@ export function TeamView({
                   checked={workingOnly}
                   onCheckedChange={setWorkingOnly}
                   disabled={workload === null}
-                  aria-label="Show working teammates only"
+                  aria-label="Show working agents only"
                   data-testid="team-roster-working"
                 />
                 Working
@@ -531,7 +531,7 @@ export function TeamView({
               ))}
               {visibleMembers.length === 0 && (
                 <p className="col-span-full text-sm text-muted-foreground" data-testid="team-roster-empty">
-                  No teammates match these filters.
+                  No agents match these filters.
                 </p>
               )}
               <button
@@ -539,7 +539,7 @@ export function TeamView({
                 className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
               >
                 <Plus className="size-5" />
-                Add teammate
+                Add agent
               </button>
             </div>
           </>
@@ -606,7 +606,7 @@ function MemberCard({
           {/*
             The shared chat avatar, not a hand-rolled tile (issue #1181). This
             drew `initials()` over a `TEAM_TONES` background — the same visual
-            language as chat, minus the mascot — so a teammate had a face in a DM
+            language as chat, minus the mascot — so a agent had a face in a DM
             and letters on the page that is *about* them.
 
             44px, comfortably above the ~24px floor under which a mascot is a
@@ -658,20 +658,20 @@ function MemberCard({
           <div className="relative z-10">
             <DropdownMenu>
               <DropdownMenuTrigger
-                render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
+                render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Agent actions" />}
               >
                 <MoreHorizontal className="size-4" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 {/*
-                  Issue #1206: "View teammate" is gone — the card itself
+                  Issue #1206: "View agent" is gone — the card itself
                   navigates now, so a menu item doing the same thing was noise
                   that also implied (wrongly) that the card did not. The
                   budget-editing items ("Set/Change daily budget…", "Remove
                   cap", "Reset to company default") are gone too, for the same
                   reason the Inbox switch left the card in #1190: a card in a
-                  grid of thirteen is for recognising a teammate, not
-                  configuring one. Editing now lives on the teammate's own
+                  grid of thirteen is for recognising a agent, not
+                  configuring one. Editing now lives on the agent's own
                   detail page, beside Inbox — see `AgentDetailView`'s `Budget`
                   section. The card still *shows* the cap and today's spend
                   via `DailyBudgetLine` below; only the controls that write
@@ -680,9 +680,9 @@ function MemberCard({
                   That leaves exactly one item. It stays a menu rather than a
                   bare button: Remove is destructive, and a deliberate extra
                   click before it is worth keeping beside the title action.
-                  Unlike "View teammate" it does
+                  Unlike "View agent" it does
                   not duplicate the card's own action, and unlike Budget it is
-                  not per-teammate configuration that reads better on a
+                  not per-agent configuration that reads better on a
                   detail page — it is the one roster-level action an operator
                   reaches for while scanning many cards deciding which to
                   prune, and moving it off the grid would trade a fast,
@@ -702,7 +702,7 @@ function MemberCard({
           </p>
         )}
         {/*
-          The desks this teammate sits on, one chip per desk (issue #1440). The
+          The desks this agent sits on, one chip per desk (issue #1440). The
           roster read already carries `desks` per member — the card just never
           drew it. A chip is the desk's name plus a "(lead)" marker for the desk
           it leads, and it links to that desk's own address (`#/company/<deskId>`),
@@ -767,14 +767,14 @@ function MemberCard({
 
           The switch was the only control on the card that *wrote* to the host,
           at the same weight as the name, on a grid of thirteen — a card is for
-          recognising a teammate, and a mis-click while scanning silently
-          changed a per-teammate setting with no confirmation. It moved to the
-          teammate's own page, which already reported inbox state as a badge and
+          recognising a agent, and a mis-click while scanning silently
+          changed a per-agent setting with no confirmation. It moved to the
+          agent's own page, which already reported inbox state as a badge and
           offered no way to change it. See `AgentDetailView`.
 
-          Its companion — a "Teammate" badge — went with it rather than being
+          Its companion — a "Agent" badge — went with it rather than being
           left behind a border rule on its own. On a page whose every card is a
-          teammate it labelled nothing, and a bordered band holding one inert
+          agent it labelled nothing, and a bordered band holding one inert
           chip reads as something that failed to load.
         */}
       </CardContent>

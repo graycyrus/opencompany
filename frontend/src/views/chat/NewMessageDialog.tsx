@@ -32,7 +32,7 @@ export function NewMessageDialog({ directMessages, onSelect, trigger }: Props) {
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>New message</DialogTitle>
-          <DialogDescription>Choose a teammate to start a direct message.</DialogDescription>
+          <DialogDescription>Choose a agent to start a direct message.</DialogDescription>
         </DialogHeader>
         <div className="flex max-h-80 flex-col gap-1 overflow-y-auto">
           {directMessages.map((channel) => (

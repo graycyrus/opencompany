@@ -47,7 +47,7 @@ export const SETTINGS_PAGES = [
     id: "approvals",
     label: "Approvals",
     icon: ShieldCheck,
-    hint: "The standing rule for what teammates may do unattended",
+    hint: "The standing rule for what agents may do unattended",
     group: "capability",
   },
   // One question per page. "Connections" carried five — third-party accounts,
@@ -108,7 +108,7 @@ export const SETTINGS_PAGES = [
   // top-level shape, `#/observatory/<runId>`, because workflow rows, approval
   // cards and chat all link straight to one — burying that behind a settings
   // rail would break every link that names a run.
-  { id: "observatory", label: "Observatory", icon: Activity, hint: "What your teammates actually did", group: "capability" },
+  { id: "observatory", label: "Observatory", icon: Activity, hint: "What your agents actually did", group: "capability" },
   // A fact about this browser rather than about the company: the theme is
   // stored per client, and changing it changes nothing for anyone else who
   // signs in. That is what separates it from every card left on General.

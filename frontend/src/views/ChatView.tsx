@@ -1754,8 +1754,8 @@ export function ChatView({
         {header}
         <EmptyPane
           title="No channels yet"
-          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a teammate and their direct message shows up here."
-          action={{ label: "Add a teammate", onClick: () => setAddOpen(true) }}
+          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a agent and their direct message shows up here."
+          action={{ label: "Add a agent", onClick: () => setAddOpen(true) }}
           after={
             <AddMemberDialog
               open={addOpen}
@@ -1973,8 +1973,8 @@ export function ChatView({
       if (outside.length) {
         toast.warning(
           outside.length === 1
-            ? "A teammate you @-mentioned is not on this channel — they won't see the message."
-            : `${outside.length} teammates you @-mentioned are not on this channel — they won't see the message.`,
+            ? "A agent you @-mentioned is not on this channel — they won't see the message."
+            : `${outside.length} agents you @-mentioned are not on this channel — they won't see the message.`,
         );
       }
     }
@@ -2554,10 +2554,10 @@ export function ChatView({
         // least one teammate. The host's own message says which teammate and
         // what to do about it, so it is shown rather than restated.
         toast.error(
-          error.message || "You can't remove your company's last teammate.",
+          error.message || "You can't remove your company's last agent.",
         );
       } else {
-        toast.error(error instanceof Error ? error.message : "Couldn't remove teammate.");
+        toast.error(error instanceof Error ? error.message : "Couldn't remove agent.");
       }
     }
   }
@@ -2760,7 +2760,7 @@ export function ChatView({
                     <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                     <span className="min-w-0">
                       <span className="font-medium text-foreground">{consoleOnlyMember}</span> only
-                      exists in this console — the company has no such teammate, so nobody answers
+                      exists in this console — the company has no such agent, so nobody answers
                       here. The transcript is still saved and survives a reload.
                     </span>
                   </p>
@@ -2781,7 +2781,7 @@ export function ChatView({
                 <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
                 {/* Issues #1734 / #1735, repositioned. Directly above the composer,
                     not above the transcript: what the notice warns about — a reply
-                    that comes from the echo brain rather than the teammate it appears
+                    that comes from the echo brain rather than the agent it appears
                     under — is the consequence of pressing Send, and a caveat at the
                     other end of the page from the control it qualifies is one the
                     operator reads before it means anything and has forgotten by the
@@ -2804,11 +2804,11 @@ export function ChatView({
                     there, so a caveat about what sending produces has nothing left to
                     qualify. But the sentence is not about sending — every state below
                     says the replies in this conversation come from the echo brain
-                    rather than the teammate they appear under, which is a claim about
+                    rather than the agent they appear under, which is a claim about
                     the messages already on screen. `readOnly` is
                     `Boolean(channel?.system)`, i.e. the `#Operator` feed.
 
-                    Its rows are NOT under a roster teammate, and the difference
+                    Its rows are NOT under a roster agent, and the difference
                     matters (codex review on #2159). `DurableOperatorChannel` journals
                     them under the reserved authors `workflow-report` and
                     `owner-fallback-report` (`runtime/channel.rs`), which `senderOf`
@@ -2873,10 +2873,10 @@ export function ChatView({
                       {cognition === "unconfigured" && (
                         <>
                           <span className="font-medium text-foreground">
-                            Teammates can&apos;t think yet.
+                            Agents can&apos;t think yet.
                           </span>{" "}
                           This company has no model configured, so the replies in this
-                          conversation come from the offline echo brain rather than the teammate
+                          conversation come from the offline echo brain rather than the agent
                           they appear under. Choose a provider in{" "}
                           <a
                             className="font-medium text-foreground transition-opacity hover:opacity-80"
@@ -2897,11 +2897,11 @@ export function ChatView({
                       {cognition === "restart-required" && (
                         <>
                           <span className="font-medium text-foreground">
-                            Teammates can&apos;t think yet — the model isn&apos;t live.
+                            Agents can&apos;t think yet — the model isn&apos;t live.
                           </span>{" "}
                           A provider is configured, but this company&apos;s runtime was built before
                           it was saved, so the replies in this conversation still come from the
-                          offline echo brain rather than the teammate they appear under. Finish
+                          offline echo brain rather than the agent they appear under. Finish
                           the switch in{" "}
                           <a
                             className="font-medium text-foreground transition-opacity hover:opacity-80"
@@ -2918,7 +2918,7 @@ export function ChatView({
                             This host cannot reach a model — no agent harness is available.
                           </span>{" "}
                           The replies in this conversation come from the offline echo brain
-                          rather than the teammate they appear under. No setting changes that:
+                          rather than the agent they appear under. No setting changes that:
                           it takes a host built and started with the harness.
                         </>
                       )}
@@ -2932,10 +2932,10 @@ export function ChatView({
                       {cognition === "undetermined" && (
                         <>
                           <span className="font-medium text-foreground">
-                            Teammates can&apos;t think, and this host can&apos;t say why.
+                            Agents can&apos;t think, and this host can&apos;t say why.
                           </span>{" "}
                           Its inference configuration could not be read, so the replies in this
-                          conversation come from the offline echo brain rather than the teammate
+                          conversation come from the offline echo brain rather than the agent
                           they appear under. Until the host can read that configuration, saving a
                           provider is not known to help.
                         </>

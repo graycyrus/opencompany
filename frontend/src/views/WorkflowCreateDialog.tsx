@@ -3344,10 +3344,10 @@ function NodeRow({
         {node.kind === "agent" &&
           (roster.length > 0 ? (
             <>
-              <Label className="mt-1 text-2xs text-muted-foreground">Teammate</Label>
+              <Label className="mt-1 text-2xs text-muted-foreground">Agent</Label>
               <Select value={node.agent} onValueChange={(v) => onChange({ agent: v ?? "" })}>
-                <SelectTrigger className="h-8" aria-label="Teammate">
-                  <SelectValue placeholder="Pick a teammate" />
+                <SelectTrigger className="h-8" aria-label="Agent">
+                  <SelectValue placeholder="Pick a agent" />
                 </SelectTrigger>
                 <SelectContent>
                   {roster.map((m) => (
@@ -3360,15 +3360,15 @@ function NodeRow({
             </>
           ) : (
             <>
-              <Label htmlFor={`${rowId}-teammate`} className="mt-1 text-2xs text-muted-foreground">
-                Teammate ID
+              <Label htmlFor={`${rowId}-agent`} className="mt-1 text-2xs text-muted-foreground">
+                Agent ID
               </Label>
               <Input
-                id={`${rowId}-teammate`}
+                id={`${rowId}-agent`}
                 value={node.agent}
                 onChange={(e) => onChange({ agent: e.target.value })}
-                placeholder="teammate id"
-                aria-label="Teammate id"
+                placeholder="agent id"
+                aria-label="Agent id"
               />
             </>
           ))}

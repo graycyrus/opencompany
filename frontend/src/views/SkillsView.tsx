@@ -252,7 +252,7 @@ export function SkillsView({ client, company }: Props) {
         width="full"
         description={
           <>
-            Playbooks your teammates read. Enable, install from the registry, or add your own.
+            Playbooks your agents read. Enable, install from the registry, or add your own.
           </>
         }
         actions={
@@ -282,7 +282,7 @@ export function SkillsView({ client, company }: Props) {
             <Info className="size-4" />
             <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
             <AlertDescription>
-              Enabling, installing, uninstalling and adding a skill change what every teammate is
+              Enabling, installing, uninstalling and adding a skill change what every agent is
               told to do, so an admin makes those calls. You can see what is installed and browse
               the registry.
             </AlertDescription>
@@ -295,7 +295,7 @@ export function SkillsView({ client, company }: Props) {
             pinned by `dispatched_belt_excludes_every_deferred_family` — but this
             screen's vocabulary is the vocabulary of switching a capability on,
             so without saying it the operator learns the difference by asking a
-            teammate to do something and watching nothing happen. */}
+            agent to do something and watching nothing happen. */}
         <Alert data-testid="skills-read-only-note">
           <BookOpen className="size-4" />
           <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
@@ -306,7 +306,7 @@ export function SkillsView({ client, company }: Props) {
             <Info className="size-4" />
             <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
             <AlertDescription>
-              A skill's content reaches every teammate, so an admin installs, removes, enables and
+              A skill's content reaches every agent, so an admin installs, removes, enables and
               adds them. You can see what is installed and enabled.
             </AlertDescription>
           </Alert>
@@ -557,10 +557,10 @@ function AddSkillDialog({
           <DialogTitle>Add a skill</DialogTitle>
           {/* Not "a capability your company should have" (issue #569): this is
               where an operator authors one, so it is the earliest point the
-              console can frame a skill as the playbook a teammate reads rather
+              console can frame a skill as the playbook a agent reads rather
               than as something the company will carry out. */}
           <DialogDescription>
-            Describe a playbook your teammates should follow — what to do, and when.
+            Describe a playbook your agents should follow — what to do, and when.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">

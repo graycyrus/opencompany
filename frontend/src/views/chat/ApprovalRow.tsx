@@ -102,12 +102,12 @@ function settledReceipt(approvals: ApprovalSummary[], decided: Record<string, Ve
     return approved === 1 ? approvedLine(undefined) : "Declined — recorded, and nothing will run";
   }
   if (approved === approvals.length) {
-    return `Approved ${actionCount(approved)} — the teammate is picking it up now`;
+    return `Approved ${actionCount(approved)} — the agent is picking it up now`;
   }
   if (declined === approvals.length) {
-    return `Declined ${actionCount(declined)} — the teammate will not take them`;
+    return `Declined ${actionCount(declined)} — the agent will not take them`;
   }
-  return `Approved ${actionCount(approved)} and declined ${actionCount(declined)} — the teammate is picking it up now`;
+  return `Approved ${actionCount(approved)} and declined ${actionCount(declined)} — the agent is picking it up now`;
 }
 
 /**
@@ -469,7 +469,7 @@ export function ApprovalRow({
   // the one thing here the operator has to act on.
   const status = busy
     ? awaiting("approve")
-      ? "Waiting for the teammate…"
+      ? "Waiting for the agent…"
       : "Recording…"
     : failedCount > 0
       ? failureLabel(failedCount, approvals.length)

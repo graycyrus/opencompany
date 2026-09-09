@@ -68,7 +68,7 @@ export const CONNECTION_PAGES = [
     id: "apps",
     label: "Apps",
     icon: LayoutGrid,
-    hint: "The apps your teammates act through",
+    hint: "The apps your agents act through",
   },
   {
     id: "mcp",
@@ -80,13 +80,13 @@ export const CONNECTION_PAGES = [
     id: "inference",
     label: "Inference",
     icon: BrainCircuit,
-    hint: "The model teammates think with",
+    hint: "The model agents think with",
   },
   {
     id: "skills",
     label: "Skills",
     icon: Sparkles,
-    hint: "Playbooks your teammates read",
+    hint: "Playbooks your agents read",
   },
   {
     id: "hosting",
@@ -98,7 +98,7 @@ export const CONNECTION_PAGES = [
     id: "search",
     label: "Search",
     icon: Search,
-    hint: "Where teammates look things up",
+    hint: "Where agents look things up",
   },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon; hint: string }[];
 

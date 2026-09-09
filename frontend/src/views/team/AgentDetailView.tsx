@@ -19,7 +19,7 @@ import {
   type AcpHarnessModel,
 } from "@/api/transport/desktop";
 import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } from "@/api/types";
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
 import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
@@ -254,7 +254,7 @@ export function AgentDetailView({
    */
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   /** An icon save is in flight — the picker is disabled until it settles, so two
-      avatar PATCHes for the same teammate can never be pending at once and
+      avatar PATCHes for the same agent can never be pending at once and
       resolve out of order (the older one overwriting the newer choice). */
   const [avatarSaving, setAvatarSaving] = useState(false);
   /**
@@ -440,7 +440,7 @@ export function AgentDetailView({
       toast.success(avatar ? "Icon updated." : "Back to the default icon.");
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Couldn't change this teammate's icon.",
+        error instanceof Error ? error.message : "Couldn't change this agent's icon.",
       );
     } finally {
       setAvatarSaving(false);
@@ -464,14 +464,14 @@ export function AgentDetailView({
       setAgent(updated);
       setDraft(draftFrom(updated));
       setEditing(false);
-      toast.success("Teammate updated.");
+      toast.success("Agent updated.");
     } catch (error) {
       toast.error(
         error instanceof ApiError && error.status === 409
           ? error.message
           : error instanceof Error
             ? error.message
-            : "Couldn't save this teammate.",
+            : "Couldn't save this agent.",
       );
     } finally {
       setSaving(false);
@@ -557,7 +557,7 @@ export function AgentDetailView({
           ? error.message
           : error instanceof Error
             ? error.message
-            : "Couldn't save this teammate's harness.",
+            : "Couldn't save this agent's harness.",
       );
     } finally {
       setSavingHarness(false);
@@ -601,7 +601,7 @@ export function AgentDetailView({
       <div className="w-full space-y-6 px-4 py-6">
         {/*
           A breadcrumb rather than a Back button (issue #1141). Back said where
-          the operator had been; this says where they *are* — one teammate,
+          the operator had been; this says where they *are* — one agent,
           inside the company — which is the question a linked page has to answer,
           and this page is linked from the org chart, the chat member pane and
           every "Not on a desk" chip. Arriving from any of those, "Back to team"
@@ -636,10 +636,10 @@ export function AgentDetailView({
               aria-current="page"
               className="flex min-w-0 items-center truncate font-medium text-foreground"
             >
-              {/* Named as soon as there is a name, and "Teammate" until then.
+              {/* Named as soon as there is a name, and "Agent" until then.
                   A crumb that appeared only once the read landed would move
                   the page's controls across the row as it settled. */}
-              {agent ? (agent.name?.trim() || agent.role) : "Teammate"}
+              {agent ? (agent.name?.trim() || agent.role) : "Agent"}
             </li>
           </ol>
         </nav>
@@ -647,9 +647,9 @@ export function AgentDetailView({
         {/*
           The page's accessible name in the four states `Identity` does not
           mount for (codex review, #1785). `Identity`'s `h1` is this page's
-          only heading and it renders only once the teammate has loaded, so a
+          only heading and it renders only once the agent has loaded, so a
           direct `#/team/<id>` visit that was still loading — or that landed on
-          a removed teammate, an older host, or a failed read — was a page a
+          a removed agent, an older host, or a failed read — was a page a
           screen reader could not announce at all.
 
           `hidden`, because the breadcrumb above already says where you are and
@@ -658,7 +658,7 @@ export function AgentDetailView({
           The name is gated on `load === "ready"` and not merely on `agent`
           being set (coderabbit review). `boot()` moves `load` to `"loading"`
           on an `agentId` change but keeps the previous `agent` until the new
-          request settles, so keying off `agent` alone announced the teammate
+          request settles, so keying off `agent` alone announced the agent
           you just navigated *away from* as the name of the page you navigated
           *to* — a wrong name, which is worse than a generic one. The crumb has
           the same shape and can afford it: it is visible text next to the
@@ -666,28 +666,28 @@ export function AgentDetailView({
           reader announces on arrival.
         */}
         {load !== "ready" || !agent ? (
-          <PageHeader title="Teammate" hidden />
+          <PageHeader title="Agent" hidden />
         ) : null}
 
         {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
 
         {load === "missing" && (
           <EmptyState
-            title="This teammate is no longer on the roster."
+            title="This agent is no longer on the roster."
             body="It may have been removed. Go back to the team to see who is here now."
           />
         )}
 
         {load === "unsupported" && (
           <EmptyState
-            title="This host can't open a teammate yet."
-            body="Opening a teammate needs a newer host. The roster still works."
+            title="This host can't open a agent yet."
+            body="Opening a agent needs a newer host. The roster still works."
           />
         )}
 
         {load === "error" && (
           <EmptyState
-            title="Couldn't load this teammate."
+            title="Couldn't load this agent."
             body="The company host didn't answer. Try again in a moment."
           />
         )}
@@ -721,7 +721,7 @@ export function AgentDetailView({
                 value={tab}
                 onChange={setTab}
                 idBase="agent"
-                aria-label="Teammate views"
+                aria-label="Agent views"
                 className="mt-0 -mb-px"
               />
             </div>
@@ -730,9 +730,9 @@ export function AgentDetailView({
             <FactLine agent={agent} workload={workload} />
             <OpenTasks tasks={openTasks} />
 
-            {/* What this teammate has actually done (issue #1573), directly
+            {/* What this agent has actually done (issue #1573), directly
                 under what it is doing now. Everything below this point defines
-                the teammate — instructions, tools, inbox, budget — and the
+                the agent — instructions, tools, inbox, budget — and the
                 record of its work reads before its definition, not after four
                 cards of configuration. */}
             <AgentRuns
@@ -744,7 +744,7 @@ export function AgentDetailView({
             </PageTabPanel>
 
             {/* Edit sits in this card, beside the fields it opens (issue #1434
-                revisited). It was on the teammate's name row — right while the
+                revisited). It was on the agent's name row — right while the
                 page was one column and the name row was the only place a
                 page-level action could go. With the definition split into tabs
                 a single header Edit would have been an action whose form
@@ -760,7 +760,7 @@ export function AgentDetailView({
               // it — so a teammate with no persona showed one sentence under a
               // heading naming the other field, and nothing on screen said the
               // persona was empty. See the two labelled blocks below.
-              subtitle="What this teammate owns, and the standing instructions that frame every turn they take."
+              subtitle="What this agent owns, and the standing instructions that frame every turn they take."
               action={
                 <div className="flex items-center gap-2">
                   {/* Reset is offered only when an override is actually masking
@@ -791,7 +791,7 @@ export function AgentDetailView({
                       disabled={agent.editable.length === 0}
                       title={
                         agent.editable.length === 0
-                          ? "This teammate can't be edited from here."
+                          ? "This agent can't be edited from here."
                           : undefined
                       }
                       data-testid="agent-edit"
@@ -851,7 +851,7 @@ export function AgentDetailView({
                             cognition === "echo"
                               ? "No model is configured, so the copilot can't draft yet."
                               : !draft.role.trim()
-                                ? "Give this teammate a role first — the copilot drafts from it."
+                                ? "Give this agent a role first — the copilot drafts from it."
                                 : undefined
                           }
                         />
@@ -869,7 +869,7 @@ export function AgentDetailView({
                   )}
                   <div className="flex items-center justify-end gap-2">
                     {/* Why Save is dead, next to Save (issue #1776). A manifest
-                        teammate carries no name of its own, so this form opens
+                        agent carries no name of its own, so this form opens
                         with Name blank and the button already disabled — and
                         until this line the only way to find that out was to
                         guess. The fields themselves are marked too; this says
@@ -905,7 +905,7 @@ export function AgentDetailView({
                 <>
                   {/* Labelled, like the persona below it. Unlabelled, this
                       paragraph was read as the standing instructions the card's
-                      heading names — and for a teammate with no persona it was
+                      heading names — and for a agent with no persona it was
                       the only thing on the card, so the mistake was the default
                       rather than an edge. */}
                   <div className="space-y-1">
@@ -915,7 +915,7 @@ export function AgentDetailView({
                       data-testid="agent-description"
                     >
                       {agent.description?.trim() ||
-                        "No description was written for this teammate."}
+                        "No description was written for this agent."}
                     </p>
                   </div>
                   <div className="space-y-1">
@@ -941,14 +941,14 @@ export function AgentDetailView({
                         className="text-sm text-muted-foreground"
                         data-testid="agent-instructions-empty"
                       >
-                        None yet, so this teammate runs on the company&apos;s default
+                        None yet, so this agent runs on the company&apos;s default
                         wording. Edit to write some, or ask the copilot.
                       </p>
                     )}
                   </div>
                   {agent.editable.length === 0 && (
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
-                      This teammate can't be edited from here. Its daily budget can still be changed
+                      This agent can't be edited from here. Its daily budget can still be changed
                       below.
                     </p>
                   )}
@@ -1074,7 +1074,7 @@ function Identity({
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="flex items-start gap-4 min-w-0">
-        {/* The header of the page a teammate *is* — the one screen that should
+        {/* The header of the page a agent *is* — the one screen that should
             never be the one showing letters (issue #1181). 56px. */}
         {/* The tile is the control. A face is a visual thing, so the way to
             change it is to click the one on screen rather than to hunt for a
@@ -1086,7 +1086,7 @@ function Identity({
             type="button"
             onClick={onPickAvatar}
             disabled={avatarBusy}
-            aria-label="Change this teammate's icon"
+            aria-label="Change this agent's icon"
             title="Change icon"
             className="rounded-xl ring-2 ring-transparent transition-colors hover:ring-primary focus-visible:ring-primary focus-visible:outline-none disabled:cursor-wait"
             data-testid="agent-avatar-pick"
@@ -1312,11 +1312,11 @@ function Tools({
       subtitle={
         summary.standardGrant
           ? deskCeilingActive
-            ? "This teammate lists no tools of its own, so it holds what its desk allows, narrowed by the company."
-            : "This teammate lists no tools of its own, so it holds everything the company allows."
+            ? "This agent lists no tools of its own, so it holds what its desk allows, narrowed by the company."
+            : "This agent lists no tools of its own, so it holds everything the company allows."
           : summary.deniedAll
-            ? "This teammate has been given an explicit empty grant, so it holds no tools at all."
-            : "What this teammate asked for, narrowed by what its desk and the company allow."
+            ? "This agent has been given an explicit empty grant, so it holds no tools at all."
+            : "What this agent asked for, narrowed by what its desk and the company allow."
       }
       action={
         canEdit && !editing ? (
@@ -1334,7 +1334,7 @@ function Tools({
       {editing && (
         <div className="grid gap-3" data-testid="agent-tools-editor">
           {/* One row per grant the ceiling actually offers. Switching one off
-              narrows this teammate; there is no row for a tool the company
+              narrows this agent; there is no row for a tool the company
               does not allow, because granting it here would confer nothing. */}
           {ceiling.length > 0 ? (
             <div className="divide-y rounded-lg border" data-testid="agent-tools-toggles">
@@ -1368,19 +1368,19 @@ function Tools({
           ) : (
             <p className="text-xs text-muted-foreground" data-testid="agent-tools-no-ceiling">
               {deskCeilingActive
-                ? "This teammate's desk allows no tools, so there is nothing to grant here."
+                ? "This agent's desk allows no tools, so there is nothing to grant here."
                 : "The company allows no tools, so there is nothing to grant here."}
             </p>
           )}
 
           <p className="text-xs text-muted-foreground">
             Every grant is narrowed by the company tool list
-            {deskCeilingActive ? " and by this teammate's desk ceiling" : ""}, so this
+            {deskCeilingActive ? " and by this agent's desk ceiling" : ""}, so this
             can only ever take capability away — never add to it.
           </p>
 
           {/* The switches cannot spell a wildcard, and a company that grants
-              `docs.*` scopes teammates with patterns rather than with the
+              `docs.*` scopes agents with patterns rather than with the
               literal rows above. The field stays, one disclosure away. */}
           <div>
             <Button
@@ -1418,7 +1418,7 @@ function Tools({
             // deliberate deny-all, NOT the standard grant. An operator who
             // wants the standard grant back must use "Reset to standard" below.
             <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
-              Saving an empty list is a deny-all — this teammate would hold no tools at all. To
+              Saving an empty list is a deny-all — this agent would hold no tools at all. To
               give it the standard company grant instead, use “Reset to standard grant”.
             </p>
           )}
@@ -1442,7 +1442,7 @@ function Tools({
             </Button>
             {/* Reset to the standard grant (`null`) — a distinct action from
                 saving an empty list (`[]`, a deny-all) since #1804. Only shown
-                when the teammate is not already on the standard grant. */}
+                when the agent is not already on the standard grant. */}
             {!summary.standardGrant && (
               <Button
                 variant="ghost"
@@ -1488,10 +1488,10 @@ function Tools({
               nothing; a narrowed agent asked for tools none of which are
               covered. */}
           {summary.standardGrant
-            ? "This teammate has no tools, because the company allows none."
+            ? "This agent has no tools, because the company allows none."
             : summary.deniedAll
-              ? "This teammate has no tools: it was given an explicit empty (deny-all) grant."
-              : "This teammate has no tools. Nothing it asked for is covered by the company tool list."}
+              ? "This agent has no tools: it was given an explicit empty (deny-all) grant."
+              : "This agent has no tools. Nothing it asked for is covered by the company tool list."}
         </p>
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-tools">
@@ -1645,7 +1645,7 @@ function HarnessAndModel({
   return (
     <Section
       title="Harness & model"
-      subtitle="Which coding engine this teammate runs on, and — on an ACP harness (an operator's own coding CLI) — which model to pin it to."
+      subtitle="Which coding engine this agent runs on, and — on an ACP harness (an operator's own coding CLI) — which model to pin it to."
       action={
         editable && !editing ? (
           <Button variant="ghost" size="sm" onClick={onEdit} data-testid="agent-harness-edit">
@@ -1709,7 +1709,7 @@ function HarnessAndModel({
                     {/* A value the harness no longer advertises is still
                         offered, so opening the editor cannot silently drop a
                         pin somebody set deliberately. The list moves when the
-                        CLI updates; the teammate's setting should not. */}
+                        CLI updates; the agent's setting should not. */}
                     {unlistedModel && (
                       <SelectItem value={unlistedModel}>
                         {unlistedModel}
@@ -1806,7 +1806,7 @@ function AvatarDialog({
   onOpenChange: (open: boolean) => void;
   onPick: (avatar: string | undefined) => void;
 }) {
-  const name = agent?.name?.trim() || agent?.role || "this teammate";
+  const name = agent?.name?.trim() || agent?.role || "this agent";
   return (
     <Dialog open={agent !== null} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">

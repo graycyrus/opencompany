@@ -118,7 +118,7 @@ export function widensAutonomy(
  * reset) and only the tier one is shared, so a component would have to carry
  * all three.
  */
-export const AUTONOMY_CONFIRM_TITLE = "Give teammates more autonomy?";
+export const AUTONOMY_CONFIRM_TITLE = "Give agents more autonomy?";
 
 /** The cancel label. It names the outcome, not the gesture: nothing changes. */
 export const AUTONOMY_CONFIRM_CANCEL = "Keep current setting";
@@ -977,7 +977,7 @@ export function PolicySettings({ client, company, canManage }: Props) {
                 testId="policy-read-only"
                 title="Only an admin can change this company's approval policy"
               >
-                The tier decides how much every teammate here may do without asking
+                The tier decides how much every agent here may do without asking
                 first, so it is the company&rsquo;s to set rather than any one
                 member&rsquo;s. You can see which tier is in force.
               </AdminOnlyNotice>
@@ -994,7 +994,7 @@ export function PolicySettings({ client, company, canManage }: Props) {
                 </>
               ) : (
                 <>
-                  Policy-based approval prompts are disabled. Teammates ask through{" "}
+                  Policy-based approval prompts are disabled. Agents ask through{" "}
                   <code>request_approval</code>; the paid-media tools stage their own
                   approval and an authored workflow can add its own{" "}
                   <code>requires_approval</code> gate. Read-only mode and the emergency
@@ -1158,7 +1158,7 @@ export function PolicySettings({ client, company, canManage }: Props) {
                 ) : (
                   <>
                     Stored for a future policy-HITL mode. These entries do not create
-                    prompts now; teammates use <code>request_approval</code> explicitly.
+                    prompts now; agents use <code>request_approval</code> explicitly.
                   </>
                 )}
               </p>

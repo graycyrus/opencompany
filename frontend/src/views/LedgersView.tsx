@@ -1206,7 +1206,7 @@ export function LedgersView({
               <DialogTitle>Delete {confirmDelete.id}?</DialogTitle>
               <DialogDescription>
                 This removes the row and everything ever recorded against it.
-                Nothing can bring it back, and no teammate can do this — they
+                Nothing can bring it back, and no agent can do this — they
                 close a row instead, which keeps the reason. Close it rather
                 than delete it unless it should never have existed.
               </DialogDescription>

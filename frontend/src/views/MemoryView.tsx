@@ -264,7 +264,7 @@ export function MemoryView({ client, company, sub }: Props) {
         description={
           <>
             What your company remembers — facts, people, projects, and preferences your
-            teammates can recall.
+            agents can recall.
           </>
         }
         tabs={
@@ -425,7 +425,7 @@ function HealthStrip({
   const tiles: { label: string; value: string }[] = [
     { label: "Total items", value: String(stats?.totalItems ?? 0) },
     { label: "Operator facts", value: String(stats?.facts ?? 0) },
-    { label: "Teammate memory", value: String(stats?.teammateMemory ?? 0) },
+    { label: "Agent memory", value: String(stats?.teammateMemory ?? 0) },
     { label: "Document chunks", value: String(stats?.documentMemory ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only

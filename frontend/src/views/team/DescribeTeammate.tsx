@@ -89,11 +89,11 @@ export function DescribeTeammate({
         />
         {/* Says what actually happens next, because the fields this dialog
             stopped asking for have not gone away — the copilot writes them from
-            this sentence before the teammate is created, and the operator lands
+            this sentence before the agent is created, and the operator lands
             on them. An earlier wording promised a copilot that "can draft their
             instructions" on the page they land on, which was true only in the
             sense that a button was enabled: nothing drafted until they noticed
-            it and prompted it themselves, and until they did, the teammate held
+            it and prompted it themselves, and until they did, the agent held
             no persona at all. */}
         <p className="text-2xs text-muted-foreground" data-testid="team-describe-hint">
           The copilot writes their role, what they do and their instructions from

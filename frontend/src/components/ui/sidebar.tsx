@@ -242,7 +242,7 @@ function Sidebar({
           {/* The sheet's own scroller.
               `sidebar-inner` below is the desktop branch only, so when the
               column's single scroller moved there the sheet was left with none:
-              a phone showing five nav rows, a channel list and every teammate
+              a phone showing five nav rows, a channel list and every agent
               simply ran off the bottom with no way to reach the end. Same two
               classes, same reason — one scroller for the whole column — and the
               hover treatment is deliberately NOT applied, because a touch

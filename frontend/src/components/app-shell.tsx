@@ -3225,7 +3225,7 @@ export function AppShell({
           blockerDecidedLine(blocker.verdict, undefined, answer.settledIds),
         );
       } else if (verdict === "deny") {
-        noteInChannel(approval.thread, "Declined — the teammate will not take that action.");
+        noteInChannel(approval.thread, "Declined — the agent will not take that action.");
       }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "something went wrong";
@@ -3768,7 +3768,7 @@ export function AppShell({
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
-        {/* Every teammate's face in here is a way into who they are (issue
+        {/* Every agent's face in here is a way into who they are (issue
             #1653): the panel is mounted once around the whole surface so a
             click on an avatar in a transcript, a member list or a channel
             header opens the same summary, over the page rather than instead of

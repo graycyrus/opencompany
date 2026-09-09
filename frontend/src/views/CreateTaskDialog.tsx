@@ -263,7 +263,7 @@ export function CreateTaskDialog({
           />
           <p className="text-2xs text-muted-foreground">
             Leave unassigned and the card is routed for you. If more than one
-            teammate fits, it waits and asks rather than picking one.
+            agent fits, it waits and asks rather than picking one.
           </p>
         </div>
 

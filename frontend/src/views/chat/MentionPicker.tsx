@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Hash, Users } from "lucide-react";
 
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { cn } from "@/lib/utils";
 import type { Mentionable } from "@/views/chat/mentions";
 

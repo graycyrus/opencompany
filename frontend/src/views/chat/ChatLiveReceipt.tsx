@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { TurnStep } from "@/api/types";
 import { cn } from "@/lib/utils";
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { StepTimeline } from "./StepTimeline";
 import { runningStepLabel } from "./WorkingIndicator";
 import type { Channel } from "./model";
@@ -120,7 +120,7 @@ export function resolveReceiptAgentName(
   channel: Channel,
 ): string | undefined {
   if (!receipt.agentId) return undefined;
-  return agentNames?.[receipt.agentId] ?? channel.voice ?? "a teammate";
+  return agentNames?.[receipt.agentId] ?? channel.voice ?? "a agent";
 }
 
 /**

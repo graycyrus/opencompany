@@ -86,14 +86,14 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="chat-composer"]',
     placement: "top",
     title: "Talk to your company",
-    body: "Ask for an update or hand off a task in plain language — like messaging a teammate.",
+    body: "Ask for an update or hand off a task in plain language — like messaging a agent.",
   },
   {
     view: "chat",
     target: '[data-tour="nav-chat"]',
     placement: "right",
     title: "Your AI staff",
-    body: "Every channel and direct message is listed here while you're in the Room. The teammates that do the work each have one.",
+    body: "Every channel and direct message is listed here while you're in the Room. The agents that do the work each have one.",
   },
   {
     view: "company",
@@ -107,7 +107,7 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-workflows"]',
     placement: "right",
     title: "Flows",
-    body: "Turn recurring work into a repeatable flow — a graph of steps your teammates run end to end.",
+    body: "Turn recurring work into a repeatable flow — a graph of steps your agents run end to end.",
   },
   {
     // The accounts page is `#/connections/apps` since it left the settings
@@ -117,7 +117,7 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-connections"]',
     placement: "right",
     title: "Connect your tools",
-    body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your teammates can act for real.",
+    body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your agents can act for real.",
   },
   {
     // Addressed, for the reason the first composer stop above gives at length.

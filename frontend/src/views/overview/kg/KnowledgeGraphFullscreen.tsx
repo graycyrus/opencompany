@@ -305,7 +305,7 @@ export function KnowledgeGraphFullscreen({
                   asked for something the page made impossible. */}
               {deptList.length > 0 ? 'Desks' : 'No desks yet'}
             </span>
-            {/* With no pillars the graph still draws — teammates, tools and
+            {/* With no pillars the graph still draws — agents, tools and
                 workflows hang off the core — so this corner is where the fact
                 is stated and where the one control that changes it lives. It
                 was previously the empty-state overlay's job, and that overlay
@@ -400,7 +400,7 @@ export function KnowledgeGraphFullscreen({
                 {noDesks ? 'No desks yet' : 'Nothing to draw yet'}
               </h2>
               <p className="mt-2 text-sm leading-6 text-os-muted">
-                This graph shows how your company&apos;s desks, teammates, work, and workflows connect.
+                This graph shows how your company&apos;s desks, agents, work, and workflows connect.
                 {noDesks
                   ? ' Create a desk to add its first pillar.'
                   : ' Nothing has been declared for it to draw.'}

@@ -146,7 +146,7 @@ export function FinancesView({ client, company }: Props) {
             <CardDescription data-testid="monthly-budget-origin">
               This cap is read from the company manifest's <code>[budget]</code>{" "}
               section and cannot be changed here. To limit spending from the
-              console, set a daily cap on each teammate's page.
+              console, set a daily cap on each agent's page.
             </CardDescription>
           </CardHeader>
           {hasBudget && (

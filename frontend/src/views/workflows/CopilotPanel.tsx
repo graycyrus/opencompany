@@ -579,7 +579,7 @@ export function CopilotPanel({
             This block is a claim about the host, so it changes only when the
             host does. #405 had to *withdraw* a confinement claim: the thread
             bought transcript isolation, not a confined responder, and the
-            teammate answering held the company's whole context and tool
+            agent answering held the company's whole context and tool
             surface. #416 built the confinement, so the claim is back — and it
             is now the narrower, checkable one: no tools, no company context,
             and a turn that says which part of a question it could not answer
@@ -605,7 +605,7 @@ export function CopilotPanel({
               <p className="mt-1.5">
                 That is also all the answer is drawn from. This turn runs{" "}
                 <span className="font-medium text-foreground">confined to this workflow</span>:
-                no tools, no company memory, and no reach into the board, your teammates or
+                no tools, no company memory, and no reach into the board, your agents or
                 another workflow. Ask something that needs the wider company and it will say so
                 rather than guess.
               </p>

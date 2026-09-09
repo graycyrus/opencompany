@@ -391,7 +391,7 @@ function ColorSection() {
               ink-hint — subtitles, empty-state prompts. 5.4:1
             </p>
             <p className="text-sm text-ink-muted">
-              ink-muted — teammate counts, metadata. 4.5:1
+              ink-muted — agent counts, metadata. 4.5:1
             </p>
             <p className="text-sm text-primary">primary — links and emphasis. 4.7:1</p>
             <p className="text-sm text-destructive">destructive — errors. 4.67:1</p>

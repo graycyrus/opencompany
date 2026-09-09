@@ -680,8 +680,8 @@ export function mentionablesFor(
     aliases: [...new Set([d.id.toLowerCase(), d.name.toLowerCase()])],
     hint:
       d.memberIds.length === 1
-        ? `${d.name} — 1 teammate`
-        : `${d.name} — ${d.memberIds.length} teammates`,
+        ? `${d.name} — 1 agent`
+        : `${d.name} — ${d.memberIds.length} agents`,
     memberIds: d.memberIds,
   }));
   const everyone: Mentionable = {

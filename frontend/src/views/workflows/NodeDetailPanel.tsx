@@ -41,8 +41,8 @@ export function NodeDetailPanel({
 }) {
   const meta = nodeKindMeta(node.kind);
   const kindLabel = nodeKindLabel(node.kind);
-  const teammate = node.agent ? roster.find((member) => member.id === node.agent) : undefined;
-  const teammateName = teammate ? teammate.name?.trim() || teammate.role : undefined;
+  const agent = node.agent ? roster.find((member) => member.id === node.agent) : undefined;
+  const teammateName = agent ? agent.name?.trim() || agent.role : undefined;
   const hasConfig =
     node.config !== undefined && node.config !== null &&
     !(typeof node.config === "object" && Object.keys(node.config as object).length === 0);
@@ -134,7 +134,7 @@ export function NodeDetailPanel({
         )}
 
         {node.agent && (
-          <DetailField label="Assigned teammate">
+          <DetailField label="Assigned agent">
             <p className="text-sm">{teammateName ?? node.agent}</p>
             {teammateName && teammateName !== node.agent && (
               <p className="font-mono text-3xs text-muted-foreground">Roster ID: {node.agent}</p>

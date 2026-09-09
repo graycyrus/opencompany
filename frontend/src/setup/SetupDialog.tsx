@@ -822,7 +822,7 @@ function InferenceNotice({
       </AlertTitle>
       <AlertDescription>
         {restart
-          ? "A model is set up for this company, but the running brain predates it — teammates keep echoing until the company is restarted. "
+          ? "A model is set up for this company, but the running brain predates it — agents keep echoing until the company is restarted. "
           : noModel
             ? "Your answers will create a standard team for your industry — this deployment can't use a model to design one. "
             : unavailable

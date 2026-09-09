@@ -58,7 +58,7 @@ export function InferenceView({ client, company }: Props) {
         width="full"
         description={
           <>
-            The model your teammates think with, and the key their turns are billed to.
+            The model your agents think with, and the key their turns are billed to.
           </>
         }
         tabs={
@@ -77,7 +77,7 @@ export function InferenceView({ client, company }: Props) {
             testId="inference-read-only"
             title="Only an admin can change this company's model"
           >
-            The model and its key decide what every teammate&apos;s turn costs, so an admin sets
+            The model and its key decide what every agent&apos;s turn costs, so an admin sets
             them. You can see what is configured.
           </AdminOnlyNotice>
         )}

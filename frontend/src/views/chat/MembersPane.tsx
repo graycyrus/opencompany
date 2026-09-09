@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { MessageSquare, MoreHorizontal, UserPlus } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -123,7 +123,7 @@ export function MembersPane({
   // two numbers the header's count refers to.
   const subtitle = channelMembers
     ? `${channelMembers.length} in this channel · ${total} in the company`
-    : `${total} ${total === 1 ? "teammate" : "teammates"} · ${
+    : `${total} ${total === 1 ? "agent" : "agents"} · ${
         fromHost ? "defined by this company" : "starter roster"
       }`;
 
@@ -139,8 +139,8 @@ export function MembersPane({
           size="icon"
           className="size-8"
           onClick={onAdd}
-          aria-label="Add teammate"
-          title="Add teammate"
+          aria-label="Add agent"
+          title="Add agent"
         >
           <UserPlus className="size-4" />
         </Button>
@@ -292,7 +292,7 @@ function MemberRow({
     <div className="group/member flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-accent/60">
       {/* Outside the row button, not inside it: a button inside a button is
           invalid HTML, and the two want different things anyway — the face
-          opens who this teammate is (issue #1653), the row opens a line to
+          opens who this agent is (issue #1653), the row opens a line to
           them. */}
       <AgentAvatarButton agentId={member.id} name={member.name}>
         <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-8" />

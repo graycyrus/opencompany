@@ -10,7 +10,7 @@ import { Pencil, Sparkles, Users, Wrench } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type AgentDetailDto } from "@/api/types";
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -199,13 +199,13 @@ export function AgentProfileSheet({
         {load === "loading" && <ProfileSkeleton />}
         {load === "unavailable" && (
           <Message
-            title="Can't open this teammate."
-            body="Either they've been removed from the roster, or this company host is too old to serve a teammate's profile."
+            title="Can't open this agent."
+            body="Either they've been removed from the roster, or this company host is too old to serve a agent's profile."
           />
         )}
         {load === "error" && (
           <Message
-            title="Couldn't load this teammate."
+            title="Couldn't load this agent."
             body="The company host didn't answer. Try again in a moment."
           />
         )}
@@ -264,7 +264,7 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
             </p>
           ) : (
             <p className="text-sm text-muted-foreground">
-              No instructions have been written for this teammate yet.
+              No instructions have been written for this agent yet.
             </p>
           )}
           {profile.aboutTruncated && (
@@ -305,7 +305,7 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
             </p>
           ) : profile.tools.effective.length === 0 ? (
             <p className="text-sm text-muted-foreground" data-testid="agent-profile-tools">
-              No tools. Nothing this teammate asked for is on the company's allow-list.
+              No tools. Nothing this agent asked for is on the company's allow-list.
             </p>
           ) : (
             <div className="flex flex-wrap gap-1.5" data-testid="agent-profile-tools">
@@ -336,7 +336,7 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
           className="flex-1"
           render={<a href={agentHref(agent.id, { edit: true })} />}
           disabled={!editable}
-          title={editable ? undefined : "This teammate can't be edited from here."}
+          title={editable ? undefined : "This agent can't be edited from here."}
           data-testid="agent-profile-edit"
         >
           <Pencil className="size-4" aria-hidden /> Edit agent

@@ -17,7 +17,7 @@ import { Check } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto } from "@/api/types";
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -203,7 +203,7 @@ export function ChannelCreateDialog({
               id={`${formId}-member-filter`}
               value={memberFilter}
               onChange={(e) => setMemberFilter(e.target.value)}
-              placeholder="Filter teammates"
+              placeholder="Filter agents"
               aria-invalid={membersError ? true : undefined}
               aria-describedby={membersError ? membersErrorId : undefined}
               disabled={submitting}
@@ -237,7 +237,7 @@ export function ChannelCreateDialog({
                 );
               })}
               {visible.length === 0 && (
-                <li className="px-2 py-1.5 text-xs text-muted-foreground">No teammates match.</li>
+                <li className="px-2 py-1.5 text-xs text-muted-foreground">No agents match.</li>
               )}
             </ul>
             {membersError && (

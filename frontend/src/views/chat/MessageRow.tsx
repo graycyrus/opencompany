@@ -4,7 +4,7 @@ import type { TaskStatus } from "@/api/tasks";
 import type { CognitionState, TurnStep } from "@/api/types";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
-import { TeammateAvatar } from "@/components/teammate-avatar";
+import { TeammateAvatar } from "@/components/agent-avatar";
 import { Button } from "@/components/ui/button";
 import { consoleHref } from "@/lib/console-paths";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
