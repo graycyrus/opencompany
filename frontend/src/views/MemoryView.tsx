@@ -310,12 +310,15 @@ export function MemoryView({ client, company, sub }: Props) {
             document is something an operator does when one arrives, not on the
             way to reading what is already remembered. */}
         {page === "upload" && (
+        <>
         <DropZone
           client={client}
           company={company}
           discarding={discarding}
           onIngested={() => void load({ silent: true })}
         />
+        <AddMemoryPanel discarding={discarding} onAdd={add} />
+        </>
         )}
 
         {error && (
@@ -486,13 +489,24 @@ function EmptyMemory({ hasEntries }: { hasEntries: boolean }) {
   );
 }
 
-function AddMemoryDialog({
-  open,
-  onOpenChange,
+/**
+ * Add one memory by hand — inline, on the Upload page.
+ *
+ * This was a dialog opened from a button in the Brain header. The header is
+ * shared by all three sub-pages, so the control stood on Overview and Settings
+ * too — neither of which is about writing — while the one page whose whole job
+ * is putting things into memory had no visible way to do it by hand.
+ *
+ * On a page that already hosts the drop zone, a modal is packaging around a
+ * form with nowhere else to be. The two ways in — drop a document, type a fact
+ * — now sit one above the other, and neither covers the other while you read
+ * it.
+ */
+function AddMemoryPanel({
+  discarding,
   onAdd,
 }: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
+  discarding: boolean;
   onAdd: (fields: { kind: MemoryKind; title: string; body: string }) => Promise<void>;
 }) {
   const [kind, setKind] = useState<MemoryKind>("fact");
@@ -500,17 +514,17 @@ function AddMemoryDialog({
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
 
-  function reset() {
-    setKind("fact");
-    setTitle("");
-    setBody("");
-  }
-
   async function submit() {
     if (!title.trim()) return;
     setBusy(true);
     try {
       await onAdd({ kind, title: title.trim(), body: body.trim() });
+      // A dialog used to clear itself by closing. Nothing closes now, so the
+      // form has to reset explicitly — text left standing in the fields after a
+      // successful save reads as work that has not been saved yet.
+      setKind("fact");
+      setTitle("");
+      setBody("");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "could not save the memory");
     } finally {
@@ -519,18 +533,16 @@ function AddMemoryDialog({
   }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        onOpenChange(o);
-        if (!o) reset();
-      }}
-    >
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>New memory</DialogTitle>
-          <DialogDescription>Capture something your company should remember.</DialogDescription>
-        </DialogHeader>
+    <Card data-testid="memory-add">
+      <CardContent className="grid gap-4">
+        <div className="grid gap-1">
+          <h3 className="flex items-center gap-1.5 text-sm font-medium">
+            <Plus className="size-4" /> New memory
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Capture something your company should remember.
+          </p>
+        </div>
         <div className="grid gap-2">
           <Label htmlFor="mem-kind">Type</Label>
           <Select
@@ -571,20 +583,32 @@ function AddMemoryDialog({
             placeholder="The detail your company should recall."
           />
         </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
-            Cancel
-          </Button>
-          <Button
-            disabled={!title.trim() || busy}
-            onClick={() => void submit()}
-            data-testid="memory-save"
+        <div className="flex justify-end">
+          {/*
+            The reason rides on the wrapper, not the button: `Button` carries
+            `disabled:pointer-events-none`, so a `title` on a disabled button
+            never surfaces — the span still takes the hover and shows it.
+          */}
+          <span
+            title={
+              discarding
+                ? "This engine discards every write — nothing saved here is retained."
+                : undefined
+            }
           >
-            {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-            Save memory
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            <Button
+              // Rendered, not hidden: the operator should see that writing is
+              // the thing this engine cannot do, not find the control missing.
+              disabled={discarding || !title.trim() || busy}
+              onClick={() => void submit()}
+              data-testid="memory-save"
+            >
+              {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
+              Save memory
+            </Button>
+          </span>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
