@@ -331,11 +331,6 @@ export function TeamView({
     void boot();
   }, [sub, boot]);
 
-  /** A human label for whoever set a cap — never a raw user id. */
-  function whoSet(userId: string): string {
-    const person = people.find((p) => p.id === userId);
-    return person ? personName(person) : "an admin";
-  }
 
   // Setting, changing and resetting a teammate's daily cap moved to the
   // teammate's own detail page (issue #1206), beside Inbox — see
@@ -582,7 +577,6 @@ export function TeamView({
                   // id would 404 and the detail view would report a teammate that
                   // was never removed.
                   onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
-                  setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
                   // Looked up by roster id, so a card the board assigned to a
                   // *desk* is never attributed to the people on it.
                   //
@@ -615,7 +609,6 @@ export function TeamView({
         open={addOpen}
         onOpenChange={setAddOpen}
         onAdd={addMember}
-        canSetBudget={isAdmin && fromHost}
         client={client}
         company={company}
       />
@@ -675,7 +668,6 @@ function MemberCard({
   member,
   onRemove,
   onOpen,
-  setByLabel,
   workload,
   onNavigateToDesk,
 }: {
@@ -683,8 +675,6 @@ function MemberCard({
   onRemove: () => void;
   /** Open this agent's detail page. Undefined when the card has no host record. */
   onOpen?: () => void;
-  /** Who set the current override, already resolved to something readable. */
-  setByLabel?: string;
   /**
    * What this teammate is on and carrying, or undefined when the board could
    * not be read — in which case the card says nothing about either.
@@ -868,7 +858,6 @@ function MemberCard({
         */}
         <div className="mt-auto space-y-1.5 empty:hidden">
           {workload && <WorkloadLine workload={workload} />}
-          <DailyBudgetLine member={member} setByLabel={setByLabel} />
         </div>
         {/*
           The card's footer is gone with the Inbox switch it existed to hold
@@ -932,51 +921,6 @@ function WorkloadLine({ workload }: { workload: Workload }) {
   );
 }
 
-/**
- * The teammate's daily spend cap and what it has spent against it today.
- *
- * Renders nothing at all for an uncapped teammate: the host omits the fields
- * entirely rather than sending zeros, so absence means "spends freely" and must
- * not be drawn as "$0.00/day". Once spend reaches the cap the line turns
- * destructive — that teammate's dispatch is paused until 00:00 UTC, and the
- * card is where an operator will look to find out why it went quiet.
- */
-function DailyBudgetLine({
-  member,
-  setByLabel,
-}: {
-  member: TeamMember;
-  setByLabel?: string;
-}) {
-  const cap = member.budgetUsdDaily;
-  const attribution =
-    setByLabel && member.budgetSetAtMillis !== undefined ? (
-      <p data-testid="team-budget-attribution" className="text-xs text-muted-foreground">
-        {cap === undefined ? "Uncapped by" : "Set by"} {setByLabel} ·{" "}
-        {new Date(member.budgetSetAtMillis).toLocaleDateString()}
-      </p>
-    ) : null;
-
-  // No cap: render nothing but the attribution, if a human deliberately removed
-  // one. "Uncapped by Ana" and "nobody ever capped this" are different facts,
-  // and only the first has a line.
-  if (cap === undefined) return attribution;
-
-  const spent = member.spentTodayUsd ?? 0;
-  const overBudget = spent >= cap;
-  return (
-    <div className="space-y-0.5">
-      <p
-        data-testid="team-budget"
-        className={cn("text-xs", overBudget ? "text-destructive" : "text-muted-foreground")}
-      >
-        {usd(cap)}/day · {usd(spent)} spent today
-        {overBudget && " · paused until 00:00 UTC"}
-      </p>
-      {attribution}
-    </div>
-  );
-}
 
 // `BudgetDialog` — entering a daily cap — moved to `AgentDetailView.tsx`
 // (issue #1206), alongside the editing controls it belongs to now.
@@ -985,7 +929,6 @@ function AddMemberDialog({
   open,
   onOpenChange,
   onAdd,
-  canSetBudget,
   client,
   company,
 }: {
@@ -1003,8 +946,6 @@ function AddMemberDialog({
    * can simply be pressed again.
    */
   onAdd: (fields: AddMemberFields) => boolean | Promise<boolean>;
-  /** Whether to offer the cap field — setting one is admin-only on the host. */
-  canSetBudget: boolean;
   /** For the copilot's draft call (issue #1776) — this dialog writes nothing. */
   client: OpenCompanyClient;
   company: string | null;
