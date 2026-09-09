@@ -1119,7 +1119,7 @@ export function ApprovalCard({
             aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — ${
               scope.kind === "tool"
                 ? `let this ${
-                    a.workflow_id ? "workflow" : "agent"
+                    a.workflow_id ? "automation" : "agent"
                   } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
                 : "just this once"
             }${a.contents_hidden ? "" : ` — request ${a.at_millis}`}${
