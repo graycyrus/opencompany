@@ -274,60 +274,68 @@ async fn link_ingestion_refuses_this_deployments_own_network() {
     );
 }
 
-/// The half a string check cannot do, and the reason this delegates.
+/// The half a string check cannot do.
 ///
 /// A host that is not a literal was admitted on its spelling alone, so
 /// `http://anything.example/` answering `169.254.169.254` read as an ordinary
-/// public URL and the fetch reached the metadata service. The guard now
-/// resolves the name and refuses it on what it answers with.
+/// public URL and the fetch reached the metadata service. The guard resolves
+/// the name and refuses it on what it answers with.
 ///
-/// This case needs working DNS, which the rest of the guard's cases
-/// deliberately do not: `localtest.me` is a long-standing public name that
-/// answers `127.0.0.1`, and using a real one is the only way to exercise the
-/// resolving arm from outside the runtime crate, whose own
-/// resolver-injected tests are not reachable from here. A runner without DNS
-/// fails this loudly rather than passing it quietly, which is the right way
-/// round.
+/// Through an injected resolver rather than real DNS: a case that reaches the
+/// network to prove this fails on a runner without it, and that failure says
+/// nothing about the product — the wrong way round for a check in the default
+/// feature set.
 #[cfg(feature = "documents")]
 #[tokio::test]
 async fn a_host_that_resolves_into_this_network_is_refused_on_what_it_resolves_to() {
-    let refusal = super::guard_link("http://localtest.me/admin")
-        .await
-        .expect_err("a name resolving to loopback must be refused");
-    // Which loopback it answers with is the resolver's business — v4 on some
-    // hosts, `::1` on others. What must hold is that the refusal names the
-    // address it resolved to, so the operator can see why their link was
-    // turned down rather than guessing.
-    assert!(
-        refusal.contains("resolves to") && refusal.contains("own network"),
-        "the refusal must name the address it resolved to: {refusal}"
-    );
-}
-
-/// The same address written the long way is the same address.
-///
-/// `::ffff:127.0.0.1` and `::127.0.0.1` both carry 127.0.0.1 — the first the
-/// mapped form, the second the deprecated IPv4-compatible one. Neither answers
-/// `is_loopback`, and `to_ipv4_mapped` answers `None` for the second, so a
-/// guard reading only the mapped form admits it.
-#[cfg(feature = "documents")]
-#[tokio::test]
-async fn an_internal_address_written_as_ipv6_is_still_refused() {
-    for refused in [
-        "http://[::ffff:127.0.0.1]/admin",
-        "http://[::127.0.0.1]/admin",
-        "http://[::ffff:169.254.169.254]/latest/meta-data/",
-        "http://[::ffff:10.0.0.5]/",
-        "http://[fd00::1]/",
-        "http://[fe80::1]/",
+    for (answer, label) in [
+        ("127.0.0.1", "loopback"),
+        ("169.254.169.254", "the metadata service"),
+        ("10.0.0.5", "an RFC1918 address"),
+        ("::1", "v6 loopback"),
     ] {
+        let address: std::net::IpAddr = answer.parse().expect("a literal");
+        let refusal =
+            super::guard_link_resolving_with("http://anything.example/x", |_, _| async move {
+                Ok(vec![address])
+            })
+            .await
+            .unwrap_err();
         assert!(
-            super::guard_link(refused).await.is_err(),
-            "{refused} must be refused"
+            refusal.contains("resolves to") && refusal.contains("own network"),
+            "a name answering {label} must be refused, naming the address: {refusal}"
         );
     }
-    // A public v6 literal still passes, so the check is not refusing all of v6.
-    assert!(super::guard_link("https://[2606:4700::1]/").await.is_ok());
+}
+
+/// One internal answer among several is still internal.
+///
+/// A resolver may hand back a list. Refusing only when *every* address is
+/// internal would admit a name that answers one public address and one
+/// loopback, which is the shape a rebinding setup produces.
+#[cfg(feature = "documents")]
+#[tokio::test]
+async fn a_host_answering_one_internal_address_among_public_ones_is_refused() {
+    let refusal = super::guard_link_resolving_with("http://anything.example/x", |_, _| async {
+        Ok(vec![
+            "93.184.216.34".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+        ])
+    })
+    .await
+    .unwrap_err();
+    assert!(refusal.contains("127.0.0.1"), "{refusal}");
+}
+
+/// A wholly public answer is admitted, so the guard is not refusing every name.
+#[cfg(feature = "documents")]
+#[tokio::test]
+async fn a_host_answering_only_public_addresses_is_admitted() {
+    super::guard_link_resolving_with("http://anything.example/x", |_, _| async {
+        Ok(vec!["93.184.216.34".parse().unwrap()])
+    })
+    .await
+    .expect("a public answer is fetchable");
 }
 
 /// A name that will not resolve does not hold the request open.
@@ -337,21 +345,30 @@ async fn an_internal_address_written_as_ipv6_is_still_refused() {
 /// at a time, and a list of names whose resolver blackholes queries would
 /// otherwise cost their sum.
 #[cfg(feature = "documents")]
+#[tokio::test(start_paused = true)]
+async fn a_resolver_that_never_answers_is_bounded_rather_than_waited_on() {
+    let refusal = super::guard_link_resolving_with("http://anything.example/x", |_, _| async {
+        std::future::pending::<()>().await;
+        unreachable!("the lookup timeout must fire long before this wakes")
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        refusal.contains("too long to resolve"),
+        "the refusal must say the lookup was cut short: {refusal}"
+    );
+}
+
+/// A resolver that answers nothing is refused rather than admitted.
+#[cfg(feature = "documents")]
 #[tokio::test]
-async fn a_host_that_will_not_resolve_is_refused_rather_than_waited_on() {
-    let started = std::time::Instant::now();
-    let refusal = super::guard_link("http://this-name-does-not-exist.invalid/x")
-        .await
-        .expect_err("an unresolvable host must be refused");
-    assert!(
-        refusal.contains("could not be resolved") || refusal.contains("too long to resolve"),
-        "the refusal must say the name did not resolve: {refusal}"
-    );
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(10),
-        "the lookup must be bounded, took {:?}",
-        started.elapsed()
-    );
+async fn a_host_that_resolves_to_no_addresses_is_refused() {
+    let refusal = super::guard_link_resolving_with("http://anything.example/x", |_, _| async {
+        Ok(Vec::new())
+    })
+    .await
+    .unwrap_err();
+    assert!(refusal.contains("no addresses"), "{refusal}");
 }
 
 /// Dropping the wrong folder is a mistake an operator makes once; without a

@@ -483,6 +483,27 @@ fn is_internal_address(address: std::net::IpAddr) -> bool {
 /// copies rather than an oversight.
 #[cfg(feature = "documents")]
 async fn guard_link(url: &str) -> Result<(), String> {
+    guard_link_resolving_with(url, |host, port| async move {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map(|addrs| addrs.map(|socket| socket.ip()).collect())
+    })
+    .await
+}
+
+/// [`guard_link`], against a resolver the caller supplies.
+///
+/// The split exists so the resolving arm can be tested without a lookup. A
+/// case that reaches real DNS to prove this fails on a runner without it, and
+/// that failure says nothing about the product — the wrong way round for a
+/// check that sits in the default feature set. The runtime's own guard is
+/// split the same way and for the same reason.
+#[cfg(feature = "documents")]
+async fn guard_link_resolving_with<F, Fut>(url: &str, resolve: F) -> Result<(), String>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::IpAddr>>>,
+{
     let parsed = url
         .parse::<axum::http::Uri>()
         .map_err(|_| "not a URL".to_string())?;
@@ -512,29 +533,19 @@ async fn guard_link(url: &str) -> Result<(), String> {
         Some("https") => 443,
         _ => 80,
     });
-    // `LINK_TIMEOUT` belongs to the request built after this returns, so it
-    // does not bound the lookup. Without its own ceiling a name whose resolver
-    // blackholes queries holds this handler for a retry period, and the route
-    // walks its URLs one at a time — so a list of such names costs their sum.
-    let resolved = tokio::time::timeout(
-        DNS_TIMEOUT,
-        tokio::net::lookup_host((lowered.as_str(), port)),
-    )
-    .await
-    .map_err(|_| format!("`{lowered}` took too long to resolve"))?
-    .map_err(|e| format!("that host could not be resolved: {e}"))?;
-    let mut any = false;
-    for socket in resolved {
-        any = true;
-        if is_internal_address(socket.ip()) {
+    let resolved = tokio::time::timeout(DNS_TIMEOUT, resolve(lowered.clone(), port))
+        .await
+        .map_err(|_| format!("`{lowered}` took too long to resolve"))?
+        .map_err(|e| format!("that host could not be resolved: {e}"))?;
+    if resolved.is_empty() {
+        return Err(format!("`{lowered}` resolved to no addresses"));
+    }
+    for address in resolved {
+        if is_internal_address(address) {
             return Err(format!(
-                "`{lowered}` resolves to {}, which is inside this deployment's own network",
-                socket.ip()
+                "`{lowered}` resolves to {address}, which is inside this deployment's own network"
             ));
         }
-    }
-    if !any {
-        return Err(format!("`{lowered}` resolved to no addresses"));
     }
     Ok(())
 }
