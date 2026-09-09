@@ -270,27 +270,27 @@ describe("the window title row", () => {
     expect(approvals.parentElement).toBe(group("go"));
   });
 
-  it("decides the whole ladder in one place", () => {
-    // The point of `TITLE_BAR_LADDER` is that reading it is reading the ladder.
-    // Three rungs, in order, at 1280 / 1024 / 768 — and each consumed by the
-    // component that owns the item rather than restated there.
-    expect(TITLE_BAR_LADDER.autonomySentence).toContain("xl:");
-    expect(TITLE_BAR_LADDER.companyName).toContain("lg:");
-    expect(TITLE_BAR_LADDER.overview).toContain("md:");
-    for (const rung of Object.values(TITLE_BAR_LADDER)) {
-      // Every rung hides by default and reveals at its breakpoint, so the
-      // narrow window is the one that needs no class to be correct.
-      expect(rung.startsWith("hidden ")).toBe(true);
-    }
+  it("keeps the one surviving ladder rung in one place", () => {
+    // `TITLE_BAR_LADDER` had three rungs — the autonomy sentence at `xl`, the
+    // company name at `lg`, the Overview glyph at `md` — and has one left.
+    //
+    // Each went for its own reason, recorded where it was retired: the pill
+    // prints no sentence at any width; the switcher draws no glyph, so the name
+    // is the only thing identifying the company and there is nothing to
+    // collapse to; and Overview's narrow-width fallback was a sidebar footer
+    // row that no longer exists, so dropping the glyph below `md` would leave
+    // zero controls named Overview at 390px.
+    //
+    // What the constant is still for is the rule below: whoever consumes a rung
+    // imports it rather than re-typing the breakpoint.
+    expect(TITLE_BAR_LADDER.overview).toBe("inline-flex");
 
     const read = (rel: string) =>
       readFileSync(resolve(process.cwd(), "src/components", rel), "utf8");
-    // The two rungs consumed elsewhere are IMPORTED, not re-typed. A literal
-    // breakpoint in either file is the scattering this constant exists to stop.
+    // A literal responsive class in either file is the scattering this constant
+    // exists to stop — including one added back on a rung that was retired.
     for (const file of ["autonomy-pill.tsx", "host-switcher.tsx"]) {
-      const source = read(file);
-      expect(source).toContain("TITLE_BAR_LADDER");
-      expect(source).not.toMatch(/className="hidden [a-z]{2}:/);
+      expect(read(file)).not.toMatch(/className="hidden [a-z]{2}:/);
     }
   });
 
