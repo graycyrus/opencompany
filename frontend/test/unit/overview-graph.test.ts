@@ -387,7 +387,7 @@ describe("workflows", () => {
 
 describe("DERIVED_NOTICE", () => {
   it("names flow placement and no longer claims departments or tools are invented", () => {
-    expect(DERIVED_NOTICE).toMatch(/workflow/i);
+    expect(DERIVED_NOTICE).toMatch(/automation/i);
     // The acceptance criterion for #601, asserted rather than assumed: the
     // notice must not still be telling operators that rings the host now
     // answers for are placeholders.
