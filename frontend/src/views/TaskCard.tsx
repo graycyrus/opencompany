@@ -51,6 +51,7 @@ import type { DecideApproval, Verdict } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { withHostParam } from "@/hooks/use-host-route";
+import { consoleHref } from "@/lib/console-paths";
 import { PRIORITY_STYLES } from "@/lib/board-columns";
 import { formatUsdCost } from "@/lib/cost";
 import {
@@ -517,7 +518,7 @@ function OutputLinkRow({ task }: { task: Task }) {
       </a>
       {extra > 0 && (
         <a
-          href={`#/tasks/${encodeURIComponent(task.id)}`}
+          href={consoleHref("tasks", task.id)}
           title="Open the task to see everything it produced."
           className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
         >

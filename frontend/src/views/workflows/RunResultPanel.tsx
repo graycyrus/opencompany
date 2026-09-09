@@ -5,6 +5,7 @@
 // Extracted verbatim from `WorkflowsView.tsx` (issue #303).
 
 import { SquareKanban } from "lucide-react";
+import { consoleHref } from "@/lib/console-paths";
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -434,7 +435,7 @@ function BoardRows({ board }: { board: WorkflowRunBoardRow[] }) {
             </Badge>
             {row.taskId ? (
               <a
-                href={`#/tasks/${encodeURIComponent(row.taskId)}`}
+                href={consoleHref("tasks", row.taskId)}
                 className="flex w-fit items-center gap-1 text-2xs font-medium text-accent-foreground underline-offset-2 hover:underline"
               >
                 <SquareKanban className="size-3 shrink-0" />

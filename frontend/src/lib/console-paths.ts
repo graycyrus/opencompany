@@ -96,3 +96,16 @@ export function parseConsolePath(segments: readonly string[]): [View, string | n
   if (!view) return ["company", second];
   return [view, segments[2] ?? null];
 }
+
+/**
+ * A ready-made `href` for a view and an optional second segment.
+ *
+ * Every link to a Company surface goes through this rather than composing
+ * `#/tasks/${id}` by hand. Hand-composed addresses are what a prefix breaks:
+ * they keep resolving — the router still accepts the old spelling — so nothing
+ * fails, and the console quietly ships two spellings of the same page, one of
+ * which the address bar rewrites the instant it is followed.
+ */
+export function consoleHref(view: View, sub?: string | null): string {
+  return `#/${formatConsolePath(view, sub ?? null)}`;
+}

@@ -11,6 +11,7 @@ import { nodeKindLabel, type WorkflowNode as WorkflowNodeModel } from "@/api/wor
 import type { TeamMemberDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { consoleHref } from "@/lib/console-paths";
 import { nodeKindMeta } from "@/lib/workflow-sample";
 
 import { type NodeOutputView, isRecord, parseNodeMessages } from "./run-output";
@@ -319,7 +320,7 @@ export function OutputSection({ output }: { output: NodeOutputView }) {
               <a
                 key={`${artifact.workspaceNodeId}-${artifact.source}`}
                 className="block rounded-md border bg-muted/30 px-2 py-1.5 hover:border-primary/40"
-                href={`#/workspace/${encodeURIComponent(artifact.workspaceNodeId)}`}
+                href={consoleHref("workspace", artifact.workspaceNodeId)}
                 data-testid="node-output-artifact"
               >
                 <span className="block truncate text-xs font-medium text-primary">

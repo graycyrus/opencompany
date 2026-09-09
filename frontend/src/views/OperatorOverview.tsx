@@ -5,6 +5,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listRuns, RUN_STATUS_LABEL, type RunSummary } from "@/api/runs";
 import type { LocalScope } from "@/connections/types";
 import type { CompanyFeed } from "@/hooks/use-company";
+import { consoleHref } from "@/lib/console-paths";
 import { commitOverviewVisit, openOverviewVisit } from "@/lib/overview-visit";
 import { chatHref } from "@/lib/run-source";
 import { PageHeader } from "@/components/page-header";
@@ -349,7 +350,7 @@ function RunRows({
             <p className="text-xs text-muted-foreground">{RUN_STATUS_LABEL[run.status]}{run.error ? ` — ${run.error}` : ""}</p>
           </div>
           {run.taskId ? (
-            <a href={`#/tasks/${encodeURIComponent(run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
+            <a href={`${consoleHref("tasks", run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
           ) : run.chatId ? (
             // A paused or failed operator-chat turn is investigated from the
             // thread it was raised in — the icon alone hid it (issue #1643).

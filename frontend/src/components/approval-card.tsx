@@ -57,6 +57,7 @@ import {
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { consoleHref } from "@/lib/console-paths";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
@@ -547,7 +548,7 @@ export function ApprovalMeta({
       {taskId && (
         <>
           <a
-            href={`#/tasks/${encodeURIComponent(taskId)}`}
+            href={consoleHref("tasks", taskId)}
             className="flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 font-medium text-accent-foreground transition-opacity hover:opacity-80"
           >
             <SquareKanban className="size-3 shrink-0" />

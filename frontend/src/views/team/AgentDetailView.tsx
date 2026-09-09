@@ -71,6 +71,7 @@ import {
 import { draftAgentField } from "@/api/agent-copilot";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { FieldCopilot } from "@/views/team/FieldCopilot";
+import { consoleHref } from "@/lib/console-paths";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
@@ -1302,7 +1303,7 @@ function OpenTasks({ tasks }: { tasks: Task[] | null }) {
         {tasks.map((task) => (
           <a
             key={task.id}
-            href={`#/tasks/${encodeURIComponent(task.id)}`}
+            href={consoleHref("tasks", task.id)}
             className="text-sm text-primary underline-offset-4 hover:underline"
             data-testid={`agent-open-task-${task.id}`}
           >

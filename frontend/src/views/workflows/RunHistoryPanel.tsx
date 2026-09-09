@@ -27,6 +27,7 @@ import {
   type WorkflowRunNode,
   type WorkflowRunOutcome,
 } from "@/api/workflows";
+import { consoleHref } from "@/lib/console-paths";
 import { artifactHref } from "@/lib/task-output";
 
 import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
@@ -1326,7 +1327,7 @@ function RunFilesSection({
                   {" · "}
                   <a
                     className="hover:underline"
-                    href={`#/workspace/${encodeURIComponent(file.workspaceNodeId)}`}
+                    href={consoleHref("workspace", file.workspaceNodeId)}
                     data-testid="workflow-run-file-workspace"
                   >
                     Open in workspace
