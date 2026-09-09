@@ -1,8 +1,10 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { resolveConnectionPage } from "@/views/connection-pages";
+import { HostingView } from "@/views/HostingView";
 import { InferenceView } from "@/views/InferenceView";
 import { McpServersView } from "@/views/McpServersView";
 import { OAuthView } from "@/views/OAuthView";
+import { SearchView } from "@/views/SearchView";
 import { SkillsView } from "@/views/SkillsView";
 
 interface Props {
@@ -73,6 +75,15 @@ export function ConnectionsSection({ client, company, sub }: Props) {
           must not carry one company's admin authority into another's
           still-resolving read. */}
       {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
+      {/* Both remounted per company for the reason they were on the settings
+          rail: a deploy token or a search key typed for one company must never
+          ride into another company's Save. */}
+      {page === "hosting" && (
+        <HostingView key={company ?? "self"} client={client} company={company} />
+      )}
+      {page === "search" && (
+        <SearchView key={company ?? "self"} client={client} company={company} />
+      )}
     </div>
   );
 }

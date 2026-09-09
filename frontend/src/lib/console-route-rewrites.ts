@@ -48,6 +48,8 @@ export const REWRITE_RETIRED = (
   // bookmarks, and links already sent to somebody.
   if (head === "settings" && sub === "inference") return ["connections", "inference"];
   if (head === "settings" && sub === "skills") return ["connections", "skills"];
+  if (head === "settings" && sub === "hosting") return ["connections", "hosting"];
+  if (head === "settings" && sub === "search") return ["connections", "search"];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
   // page: a bookmark or shared link must say where it actually lands.

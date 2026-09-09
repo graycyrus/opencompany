@@ -4,8 +4,6 @@ import type { OpenCompanyClient } from "@/api/client";
 import { RouteLoading } from "@/components/route-loading";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
-import { HostingView } from "@/views/HostingView";
-import { SearchView } from "@/views/SearchView";
 import { PeopleView } from "@/views/PeopleView";
 import { SettingsView } from "@/views/SettingsView";
 import {
@@ -165,23 +163,13 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
             `/skills`) — each is read repeatedly and changes as the company's
             work does, and a settings rail is where an operator changes
             configuration once. Every one of those addresses still resolves,
-            rewritten by `console-route-rewrites.ts`. Hosting and Search below
-            stayed, because they really are once-a-company credential forms;
-            `connection-pages.ts` argues the split. */}
+            rewritten by `console-route-rewrites.ts`. Hosting and Search went
+            with them, which emptied the Integrations group and retired it —
+            `connection-pages.ts` carries the argument. */}
         {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
             (docs/spec/runtime/finance-console.md): a credential form belongs
             beside the data it unlocks, and "Billing" read as *what OpenCompany
-            charges me* — which is Usage, two rows down.
-            Same `key` remount as the providers in FinanceSection: it keeps one
-            company's typed-but-unsaved token out of another's Save. */}
-        {page === "hosting" && (
-          <HostingView key={company ?? "self"} client={client} company={company} />
-        )}
-        {/* Same remount rule, same reason: a search key typed for one company
-            must never ride into another company's Save. */}
-        {page === "search" && (
-          <SearchView key={company ?? "self"} client={client} company={company} />
-        )}
+            charges me* — which is Usage, two rows down. */}
         {/* Observatory has a row on this rail but renders nothing here: the row
             is a doorway, and `#/settings/observatory` is rewritten onto
             `#/observatory` before it ever reaches this dispatch.
