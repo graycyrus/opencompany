@@ -7372,8 +7372,10 @@ mod test {
         );
         assert!(!record.desk_hive_is_installed("studio"));
 
-        let mut first = crate::hivemind::HiveConfig::default();
-        first.quorum = Some(1);
+        let first = crate::hivemind::HiveConfig {
+            quorum: Some(1),
+            ..Default::default()
+        };
         record.upsert_desk_hive(DeskHiveOverride {
             desk_id: "studio".into(),
             hive: first,
@@ -7381,8 +7383,10 @@ mod test {
         assert!(record.desk_hive_is_installed("studio"));
         assert_eq!(record.effective_desk_hive("studio").quorum, Some(1));
 
-        let mut replacement = crate::hivemind::HiveConfig::default();
-        replacement.quorum = Some(3);
+        let replacement = crate::hivemind::HiveConfig {
+            quorum: Some(3),
+            ..Default::default()
+        };
         record.upsert_desk_hive(DeskHiveOverride {
             desk_id: "studio".into(),
             hive: replacement,
