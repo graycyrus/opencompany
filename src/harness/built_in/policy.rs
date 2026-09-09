@@ -4339,6 +4339,74 @@ mod tests {
         );
     }
 
+    /// CONC-axis (TOOL-021): the cap in `the_drain_is_capped_and_empties_the_queue`
+    /// above is proven with sequential pushes — each `check` is awaited before
+    /// the next fires. This drives the same overflow from genuinely concurrent
+    /// pushes, via real worker threads and a barrier (not `tokio::join!`, which
+    /// has no suspension point around `push`'s synchronous body and would just
+    /// serialise the two futures on one task — the exact false confidence this
+    /// lane's brief warns about). `push`'s per-scope `Mutex` must make every
+    /// racing call land exactly once: no card lost to a race, none double
+    /// counted, and `requests.len() + discarded` must equal the number of
+    /// calls that actually raced, every round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_pushes_past_the_cap_are_never_lost_or_double_counted() {
+        use std::sync::{Arc, Barrier};
+
+        const RACERS: usize = MAX_APPROVAL_REQUESTS_PER_TURN + 5;
+
+        for round in 0..20 {
+            let queue = ApprovalRequestQueue::default();
+            let gate = Arc::new(Barrier::new(RACERS));
+
+            let mut handles = Vec::with_capacity(RACERS);
+            for i in 0..RACERS {
+                let queue = queue.clone();
+                let gate = gate.clone();
+                handles.push(tokio::task::spawn_blocking(move || {
+                    gate.wait();
+                    queue.push(ApprovalRequest {
+                        tool: "composio_execute".to_string(),
+                        reason: format!("racer {i}"),
+                        effect: Effect {
+                            kind: format!("composio.call.{i}"),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({ "racer": i }),
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                }));
+            }
+            for handle in handles {
+                handle.await.expect("racer joins");
+            }
+
+            let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(
+                drained.requests.len(),
+                MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: the drain must be exactly full, not short a card a race lost"
+            );
+            assert_eq!(
+                drained.discarded,
+                RACERS - MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: every racer that did not fit must be counted, not silently \
+                 dropped from the tally"
+            );
+            let reasons: std::collections::HashSet<&String> =
+                drained.requests.iter().map(|r| &r.reason).collect();
+            assert_eq!(
+                reasons.len(),
+                MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: no racer's card duplicated another's under the race: {reasons:?}"
+            );
+        }
+    }
+
     /// The ordinary path says nothing. A notice on every turn would train the
     /// operator to ignore the one that matters.
     #[tokio::test]
