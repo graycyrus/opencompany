@@ -948,8 +948,8 @@ export function AgentDetailView({
                   </div>
                   {agent.editable.length === 0 && (
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
-                      This agent can't be edited from here. Its daily budget can still be changed
-                      below.
+                      This agent can't be edited from here — its definition comes from the
+                      company's manifest.
                     </p>
                   )}
                 </>
