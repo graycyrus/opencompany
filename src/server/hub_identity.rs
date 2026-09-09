@@ -203,6 +203,12 @@ pub trait HubIdentityExchange: Send + Sync {
 #[derive(Debug, Default)]
 pub struct MockHubIdentityExchange {
     tokens: StdMutex<HashMap<String, String>>,
+    /// Grant codes and the `(verifier, key)` each redeems to.
+    ///
+    /// Single-use, unlike [`Self::tokens`]: a grant code really is spent on
+    /// redemption at the hub, and a mock that let one be redeemed twice would
+    /// make the route look safe to retry when it is not.
+    grants: StdMutex<HashMap<String, (String, String)>>,
     /// A forced transport failure, standing in for "the hub is not answering".
     unreachable: bool,
 }
@@ -219,6 +225,15 @@ impl MockHubIdentityExchange {
             .lock()
             .expect("mock poisoned")
             .insert(token.to_string(), email.to_string());
+        self
+    }
+
+    /// Seeds one grant code, the verifier that unlocks it, and the key it mints.
+    pub fn with_grant(self, code: &str, verifier: &str, key: &str) -> Self {
+        self.grants
+            .lock()
+            .expect("mock poisoned")
+            .insert(code.to_string(), (verifier.to_string(), key.to_string()));
         self
     }
 
@@ -265,6 +280,22 @@ impl HubIdentityExchange for MockHubIdentityExchange {
                 email: email.clone(),
             })
             .ok_or_else(rejected)
+    }
+
+    async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String> {
+        if self.unreachable {
+            return Err(crate::error::OpenCompanyError::TinyHumans {
+                code: "unreachable".to_string(),
+                message: "connection refused".to_string(),
+            });
+        }
+        // Removed before the verifier is checked, mirroring the hub: a wrong
+        // verifier spends the code rather than leaving it up for another guess.
+        let entry = self.grants.lock().expect("mock poisoned").remove(code);
+        match entry {
+            Some((expected, key)) if expected == verifier => Ok(key),
+            _ => Err(rejected()),
+        }
     }
 }
 
