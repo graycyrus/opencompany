@@ -615,9 +615,25 @@ export function InferenceSection({
    */
   const draftLeavesSavedEndpoint = savedIsProxied && key.trim().length > 0;
 
+  /**
+   * Whether the *draft's* provider select resolves to OpenRouter.
+   *
+   * Mirrors `storedProviderIsOpenRouter` above, but for the live form value
+   * instead of the saved config: `managed` is a legacy alias the host
+   * resolves onto the same OpenRouter-backed platform endpoint, and — since
+   * `INFERENCE_MANAGED_HIDDEN` stopped silently seeding the form onto
+   * `openrouter` whenever the saved provider was `managed` — a draft can now
+   * genuinely sit on `managed` while a key is typed into it. That key is sent
+   * straight to OpenRouter (`keyKind` above says so), so every guard below
+   * that exists to keep an OpenRouter-only catalog or id shape off a draft
+   * that would reach a *different* endpoint has to treat `managed` the same
+   * way it treats `openrouter`, or a `managed` draft slips through them.
+   */
+  const draftProviderIsOpenRouter = provider === "openrouter" || provider === "managed";
+
   useEffect(() => {
     let current = true;
-    if (provider !== "openrouter") {
+    if (!draftProviderIsOpenRouter) {
       setModelCatalog({ kind: "idle" });
       return () => {
         current = false;
