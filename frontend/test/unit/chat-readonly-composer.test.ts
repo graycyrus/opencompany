@@ -245,12 +245,17 @@ describe("a read-only channel renders no composer", () => {
 });
 
 describe("a writable channel still renders the whole composer", () => {
-  it("draws the input, the Send button, the chips and the controls", async () => {
+  it("draws the input, the Send button and the controls", async () => {
     await mount("main");
 
     expect(composerInput()).not.toBeNull();
     expect(container.querySelector('[aria-label="Send"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="What this message is for"]')).not.toBeNull();
+    // The intent chips ("Just chatting" / "Do it once" / "Build me the
+    // automation") are behind `COMPOSER_INTENT_HIDDEN`, so the control that
+    // opened them is absent. Asserted rather than dropped, in the idiom
+    // `product-scope-hidden-surfaces.test.ts` uses: a hidden surface coming
+    // back by accident is the failure, and it looks like a feature.
+    expect(container.querySelector('[aria-label="What this message is for"]')).toBeNull();
     for (const label of ["Mention someone", "Formatting"]) {
       expect(container.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
     }
@@ -285,7 +290,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     );
   });
 
-  it("places it below the transcript and above the composer", async () => {
+  it("shares the composer's own box, so nothing can come between them", async () => {
     await mount("main", "unavailable");
 
     const strip = banner()!;
@@ -293,79 +298,53 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     expect(strip).not.toBeNull();
     expect(input).not.toBeNull();
 
-    // `MessageTimeline`'s root is the scrolling viewport. The notice, the
-    // scroller and the composer are all direct children of the same flex
-    // column, so their order in that column is the order on screen — which is
-    // the entire claim being made: the notice qualifies the Send below it, not
-    // the transcript above it.
-    const column = strip.parentElement!;
-    const kids = Array.from(column.children);
-    const scroller = column.querySelector(":scope > div.overflow-y-auto")!;
-    const composerRoot = kids.find((el) => el.contains(input))!;
-
-    expect(scroller).not.toBeNull();
-    expect(composerRoot).not.toBeUndefined();
-    expect(kids.indexOf(scroller)).toBeLessThan(kids.indexOf(strip));
-    expect(kids.indexOf(strip)).toBeLessThan(kids.indexOf(composerRoot));
+    // This used to be an order assertion over the pane's flex column: the
+    // notice was a full-bleed strip in the flow, and the claim was that it sat
+    // after the transcript and before the composer. It kept needing more cases
+    // — the typing line, then the in-flight run bar — because every new row in
+    // that column was a new thing that could land between them.
+    //
+    // The notice hovers now: it and the composer are in one `relative` box, and
+    // it anchors to that box with `absolute bottom-full`. So the adjacency is
+    // structural rather than ordered, and the run bar can render between them
+    // in the DOM without coming between them on screen.
+    const box = strip.parentElement!;
+    expect(box.className).toContain("relative");
+    expect(box.contains(input), "the notice and the composer share one box").toBe(true);
+    expect(strip.className).toContain("absolute");
+    expect(strip.className).toContain("bottom-full");
   });
 
-  it("stays directly above the composer with somebody typing, nothing in flight", async () => {
-    // The order was asserted with nobody typing, which is the one case where
-    // `TypingLine` renders nothing — so `["TRANSCRIPT", "BANNER", "COMPOSER"]`
-    // read correct while the shipped order was TRANSCRIPT, BANNER, TYPING,
-    // COMPOSER for anyone mid-conversation (CodeRabbit review on PR #1984).
-    // Proximity to the composer is the entire reason the strip moved, so the
-    // case with a row competing for that gap is the case worth pinning.
-    await mount("main", "unavailable", ["Jane"]);
+  it("overlaps the transcript rather than displacing it", async () => {
+    await mount("main", "unavailable");
 
     const strip = banner()!;
-    const input = composerInput()!;
-    const typing = container.querySelector('[data-testid="typing-line"]');
-    expect(strip).not.toBeNull();
-    expect(input).not.toBeNull();
-    expect(typing).not.toBeNull();
-
-    const column = strip.parentElement!;
-    const kids = Array.from(column.children);
-    const composerRoot = kids.find((el) => el.contains(input))!;
-
-    // Adjacency, not just order: nothing at all between the notice and the
-    // control it qualifies. True while the company is idle, which is the case
-    // this one pins — `InflightRunBar` is the one thing that comes between them,
-    // and the test below is where that is pinned instead.
-    expect(kids.indexOf(typing!)).toBeLessThan(kids.indexOf(strip));
-    expect(kids.indexOf(composerRoot)).toBe(kids.indexOf(strip) + 1);
-    expect(container.querySelector('[data-testid="inflight-run-bar"]')).toBeNull();
+    // The trade the float makes, stated: it covers the last line of the
+    // transcript instead of pushing it up. The transcript can be scrolled and
+    // this cannot be missed, which is the right way round — but it is only
+    // acceptable because the box takes no pointer events, so a click meant for
+    // the message underneath still lands. The one thing here that IS clickable
+    // puts them back on itself.
+    expect(strip.className).toContain("pointer-events-none");
+    const link = strip.querySelector("a");
+    if (link) expect(strip.className).toContain("[&_a]:pointer-events-auto");
   });
 
-  /**
-   * With a run in flight, the run bar is between the banner and the composer —
-   * on purpose, and the specification says so.
-   *
-   * The adjacency above was asserted with no `inflightRuns` prop at all, and
-   * `ChatView` gates `InflightRunBar` on that prop being defined, so the harness
-   * was pinning a layout no shell in production ever renders. Both reviewers on
-   * PR #2159 caught the same thing in the spec prose; this is the assertion half.
-   */
-  it("lets the in-flight run bar come between it and the composer", async () => {
+  it("still hovers over the composer with a run in flight", async () => {
+    // `InflightRunBar` renders inside the same box, between the notice's anchor
+    // and the composer. That used to break the adjacency assertion; now it
+    // cannot, and this is the case that proves it.
     await mount("main", "unavailable", ["Jane"], true);
 
     const strip = banner()!;
     const input = composerInput()!;
     const bar = container.querySelector('[data-testid="inflight-run-bar"]');
-    expect(strip).not.toBeNull();
-    expect(input).not.toBeNull();
     expect(bar).not.toBeNull();
 
-    const column = strip.parentElement!;
-    const kids = Array.from(column.children);
-    const composerRoot = kids.find((el) => el.contains(input))!;
-    const barRoot = kids.find((el) => el.contains(bar!))!;
-
-    // Still below the transcript and the typing line — the placement this
-    // strip moved for — and still before the composer. Just not glued to it.
-    expect(kids.indexOf(strip)).toBeLessThan(kids.indexOf(barRoot));
-    expect(kids.indexOf(barRoot)).toBeLessThan(kids.indexOf(composerRoot));
+    const box = strip.parentElement!;
+    expect(box.contains(input)).toBe(true);
+    expect(box.contains(bar!)).toBe(true);
+    expect(strip.className).toContain("bottom-full");
   });
 
   /**
