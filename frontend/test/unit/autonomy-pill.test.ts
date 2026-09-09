@@ -201,10 +201,14 @@ describe("the pill", () => {
     expect(host.textContent).toBe("");
   });
 
-  it("shows the tier's name and the host's lead sentence", () => {
+  it("shows the tier's name and nothing else", () => {
+    // It printed the host's lead sentence beside the name. A sentence inside a
+    // chrome pill made it the widest thing in the row, and the dropdown it
+    // opened inherited the same width — so the pill states the tier and the
+    // sentence moved to the tooltip, in full, asserted directly below.
     render(createElement(AutonomyPill, { status: policy({ mode: "auto" }) }));
     expect(pill()!.textContent).toContain("Auto");
-    expect(pill()!.textContent).toContain("Balanced execution autonomy.");
+    expect(pill()!.textContent).not.toContain("Balanced execution autonomy.");
   });
 
   it("carries the host's FULL description in its tooltip, not the cut one", () => {
@@ -254,18 +258,15 @@ describe("the pill", () => {
     expect(pill()!.className).not.toContain("py-0.5");
   });
 
-  it("drops the sentence below the ladder's first step and keeps the tier's name", () => {
-    // The degradation the 880px minimum window forces, made explicit: the
-    // sentence is hidden, the tier is not. A pill that had silently dropped
-    // the tier would look identical to a company with no policy at all.
+  it("draws no sentence element at any width", () => {
+    // This used to assert the degradation the 880px minimum window forced: the
+    // sentence hidden below `xl` by `TITLE_BAR_LADDER.autonomySentence`, the
+    // tier name never hidden. There is no sentence at any width now, so the
+    // rung was retired and this asserts its absence instead — a pill that grew
+    // one back would be the regression, and it would look correct until the
+    // window narrowed.
     render(createElement(AutonomyPill, { status: policy({ mode: "auto" }) }));
-    const sentence = pill()!.querySelector(
-      "[data-testid=autonomy-consequence]",
-    ) as HTMLElement;
-    expect(sentence.className).toContain("hidden");
-    // The rung `TITLE_BAR_LADDER.autonomySentence` hands it: gone below 1280,
-    // which is the ladder's first step. Not chosen here — see that constant.
-    expect(sentence.className).toContain("xl:inline");
+    expect(pill()!.querySelector("[data-testid=autonomy-consequence]")).toBeNull();
     // The label carries no responsive visibility class of its own.
     const label = Array.from(pill()!.children).find(
       (c) => c.textContent === "Auto",
@@ -358,7 +359,7 @@ async function openMenu() {
 }
 
 describe("changing the tier from the title bar", () => {
-  it("offers every tier the host returned, in the host's own words", async () => {
+  it("offers every tier the host returned, by name", async () => {
     const api = client({});
     await mount(api);
     await openMenu();
