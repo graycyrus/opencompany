@@ -367,16 +367,6 @@ impl CompanyManifest {
     /// * an id the company already declares is **skipped**, so a company's own
     ///   `researcher` supersedes the global one outright rather than merging
     ///   with it field by field.
-    /// The company's own teammates, without the baseline.
-    ///
-    /// [`apply_globals`](Self::apply_globals) appends the host's baseline to
-    /// every roster on every load, so `agents` is the company's roster plus
-    /// four teammates it did not add and cannot remove. Anything answering
-    /// *how many teammates has this company got* means this, not that.
-    pub fn own_agents(&self) -> impl Iterator<Item = &crate::company::Agent> {
-        self.agents.iter().filter(|agent| !agent.global)
-    }
-
     pub fn apply_globals(&mut self) {
         self.agents.retain(|agent| !agent.global);
         for global in crate::globals::agents() {
@@ -390,6 +380,16 @@ impl CompanyManifest {
             agent.global = true;
             self.agents.push(agent);
         }
+    }
+
+    /// The company's own teammates, without the baseline.
+    ///
+    /// [`apply_globals`](Self::apply_globals) appends the host's baseline to
+    /// every roster on every load, so `agents` is the company's roster plus
+    /// four teammates it did not add and cannot remove. Anything answering
+    /// *how many teammates has this company got* means this, not that.
+    pub fn own_agents(&self) -> impl Iterator<Item = &crate::company::Agent> {
+        self.agents.iter().filter(|agent| !agent.global)
     }
 
     /// Runs [`validate`](Self::validate), reporting every problem against `path`.
