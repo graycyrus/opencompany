@@ -34,14 +34,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -137,7 +129,6 @@ export function MemoryView({ client, company, sub }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<string>("all");
-  const [addOpen, setAddOpen] = useState(false);
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   const lanes = useMediaQuery("(min-width: 640px)") ? 2 : 1;
   // A generation token so a response from a previous company scope (or after
@@ -221,14 +212,13 @@ export function MemoryView({ client, company, sub }: Props) {
 
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
-    // Close the moment the write is confirmed, then reload in the background.
-    // The dialog's catch owns the "could not save the memory" toast, so only
-    // createMemory — an actual save failure — may reach it. Awaiting the reload
-    // here instead would route a reload failure into that same catch (a false
-    // save error) and skip this close, stranding the dialog open so the operator
-    // retries and writes a duplicate. `void load` is fire-and-forget: load
-    // handles its own errors via the page banner and never leaks a rejection.
-    setAddOpen(false);
+    // Reload in the background once the write is confirmed. The panel's catch
+    // owns the "could not save the memory" toast, so only createMemory — an
+    // actual save failure — may reach it; awaiting the reload here instead
+    // would route a reload failure into that same catch and report a save that
+    // did happen as one that did not, prompting a duplicate. `void load` is
+    // fire-and-forget: load handles its own errors via the page banner and
+    // never leaks a rejection.
     void load({ silent: true });
   }
 
@@ -292,28 +282,6 @@ export function MemoryView({ client, company, sub }: Props) {
                 )}
               </span>
             )}
-            {/*
-              The reason rides on the wrapper, not the button: `Button` carries
-              `disabled:pointer-events-none`, so a `title` on a disabled button
-              never surfaces — the span still takes the hover and shows it.
-            */}
-            <span
-              title={
-                discarding
-                  ? "This engine discards every write — nothing saved here is retained."
-                  : undefined
-              }
-            >
-              <Button
-                onClick={() => setAddOpen(true)}
-                disabled={discarding}
-                // Rendered, not hidden: the operator should see that writing is
-                // the thing this engine cannot do, not find the control missing.
-                data-testid="memory-add"
-              >
-                <Plus className="size-4" /> New memory
-              </Button>
-            </span>
           </>
         }
       />
@@ -417,7 +385,6 @@ export function MemoryView({ client, company, sub }: Props) {
         )}
       </div>
 
-      <AddMemoryDialog open={addOpen} onOpenChange={setAddOpen} onAdd={add} />
     </div>
   );
 }
