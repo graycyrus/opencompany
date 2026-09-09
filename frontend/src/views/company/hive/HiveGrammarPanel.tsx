@@ -147,6 +147,13 @@ export function HiveGrammarPanel({
   const toggle = (agentId: string, kind: MoveKind, next: boolean) => {
     setDraft((prev) => {
       const table = { ...(prev.moves ?? {}) };
+      // A departed seat cannot be meaningfully narrowed. Any interaction with
+      // its visible stale row removes that invalid authored entry so the
+      // operator can install the repaired grammar.
+      if (!memberIds.includes(agentId)) {
+        delete table[agentId];
+        return { ...prev, moves: table };
+      }
       // Toggling an ungoverned seat materialises its row: until now the table
       // did not name it, and naming it is what makes the narrowing a decision.
       const current = new Set(table[agentId] ?? GATEABLE_KINDS);
