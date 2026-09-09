@@ -1301,13 +1301,24 @@ async fn attach_referral_origins(
         if to_desk != desk_id {
             continue;
         }
-        let Some(child) = page[index + 1..].iter().find(|later| {
-            matches!(
-                &later.event,
-                CompanyEvent::OperatorMessage { chat, by, .. }
-                    if chat.as_deref() == Some(to_desk.as_str())
-                        && by.as_ref().is_some_and(|actor| actor.id == *asker)
-            )
+        // The row the marker is about, in either shape the two paths write.
+        //
+        // A chat-path crossing lands as an `OperatorMessage` on the target desk
+        // authored by the agent that asked — it IS that agent speaking there. A
+        // crossing raised inside a room lands as an `AgentReply` under the
+        // reserved `hive-referral` author, because the room folds it into its
+        // own transcript for the next speaker to read. Same event, two shapes,
+        // and a matcher that knew only the first left every room crossing
+        // unattached: marker on the journal, nothing on the message.
+        let Some(child) = page[index + 1..].iter().find(|later| match &later.event {
+            CompanyEvent::OperatorMessage { chat, by, .. } => {
+                chat.as_deref() == Some(to_desk.as_str())
+                    && by.as_ref().is_some_and(|actor| actor.id == *asker)
+            }
+            CompanyEvent::AgentReply {
+                chat_id, agent_id, ..
+            } => chat_id == to_desk && agent_id == crate::hivemind::HIVE_REFERRAL_AUTHOR,
+            _ => false,
         }) else {
             continue;
         };
@@ -1353,7 +1364,13 @@ async fn attach_referral_origins(
                 // rules to drift from the host's.
                 let paired = answers.and_then(|seq| {
                     let forward = page.iter().find(|stored| stored.seq.value() == seq)?;
-                    page.iter()
+                    // The question, in whichever form this crossing left behind.
+                    //
+                    // A chat-path crossing delivers a copy onto the far desk —
+                    // the asking agent speaking there — so that copy is the
+                    // question, already addressed to its reader.
+                    let delivered = page
+                        .iter()
                         .find(|later| {
                             later.seq > forward.seq
                                 && matches!(
@@ -1363,7 +1380,23 @@ async fn attach_referral_origins(
                                             && by.as_ref().is_some_and(|a| a.id == *target)
                                 )
                         })
-                        .and_then(|m| strip_relay_note(&m.event))
+                        .and_then(|m| strip_relay_note(&m.event));
+                    // A room's crossing delivers no copy: the far seat simply
+                    // takes a turn, and only its answer is journalled. What
+                    // asked is the member's own line back home — the committed
+                    // reply the marker was raised from, which `trigger_sequence`
+                    // names exactly.
+                    delivered.or_else(|| {
+                        let CompanyEvent::ReferralEnqueued {
+                            trigger_sequence, ..
+                        } = &forward.event
+                        else {
+                            return None;
+                        };
+                        page.iter()
+                            .find(|stored| stored.seq.value() == *trigger_sequence)
+                            .and_then(|m| strip_relay_note(&m.event))
+                    })
                 });
                 // Markers written before `answers` existed carry no pointer, so
                 // they still pair by scanning. Same result when the ask is in
@@ -1403,11 +1436,16 @@ async fn attach_referral_origins(
                     })
                     .flatten());
                 let mut lines = Vec::new();
+                // A room's question is a committed MOVE — `!question @#triage
+                // …` — because that is how it was said. The move grammar is
+                // addressed to the fold, not to a person reading a transcript,
+                // and it is stripped everywhere else a person sees a room's
+                // words; a crossing is no different.
                 if let Some(text) = question {
                     lines.push(ReferralLine {
                         author_id: target.clone(),
                         author_label: String::new(),
-                        text,
+                        text: readable_moves(text),
                         outbound: true,
                     });
                 }
@@ -1415,7 +1453,7 @@ async fn attach_referral_origins(
                     lines.push(ReferralLine {
                         author_id: asker.clone(),
                         author_label: asker_label.clone(),
-                        text,
+                        text: readable_moves(text),
                         outbound: false,
                     });
                 }
@@ -1461,8 +1499,12 @@ async fn attach_referral_origins(
 /// or a crossing folded onto a report — has to cut it off at the marker. One
 /// function, so the two readers cannot disagree about where the words end.
 fn strip_relay_note(event: &CompanyEvent) -> Option<String> {
-    let CompanyEvent::OperatorMessage { text, .. } = event else {
-        return None;
+    let text = match event {
+        CompanyEvent::OperatorMessage { text, .. } => text,
+        // The shape a room's crossing takes; see the matcher in
+        // `attach_referral_origins`.
+        CompanyEvent::AgentReply { text, .. } => text,
+        _ => return None,
     };
     let words = text
         .split_once(crate::ports::types::RELAY_NOTE_MARKER)

@@ -26,6 +26,8 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
+import { TeammateAvatar } from "@/components/teammate-avatar";
+
 import type { ReferralConversationDto } from "@/api/types";
 
 import {
@@ -133,17 +135,39 @@ export function ReferralConversation({ crossing }: { crossing: ReferralConversat
         </span>
       </button>
       {open && (
-        <ol className="mt-0.5 flex flex-col gap-1.5 rounded-lg border bg-card/60 px-2.5 py-1.5">
-          {crossing.lines.map((line, i) => (
-            <li key={i} className="flex flex-col gap-0.5 text-2xs leading-relaxed">
-              <span className="font-medium text-muted-foreground">
-                {line.outbound
-                  ? `@${crossing.askerId} asked`
-                  : `@${line.authorLabel || line.authorId} on ${crossing.otherDeskName} answered`}
-              </span>
-              <span className="whitespace-pre-wrap">{line.text}</span>
-            </li>
-          ))}
+        // Rendered as a conversation, because that is what it is. The same
+        // gutter-avatar-then-author-then-body shape a message uses in the
+        // transcript above, one size down: an operator reading this is reading
+        // a chat between two desks, and a label-over-paragraph list made them
+        // translate it back into one.
+        <ol className="mt-0.5 flex flex-col gap-2 rounded-lg border bg-card/60 px-2.5 py-2">
+          {crossing.lines.map((line, i) => {
+            const who = line.outbound
+              ? crossing.askerId
+              : line.authorLabel || line.authorId;
+            // The desk each side is speaking from — the asker's is this one, so
+            // it goes unsaid; the answer comes from somewhere the reader may not
+            // have open.
+            const where = line.outbound ? null : crossing.otherDeskName;
+            return (
+              <li key={i} className="flex gap-2">
+                <TeammateAvatar name={who} className="mt-0.5 size-5 shrink-0" />
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-2xs leading-none font-semibold">
+                    {who}
+                    {where && (
+                      <span className="ml-1 font-normal text-muted-foreground">
+                        on {where}
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-2xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
+                    {line.text}
+                  </span>
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>

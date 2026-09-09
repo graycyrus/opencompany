@@ -45,7 +45,7 @@
 //!
 //! See `docs/spec/runtime/hivemind-referral.md`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -426,6 +426,11 @@ struct ReferralState {
     /// The answer the last forward produced, if it finished — read by the
     /// driver to decide whether a return hop is worth folding.
     last_answer: Option<(Referral, String)>,
+    /// The journal sequence of each forward marker this episode wrote, by the
+    /// desk it went to. A return names the forward it answers (`answers`), and
+    /// this is where that sequence comes from — the episode knows it, because
+    /// it wrote the marker itself a moment earlier.
+    forwards: HashMap<String, u64>,
 }
 
 impl<'a> EpisodeReferrals<'a> {
@@ -523,6 +528,57 @@ impl<'a> EpisodeReferrals<'a> {
 
     /// Run one crossing (or local) question and journal its answer where the
     /// turn actually happened.
+    /// Journal the `ReferralEnqueued` marker for one crossing.
+    ///
+    /// The same row the chat path writes, so one projection reads both: the
+    /// console's chip and its crossing transcript key off this marker, and a
+    /// hand-off that does not write one is a hand-off nobody can audit.
+    ///
+    /// A return names the forward it answers, taken from what this episode
+    /// recorded when it wrote that forward — the pairing is a fact the writer
+    /// holds, never something a reader re-derives by scanning.
+    async fn mark(&self, referral: &Referral) {
+        let returning = matches!(referral.kind, ReferralKind::Return);
+        let answers = if returning {
+            self.state
+                .lock()
+                .await
+                .forwards
+                .get(&referral.from.desk_id)
+                .copied()
+        } else {
+            None
+        };
+        let event = CompanyEvent::ReferralEnqueued {
+            from_desk: referral.from.desk_id.clone(),
+            from_desk_name: self.desk_name(&referral.from.desk_id),
+            asker: referral.source_id.clone(),
+            asker_label: self.label(&referral.source_id),
+            trigger_sequence: referral.key.trigger_sequence,
+            returning,
+            answers,
+            to_desk: referral.to.desk_id.clone(),
+            target: referral.target_id.clone(),
+        };
+        match self.events.append(&self.company, event).await {
+            Ok(seq) if !returning => {
+                // Keyed by the desk being asked, which is the desk a return
+                // comes back FROM — the lookup above.
+                self.state
+                    .lock()
+                    .await
+                    .forwards
+                    .insert(referral.to.desk_id.clone(), seq.value());
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(
+                company = %self.company,
+                desk = %referral.from.desk_id,
+                "[hive] a crossing could not be marked on the journal ({err}); the turn still runs"
+            ),
+        }
+    }
+
     async fn forward(&self, referral: &Referral) -> EnqueueOutcome {
         let asker = self.label(&referral.source_id);
         let asker_desk = self.desk_name(&referral.from.desk_id);
@@ -646,6 +702,22 @@ impl ReferralQueue for EpisodeReferrals<'_> {
                     state.asked = state.asked.saturating_add(1);
                 }
             }
+            // **The marker, before the turn it authorizes.**
+            //
+            // A crossing raised inside a room used to leave no trace on the
+            // journal at all: this adapter kept its idempotency in memory and
+            // dispatched straight to the runner, so the console had nothing to
+            // attach a chip or a transcript to and a room's question was
+            // invisible to the operator it was asked on behalf of. The chat
+            // path has always written one (`JournalReferralQueue`); writing it
+            // here too means every crossing is recorded the same way, whichever
+            // path raised it.
+            //
+            // Best-effort: a marker that cannot be appended is logged and the
+            // turn still runs, for the reason the rest of this module gives —
+            // a question that went unrecorded is a worse episode, not a broken
+            // one.
+            self.mark(&referral).await;
             Ok(match referral.kind {
                 ReferralKind::Forward => self.forward(&referral).await,
                 ReferralKind::Return => self.ret(&referral).await,
