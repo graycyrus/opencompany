@@ -12,7 +12,7 @@ import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { FailedSendNotice } from "./MessageRow";
 import { MessageAttachments } from "./MessageAttachments";
-import { StepTimeline } from "./StepTimeline";
+import { ReferralChip, ReferralConversation, StepTimeline } from "./StepTimeline";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -509,6 +509,24 @@ function Line({
             #2069). */}
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
+        {/* And the crossings, for the same reason the steps are here: a room's
+            turns are threaded, so this panel is the only surface a deliberating
+            desk's line has. Rendered only here would be a channel-only feature
+            that a room — the one place crossings actually come from — never
+            shows. */}
+        {message.referredFrom && (
+          <ReferralChip
+            deskId={message.referredFrom.deskId}
+            deskName={message.referredFrom.deskName}
+            askerId={message.referredFrom.askerId}
+            direct={message.referredFrom.direct}
+            sequence={message.referredFrom.sequence}
+            direction={message.referredFrom.direction ?? "asked"}
+          />
+        )}
+        {message.referralConversation && (
+          <ReferralConversation crossing={message.referralConversation} />
+        )}
       </div>
     </div>
   );

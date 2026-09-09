@@ -23,7 +23,12 @@ import {
   type TimelineEntry,
 } from "./model";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
-import { CardChip, ReferralChip, StepTimeline } from "./StepTimeline";
+import {
+  CardChip,
+  ReferralChip,
+  ReferralConversation,
+  StepTimeline,
+} from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
@@ -383,12 +388,20 @@ export function MessageRow({
           <ReferralChip
             deskId={message.referredFrom.deskId}
             deskName={message.referredFrom.deskName}
+            askerId={message.referredFrom.askerId}
+            direct={message.referredFrom.direct}
             sequence={message.referredFrom.sequence}
             // The host's word, never a guess off `from`: both legs of a
             // referral are `company` lines, so that test called every answer
             // an ask. Falling back to "asked" matches a host too old to say.
             direction={message.referredFrom.direction ?? "asked"}
           />
+        )}
+        {/* And what actually crossed. The chip says a referral happened; this
+            says what was asked and what came back, collapsed so the desk still
+            reads as its own conversation. */}
+        {message.referralConversation && (
+          <ReferralConversation crossing={message.referralConversation} />
         )}
         {message.taskId && (
           <div className="flex flex-wrap items-center gap-2">

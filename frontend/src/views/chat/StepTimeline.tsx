@@ -26,6 +26,10 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
+import { TeammateAvatar } from "@/components/teammate-avatar";
+
+import type { ReferralConversationDto } from "@/api/types";
+
 import {
   AWAITING_APPROVAL_LABEL,
   STEP_FAILURE_LABEL,
@@ -93,6 +97,77 @@ export function StepTimeline({
           {steps.map((step, i) => (
             <StepRow key={i} step={step} />
           ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A crossing with somebody outside this desk, as one collapsed line.
+ *
+ * Same idiom as {@link StepTimeline} and for the same reason: the exchange is
+ * detail behind a report, not part of the desk's own conversation. The relayed
+ * rows are dropped host-side — an agent who does not work here did not speak
+ * here — so this is the only place an operator can read what was actually asked
+ * and answered rather than the asker's paraphrase of it.
+ *
+ * Closed by default. The count is the whole point of the collapsed state: it
+ * says how much was said without saying it.
+ */
+export function ReferralConversation({ crossing }: { crossing: ReferralConversationDto }) {
+  const [open, setOpen] = useState(false);
+  const count = crossing.lines.length;
+  if (count === 0) return null;
+
+  return (
+    <div className="mt-1 w-full max-w-[85%] sm:max-w-[75%]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-accent/60"
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <span>
+          {/* Who was asked, in the form they were asked in: `@name` went to a
+              person, `#desk` was put to a room. Naming the answerer's desk
+              alongside their name read as though the desk had been asked, which
+              for a `@name` crossing is the one thing that did not happen. */}
+          asked {crossing.direct ? `@${crossing.otherId}` : `#${crossing.otherDeskId}`} ·{" "}
+          {count} message{count === 1 ? "" : "s"}
+        </span>
+      </button>
+      {open && (
+        // Rendered as a conversation, because that is what it is. The same
+        // gutter-avatar-then-author-then-body shape a message uses in the
+        // transcript above, one size down: an operator reading this is reading
+        // a chat between two desks, and a label-over-paragraph list made them
+        // translate it back into one.
+        <ol className="mt-0.5 flex flex-col gap-2 rounded-lg border bg-card/60 px-2.5 py-2">
+          {crossing.lines.map((line, i) => {
+            const who = line.outbound
+              ? crossing.askerId
+              : line.authorLabel || line.authorId;
+            // The desk each side is speaking from — the asker's is this one, so
+            // it goes unsaid; the answer comes from somewhere the reader may not
+            // have open.
+            return (
+              <li key={i} className="flex gap-2">
+                <TeammateAvatar name={who} className="mt-0.5 size-5 shrink-0" />
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  {/* The name alone. The header already says whether this was
+                      a person or a desk, and repeating the answerer's desk on
+                      their line was what made a `@name` crossing read as though
+                      the desk had been asked. */}
+                  <span className="text-2xs leading-none font-semibold">{who}</span>
+                  <span className="text-2xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
+                    {line.text}
+                  </span>
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>
@@ -224,25 +299,52 @@ function formatElapsed(ms: number | undefined, status: TurnStep["status"]): stri
 export function ReferralChip({
   deskId,
   deskName,
+  askerId,
   sequence,
   direction,
+  direct = false,
 }: {
   deskId: string;
   deskName: string;
+  askerId: string;
   sequence: number;
   direction: "asked" | "answered";
+  direct?: boolean;
 }) {
-  const label = direction === "asked" ? `Asked by ${deskName}` : `Answered by ${deskName}`;
+  // Whoever was actually addressed. A crossing put to a PERSON never reached
+  // their desk — that desk holds none of the exchange and its other members had
+  // no part in it — so naming the desk here credited a room that was never asked.
+  const who = direct ? `@${askerId}` : deskName;
+  const label = direction === "asked" ? `Asked by ${who}` : `Answered by ${who}`;
+  const body = (
+    <>
+      <CornerUpLeft className="size-3 shrink-0" />
+      {label}
+    </>
+  );
   return (
     <span className="mt-1.5 flex w-fit items-center rounded-full bg-accent text-accent-foreground">
-      <a
-        href={`#/chat?desk=${encodeURIComponent(deskId)}&at=${sequence}`}
-        className="flex items-center gap-1 px-2 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80"
-        title={`Open the conversation that ${direction === "asked" ? "asked" : "answered"}`}
-      >
-        <CornerUpLeft className="size-3 shrink-0" />
-        {label}
-      </a>
+      {/* A DESK crossing ran on that desk, so its transcript is where the
+          question at `sequence` is and the link reaches it.
+
+          A DIRECT one did not: both sides are held in the pair's own thread and
+          the target's desk holds none of it, so this link would open an
+          unrelated conversation and land on a sequence that is not there.
+          Nothing to link to until a pair thread is a surface an operator can
+          open — and the exchange itself is already one click away, on the
+          message this chip sits under. So it reads as a label rather than
+          offering a way somewhere wrong. */}
+      {direct ? (
+        <span className="flex items-center gap-1 px-2 py-0.5 text-2xs font-medium">{body}</span>
+      ) : (
+        <a
+          href={`#/chat?desk=${encodeURIComponent(deskId)}&at=${sequence}`}
+          className="flex items-center gap-1 px-2 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80"
+          title={`Open the conversation that ${direction === "asked" ? "asked" : "answered"}`}
+        >
+          {body}
+        </a>
+      )}
     </span>
   );
 }
