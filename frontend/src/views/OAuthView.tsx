@@ -32,7 +32,6 @@ import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
-import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 interface Props {
   client: OpenCompanyClient;
@@ -577,21 +576,27 @@ export function OAuthView({ client, company }: Props) {
           </Alert>
         )}
 
-        {/* The general answer sat above the Composio-specific one: one key
+        {/* The general answer above the Composio-specific one: one key
             authorizing every brokered surface, with the Composio credential as
-            the escape hatch (issue #586). While this company reaches Composio
-            through its own account and nothing else, that key buys nothing —
-            and asking for it on the first-run screen sends an operator after a
-            credential this console can no longer use. The Composio section
-            below is the whole answer now. */}
-        {!COMPOSIO_MANAGED_HIDDEN && (
-          <CompanyCredentialCard
-            client={client}
-            company={company}
-            canManage={canManage}
-            onChanged={() => setCredentialGeneration((n) => n + 1)}
-          />
-        )}
+            the escape hatch (issue #586).
+
+            This was hidden behind `COMPOSIO_MANAGED_HIDDEN` because asking for
+            a TinyHumans key meant sending an operator to another site to mint
+            one — a worse errand than the Composio key below, for a credential
+            most people did not have. The key grant removes the errand: the card
+            now leads with one button and falls back to the field only where a
+            grant cannot complete.
+
+            It is no longer gated by a flag at all. The card asks the host and
+            renders nothing when there is no credential plane to talk to, which
+            is a truer answer than a constant — and it keeps this flag meaning
+            the one thing it says, rather than two. */}
+        <CompanyCredentialCard
+          client={client}
+          company={company}
+          canManage={canManage}
+          onChanged={() => setCredentialGeneration((n) => n + 1)}
+        />
 
         {/* Remounted on a credential change so its status is re-read: the tier
             it reports (`company` vs `attested` vs `none`) is downstream of the

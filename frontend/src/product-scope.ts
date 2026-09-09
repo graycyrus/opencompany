@@ -18,16 +18,15 @@ export const HOST_SETTINGS_HIDDEN = true;
 /**
  * Hides the OpenHuman-managed Composio route, leaving BYOK the only choice.
  *
- * Off since the one-click key grant landed. It was on because the managed route
- * asked an operator to paste a TinyHumans account key, which is a worse errand
- * than pasting a Composio one — two sites instead of one, for a credential most
- * people did not have. The grant removes the paste entirely, so the managed
- * route is now the shorter path rather than the longer one.
- *
- * The card it unhides still renders its paste field for a host with no hub
- * wired, where the button cannot appear.
+ * Still on. It used to gate the company-credential card as well, which made it
+ * one flag doing two jobs: hiding a *Composio route* and hiding the *TinyHumans
+ * key* surface. Those came apart when the key grant landed — the credential
+ * card is now worth showing (one click, no paste) while the managed Composio
+ * route is hidden for its own reasons, which this flag still names. The card
+ * decides its own visibility from the host's answer instead; see
+ * `CompanyCredentialCard`.
  */
-export const COMPOSIO_MANAGED_HIDDEN = false;
+export const COMPOSIO_MANAGED_HIDDEN = true;
 
 /**
  * Hides the managed inference provider, leaving the operator to name one.
