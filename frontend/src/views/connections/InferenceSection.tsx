@@ -866,7 +866,7 @@ export function InferenceSection({
         ...Object.fromEntries(changedTiers.map((tier) => [tier, next[tier]])),
       },
     }));
-  }, [provider, wouldSaveProxied, models]);
+  }, [draftProviderIsOpenRouter, wouldSaveProxied, models]);
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
