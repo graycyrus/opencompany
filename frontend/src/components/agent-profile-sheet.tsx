@@ -6,7 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Mail, Pencil, Sparkles, Users, Wrench } from "lucide-react";
+import { Pencil, Sparkles, Users, Wrench } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type AgentDetailDto } from "@/api/types";
