@@ -939,7 +939,7 @@ export function InferenceSection({
         // catalog id under the proxy even in the window before that effect
         // has run (issue #1838 follow-up).
         const draftModels =
-          provider === "openrouter" && wouldSaveProxied
+          draftProviderIsOpenRouter && wouldSaveProxied
             ? stripProxyIncompatible(models)
             : models;
         const cleanModels = Object.fromEntries(
