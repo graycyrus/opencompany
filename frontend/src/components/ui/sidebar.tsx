@@ -317,10 +317,14 @@ function Sidebar({
           // Discord, the autonomy tier and you — is in the window's title row
           // and never moves.
           //
-          // `no-scrollbar` for the reason `SidebarContent` carried it: the bar
-          // would sit on the window chrome this column is painted on, and the
-          // column is scrolled by wheel and by trackpad rather than by dragging.
-          className="no-scrollbar flex size-full flex-col overflow-y-auto bg-transparent group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
+          // No `no-scrollbar`. `index.css` gives every scroller in the console
+          // one thin, overlay-style bar — 10px, transparent track, a thumb that
+          // only firms up on hover — and this column opting out of it was the
+          // one place a scrollable region said nothing about being scrollable.
+          // With the whole sidebar scrolling as one that matters more than it
+          // did when only a middle band moved: an operator has to be able to
+          // see that there is more column below.
+          className="flex size-full flex-col overflow-y-auto bg-transparent group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
         >
           {children}
         </div>

@@ -54,13 +54,20 @@ import type { ReactNode } from "react";
  */
 const CARD =
   "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden " +
-  // `--frame-inset` on three sides, and a thinner top.
+  // `--frame-inset` on the two outer edges, nothing on the leading one, and a
+  // thinner top.
   //
-  // The frame used to be one quantity because nothing sat above the card. The
-  // title row does now, so a full inset there stacks the row's own bottom
-  // padding on top of the card's margin and reads as a gap twice the size of
-  // the one on the other three edges — which is what it is.
-  "mx-(--frame-inset) mb-(--frame-inset) mt-0.5 rounded-2xl border border-chrome-border bg-background shadow-sm";
+  // The frame used to be one quantity because nothing sat beside or above the
+  // card. Both are false now, and each stacks:
+  //
+  //   - **Leading edge.** The sidebar's groups already carry a `px-3` gutter,
+  //     so a `--frame-inset` here put 12px of card margin against 12px of
+  //     column padding — 24px between the last nav row and the first pixel of
+  //     the page, against 12px on the other three sides. One gutter, not two:
+  //     `ml-0` leaves the sidebar's own, and the measurement is uniform again.
+  //   - **Top edge.** The title row has its own bottom padding, so a full inset
+  //     there reads as a gap twice the size of the others.
+  "mr-(--frame-inset) mb-(--frame-inset) mt-0.5 ml-0 rounded-2xl border border-chrome-border bg-background shadow-sm";
 
 export function ContentSurface({ children }: { children: ReactNode }) {
   return (
