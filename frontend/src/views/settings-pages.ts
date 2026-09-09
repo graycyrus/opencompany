@@ -11,8 +11,6 @@
 import {
   Activity,
   ChartColumnBig,
-  Globe,
-  Search,
   type LucideIcon,
   Settings2,
   UserCog,
@@ -56,18 +54,18 @@ export const SETTINGS_PAGES = [
   // while it lived on this rail still works. Skills went with it, for the
   // matching reason on the capability group below.
   //
-  // Hosting and Search below did NOT follow, and the difference is the point:
-  // they really are once-a-company credential forms, so the argument that
-  // moved Inference does not reach them. See `connection-pages.ts`.
+  // Hosting and Search went too, which emptied the Integrations group and
+  // retired it. This file argued for years that a credential form belongs
+  // beside what it unlocks; what settled it is that the thing a deploy token
+  // and a search key each unlock IS the connection, so "beside what it
+  // unlocks" was always an argument for the Connections section rather than
+  // against it. Both resolve from their old addresses. See
+  // `connection-pages.ts`.
   //
-  // A credential form belongs beside what it unlocks. An operator looking for
-  // "where do I put my Vercel token" searches for hosting, so it sits here
-  // rather than inside a third-party-accounts drawer.
-  { id: "hosting", label: "Hosting", icon: Globe, hint: "Where this company's sites go live", group: "integrations" },
-  // Beside Hosting for the same reason: a credential form belongs beside what
-  // it unlocks, and an operator looking for "where do I put my Brave key"
-  // searches for search.
-  { id: "search", label: "Search", icon: Search, hint: "Where teammates look things up", group: "integrations" },
+  // What is left on this rail is what Settings is for: who can sign in, how
+  // the company behaves, what it did, and what it spends. No row below has an
+  // outside service at the other end of it, and a new row that does belongs in
+  // Connections rather than here.
   // Skills is NOT here any more: it is `#/connections/skills`, rewritten from
   // this rail so every link minted while it lived here works. Installing a
   // skill is the same act as connecting an app — granting the company a
@@ -106,7 +104,6 @@ export type SettingsPage = (typeof SETTINGS_PAGES)[number]["id"];
 /** The settings rail groups related sub-pages without changing their routes. */
 export const SETTINGS_PAGE_GROUPS = [
   { id: "identity", label: "Identity & lifecycle" },
-  { id: "integrations", label: "Integrations" },
   { id: "capability", label: "Capability" },
   { id: "spend", label: "Spend" },
 ] as const satisfies readonly { id: (typeof SETTINGS_PAGES)[number]["group"]; label: string }[];
