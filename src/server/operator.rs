@@ -10690,24 +10690,18 @@ mode = "full"
         assert!(banked_resolutions(&home, &company).await.is_empty());
     }
 
-    /// **A documented limitation, pinned rather than left incidental.**
-    ///
     /// A blocker raised by `escalate_to_human` carries no
-    /// [`BlockerStep`](crate::ports::blockers::BlockerStep), and every resume
-    /// reads the verdict's step and nothing else — so its card is never
-    /// re-dispatched however it is answered, on this route and on the
-    /// two-value one that predates it. The resume posts a note into the
-    /// blocker's thread and stops there.
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep) — the tool holds
+    /// neither a card nor a node — so the resume falls back to the card the
+    /// approval is linked to, and answering re-dispatches it.
     ///
-    /// The route lets the verdict through rather than refusing it: the answer
-    /// is banked durably and correctly, so the resume that reads the approval's
-    /// own task link inherits a right answer rather than a discarded one, and
-    /// refusing only `skip`/`amend` would leave `approve` no-opping in exactly
-    /// the same way while looking supported. Tracked as its own defect; when it
-    /// is fixed this test's final assertion is what changes.
+    /// The banked resolution is still stepless, and that assertion is
+    /// load-bearing rather than incidental: the fallback is read at resume
+    /// time, so the durable record keeps saying what the blocker actually
+    /// carried instead of being rewritten to claim a step it never had.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn an_agent_question_banks_its_verdict_but_re_dispatches_no_card() {
+    async fn an_agent_question_re_dispatches_the_card_its_approval_is_linked_to() {
         use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
         use crate::runtime::journal::{ApprovalConversation, TaskLink};
 
@@ -10806,7 +10800,7 @@ mode = "full"
         );
         assert!(
             banked[0]["resolution"].get("step").is_none(),
-            "an agent question is parked with no step, which is the defect: {}",
+            "the durable record keeps the stepless park the blocker carried: {}",
             banked[0]
         );
         let card = runtime
@@ -10819,8 +10813,8 @@ mode = "full"
             .expect("the card still exists");
         assert_eq!(
             card.column,
-            crate::ports::tasks::COLUMN_PAUSED,
-            "the stepless resume moves no card — the limitation this pins"
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the answer re-dispatches the linked card"
         );
     }
 
