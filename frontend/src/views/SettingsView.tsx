@@ -118,10 +118,13 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
             a browser; the installed-here half only fills in on the desktop. */}
         <ExternalHarnesses client={client} company={company} />
 
-        {/* Approvals: the autonomy tier and the always-ask list (issue #562).
-            High in the page on purpose — an operator who comes to settings
-            because they are drowning in approval cards is here for this. */}
-        <PolicySettings client={client} company={company} canManage={canManagePolicy} />
+        {/* Approvals was here — the autonomy tier and the always-ask list
+            (issue #562), kept high in the page because an operator who comes to
+            settings while drowning in approval cards is here for this. That is
+            now an argument for a rail row rather than for a scroll position:
+            `#/settings/approvals`, `views/settings/ApprovalsSettingsView.tsx`.
+            It is also the only policy this page carried; everything left is a
+            fact about how the company is set up. */}
 
         {/* Connection */}
         <Card>
@@ -210,22 +213,10 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
           canManage={canManage}
         />
 
-        {/* Appearance.
-
-            The trailing control goes in `CardAction`, not a bare child:
-            `CardHeader` is a grid, so `flex-row justify-between` on it is inert
-            and the control drops onto a row of its own below the description.
-            `CardAction` is what switches the header to `grid-cols-[1fr_auto]`
-            and parks the control at the top right. */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Appearance</CardTitle>
-            <CardDescription>Switch between light, dark, and system themes.</CardDescription>
-            <CardAction>
-              <ThemeToggle />
-            </CardAction>
-          </CardHeader>
-        </Card>
+        {/* Appearance was here. It is `#/settings/appearance` now
+            (`views/settings/AppearanceView.tsx`): everything else on this page
+            is a fact about the company and the same for everyone who signs in,
+            while the theme is a fact about this browser alone. */}
 
         {/* Product tour */}
         <Card>
