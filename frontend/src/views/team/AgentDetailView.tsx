@@ -714,23 +714,35 @@ export function AgentDetailView({
           every "Not on a desk" chip. Arriving from any of those, "Back to team"
           named a page they had never seen.
         */}
+        {/*
+          Both crumbs are the same text, on one baseline.
+          The parent used to be a `Button variant="ghost" size="sm"` — 28px
+          tall, `px-2`, pulled back by `-ml-2` — beside a bare `<li>` of plain
+          text. So the two halves of one line disagreed about height, weight and
+          left edge, and the separator floated between them at neither's centre.
+          A crumb is a link, not a control with a hit area of its own; it is
+          typeset like the text it sits in and coloured to say which half you
+          can press.
+        */}
         <nav aria-label="Breadcrumb" data-testid="agent-breadcrumb">
-          <ol className="flex flex-wrap items-center gap-1 text-sm">
-            <li>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-2 h-7 px-2 text-muted-foreground"
+          <ol className="flex flex-wrap items-center gap-1.5 text-sm leading-6">
+            <li className="flex items-center">
+              <button
+                type="button"
                 onClick={onBack}
                 data-testid="agent-breadcrumb-company"
+                className="rounded-sm text-muted-foreground transition-colors hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
                 Company
-              </Button>
+              </button>
             </li>
-            <li aria-hidden className="text-muted-foreground">
+            <li aria-hidden className="flex items-center text-muted-foreground/60">
               <ChevronRight className="size-3.5" />
             </li>
-            <li aria-current="page" className="min-w-0 truncate font-medium">
+            <li
+              aria-current="page"
+              className="flex min-w-0 items-center truncate font-medium text-foreground"
+            >
               {/* Named as soon as there is a name, and "Teammate" until then.
                   A crumb that appeared only once the read landed would move
                   the page's controls across the row as it settled. */}
