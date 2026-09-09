@@ -7366,18 +7366,27 @@ mod test {
         // The manifest wins where no edit exists, and an unknown desk falls
         // through to the default rather than borrowing another desk's table.
         assert_eq!(record.effective_desk_hive("studio").quorum, Some(2));
-        assert_eq!(record.effective_desk_hive("unknown"), crate::hivemind::HiveConfig::default());
+        assert_eq!(
+            record.effective_desk_hive("unknown"),
+            crate::hivemind::HiveConfig::default()
+        );
         assert!(!record.desk_hive_is_installed("studio"));
 
         let mut first = crate::hivemind::HiveConfig::default();
         first.quorum = Some(1);
-        record.upsert_desk_hive(DeskHiveOverride { desk_id: "studio".into(), hive: first });
+        record.upsert_desk_hive(DeskHiveOverride {
+            desk_id: "studio".into(),
+            hive: first,
+        });
         assert!(record.desk_hive_is_installed("studio"));
         assert_eq!(record.effective_desk_hive("studio").quorum, Some(1));
 
         let mut replacement = crate::hivemind::HiveConfig::default();
         replacement.quorum = Some(3);
-        record.upsert_desk_hive(DeskHiveOverride { desk_id: "studio".into(), hive: replacement });
+        record.upsert_desk_hive(DeskHiveOverride {
+            desk_id: "studio".into(),
+            hive: replacement,
+        });
         assert_eq!(record.overlay_desk_hive.len(), 1);
         assert_eq!(record.effective_desk_hive("studio").quorum, Some(3));
         assert!(record.clear_desk_hive("studio"));

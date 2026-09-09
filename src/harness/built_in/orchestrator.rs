@@ -2528,11 +2528,7 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::TeammateAdded { .. } => "teammate added".into(),
         CompanyEvent::DeskCreated { name, .. } => format!("desk created: {name}"),
         CompanyEvent::DeskDeleted { .. } => "desk deleted".into(),
-        CompanyEvent::DeskMembersChanged {
-            added,
-            removed,
-            ..
-        } => format!(
+        CompanyEvent::DeskMembersChanged { added, removed, .. } => format!(
             "desk membership changed: +{} −{}",
             added.len(),
             removed.len()
