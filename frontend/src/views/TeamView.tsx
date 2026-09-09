@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, MoreHorizontal, Network, Plus, Sparkles, UserPlus, Users } from "lucide-react";
+import { MoreHorizontal, Network, Plus, Sparkles, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -10,14 +10,6 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,7 +32,7 @@ import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
-import { AddMemberDialog } from "@/views/chat/AddMemberDialog";
+import { AddMemberDialog, type NewMemberFields } from "@/views/chat/AddMemberDialog";
 
 interface Props {
   client: OpenCompanyClient;
@@ -296,7 +288,7 @@ export function TeamView({
    * covers the console-only fallback below: nothing reached a host, but the
    * add is as complete as it is going to get and there is nothing to retry.
    */
-  async function addMember(fields: AddMemberFields): Promise<boolean> {
+  async function addMember(fields: NewMemberFields): Promise<boolean> {
     let created: TeamMemberDto | null = null;
     try {
       created = await client.addTeamMember(
@@ -573,45 +565,6 @@ export function TeamView({
  */
 const IDLE: Workload = { open: 0, status: "idle" };
 
-/** The fields the add dialog collects. */
-interface AddMemberFields {
-  name: string;
-  role: string;
-  description: string;
-  /**
-   * The persona typed into the dialog's Instructions box.
-   *
-   * Collected since #264 put `instructions` in `AGENT_FIELDS`, and dropped on
-   * the floor until #1776 noticed: the box was rendered, filled in, and never
-   * sent. The host has accepted `instructions` at creation since #1530 and
-   * `addTeamMember` has carried it since — this was the one link missing, so an
-   * operator who wrote a persona in the add dialog watched it vanish.
-   *
-   * Since #1989 the reduced dialog fills it too, from the host's design pass —
-   * so a teammate created from one sentence is born with a persona rather than
-   * with an empty one and a promise that somebody will write it later.
-   */
-  instructions: string;
-  /**
-   * The face, chosen before the teammate exists.
-   *
-   * `addTeamMember` takes no avatar, so this is written as a second call once
-   * the host has answered with an id. Best-effort by construction: a teammate
-   * with the wrong face is a teammate, and failing the whole add over an icon
-   * would throw away the name and the post that did land.
-   */
-  avatar?: string;
-  /**
-   * Land on the new teammate's detail page with its edit form open, rather than
-   * staying on the roster (issue #1989).
-   *
-   * Set only by the reduced dialog, and it is that dialog's second half: it
-   * collects a name and a sentence, so the description, the instructions, the
-   * budget and the inbox are all still to be filled in — on the page this
-   * flag opens, beside the copilot that drafts two of them.
-   */
-  landOnProfile?: boolean;
-}
 
 function MemberCard({
   member,
