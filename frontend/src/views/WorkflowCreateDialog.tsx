@@ -292,7 +292,7 @@ export function destinationTargetProblem(
     channels.status === "ready" &&
     !channels.ids.includes(value)
   ) {
-    return `\`${value}\` is not a workflow delivery channel — this runtime has: ${
+    return `\`${value}\` is not an automation delivery channel — this runtime has: ${
       channels.ids.length > 0 ? channels.ids.join(", ") : "no durable channels"
     }.`;
   }

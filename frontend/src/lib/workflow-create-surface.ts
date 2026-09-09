@@ -225,7 +225,7 @@ export function draftDecline(reason: string | null | undefined): DraftDecline {
   }
   return {
     kind: "judgment",
-    message: stated || "This is better done once than built into a workflow.",
+    message: stated || "This is better done once than built into an automation.",
     action: "Create it anyway",
   };
 }
