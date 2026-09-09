@@ -469,6 +469,11 @@ function Console() {
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
   const hubToken = useMemo(() => readHubToken(), []);
+  // Captured before the strip below, and handed to whichever card started the
+  // grant. Not part of `auth` — a key grant does not sign anyone in and must not
+  // hold up the boot.
+  const keyLink = useMemo(() => readKeyLink(), []);
+  const keyLinkFailed = useMemo(() => readKeyLinkError(), []);
   const hubFailed = useMemo(() => readHubError(), []);
   /**
    * The in-flight redemption, so a link is redeemed exactly once.
@@ -486,6 +491,10 @@ function Console() {
   // Now that any credential is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
+    if (keyLink || keyLinkFailed) {
+      captureKeyLink(keyLink, keyLinkFailed);
+      clearKeyLinkFromUrl();
+    }
     if (hubToken || hubFailed) {
       clearHubResultFromUrl();
       // A hub sign-in that was asked to land on setup's destination carries it
@@ -495,7 +504,7 @@ function Console() {
       // with the welcome suppressed, exactly as a setup link would have.
       absorbHubSetupHandoff();
     }
-  }, [magicLink, hubToken, hubFailed]);
+  }, [magicLink, hubToken, hubFailed, keyLink, keyLinkFailed]);
 
   /**
    * Redeem a landing credential before any console asks for data.
