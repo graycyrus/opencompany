@@ -1215,12 +1215,17 @@ export function AgentDetailView({
 /** Name, role, id, desks, and the two facts that classify an agent. */
 function Identity({
   agent,
-  action,
   onPickAvatar,
   avatarBusy,
 }: {
   agent: AgentDetailDto;
-  action?: ReactNode;
+  /*
+   * `action` used to be here — the page's one Edit button, on the name row.
+   * Editing is per-tab now (`AGENT_TABS`), so each card carries its own way in
+   * and this header has no action of its own. Removed rather than left
+   * optional-and-unpassed: an unused slot is a third state, neither drawn nor
+   * gone, that the next reader has to rule out.
+   */
   /** Opens the icon picker. Absent leaves the tile inert — a read-only header. */
   onPickAvatar?: () => void;
   /** An icon save is in flight — the tile must not start another one. */
@@ -1314,9 +1319,6 @@ function Identity({
           </div>
         </div>
       </div>
-      {action && (
-        <div className="flex shrink-0 flex-wrap justify-end gap-2">{action}</div>
-      )}
     </div>
   );
 }
