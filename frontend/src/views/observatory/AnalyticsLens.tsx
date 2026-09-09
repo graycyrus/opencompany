@@ -26,6 +26,7 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import type { ObservatoryRun } from "@/api/observatory";
+import { usd } from "@/lib/money";
 import { byAgent, byNode, failureHistogram } from "./model";
 
 const config = {
@@ -115,7 +116,7 @@ export function AnalyticsLens({ runs }: { runs: ObservatoryRun[] }) {
                 <CartesianGrid horizontal={false} />
                 <XAxis
                   type="number"
-                  tickFormatter={(v: number) => `$${v.toFixed(2)}`}
+                  tickFormatter={(v: number) => usd(v)}
                   tickLine={false}
                   axisLine={false}
                 />
