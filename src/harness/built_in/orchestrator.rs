@@ -1991,7 +1991,7 @@ impl Tool for ReadTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Read one task card in full: its column, assignee, note, every attempt's status, and what it produced — use this to discuss a finished task, explain why one is stuck, or answer a follow-up about its output. Pass the card's `task_id`, from `list_tasks` or a board reference."
+        "Read one task card in full: its column, assignee, note, its 10 most recent attempts' status, and what it produced — use this to discuss a finished task, explain why one is stuck, or answer a follow-up about its output. Pass the card's `task_id`, from `list_tasks` or a board reference."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -11963,6 +11963,45 @@ name = "Morning"
         assert!(text.contains("list_tasks"), "{text}");
     }
 
+    /// AUTH-axis (HT-072): `read_task` is company-scoped only through
+    /// `tasks.list(&self.company)` — a real backend (here `FsOps`, the
+    /// production store, not a hand-rolled fake) partitions its data by
+    /// company on disk, so a `task_id` that exists but is filed under a
+    /// DIFFERENT company must read as not-found, never leak.
+    #[tokio::test]
+    async fn read_task_never_leaks_a_task_id_belonging_to_another_company() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        tasks
+            .upsert(
+                &CompanyId::new("beta"),
+                &task_card(
+                    "t-secret",
+                    "beta's confidential rollout plan",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), Some(tasks), None, None);
+        let result = tool
+            .execute(json!({ "task_id": "t-secret" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "acme asking about beta's task_id must read as not-found: {}",
+            result.text()
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("confidential rollout"),
+            "must not render beta's card: {text}"
+        );
+    }
+
     /// Fail-closed by construction (issue #1859's approved redaction posture):
     /// `read_task` never reads [`RunRecord::usage`], so a run's USD cost cannot
     /// reach its rendering no matter what that run cost.
@@ -12725,26 +12764,32 @@ name = "Morning"
         );
     }
 
-    /// `ReadTaskTool::description()` promises the model
-    /// "every attempt's status", and `read_task_bounds_rendered_attempts_...`
-    /// right above proves the render is truncated to `READ_TASK_ATTEMPTS_LIMIT`
-    /// rows. Both are real; they contradict each other. Pinning the exact
-    /// claim here means a future wording fix and a future cap change are each
-    /// forced to touch this test, instead of one silently drifting out of step
-    /// with the other the way they did to get here.
+    /// LIMIT-axis (HT-072): `ReadTaskTool::description()` used to promise the
+    /// model "every attempt's status" while the render silently truncates to
+    /// `READ_TASK_ATTEMPTS_LIMIT` rows — a false completeness claim the model
+    /// reads before ever calling the tool, independent of the honest
+    /// `_N earlier attempt(s) omitted_` notice the render itself carries (see
+    /// `read_task_bounds_rendered_attempts_...` above). The description must
+    /// name the same cap the render enforces, and the two are pinned against
+    /// the same literal so a change to one is forced to touch the other
+    /// instead of silently drifting out of step the way they did to get here.
     #[test]
-    fn read_task_description_claims_every_attempt_while_the_render_caps_at_the_limit() {
+    fn read_task_description_names_the_same_cap_the_render_enforces() {
         let tool = ReadTaskTool::new(CompanyId::new("acme"), None, None, None);
         assert!(
-            tool.description().contains("every attempt's status"),
-            "the schema text under test has changed; re-check whether the cap it once \
-             contradicted still exists: {}",
+            !tool.description().contains("every attempt's status"),
+            "the description must not promise completeness the render does not keep: {}",
+            tool.description()
+        );
+        assert!(
+            tool.description().contains("10 most recent"),
+            "the description should name the cap the render enforces: {}",
             tool.description()
         );
         assert_eq!(
             READ_TASK_ATTEMPTS_LIMIT, 10,
-            "the render is capped well under \"every attempt\" whenever a card has more retries \
-             than this"
+            "pinned against the same literal the description names, so a cap change cannot \
+             drift silently out of step with the sentence the model reads"
         );
     }
 
