@@ -106,7 +106,7 @@ export const TOUR: TourStop[] = [
     view: "workflows",
     target: '[data-tour="nav-workflows"]',
     placement: "right",
-    title: "Flows",
+    title: "Automations",
     body: "Turn recurring work into a repeatable flow — a graph of steps your agents run end to end.",
   },
   {
