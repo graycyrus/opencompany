@@ -834,4 +834,88 @@ mod tool_test {
              from"
         );
     }
+
+    /// STATE-axis (REQ-002): `push`'s de-duplication is per [`ApprovalScope`]
+    /// (issue #439) — two different turns asking the identical question are
+    /// two requests, not one collapsed into the other. This is the flip side
+    /// of `a_repeated_identical_escalation_collapses_but_a_distinct_one_survives`
+    /// (`policy.rs`), which proves the collapse WITHIN one turn; this proves a
+    /// prior turn's already-drained card does not leave state that suppresses
+    /// an identical question asked again in a later, separate turn.
+    #[tokio::test]
+    async fn escalate_to_human_repeated_across_different_turns_is_not_deduped() {
+        let queue = ApprovalRequestQueue::default();
+        let tool = tool(&queue);
+
+        let first_turn = queue.claim(crate::harness::built_in::policy::ApprovalScope::Run(
+            "run-1".to_string(),
+        ));
+        let first_drain = first_turn
+            .scoped(async {
+                tool.execute(serde_json::json!({ "question": "staging or prod?" }))
+                    .await
+                    .expect("first turn runs");
+                queue.drain(8)
+            })
+            .await;
+        assert_eq!(
+            first_drain.requests.len(),
+            1,
+            "the first turn's own question lands"
+        );
+        drop(first_turn);
+
+        let second_turn = queue.claim(crate::harness::built_in::policy::ApprovalScope::Run(
+            "run-2".to_string(),
+        ));
+        let second_drain = second_turn
+            .scoped(async {
+                tool.execute(serde_json::json!({ "question": "staging or prod?" }))
+                    .await
+                    .expect("second turn runs");
+                queue.drain(8)
+            })
+            .await;
+        assert_eq!(
+            second_drain.requests.len(),
+            1,
+            "a later, separate turn asking the identical question must not read as a duplicate \
+             of a card the first turn already drained and lost scope of"
+        );
+    }
+
+    /// BOUND-axis (REQ-002): the cap boundary through the real tool, not a
+    /// hand-built `ApprovalRequest`. Exactly `MAX_APPROVAL_REQUESTS_PER_TURN`
+    /// distinct questions in one turn must all land with no overflow; the
+    /// existing pin at `escalate_to_human_does_not_set_the_turn_boundary_and_can_overflow_the_cap`
+    /// (`policy.rs`) only exercises one-past the cap.
+    #[tokio::test]
+    async fn escalate_to_human_exactly_at_the_cap_produces_no_overflow() {
+        use crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+
+        let queue = ApprovalRequestQueue::default();
+        let tool = tool(&queue);
+        for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+            let outcome = tool
+                .execute(serde_json::json!({ "question": format!("question {i}?") }))
+                .await
+                .expect("runs");
+            assert!(!outcome.is_error, "question {i}: {}", outcome.text());
+        }
+
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(
+            drained.requests.len(),
+            MAX_APPROVAL_REQUESTS_PER_TURN,
+            "exactly the cap's worth of distinct questions must all land"
+        );
+        assert_eq!(
+            drained.discarded, 0,
+            "at exactly the cap, nothing overflows"
+        );
+        assert!(
+            drained.overflow_notice().is_none(),
+            "no notice is owed when nothing was dropped"
+        );
+    }
 }
