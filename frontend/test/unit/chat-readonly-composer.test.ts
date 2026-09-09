@@ -386,12 +386,16 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     await mount("operator", "unavailable");
 
     const strip = banner()!;
-    const column = strip.parentElement!;
+    // One level deeper than it used to be: the notice's parent is now the
+    // `relative` box the banner anchors to, so the read-only notice is a
+    // sibling of that box rather than of the banner itself.
+    const box = strip.parentElement!;
+    const column = box.parentElement!;
     const kids = Array.from(column.children);
     const notice = kids.find((el) => el.textContent?.includes("There is nothing to reply to here"));
 
     expect(notice).not.toBeUndefined();
-    expect(kids.indexOf(notice!)).toBeLessThan(kids.indexOf(strip));
+    expect(kids.indexOf(notice!)).toBeLessThan(kids.indexOf(box));
 
     // Order relative to the read-only notice only — deliberately NOT "and it is
     // the last child of the column". `InflightRunBar` renders after this strip
