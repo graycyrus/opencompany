@@ -303,7 +303,7 @@ function ProgressLine({
                 step that couldn&apos;t be queued for approval at all, so there&apos;s
                 nothing to decide about that part. It did produce a report still waiting on
                 a separate approval to send — deciding that only sends the report, so this
-                step won&apos;t tick until you run the workflow again.
+                step won&apos;t tick until you run the automation again.
               </>,
               "gate-workflow-blocked-unparkable-delivery",
             );
