@@ -118,8 +118,14 @@ export function SectionRail({
   // current page, and an ancestor of it is not a second one.
   const current = chips.filter((row) => row.active).at(-1);
 
+  // No rows is a real state — Room and Flows have no sub-navigation — and it
+  // renders the same wrapper with neither the rail nor the chip row inside it.
+  // The wrapper is what has to be constant; see `SectionContentRail`.
+  const hasRail = rows.length > 0;
+
   return (
     <div className="flex min-h-0 flex-1">
+      {hasRail && (
       <nav
         aria-label={label}
         className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex"
@@ -165,6 +171,7 @@ export function SectionRail({
           </Fragment>
         ))}
       </nav>
+      )}
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Below `lg` the rail collapses to a scrolling row of chips, so the
@@ -176,6 +183,7 @@ export function SectionRail({
             below `lg`. Without its own stacking context its links are
             unreachable at 880–1023px window widths — the same fix, for the same
             reason, that `SettingsSection`'s chip row carries. */}
+        {hasRail && (
         <div className="relative z-30 border-b lg:hidden">
           <div className="flex gap-1 overflow-x-auto p-2">
             {chips.map((row) => (
@@ -207,6 +215,7 @@ export function SectionRail({
               That is not a second line per row, which is what was removed. */}
           {current && <p className="px-3 pb-2 text-xs text-muted-foreground">{current.hint}</p>}
         </div>
+        )}
 
         {children}
       </div>
@@ -306,10 +315,30 @@ export function SectionContentRail({
   children: ReactNode;
 }) {
   const section = sectionOwning(view);
-  if (!section?.children) return <>{children}</>;
+  // ALWAYS the same element at this position, even for a section with no rail.
+  //
+  // This used to be `if (!section?.children) return <>{children}</>` beside a
+  // `<SectionRail>` return, and the two shapes are what made it a bug rather
+  // than a tidiness question: React reconciles by position and type, so
+  // swapping a Fragment for `SectionRail` unmounts and remounts everything
+  // under it — and `children` here is the console's whole content area,
+  // `ChatView` included.
+  //
+  // `ChatView` is deliberately mounted on every route (`room-rail.tsx`) so the
+  // channel list is never a round trip away and returning to Room refetches
+  // nothing. Remounting it on the way between Room and Company threw that away
+  // silently: the rail portalled into the sidebar was torn down and rebuilt on
+  // every such navigation, which reset the sidebar's scroll position to zero —
+  // the visible symptom, and the one that led here.
+  //
+  // Measured before the fix: Company → Connections (both draw a rail) kept the
+  // sidebar's scroll at 238px and unmounted nothing; Room → Company and
+  // Connections → Flows each unmounted the rail once and dropped the scroll to
+  // 0. Exactly the crossings that changed this element's type.
+  const rows = section?.children ? sectionRows(section, view, sub, onNavigate) : [];
 
   return (
-    <SectionRail label={section.label} rows={sectionRows(section, view, sub, onNavigate)}>
+    <SectionRail label={section?.label ?? ""} rows={rows}>
       {children}
     </SectionRail>
   );
