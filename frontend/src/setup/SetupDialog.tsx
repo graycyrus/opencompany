@@ -30,7 +30,7 @@ import {
 import { cn } from "@/lib/utils";
 import { initials, toneFor } from "@/lib/team";
 import { TEAM_TONES } from "@/lib/team";
-import { settingsHref } from "@/views/settings-pages";
+import { connectionsHref } from "@/views/connection-pages";
 
 /**
  * How long each created agent stays on screen before the next write starts.

@@ -48,7 +48,7 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
-import { settingsHref } from "@/views/settings-pages";
+import { connectionsHref } from "@/views/connection-pages";
 import {
   addMemberFailure,
   reportAddMember,

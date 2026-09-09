@@ -6,7 +6,7 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 import type { LocalScope } from "@/connections/types";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
 import { ReadTimeoutError, withReadTimeout } from "@/lib/read-timeout";
-import { settingsHref } from "@/views/settings-pages";
+import { connectionsHref } from "@/views/connection-pages";
 import { SetupDialog } from "./SetupDialog";
 import {
   clearSetupRedesign,

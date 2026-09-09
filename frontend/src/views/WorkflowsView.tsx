@@ -94,7 +94,7 @@ import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 import { useAskerNames } from "@/components/approval-card";
 import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
-import { settingsHref } from "@/views/settings-pages";
+import { connectionsHref } from "@/views/connection-pages";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
 import { workflowSavedToast } from "@/lib/workflow-saved-toast";
