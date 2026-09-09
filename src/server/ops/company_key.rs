@@ -259,7 +259,7 @@ async fn start_link(
 
     let started = state
         .hub_links()
-        .start(&OsTokens, &runtime.id().to_string());
+        .start(&OsTokens, runtime.id().as_ref());
 
     // Where the hub returns to. `key=link` is this console's own marker, kept
     // distinct from the `key=auth` the hub appends on a sign-in so the two
@@ -307,7 +307,7 @@ async fn finish_link(
     // is the right amount to say: the remedy is the same either way.
     let Some(link) = state
         .hub_links()
-        .take(&body.state, &runtime.id().to_string())
+        .take(&body.state, runtime.id().as_ref())
     else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "that connection attempt has expired — start it again".to_string(),
