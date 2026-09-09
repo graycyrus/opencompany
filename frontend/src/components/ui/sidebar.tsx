@@ -239,7 +239,16 @@ function Sidebar({
             <SheetTitle>Sidebar</SheetTitle>
             <SheetDescription>Displays the mobile sidebar.</SheetDescription>
           </SheetHeader>
-          <div className="flex h-full w-full flex-col">{children}</div>
+          {/* The sheet's own scroller.
+              `sidebar-inner` below is the desktop branch only, so when the
+              column's single scroller moved there the sheet was left with none:
+              a phone showing five nav rows, a channel list and every teammate
+              simply ran off the bottom with no way to reach the end. Same two
+              classes, same reason — one scroller for the whole column — and the
+              hover treatment is deliberately NOT applied, because a touch
+              pointer never hovers and a bar it cannot summon is a bar it does
+              not have. */}
+          <div className="flex h-full w-full flex-col overflow-y-auto">{children}</div>
         </SheetContent>
       </Sheet>
     )

@@ -3619,14 +3619,33 @@ export function AppShell({
           />
         }
         sidebarToggle={
-          // `md` and up only, and the breakpoint is the same one `useIsMobile`
-          // flips at: below it the sidebar is a sheet with its own trigger in
-          // the inset, and this button's two labels ("Collapse"/"Expand") are
-          // both wrong for a sheet. It was gated at exactly this width while it
-          // floated over the content card, for exactly this reason.
-          <span className="hidden md:inline-flex">
-            <SidebarCollapseButton />
-          </span>
+          // Two controls, one slot, exact complements — so the way to the
+          // navigation is in the same corner at every width and is never in
+          // both places or neither.
+          //
+          // `md` and up is the column, which collapses: `SidebarCollapseButton`
+          // says "Collapse"/"Expand", and `md` is the width `useIsMobile` flips
+          // at, so its own mobile guard and this gate agree by construction.
+          //
+          // Below `md` the sidebar is a sheet, which opens: those two labels are
+          // both wrong for one, so the sheet's own trigger takes the slot. It
+          // used to be a reserved row at the FOOT of the inset (issue #1265,
+          // which was about a `fixed` trigger floating over the content and
+          // winning every hit-test in the bottom-left corner). A row of its own
+          // solved that and put the way back to navigation at the bottom of the
+          // screen, furthest from the header it belongs to. In the title row it
+          // is neither floating nor buried.
+          <>
+            <span className="hidden md:inline-flex">
+              <SidebarCollapseButton />
+            </span>
+            <SidebarTrigger
+              aria-label="Toggle sidebar"
+              // The row's shared glyph shape, so it sits with its neighbours
+              // rather than reading as a `ghost` Button that wandered in.
+              className={cn(TITLE_BAR_ICON_BUTTON, "md:hidden")}
+            />
+          </>
         }
         search={<TitleBarSearch />}
         utilities={
@@ -4218,22 +4237,14 @@ export function AppShell({
         </ContentSurface>
         </AgentProfileProvider>
 
-        {/* Mobile only: dedicated chrome for the way back to navigation, not an
-            overlay on top of it. A `fixed` trigger here used to float over
-            whatever content happened to scroll into the bottom-left corner and
-            win every hit-test in that region (issue #1265) — this bar reserves
-            its own row in SidebarInset's flex column instead, so the content
-            wrapper's flex-1 height (and every view's own overflow-y-auto
-            within it) already stops short of it. No view needs to know this
-            control exists. */}
-        {/* `p-3` on all four sides, matching `--frame-inset`, so this control
-            lines up with the card's own margin instead of hanging off a
-            different number. The card already supplies the gap above it through
-            that bottom margin — every page is framed now, so there is no longer
-            a flush-to-the-edge case for this row to compensate for. */}
-        <div className="flex shrink-0 items-center bg-transparent p-3 md:hidden">
-          <SidebarTrigger aria-label="Toggle sidebar" />
-        </div>
+        {/* The mobile "Toggle sidebar" row was here, at the foot of the inset.
+            It reserved its own row rather than floating, which is what issue
+            #1265 asked for after a `fixed` trigger kept winning the hit-test in
+            the bottom-left corner — but it left the way back to navigation at
+            the bottom of the screen, furthest from the header it belongs to.
+            The trigger is in the title row now, in the same slot the desktop's
+            collapse glyph uses and as its exact complement. It floats over
+            nothing, so #1265 stays answered. */}
       </SidebarInset>
       </div>
 
