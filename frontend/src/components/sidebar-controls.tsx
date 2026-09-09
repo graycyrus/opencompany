@@ -240,7 +240,11 @@ export function SidebarCollapseButton() {
         render={
           <Button
             type="button"
-            variant="ghost"
+            // Primary, not `ghost` — see the fill note on `className` below.
+            // Stated as the variant rather than painted over a ghost, so the
+            // one button here and the console's other primary buttons keep
+            // moving together when the token does.
+            variant="default"
             size="icon-sm"
             // The accessible name, and the only name this control has — an
             // icon-only button with no label is otherwise announced as
