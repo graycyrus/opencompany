@@ -1031,6 +1031,82 @@
     --scrollbar-thumb-grab: color-mix(in oklab, var(--muted-foreground) 80%, transparent);
 }
 
+/* The content card's orbiting halo.
+ *
+ * A single soft arc of shadow that travels clockwise around the outside of the
+ * card, so the sheet reads as hovering over the chrome and being lifted from a
+ * slowly changing side — rather than sitting under one fixed drop shadow that
+ * says nothing after the first glance.
+ *
+ * ## Why the angle animates and the element does not
+ *
+ * The obvious build is a rotating box behind the card. That needs the box to be
+ * a square larger than its diagonal or a corner swings into view, which on a
+ * 1200x830 card means a very large blurred layer repainting every frame. Here
+ * the element is still and only the gradient's `from` angle moves, which is one
+ * registered custom property interpolating — no transform, no oversized layer,
+ * nothing to clip.
+ *
+ * `@property` is what makes that possible: an unregistered custom property is a
+ * token, not an angle, so it would jump 0deg → 360deg in one step instead of
+ * sweeping. Where `@property` is unsupported the `var(…, 0deg)` fallback keeps
+ * the gradient valid and the halo simply holds still — a static lift rather
+ * than a broken box.
+ *
+ * ## The shape of the arc
+ *
+ * One lobe, not a ring: transparent for most of the turn, rising to
+ * `--orbit-ink` across a ~25% window. A full ring would be a uniform glow and
+ * the movement would be invisible; the gap is what makes the travel readable.
+ *
+ * `inset: -1px` and a matching radius so the halo starts flush behind the
+ * card's own border, and `blur(18px)` spreads it outward from there. The card
+ * is opaque, so only what escapes its edge is ever seen — which is the whole
+ * effect.
+ */
+@property --orbit-angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+}
+
+@keyframes content-orbit {
+    to {
+        --orbit-angle: 360deg;
+    }
+}
+
+.content-orbit {
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    border-radius: calc(var(--radius-2xl, 1rem) + 1px);
+    background: conic-gradient(
+        from var(--orbit-angle, 0deg),
+        transparent 0%,
+        var(--orbit-ink) 12%,
+        transparent 26%,
+        transparent 100%
+    );
+    filter: blur(18px);
+    /* Faint. The ink already carries most of the restraint; this is the second
+       dial, kept separate so the strength can be tuned without touching the
+       colour every other shadow in the file shares. */
+    opacity: 0.55;
+    animation: content-orbit 14s linear infinite;
+    pointer-events: none;
+}
+
+/* A moving shadow is decoration, and decoration is the first thing to go when
+   somebody has asked for less motion. The lobe holds at its starting angle
+   rather than disappearing, so the card keeps the lift and loses only the
+   travel. */
+@media (prefers-reduced-motion: reduce) {
+    .content-orbit {
+        animation: none;
+    }
+}
+
 @layer base {
     /* ---- Chromium and WebKit -------------------------------------------
      * These pseudo elements only exist on boxes that actually scroll, so no
