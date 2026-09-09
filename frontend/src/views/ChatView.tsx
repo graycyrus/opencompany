@@ -13,7 +13,7 @@ import { createPortal } from "react-dom";
 import { TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
-import { listPeople, me as fetchMe, type Person } from "@/api/auth";
+import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
@@ -1651,7 +1651,6 @@ export function ChatView({
   useEffect(() => {
     if (routeOpen) return;
     setAddOpen(false);
-    setBudgetFor(null);
     // And the thread panel, which used to close because leaving Room unmounted
     // the whole view. Clearing the marker with it makes the next arrival an
     // arrival, so Room opens on the channel rather than on a panel the operator

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Mail, MessageSquare, MoreHorizontal, UserPlus, Wallet } from "lucide-react";
+import { MessageSquare, MoreHorizontal, UserPlus } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
