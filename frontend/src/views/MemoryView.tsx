@@ -245,7 +245,7 @@ export function MemoryView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Brain"
-        width="5xl"
+        width="full"
         description={
           <>
             What your company remembers — facts, people, projects, and preferences your
@@ -307,7 +307,7 @@ export function MemoryView({ client, company }: Props) {
       />
       <div
         ref={setScrollEl}
-        className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6"
+        className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6"
       >
 
         <EngineSection

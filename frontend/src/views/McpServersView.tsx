@@ -67,7 +67,7 @@ export function McpServersView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="MCP Servers"
-        width="5xl"
+        width="full"
         description={
           <>
             The tool servers this company&apos;s teammates can call, from its manifest and the
@@ -75,7 +75,7 @@ export function McpServersView({ client, company }: Props) {
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {!canManage && (
           <Alert data-testid="mcp-read-only">
             <Info className="size-4" />

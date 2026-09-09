@@ -498,7 +498,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
       */}
       <PageHeader
         title="Desks"
-        width="4xl"
+        width="full"
         rowTestId="desks-header"
         eyebrow={
           onBack && (
@@ -558,7 +558,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {error && (
           <Alert variant="destructive">

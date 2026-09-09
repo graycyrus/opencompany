@@ -497,7 +497,7 @@ export function TeamView({
       */}
       <PageHeader
         title="Agents"
-        width="5xl"
+        width="full"
         rowTestId="company-header"
         description={
           <>
@@ -518,7 +518,7 @@ export function TeamView({
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {/*
           The other half of "blocking but skippable": until somebody has staffed
