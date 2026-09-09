@@ -123,6 +123,21 @@ impl HubLinks {
         }
         Some(link)
     }
+
+    /// The verifier parked under `state`, without spending it.
+    ///
+    /// Tests only, and deliberately not part of the trait a route can reach: a
+    /// route that could read a verifier without consuming the link would be one
+    /// step from redeeming twice. Tests need it to play the part of the hub,
+    /// which is the one participant that legitimately knows both halves.
+    #[cfg(test)]
+    pub fn peek_verifier(&self, state: &str) -> Option<String> {
+        self.pending
+            .lock()
+            .expect("hub links poisoned")
+            .get(state)
+            .map(|link| link.verifier.clone())
+    }
 }
 
 /// 256 bits of `src`, unpadded base64url — 43 characters.
