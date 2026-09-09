@@ -803,6 +803,14 @@ async fn revert_config(
     inference::clear_key(runtime.id(), secrets.as_ref())
         .await
         .map_err(ApiError)?;
+    // Reset changes the effective credential just as a rotation does, so it owes
+    // the same eviction `set_config` performs. Clearing the runtime key makes
+    // resolution fall back to the manifest's `api_key_secret`; when that manifest
+    // points at the same base URL, nothing in the cache key moves and turns would
+    // keep reading the *previous* credential's catalog for up to
+    // `MODEL_CATALOG_TTL` without ever presenting the manifest key (Codex review
+    // on #2045). Every path in this module that writes the credential evicts.
+    crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
     Ok(Json(MutationResponse {
         status: effective_status(&state, runtime).await?,
         note: "Reverted to the committed manifest (or managed) configuration.".to_string(),
@@ -1699,6 +1707,65 @@ base_url = "https://byo.example/v1"
             body["error"].is_string(),
             "with the entry evicted and the endpoint unreachable, the route reports why \
              rather than replaying stale ids: {raw}"
+        );
+    }
+
+    /// Reset owes the same eviction a rotation does.
+    ///
+    /// `revert_config` clears the runtime key so resolution falls back to the
+    /// manifest's credential. When the manifest points at the same base URL
+    /// nothing in the cache key moves, so without eviction the route would keep
+    /// answering from the catalog the *cleared* credential fetched (Codex review
+    /// on #2045). Its own company id, for the parallelism reason above.
+    #[tokio::test]
+    async fn resetting_the_config_does_not_serve_the_cleared_credentials_catalog() {
+        const ENDPOINT: &str = "http://127.0.0.1:9/reset/v1";
+        const COMPANY: &str = "resetter";
+        let home_dir = home();
+        let state = state_with_company_named(home_dir.path(), COMPANY).await;
+
+        let (status, _, raw) = send_as(
+            &state,
+            COMPANY,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({
+                "provider": "openai_compatible",
+                "baseUrl": ENDPOINT,
+                "key": "before-reset",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        seed_catalog_for(COMPANY, ENDPOINT, &["entitled/before-reset"]);
+
+        let (status, body, raw) = send_as(
+            &state,
+            COMPANY,
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(body["models"][0]["id"], "entitled/before-reset", "{raw}");
+
+        let (status, _, raw) =
+            send_as(&state, COMPANY, "DELETE", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) = send_as(
+            &state,
+            COMPANY,
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_ne!(
+            body["models"][0]["id"], "entitled/before-reset",
+            "a reset must not be answered from the cleared credential's catalog: {raw}"
         );
     }
 
