@@ -4,7 +4,6 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
@@ -364,22 +363,14 @@ export function TeamView({
           // Blank stays off the wire: at creation there is no blueprint to
           // override, so an empty box means "no persona", not "an empty one".
           instructions: fields.instructions || undefined,
-          // Omitted unless the operator typed one: an add that carries a cap is
-          // admin-only on the host, while a plain add is open to any member.
-          budgetUsdDaily: fields.budgetUsdDaily,
         },
         company,
       );
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
-        // No team write plane on this host — keep the edit local-only. An inbox
-        // needs a persisted teammate to hang off, so it can't be enabled here.
+        // No team write plane on this host — keep the edit local-only.
         setMembers((m) => [...m, newMember(fields)]);
-        reportAddMember({
-          kind: "console-only",
-          name: fields.name,
-          note: fields.inbox ? "No inbox was created." : undefined,
-        });
+        reportAddMember({ kind: "console-only", name: fields.name });
         setAddOpen(false);
         return true;
       }
@@ -390,22 +381,21 @@ export function TeamView({
     }
 
     const missed: MissedStep[] = [];
-    // Enable the inbox against the host's real agent id *before* refetching, so
-    // the reloaded roster already reports the toggle as on.
-    if (fields.inbox) {
+    // The face, against the host's real agent id — `addTeamMember` takes none.
+    // Before the redirect, so the page the operator lands on already wears it.
+    if (fields.avatar) {
       try {
-        await setInboxEnabled(client, company, created.id, true);
+        await client.updateAgent(created.id, { avatar: fields.avatar }, company);
       } catch {
         missed.push({
-          what: "their inbox couldn't be switched on",
-          fix: "Turn it on from their actions menu.",
+          what: "their icon couldn't be set",
+          fix: "Pick one again from their profile.",
         });
       }
     }
-    // Issue #1989: the reduced dialog's write is only half of its flow. It
-    // collected a name and a sentence, so the description, the persona, the
-    // budget and the inbox are all still to be written — on the teammate's own
-    // page, where the copilot that drafts two of them lives.
+    // The dialog's write is only half of its flow. It collects a name, a face
+    // and a post, so the description and the persona are still to be written —
+    // on the teammate's own page, where the copilot that drafts them lives.
     //
     // The redirect goes BEFORE the roster refetch on purpose. The operator is
     // being taken off the roster, so blocking the handoff on a read of the list
@@ -660,9 +650,15 @@ interface AddMemberFields {
    * with an empty one and a promise that somebody will write it later.
    */
   instructions: string;
-  inbox?: boolean;
-  /** An optional daily cap. Undefined means "don't set one", never "$0". */
-  budgetUsdDaily?: number;
+  /**
+   * The face, chosen before the teammate exists.
+   *
+   * `addTeamMember` takes no avatar, so this is written as a second call once
+   * the host has answered with an id. Best-effort by construction: a teammate
+   * with the wrong face is a teammate, and failing the whole add over an icon
+   * would throw away the name and the post that did land.
+   */
+  avatar?: string;
   /**
    * Land on the new teammate's detail page with its edit form open, rather than
    * staying on the roster (issue #1989).
