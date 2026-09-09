@@ -416,6 +416,33 @@ pub(crate) struct DelegationOutcome {
     /// `false` for every other delegation kind, so the chat and task paths — which
     /// never read it — are unaffected.
     pub(crate) assigned: bool,
+    /// An `assign_task`/`review_task` whose id named no card on the board
+    /// (issue #453 residual, HT-077/HT-078).
+    ///
+    /// Carried as a fact rather than an `Err`, for the same reason
+    /// [`assigned`](Self::assigned) is a fact rather than a boolean the caller
+    /// has to infer: `run_delegation` is driven from loops that drain a whole
+    /// turn's queued delegations one at a time
+    /// ([`drain_and_execute`](DelegationRunner::drain_and_execute),
+    /// [`handle_task_delegations`](DelegationRunner::handle_task_delegations)),
+    /// and every one of them propagates an `Err` with `?` — which is correct
+    /// for a genuine failure (a store write that errored), but a hallucinated
+    /// or stale `task_id` from the model is a routine path, not an exotic one.
+    /// Erroring here would abort the whole drain and silently discard every
+    /// delegation queued behind this one in the same turn, trading a false
+    /// success for lost work — the same defect family one layer over. `None`
+    /// on every other path, including a genuine store failure, which still
+    /// propagates as an `Err`.
+    pub(crate) unknown_card: Option<UnknownCardWrite>,
+}
+
+/// One `assign_task`/`review_task` that named a card not on the board — see
+/// [`DelegationOutcome::unknown_card`].
+#[derive(Clone, Debug)]
+pub(crate) struct UnknownCardWrite {
+    /// `"assign_task"` or `"review_task"`, for the operator-facing note.
+    pub(crate) tool: &'static str,
+    pub(crate) task_id: String,
 }
 
 /// Which workflow run a board write belongs to (issue #661 / M5).
@@ -654,6 +681,13 @@ pub(crate) struct Drained {
     /// The **first** board card this drain opened, matching
     /// [`OperatorTurn::spawned_task`]'s first-wins rule.
     pub(crate) spawned_task: Option<String>,
+    /// Every `assign_task`/`review_task` this drain could not perform because
+    /// its id named no card on the board (issue #453 residual, HT-077/HT-078).
+    ///
+    /// Mirrors [`cancelled_desks`](Self::cancelled_desks): a fact carried out
+    /// of the loop rather than an `Err` that would abort it, so one bad id
+    /// does not discard every delegation queued behind it in the same turn.
+    pub(crate) unknown_cards: Vec<UnknownCardWrite>,
 }
 
 /// The operator-facing result of one operator message after delegation: the
@@ -1642,6 +1676,12 @@ impl<'a> DelegationRunner<'a> {
         // bubble lands in `bubbles`.
         let mut bubbles = Vec::new();
         let mut desk_replies: Vec<(String, String)> = Vec::new();
+        // Issue #453 residual (HT-077/HT-078): sticky like `hit_iteration_cap`
+        // and the other facts below — folded into `operator_reply` at the very
+        // end, after the CEO-relay branch has had its chance to replace that
+        // string wholesale, so an unknown-card note from either drain survives
+        // the relay rather than being overwritten by it.
+        let mut unknown_cards: Vec<UnknownCardWrite> = Vec::new();
         // Issue #1846 review (Codex #3870516681): whether a DESK paused, kept
         // apart from the sticky `budget_paused` above. That one is already
         // carrying the responder's OWN pause, and a responder that paused on
@@ -1670,6 +1710,7 @@ impl<'a> DelegationRunner<'a> {
             spawned_task.get_or_insert(id);
         }
         bubbles.extend(drained.bubbles);
+        unknown_cards.extend(drained.unknown_cards);
         for desk in drained.desk_replies {
             // Fold the teammate's activity onto the operator timeline, then
             // remember the answer to relay.
@@ -1753,6 +1794,7 @@ impl<'a> DelegationRunner<'a> {
                 spawned_task.get_or_insert(id);
             }
             bubbles.extend(drained.bubbles);
+            unknown_cards.extend(drained.unknown_cards);
             // A hand-off the relay turn's tool refused is dropped with the
             // hand-offs themselves — there is no card in scope to record it on,
             // and the drain would otherwise leak it into the next turn.
@@ -1858,6 +1900,17 @@ impl<'a> DelegationRunner<'a> {
                      for a budget pause, so they are recorded nowhere but here"
                 );
             }
+        }
+        // Issue #453 residual (HT-077/HT-078): folded in last, after both
+        // drains and the relay branch that can replace `operator_reply`
+        // wholesale, so an id the model hallucinated or a card deleted out
+        // from under it is a fact the operator reads rather than a silent
+        // no-op behind a receipt that said it worked.
+        for unknown in unknown_cards {
+            operator_reply.push_str(&format!(
+                "\n\n(tried to {} card {:?}, but no such card is on the board)",
+                unknown.tool, unknown.task_id
+            ));
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -2079,6 +2132,9 @@ impl<'a> DelegationRunner<'a> {
             }
             if let Some(desk) = out.desk_reply {
                 drained.desk_replies.push(desk);
+            }
+            if let Some(unknown) = out.unknown_card {
+                drained.unknown_cards.push(unknown);
             }
         }
         Ok(drained)
@@ -2626,6 +2682,16 @@ impl<'a> DelegationRunner<'a> {
                  hand-off was refused and did not happen)"
             ));
         }
+        // Issue #453 residual (HT-077/HT-078): the same fold, one level down —
+        // a deeper delegate's own `assign_task`/`review_task` naming no card is
+        // folded into THIS member's reply exactly as their cancellations and
+        // refused hand-offs are, rather than vanishing into the log.
+        for unknown in nested.unknown_cards {
+            reply.push_str(&format!(
+                "\n\n({member} tried to {} card {:?}, but no such card is on the board)",
+                unknown.tool, unknown.task_id
+            ));
+        }
         // Issue #1846 review (Codex #3865395868): this hand-off's own card
         // (opened above by `open_hand_off_work_card`, distinct from any
         // dispatched-card the delegation is nested inside) must settle
@@ -2669,6 +2735,10 @@ impl<'a> DelegationRunner<'a> {
             // level down, so it stays the reported one; a card the member
             // opened is reported only when this hand-off opened none.
             spawned_task: card.map(|c| c.id).or(nested.spawned_task),
+            // Not a board write; see `DelegationOutcome::unknown_card`. A
+            // deeper delegate's own unknown-card write was already folded
+            // into `reply` above, not carried on this outcome.
+            unknown_card: None,
         })
     }
 
@@ -3324,11 +3394,16 @@ impl<'a> DelegationRunner<'a> {
                         company = %self.company,
                         task_id = %task_id,
                         "[delegation] assign_task named a card that is not on the board; \
-                         nothing was assigned"
+                         nothing was assigned, and the failure is carried out with the drain \
+                         rather than aborting it"
                     );
-                    return Err(crate::error::OpenCompanyError::NotFound(format!(
-                        "assign_task: no card with id {task_id:?} on the board"
-                    )));
+                    return Ok(DelegationOutcome {
+                        unknown_card: Some(UnknownCardWrite {
+                            tool: "assign_task",
+                            task_id,
+                        }),
+                        ..DelegationOutcome::default()
+                    });
                 };
                 // Issue #205: the orchestrator writes this `assignee` out of an
                 // LLM tool call, so it is exactly as capable of naming somebody
@@ -3424,11 +3499,16 @@ impl<'a> DelegationRunner<'a> {
                         task_id = %task_id,
                         ?decision,
                         "[delegation] review_task named a card that is not on the board; the \
-                         verdict was recorded nowhere"
+                         verdict was recorded nowhere, and the failure is carried out with the \
+                         drain rather than aborting it"
                     );
-                    return Err(crate::error::OpenCompanyError::NotFound(format!(
-                        "review_task: no card with id {task_id:?} on the board"
-                    )));
+                    return Ok(DelegationOutcome {
+                        unknown_card: Some(UnknownCardWrite {
+                            tool: "review_task",
+                            task_id,
+                        }),
+                        ..DelegationOutcome::default()
+                    });
                 };
                 card.note = Some(append_note(
                     card.note.as_deref(),
@@ -3449,8 +3529,11 @@ impl<'a> DelegationRunner<'a> {
     /// Loads one board card by id, with the store handle. `None` when there is
     /// no task store wired, or the card has since been deleted (issue #186). The
     /// two callers no longer treat these alike: no store wired stays a silent
-    /// no-op, and a deleted/mistyped card now errors instead of reporting a
-    /// false success (issue #453 residual).
+    /// no-op, and a deleted/mistyped card now reports
+    /// [`DelegationOutcome::unknown_card`] instead of a false success — as a
+    /// fact carried out of the drain, not an `Err`, so one bad id does not
+    /// abort every delegation queued behind it (issue #453 residual, HT-077/
+    /// HT-078).
     async fn load_card(
         &self,
         task_id: &str,
@@ -9257,11 +9340,14 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     // ── Issue #453 residual: an id that names no card ───────────────────────
 
     /// `assign_task`'s receipt tells the model the assignment "takes effect as
-    /// this turn completes". The drain is what completes it, and an id naming
-    /// no card reaches a `tracing::warn!` and `DelegationOutcome::default()` —
-    /// the board is untouched, which is right, and nobody who could act on it
-    /// is told, which is not. A mistyped id and a deleted card are the same
-    /// silence, and the turn has already been told it worked.
+    /// this turn completes". An id naming no card must not make the drain
+    /// silently agree with that receipt: the write does not happen, and the
+    /// operator reads a note saying so, carried as a fact on the outcome
+    /// (`DelegationOutcome::unknown_card`) rather than an `Err` — an `Err`
+    /// here would abort `drain_and_execute`'s loop via its `?` and discard
+    /// every delegation queued behind this one in the same turn, which is
+    /// the sibling defect `a_valid_delegation_after_an_unknown_card_still_lands`
+    /// below pins.
     #[tokio::test]
     async fn assigning_a_card_that_is_not_on_the_board_does_not_report_success() {
         let fx = Fixture::new();
@@ -9284,25 +9370,25 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 "put the launch plan on engineering",
                 Some("general"),
             )
-            .await;
+            .await
+            .expect("an unknown card is a reported fact, not a turn failure");
 
         assert!(
             fx.cards().await.iter().all(|card| card.assignee.is_empty()),
             "nothing may be assigned on the strength of an id that names no card"
         );
-        let error = outcome.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
-            error.contains("card-that-never-existed"),
-            "the drain must name the card it could not assign rather than warn into the log and \
-             let the receipt stand: {error:?}"
+            outcome.reply.contains("card-that-never-existed"),
+            "the operator's reply must name the card the assignment could not reach rather than \
+             warn into the log and let the receipt stand silently: {:?}",
+            outcome.reply
         );
     }
 
     /// The same residual on the arm the code's own comment calls the more
     /// consequential one: `review_task`'s receipt says the card "moves to done
-    /// as this turn completes". An unknown id moves nothing, records the
-    /// verdict nowhere, and returns the same empty outcome a real approval
-    /// returns.
+    /// as this turn completes". An unknown id moves nothing and records the
+    /// verdict nowhere, surfaced the same way `assign_task`'s is.
     #[tokio::test]
     async fn approving_a_card_that_is_not_on_the_board_does_not_report_success() {
         let fx = Fixture::new();
@@ -9321,17 +9407,104 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let outcome = fx
             .runner(&turns)
             .handle_operator_message("chief", "approve the launch plan card", Some("general"))
-            .await;
+            .await
+            .expect("an unknown card is a reported fact, not a turn failure");
 
         assert!(
             fx.cards().await.is_empty(),
             "a verdict on an id that names no card may not mint one"
         );
-        let error = outcome.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
-            error.contains("card-that-never-existed"),
-            "the drain must name the card whose approval landed nowhere rather than warn into the \
-             log while the turn is told it moved: {error:?}"
+            outcome.reply.contains("card-that-never-existed"),
+            "the operator's reply must name the card whose approval landed nowhere rather than \
+             warn into the log while the turn is told it moved: {:?}",
+            outcome.reply
+        );
+    }
+
+    /// The defect one layer over the false-success receipt: `run_delegation`
+    /// is driven from `drain_and_execute`'s loop with `?`, so an `Err` on one
+    /// delegation would abort the whole drain and discard every delegation
+    /// queued behind it in the SAME turn — including ones the model queued
+    /// validly. A hallucinated `task_id` is a routine model mistake, not an
+    /// exotic one, so a batch of two — an `assign_task` naming no card,
+    /// followed by one naming a real card — must still land the second write
+    /// AND still report the first's failure. The two tests above alone cannot
+    /// catch a regression to `Err`: they each queue exactly one delegation, so
+    /// an abort and a reported fact look identical from their vantage point.
+    #[tokio::test]
+    async fn a_valid_delegation_after_an_unknown_card_still_lands() {
+        let fx = Fixture::new();
+        let card = TaskRecord {
+            id: "card-real".to_string(),
+            title: TaskTitle::authored("Draft the launch plan"),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: now_millis(),
+            origin: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        };
+        fx.tasks
+            .upsert(&fx.record.id, &card)
+            .await
+            .expect("seed the real card");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "assigning both",
+                vec![
+                    Delegation::AssignTask {
+                        task_id: "card-that-never-existed".to_string(),
+                        assignee: "engineer".to_string(),
+                        note: None,
+                    },
+                    Delegation::AssignTask {
+                        task_id: "card-real".to_string(),
+                        assignee: "engineer".to_string(),
+                        note: None,
+                    },
+                ],
+            )],
+        );
+
+        let outcome = fx
+            .runner(&turns)
+            .handle_operator_message(
+                "chief",
+                "put the launch plan and the real card on engineering",
+                Some("general"),
+            )
+            .await
+            .expect("one unknown card must not fail the turn");
+
+        let cards = fx.cards().await;
+        let real = cards
+            .iter()
+            .find(|c| c.id == "card-real")
+            .expect("the real card is still on the board");
+        assert_eq!(
+            real.assignee, "engineer",
+            "the valid delegation queued AFTER the unknown-card one must still land — a false \
+             success traded for silently discarding queued work is the same defect family, one \
+             layer over"
+        );
+        assert!(
+            outcome.reply.contains("card-that-never-existed"),
+            "the unknown card's failure must still be reported even though the drain kept \
+             going: {:?}",
+            outcome.reply
         );
     }
 
