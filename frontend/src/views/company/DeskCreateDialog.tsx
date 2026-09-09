@@ -13,7 +13,7 @@ import { Check, Crown } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto, TeamMemberDto } from "@/api/types";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { avatarRef } from "@/lib/avatar";
 import { toneFor } from "@/lib/team";
 import { Alert, AlertDescription } from "@/components/ui/alert";

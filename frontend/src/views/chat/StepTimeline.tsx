@@ -26,7 +26,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 
 import type { ReferralConversationDto } from "@/api/types";
 

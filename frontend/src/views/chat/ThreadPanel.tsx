@@ -1,7 +1,7 @@
 import { TriangleAlert, X } from "lucide-react";
 
 import { Markdown } from "@/components/markdown";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import type { MessageIntent } from "@/api/tasks";
 import type { AttachmentDto, CognitionState, TurnStep } from "@/api/types";

@@ -12,7 +12,7 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { logout, me as fetchMe, updateMe, type Me } from "@/api/auth";
 import { AvatarPicker } from "@/components/avatar-picker";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,

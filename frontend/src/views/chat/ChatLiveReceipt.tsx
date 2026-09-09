@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { TurnStep } from "@/api/types";
 import { cn } from "@/lib/utils";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { StepTimeline } from "./StepTimeline";
 import { runningStepLabel } from "./WorkingIndicator";
 import type { Channel } from "./model";

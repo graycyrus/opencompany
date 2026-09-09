@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { channelSubtitle, channelTitle, dmFace, type Channel } from "./model";

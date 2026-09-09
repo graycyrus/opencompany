@@ -13,7 +13,7 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import {
   AVATAR_ACCEPT,

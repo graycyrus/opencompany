@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { MessageSquare, MoreHorizontal, UserPlus } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,

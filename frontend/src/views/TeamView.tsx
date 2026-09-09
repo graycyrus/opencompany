@@ -6,7 +6,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";

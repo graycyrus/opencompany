@@ -17,7 +17,7 @@ import { Check } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto } from "@/api/types";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {

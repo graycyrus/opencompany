@@ -19,7 +19,7 @@ import {
   type AcpHarnessModel,
 } from "@/api/transport/desktop";
 import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } from "@/api/types";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
 import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";

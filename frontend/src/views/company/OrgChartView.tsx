@@ -42,7 +42,7 @@ import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,

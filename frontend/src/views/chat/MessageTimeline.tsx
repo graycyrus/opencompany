@@ -3,7 +3,7 @@ import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, CognitionState, DecideApproval, TurnStep, Verdict } from "@/api/types";
 import type { TaskStatus } from "@/api/tasks";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";

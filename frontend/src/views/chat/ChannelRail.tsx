@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
 import { NewMessageDialog } from "./NewMessageDialog";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";

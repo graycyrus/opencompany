@@ -10,7 +10,7 @@ import { Pencil, Sparkles, Users, Wrench } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type AgentDetailDto } from "@/api/types";
-import { TeammateAvatar } from "@/components/agent-avatar";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
