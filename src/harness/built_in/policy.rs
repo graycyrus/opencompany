@@ -2328,6 +2328,66 @@ mod tests {
         assert_eq!(p.toolbelt_mode(), PolicyMode::Full);
     }
 
+    /// `toolbelt_mode` maps EVERY non-readonly tier to `Full` once policy HITL
+    /// is disabled, not just `supervised` — `auto` loses OpenHuman's own
+    /// `require_approval_for_medium_risk` exactly the same way, because
+    /// nothing in the mapping singles either tier out. `readonly` is the one
+    /// mode the guard excludes, so it must survive untouched.
+    #[tokio::test]
+    async fn disabled_hitl_maps_every_non_readonly_tier_to_full_toolbelt_mode() {
+        for mode in ["auto", "supervised", "full"] {
+            let p = policy(mode, &[], None).with_policy_hitl_disabled();
+            assert_eq!(
+                p.toolbelt_mode(),
+                PolicyMode::Full,
+                "{mode} with policy HITL disabled must hand OpenHuman Full, not its own tier"
+            );
+        }
+
+        let readonly = policy("readonly", &[], None).with_policy_hitl_disabled();
+        assert_eq!(
+            readonly.toolbelt_mode(),
+            PolicyMode::Readonly,
+            "readonly is the one tier the mapping excludes — even with policy HITL disabled, \
+             OpenHuman's own toolbelt must still see readonly"
+        );
+    }
+
+    /// The brake's other half: it denies now, but it does not consume the
+    /// grant. `readonly` is a mode a company sits in temporarily, so the same
+    /// approval must still be redeemable once the brake releases — inside its
+    /// TTL — exactly as if the readonly window had never happened.
+    #[tokio::test]
+    async fn a_readonly_denial_leaves_the_grant_redeemable_once_the_brake_releases() {
+        let locked_down_queue = ApprovalRequestQueue::default();
+        let grants = locked_down_queue.grants();
+        let args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", args.clone()));
+
+        let locked_down = policy("readonly", &[], None)
+            .with_requests(locked_down_queue)
+            .with_agent("finance");
+        assert!(
+            matches!(
+                locked_down
+                    .check(&request("payment.send", args.clone()))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly denies the call outright"
+        );
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released.check(&request("payment.send", args)).await,
+            ToolPolicyDecision::Allow,
+            "the same grant is still redeemable once the brake releases — the readonly denial \
+             must not have consumed it"
+        );
+    }
+
     #[tokio::test]
     async fn disabled_policy_hitl_keeps_readonly_as_a_hard_denial() {
         let p = policy("readonly", &[], None).with_policy_hitl_disabled();
@@ -4270,6 +4330,129 @@ mod tests {
             drained.discarded, 1,
             "a ninth question in one turn overflows the cap and is silently dropped — no card \
              is ever raised for it, though the run may still park expecting an answer"
+        );
+    }
+
+    /// `check`'s fail-closed boundary (the block right above `Deny`ing every
+    /// call once `request_approval` has fired) reads the same task-local as
+    /// `explicit_request_pending`. Since `escalate_to_human` never sets it, a
+    /// sibling gated call queued in the same turn right after a question is
+    /// evaluated on its own terms rather than refused outright the way a
+    /// second `request_approval` would be.
+    #[tokio::test]
+    async fn escalate_to_human_does_not_refuse_a_sibling_gated_call_in_the_same_turn() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("supervised", &[], None).with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+
+        let later_call = claim
+            .scoped(queue.turn_scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: crate::harness::built_in::blockers::ESCALATE_TO_HUMAN_TOOL.to_string(),
+                    reason: "staging or prod?".to_string(),
+                    effect: Effect {
+                        kind: "blocker.information".to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({ "reason": "staging or prod?" }),
+                        agent: None,
+                        run_id: None,
+                    },
+                });
+                policy
+                    .check(&request("composio_execute", composio_send_args()))
+                    .await
+            }))
+            .await;
+
+        assert!(
+            matches!(later_call, ToolPolicyDecision::RequireApproval { .. }),
+            "escalate_to_human must not trip the request_approval turn boundary — the sibling \
+             call should still be gated on its own terms, not refused outright: {later_call:?}"
+        );
+    }
+
+    /// A repeated identical question in one turn — a model retrying a call it
+    /// is unsure landed — collapses into the card already queued via `push`'s
+    /// per-scope de-duplication (issue #439), same as a duplicate
+    /// `request_approval`. Both calls still report success to the model, so a
+    /// distinct question asked right after must not vanish along with the
+    /// duplicate.
+    #[tokio::test]
+    async fn a_repeated_identical_escalation_collapses_but_a_distinct_one_survives() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        let queue = ApprovalRequestQueue::default();
+        let tool =
+            crate::harness::built_in::blockers::EscalateToHumanTool::new(queue.clone(), "engineer".to_string());
+
+        let first = tool
+            .execute(serde_json::json!({ "question": "staging or prod?" }))
+            .await
+            .expect("the tool runs");
+        let second = tool
+            .execute(serde_json::json!({ "question": "staging or prod?" }))
+            .await
+            .expect("the tool runs");
+        assert!(!first.is_error);
+        assert!(!second.is_error, "a duplicate ask is not itself a failure");
+
+        let distinct = tool
+            .execute(serde_json::json!({ "question": "which key rotates first?" }))
+            .await
+            .expect("the tool runs");
+        assert!(!distinct.is_error);
+
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(
+            drained.requests.len(),
+            2,
+            "the repeated question collapses into the card already queued, but the distinct \
+             question still gets its own: {:?}",
+            drained.requests.iter().map(|r| &r.reason).collect::<Vec<_>>()
+        );
+    }
+
+    /// Outside `turn_scoped`, the task-local backing the boundary was never
+    /// installed. `explicit_request_pending` reads that absence through
+    /// `unwrap_or(false)` rather than erroring or denying, so a call site
+    /// that forgot to wrap its turn in `turn_scoped` gets "no request
+    /// pending" — the boundary fails OPEN outside its scope, not closed.
+    #[tokio::test]
+    async fn the_turn_boundary_reads_as_not_pending_outside_any_turn_scope() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+
+        // No `turn_scoped` anywhere in this call's ancestry.
+        queue.push(ApprovalRequest {
+            tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+            reason: "May I send this?".to_string(),
+            effect: Effect {
+                kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "title": "Send update",
+                    "question": "May I send it?"
+                }),
+                agent: Some("ceo".to_string()),
+                run_id: None,
+            },
+        });
+
+        let decision = policy
+            .check(&request("composio_execute", composio_send_args()))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "outside any turn_scoped call, the boundary reads as not-pending and does not \
+             refuse a sibling call: {decision:?}"
         );
     }
 
