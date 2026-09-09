@@ -122,20 +122,18 @@ describe("the empty-channel first brief", () => {
     }
   });
 
-  it("resets a stale mode when the brief replaces the draft", () => {
+  it("sends the brief as a one-off task, whatever the draft held before", () => {
     const onSend = vi.fn();
     renderComposerForSend(onSend);
 
-    // The operator had picked "Just chatting" for the previous draft...
-    act(() => {
-      (
-        container.querySelector(
-          '[data-testid="composer-deliverable-chat"]',
-        ) as HTMLButtonElement
-      ).click();
-    });
-
-    // ...then the first-brief action replaces the draft wholesale.
+    // This used to pick "Just chatting" first and assert the brief cleared it:
+    // a stale mode would have withheld the brief's own request. The chips are
+    // behind `COMPOSER_INTENT_HIDDEN`, so there is no way to set a mode and no
+    // stale one to clear — the half that survives is the outcome, which is that
+    // the brief goes out as `once` on its own account rather than by default.
+    //
+    // Kept rather than retired with the chips: `once` is what makes the brief a
+    // task the team acts on, and nothing else in the suite pins it.
     act(() => {
       root.render(
         createElement(MessageComposer, {
