@@ -3880,8 +3880,7 @@ impl Tool for AddAgentTool {
 
         let roster_size = record
             .manifest
-            .agents
-            .iter()
+            .own_agents()
             .map(|agent| agent.id.as_str())
             .chain(record.overlay_agents.iter().map(|agent| agent.id.as_str()))
             .filter(|id| !record.is_retired(id))
@@ -13252,15 +13251,29 @@ name = "Morning"
         );
     }
 
+    /// The cap counts the company's own roster, and every load appends more.
+    ///
+    /// `apply_globals` puts the host's baseline teammates into `agents` on
+    /// every production load. A cap that counted the whole list would spend
+    /// most of its budget on teammates the company neither added nor can
+    /// remove, and a company with a designed roster would be refused its first
+    /// mint. The manifest here is built the way production builds one, so the
+    /// baseline is present and the count has to see past it.
     #[tokio::test]
     async fn add_agent_counts_manifest_teammates_toward_the_roster_cap() {
         let company = CompanyId::new("acme");
         let mut record = seeded_record(&company);
-        record.manifest = toml::from_str(
+        let mut manifest: crate::company::CompanyManifest = toml::from_str(
             "[company]\nname = \"Acme\"\n\
              [[agent]]\nid = \"designer\"\nrole = \"Designer\"\n",
         )
         .expect("valid manifest");
+        manifest.apply_globals();
+        assert!(
+            manifest.agents.len() > manifest.own_agents().count(),
+            "this test is only meaningful while the baseline is appended to a roster"
+        );
+        record.manifest = manifest;
         let store = Arc::new(MemStore::seeded(record));
         let tool = unscoped_add_agent(company.clone(), store.clone());
 
