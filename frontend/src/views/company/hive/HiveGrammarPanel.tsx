@@ -87,7 +87,23 @@ export function HiveGrammarPanel({
     };
   }, [client, company, deskId]);
 
-  const seats = state?.seats ?? [];
+  const seats = useMemo(() => {
+    const current = state?.seats ?? [];
+    const currentIds = new Set(current.map((seat) => seat.agentId));
+    // Keep an orphaned authored row visible long enough to remove it. Without
+    // this the validator quite correctly rejects the saved grammar, but the
+    // only control that could repair it has disappeared with the former seat.
+    const stale = Object.keys(draft.moves ?? {})
+      .filter((agentId) => !currentIds.has(agentId))
+      .map((agentId) => ({
+        agentId,
+        label: agentId,
+        role: "no longer on this desk",
+        moves: draft.moves?.[agentId] ?? [],
+        governed: true,
+      }));
+    return [...current, ...stale];
+  }, [state, draft.moves]);
   const memberIds = useMemo(() => seats.map((s) => s.agentId), [seats]);
   const moves = draft.moves ?? {};
 
