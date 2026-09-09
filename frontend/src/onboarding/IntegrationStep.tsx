@@ -5,6 +5,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { getComposioStatus } from "@/api/composio";
 import { Button } from "@/components/ui/button";
 import { withReadTimeout } from "@/lib/read-timeout";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
@@ -59,6 +60,19 @@ import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
  * added, so a card left mounted while another tab pastes a Composio key keeps
  * offering a durable waiver for a step that has since become completable. The
  * waive click therefore re-reads before it persists anything — see [`waive`].
+ *
+ * **And it can go stale in the other direction too, where no click can catch
+ * it** (Codex review, PR #2046, round 4). The mount read used to schedule
+ * another read only when it FAILED, so a first read that found a credential
+ * ended this card's reading for the life of the mount. Clear that credential
+ * from another tab and the card goes on asserting one exists — which hides
+ * the waive button, because it gates on `!hasCredential`, and so puts the
+ * click-time re-read above out of reach. Activation still reports
+ * `integrationConnected: false`, so the gate keeps demanding a step the
+ * founder can now neither finish nor skip until a reload: the same trap,
+ * reached through a stale answer rather than a missing one. The read
+ * therefore keeps running while the card is mounted — see
+ * [`CREDENTIAL_POLL_MS`].
  */
 /**
  * How long the waive-time credential re-read may hang before it is treated as
@@ -92,6 +106,32 @@ const REVALIDATE_TIMEOUT_MS = 20000;
  * `ACTIVATION_READ_RETRY_MS`, the same treatment on the gate's own poll.
  */
 const CREDENTIAL_RETRY_MS = 3000;
+
+/**
+ * How often a SETTLED credential read is repeated while the card is on screen
+ * (Codex review, PR #2046, round 4).
+ *
+ * `CREDENTIAL_RETRY_MS` above only fires on failure, so one successful read
+ * was the last read this card ever did — `client` and `company` never change
+ * underneath it. That left the has-credential copy asserting a credential a
+ * second tab had since removed, with the waiver hidden behind
+ * `!hasCredential` and [`waive`]'s own re-read therefore unreachable. See
+ * this component's doc for why that is the same trap from the other side.
+ *
+ * Mirrors `useActivationGate`'s `POLL_MS` and `WorkflowStep`'s
+ * `RUNNING_POLL_MS`: all three watch the same funnel from the same card
+ * stack, and a credential appearing or vanishing should not read as more or
+ * less responsive than the step beside it.
+ *
+ * Through `startVisiblePolling` rather than a bare timer chain, for the two
+ * things that helper exists to get right (issue #581). It stops while the tab
+ * is hidden, so a gate parked in a background tab is not a standing request
+ * loop — and it reads once on the hidden → visible EDGE, which is precisely
+ * this finding's scenario: the founder who changed the credential in another
+ * tab and came back gets the true answer on arrival instead of waiting out a
+ * tick.
+ */
+const CREDENTIAL_POLL_MS = 5000;
 
 export function IntegrationStep({
   client,
@@ -131,33 +171,65 @@ export function IntegrationStep({
   useEffect(() => {
     let live = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    // Same guard, and the same reason, as `useActivationGate`'s `inFlight`:
+    // once this read repeats on a cadence, a host slower than one tick would
+    // otherwise have a second read started on top of the first, and the two
+    // could land out of order — a stale "credential exists" arriving after a
+    // fresh "it does not" is exactly the wrong answer to leave on screen
+    // here. At most one read is ever out, so responses cannot overtake each
+    // other and no generation counter is needed.
+    let inFlight = false;
+    const clearRetry = () => {
+      if (retry !== undefined) {
+        clearTimeout(retry);
+        retry = undefined;
+      }
+    };
     const read = () => {
+      if (!live || inFlight) return;
+      // A poll tick (or a return to this tab) is a read in its own right, so
+      // drop any fast retry still pending rather than letting both fire.
+      clearRetry();
+      inFlight = true;
       // Bounded for the same reason the revalidation is: the transport has no
       // timeout of its own, and a request that is accepted and never answered
-      // would otherwise mean this read never settles and the retry below never
-      // gets scheduled — the hang and the old permanent no-op being the same
-      // thing from the founder's side.
+      // would otherwise mean this read never settles — leaving `inFlight` set
+      // and every later tick skipped, so the retry below never gets scheduled
+      // and the poll above stops too. The hang and the old permanent no-op
+      // are the same thing from the founder's side.
       void withReadTimeout(getComposioStatus(client, company), REVALIDATE_TIMEOUT_MS).then(
         (status) => {
+          inFlight = false;
           if (!live) return;
+          // Deliberately re-asserted on every tick rather than only on the
+          // first: a credential can go away as easily as it can arrive, and
+          // this poll is the only thing that would notice either. React bails
+          // out of a re-render when the value is unchanged, so the steady
+          // state costs a request and nothing else.
           setHasCredential(status.credentialSource !== "none");
           setCredentialConfirmed(true);
         },
         () => {
           /* Stay on the safe "no credential" default and leave
            * `credentialConfirmed` false — the waiver must not be offered
-           * against an answer we do not have. But try again: this used to be
-           * a permanent no-op, which withheld the founder's only escape for
-           * the life of the mount over a blip. */
+           * against an answer we do not have. But try again, sooner than the
+           * regular cadence: this used to be a permanent no-op, which
+           * withheld the founder's only escape for the life of the mount over
+           * a blip. */
+          inFlight = false;
           if (!live) return;
           retry = setTimeout(read, CREDENTIAL_RETRY_MS);
         },
       );
     };
     read();
+    // `startVisiblePolling` does not load on start — the `read()` above is
+    // the mount read it documents every caller as already having.
+    const stopPolling = startVisiblePolling(read, CREDENTIAL_POLL_MS);
     return () => {
       live = false;
-      if (retry !== undefined) clearTimeout(retry);
+      stopPolling();
+      clearRetry();
     };
   }, [client, company]);
 

@@ -184,6 +184,120 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
     }
   });
 
+  it("keeps reading after a success, so a credential cleared elsewhere is noticed", async () => {
+    // Codex review, PR #2046, round 4: the mount read only ever scheduled
+    // another read from its REJECTION handler, so the first successful read
+    // was the last one this card did — `client` and `company` never change.
+    // A credential cleared in another tab therefore left the card asserting
+    // one exists, which hides the waive button (`!hasCredential`) and so puts
+    // `waive`'s own click-time re-read out of reach, while activation still
+    // reports `integrationConnected: false`. Neither finish nor skip, until a
+    // reload.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let source: ComposioCredentialSource = "company";
+      let calls = 0;
+      const client = {
+        scopeFor: () => "/api/v1/company",
+        get: (path: string) => {
+          if (!path.includes("/composio")) throw new Error(`unexpected path: ${path}`);
+          calls += 1;
+          return Promise.resolve(status(source));
+        },
+      } as unknown as OpenCompanyClient;
+
+      await act(async () => {
+        root.render(
+          createElement(IntegrationStep, {
+            client,
+            company: null,
+            onOpenApps: () => {},
+            onWaive: () => {},
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(container.querySelector('[data-testid="gate-integration-has-credential"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="gate-integration-waive"]')).toBeNull();
+
+      // Another tab clears the company's last credential, with no provider
+      // ever connected. Nothing tells this card; only its own next read can.
+      source = "none";
+      const readsBefore = calls;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(calls, "a successful read must not be the last read of the mount").toBeGreaterThan(
+        readsBefore,
+      );
+      expect(
+        container.querySelector('[data-testid="gate-integration-has-credential"]'),
+        "the card must stop claiming a credential the company no longer has",
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="gate-integration-waive"]'),
+        "and the escape hidden behind that claim must come back",
+      ).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-reads on returning to the tab rather than waiting out a poll tick", async () => {
+    // The finding's scenario is literally a second tab, so the moment the
+    // answer is known to be stale is the moment this one comes back to the
+    // front. `startVisiblePolling` reads on that hidden -> visible edge (and
+    // stops the timer while hidden, issue #581), which is why the poll goes
+    // through it rather than through a bare timer chain.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    try {
+      let source: ComposioCredentialSource = "company";
+      const client = {
+        scopeFor: () => "/api/v1/company",
+        get: (path: string) => {
+          if (!path.includes("/composio")) throw new Error(`unexpected path: ${path}`);
+          return Promise.resolve(status(source));
+        },
+      } as unknown as OpenCompanyClient;
+
+      await act(async () => {
+        root.render(
+          createElement(IntegrationStep, {
+            client,
+            company: null,
+            onOpenApps: () => {},
+            onWaive: () => {},
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(container.querySelector('[data-testid="gate-integration-has-credential"]')).toBeTruthy();
+
+      source = "none";
+      await act(async () => {
+        visibility = "hidden";
+        document.dispatchEvent(new Event("visibilitychange"));
+        visibility = "visible";
+        document.dispatchEvent(new Event("visibilitychange"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(
+        container.querySelector('[data-testid="gate-integration-waive"]'),
+        "coming back to the tab must not need a full poll tick to tell the truth",
+      ).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not name a credential route the Apps page it links to has hidden", async () => {
     // `product-scope.ts` hides the OpenHuman-managed route (`OAuthView` drops
     // `CompanyCredentialCard` behind the same flag), so this sentence must not
