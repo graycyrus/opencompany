@@ -16,6 +16,7 @@ import type { MessageIntent } from "@/api/tasks";
 import type { AttachmentDto } from "@/api/types";
 import { formatBytes } from "@/api/workspace";
 import { Button } from "@/components/ui/button";
+import { COMPOSER_INTENT_HIDDEN } from "@/product-scope";
 import { cn } from "@/lib/utils";
 import { MentionPicker } from "@/views/chat/MentionPicker";
 import {
@@ -720,7 +721,7 @@ export function MessageComposer({
             right-aligned and in-flow — rather than overflowing off-screen with
             no way to scroll to it. On a roomy composer it stays a single row. */}
         <div className="flex flex-wrap items-center gap-0.5 px-2 pb-1.5">
-          {deliverableChoice && !compact && (
+          {deliverableChoice && !compact && !COMPOSER_INTENT_HIDDEN && (
             <div
               className="mr-1 flex items-center gap-0.5 rounded-lg border p-0.5"
               role="group"

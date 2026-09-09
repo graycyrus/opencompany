@@ -24,6 +24,19 @@
  */
 export const HOSTS_HIDDEN = false;
 
+/**
+ * Hides the composer's intent group — "Just chatting" / "Do it once" /
+ * "Build me the workflow".
+ *
+ * Hidden for now, and only the control is: `intent` starts `undefined` because
+ * none of the three was ever pre-pressed (issue #1152), so a composer with the
+ * group hidden sends exactly what a composer whose operator never pressed one
+ * sends. Nothing downstream needs a branch, `deliverableChoice` still decides
+ * which targets *could* offer it, and turning the row back on is this one
+ * edit.
+ */
+export const COMPOSER_INTENT_HIDDEN = true;
+
 /** Hides company switching, "All companies…" and "New company". */
 export const COMPANY_SWITCHING_HIDDEN = true;
 
