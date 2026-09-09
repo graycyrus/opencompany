@@ -161,15 +161,16 @@ async function send(text: string) {
 }
 
 describe("composer intent selection (issue #984)", () => {
-  it("starts unselected, sends no override, and resets to unselected after a choice", async () => {
+  it("draws no intent chips, and sends no override without them", async () => {
     await renderComposer();
 
+    // `COMPOSER_INTENT_HIDDEN`. The chips are hidden, not deleted — the
+    // selection logic below still runs, and this asserts the two halves agree:
+    // nothing to press, and therefore no `intent` on the wire.
     for (const intent of ["chat", "once", "workflow"]) {
       expect(
-        container.querySelector(`[data-testid="composer-deliverable-${intent}"]`)?.getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("false");
+        container.querySelector(`[data-testid="composer-deliverable-${intent}"]`),
+      ).toBeNull();
     }
 
     await send("ordinary message");

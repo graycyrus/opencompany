@@ -103,7 +103,7 @@ describe("the empty-channel first brief", () => {
     expect(onStartBrief).toHaveBeenCalledOnce();
   });
 
-  it("uses every new prefill revision, then explains each message mode", () => {
+  it("uses every new prefill revision", () => {
     renderComposer({ text: "Plan our first week.", revision: 1 });
     const textarea = container.querySelector("textarea");
     expect(textarea?.value).toBe("Plan our first week.");
@@ -112,21 +112,14 @@ describe("the empty-channel first brief", () => {
     renderComposer({ text: "Plan our first month.", revision: 2 });
     expect(textarea?.value).toBe("Plan our first month.");
 
-    expect(
-      container
-        .querySelector('[data-testid="composer-deliverable-chat"]')
-        ?.getAttribute("title"),
-    ).toBe("Chat without automatically creating a task.");
-    expect(
-      container
-        .querySelector('[data-testid="composer-deliverable-once"]')
-        ?.getAttribute("title"),
-    ).toBe("Ask the team to do this once.");
-    expect(
-      container
-        .querySelector('[data-testid="composer-deliverable-workflow"]')
-        ?.getAttribute("title"),
-    ).toBe("Turn this into a repeating automation.");
+    // The three mode chips explained themselves through their `title`s. They
+    // are behind `COMPOSER_INTENT_HIDDEN` now, so there is nothing to explain
+    // and the prefill revision above is the whole of what this test covers.
+    for (const intent of ["chat", "once", "workflow"]) {
+      expect(
+        container.querySelector(`[data-testid="composer-deliverable-${intent}"]`),
+      ).toBeNull();
+    }
   });
 
   it("resets a stale mode when the brief replaces the draft", () => {
