@@ -10,6 +10,7 @@
 
 import {
   Activity,
+  MessageSquareWarning,
   Palette,
   ShieldCheck,
   ChartColumnBig,
@@ -123,6 +124,12 @@ export const SETTINGS_PAGES = [
   // are configuration, and what the company remembers is not configuration.
   // `#/settings/brain` still resolves, rewritten onto the row by
   // `console-route-rewrites.ts`, so every link minted while it lived here works.
+  // Feedback was a glyph in the window's title row, beside Settings — which
+  // made it chrome, on a par with "where you are" and "what the agents may do".
+  // It is not that: it is a page you visit rarely and deliberately, which is
+  // what this rail is a list of. Filed under "This console" because that is
+  // exactly what it is about — the product, not the company running in it.
+  { id: "feedback", label: "Feedback", icon: MessageSquareWarning, hint: "Tell us what is wrong or missing", group: "console" },
   { id: "usage", label: "Usage", icon: ChartColumnBig, hint: "What this company is spending", group: "spend" },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon; hint: string; group: string }[];
 

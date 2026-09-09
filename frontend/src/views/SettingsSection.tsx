@@ -4,6 +4,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { RouteLoading } from "@/components/route-loading";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
+import { FeedbackView } from "@/views/FeedbackView";
 import { PeopleView } from "@/views/PeopleView";
 import { AppearanceView } from "@/views/settings/AppearanceView";
 import { ApprovalsSettingsView } from "@/views/settings/ApprovalsSettingsView";
@@ -191,6 +192,11 @@ export function SettingsSection({
         {/* Both were cards on General. See their own files for why each left. */}
         {page === "approvals" && <ApprovalsSettingsView client={client} company={company} />}
         {page === "appearance" && <AppearanceView />}
+        {/* The same page `#/feedback` renders, re-parented rather than
+            rewritten. That top-level address still resolves — the flag dialog
+            and the board's own links point at it — so nothing that names it
+            breaks; this is where the rail reaches it from. */}
+        {page === "feedback" && <FeedbackView client={client} company={company} />}
         {/* The run index, rendered here rather than bounced to `#/observatory`.
             The row on this rail used to be a doorway — the address was rewritten
             away before this dispatch ever saw it — because the view reads its

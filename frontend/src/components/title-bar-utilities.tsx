@@ -24,7 +24,7 @@
 // `aria-label` and `title` — the whole of what a screen reader and a hovering
 // pointer respectively get from an icon-only control — so only the pixels go.
 
-import { MessageSquareWarning, Settings } from "lucide-react";
+import { Settings } from "lucide-react";
 
 import { DiscordIcon } from "@/components/discord-icon";
 import { TITLE_BAR_ICON_BUTTON } from "@/components/window-title-bar";
@@ -45,7 +45,6 @@ const DISCORD_BLURPLE = "text-(--brand-discord-on-light) dark:text-(--brand-disc
 
 /** The accessible names, stated once so a test and a button cannot drift. */
 export const SETTINGS_LABEL = "Settings";
-export const FEEDBACK_LABEL = "Feedback";
 export const DISCORD_LABEL = "Join our Discord";
 
 export function TitleBarUtilities({
@@ -77,17 +76,11 @@ export function TitleBarUtilities({
       >
         <Settings aria-hidden="true" className="size-4" />
       </button>
-      <button
-        type="button"
-        data-testid="title-bar-feedback"
-        onClick={() => onNavigate("feedback")}
-        aria-current={view === "feedback" ? "page" : undefined}
-        aria-label={FEEDBACK_LABEL}
-        title={FEEDBACK_LABEL}
-        className={TITLE_BAR_ICON_BUTTON}
-      >
-        <MessageSquareWarning aria-hidden="true" className="size-4" />
-      </button>
+      {/* Feedback was here, and is a row on the Settings rail now
+          (`#/settings/feedback`). A glyph in this row put it on a par with
+          "where you are" and "what the agents may do", which is the company you
+          keep when you are chrome — and it is a page you visit rarely and
+          deliberately. Settings is the list of those. */}
       {/* An anchor, not a button: it leaves the product, so it has to behave
           like a link — middle-click, copy address, open in a new tab. */}
       <a
