@@ -748,7 +748,7 @@ function SidebarMenuDot({ className, ...props }: React.ComponentProps<"span">) {
       className={cn(
         // The mirror of the badge's own hide rule: shown ONLY on the icon rail.
         "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full",
-        "bg-(--status-blocked) group-data-[collapsible=icon]:block",
+        "bg-status-blocked-text group-data-[collapsible=icon]:block",
         className
       )}
       {...props}
