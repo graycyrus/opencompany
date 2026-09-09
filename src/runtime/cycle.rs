@@ -10892,6 +10892,100 @@ members = ["writer"]
         );
     }
 
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that fails
+    /// every `ApprovalGranted` append, passing every other line straight
+    /// through to an in-memory backend.
+    struct FailGrantedMintStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    impl FailGrantedMintStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::ports::journal::MemoryJournalStore::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for FailGrantedMintStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> Result<()> {
+            if line.contains("ApprovalGranted") {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "FailGrantedMintStore: forced failure on the single-use grant mint".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// Issue #243's ordering claim, pinned rather than left to reading the code:
+    /// `mint_grant` journals `ApprovalGranted` *before* arming the single-use
+    /// grant in the live set (`settle_approved_effect` → `mint_grant`), so a
+    /// failure on that append must leave the grant un-armed rather than live
+    /// with no durable record. A crash between the two is meant to replay as
+    /// "granted", never to lose the write; forcing the write itself to fail
+    /// proves the arm genuinely comes after it in the code, not just in the
+    /// comment describing it.
+    #[tokio::test]
+    async fn a_failed_grant_mint_never_arms_the_live_grant() {
+        let home_dir = tmp_home();
+        let effect = harness_effect("finance", "composio_execute", serde_json::json!({}));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(Arc::new(ParkingBrain {
+                    effect: effect.clone(),
+                }))
+                .with_journal_store(Arc::new(FailGrantedMintStore::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: "do it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+            .await
+            .unwrap();
+        let id = report.parked[0].clone();
+
+        let result = rt.resolve_approval(&id, Verdict::Approve, operator()).await;
+        assert!(
+            result.is_err(),
+            "the forced failure on the journal append must surface, not be swallowed"
+        );
+        assert_eq!(
+            rt.grants.live_count(),
+            0,
+            "the grant must not be armed when the journal write that was supposed to \
+             precede it failed"
+        );
+        assert!(rt.grants.peek(&id).is_none());
+    }
+
     /// Issue #1458 under concurrency: two opposite-polarity resolutions of the
     /// **same** scope settled while both are in flight — the approve and the
     /// deny each half-finished before either mints — must still leave a single
