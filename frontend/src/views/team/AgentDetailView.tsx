@@ -2,17 +2,14 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   ChevronRight,
   Cpu,
-  Mail,
   Pencil,
   Server,
   Sparkles,
   Users,
-  Wallet,
   Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { listTasks, type Task } from "@/api/tasks";
 import { isDesktopRuntime } from "@/api/transport";
@@ -33,7 +30,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -77,7 +73,6 @@ import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { usd } from "@/lib/money";
-import { personName } from "@/lib/person";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
@@ -289,49 +284,6 @@ export function AgentDetailView({
    * just has nothing to offer beyond the free-text model field it already had.
    */
   const [harnesses, setHarnesses] = useState<HarnessDto[]>([]);
-  /**
-   * Whether this viewer may edit the daily budget (issue #1206, ported from
-   * `TeamView.tsx`). Courtesy, not enforcement — the host refuses the write
-   * with a 403 regardless; hiding the control from a non-admin only spares
-   * them a control they cannot use. Every agent this page can show is
-   * host-backed by construction (`boot` only reaches `ready` once `getAgent`
-   * answers), so there is no `fromHost` half to this check the way the roster
-   * card needed.
-   */
-  const [isAdmin, setIsAdmin] = useState(false);
-  // Who set the cap override, for the attribution line. Only an admin may read
-  // the user directory, so this stays empty for a member and the attribution
-  // degrades to "an admin" rather than disappearing.
-  const [people, setPeople] = useState<Person[]>([]);
-  const [avatarOpen, setAvatarOpen] = useState(false);
-
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      let admin = false;
-      try {
-        admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
-      }
-      if (!live) return;
-      setIsAdmin(admin);
-      if (!admin) {
-        setPeople([]);
-        return;
-      }
-      try {
-        const dir = await listPeople(client, company);
-        if (live) setPeople(dir);
-      } catch {
-        // Attribution falls back to "an admin"; not worth a toast.
-        if (live) setPeople([]);
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [client, company]);
 
   /**
    * The required fields the draft leaves blank, so the form can say why Save is
@@ -364,11 +316,6 @@ export function AgentDetailView({
     };
   }, [editing, client, company]);
 
-  /** A human label for whoever set a cap — never a raw user id. */
-  function whoSet(userId: string): string {
-    const person = people.find((p) => p.id === userId);
-    return person ? personName(person) : "an admin";
-  }
 
   const boot = useCallback(async () => {
     setLoad("loading");
