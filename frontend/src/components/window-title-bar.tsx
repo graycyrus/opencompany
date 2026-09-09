@@ -190,11 +190,26 @@ export function WindowTitleBar({
       {/* Renders nothing off the macOS desktop, where the lights do not float
           over the page and there is nothing to clear. */}
       <WindowControlsInset />
-      {/* Capped rather than stretched. The trigger was sized for a sidebar
-          column, and left to itself in a 1280px row it would run halfway across
-          the window naming a company whose name is three words long. It already
-          truncates; this gives it something to truncate against. */}
-      <div className="min-w-0 max-w-72">{switcher}</div>
+      {/* The sidebar's column width, exactly — not a cap.
+
+          `max-w-72` (18rem) was a cap and nothing more: it stopped the trigger
+          running halfway across a 1280px row, but it left the width decided by
+          the company's name, so the control ended at a different x on every
+          host and overhung the sidebar's right edge by however long the name
+          happened to be. Sized instead of capped, it lands on the same two
+          vertical lines as the nav rows beneath it — the row's own `px-3` puts
+          its left edge at 12px, and subtracting both gutters from
+          `--sidebar-width` puts its right edge where theirs is.
+
+          `--sidebar-width` rather than a literal: `SidebarProvider` sets it,
+          this row is inside that provider, and the one number then lives in
+          one place. `shrink-0` because the elastic member of this row is the
+          drag spacer beside it; without it a crowded row would take the width
+          back out of here and undo the alignment. The name inside still
+          truncates, which is what makes a fixed box safe for a long one. */}
+      <div className="w-[calc(var(--sidebar-width)-(--spacing(6)))] min-w-0 shrink-0">
+        {switcher}
+      </div>
       {/* The draggable middle. `self-stretch` so the grabbable area is the full
           height of the row rather than a hairline through its centre. */}
       <div data-tauri-drag-region aria-hidden="true" className="min-w-0 flex-1 self-stretch" />
