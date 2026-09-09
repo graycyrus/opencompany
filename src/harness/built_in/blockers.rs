@@ -746,41 +746,48 @@ mod tool_test {
     /// after the other on a single task. That arrangement exercises two serial
     /// inserts and would pass unchanged if simultaneous calls could lose a
     /// card — which is the only thing this test exists to rule out.
+    ///
+    /// Repeated, because the barrier releases both workers before either
+    /// reaches `push` rather than at `push` itself: a single round can
+    /// interleave benignly. Making the window certain would mean a test hook
+    /// inside the queue every caller pays for, so the rounds buy it instead.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_questions_from_different_agents_both_park() {
         use std::sync::{Arc, Barrier};
 
-        let queue = ApprovalRequestQueue::default();
-        let finance = EscalateToHumanTool::new(queue.clone(), "finance".to_string());
-        let legal = EscalateToHumanTool::new(queue.clone(), "legal".to_string());
-        let gate = Arc::new(Barrier::new(2));
+        for round in 0..20 {
+            let queue = ApprovalRequestQueue::default();
+            let finance = EscalateToHumanTool::new(queue.clone(), "finance".to_string());
+            let legal = EscalateToHumanTool::new(queue.clone(), "legal".to_string());
+            let gate = Arc::new(Barrier::new(2));
 
-        let ask = |tool: EscalateToHumanTool, question: &'static str, gate: Arc<Barrier>| {
-            tokio::task::spawn_blocking(move || {
-                gate.wait();
-                tokio::runtime::Handle::current()
-                    .block_on(tool.execute(serde_json::json!({ "question": question })))
-            })
-        };
-        let a = ask(finance, "approve the Q3 budget?", gate.clone());
-        let b = ask(legal, "sign the NDA as-is?", gate.clone());
-        assert!(!a.await.expect("joins").expect("runs").is_error);
-        assert!(!b.await.expect("joins").expect("runs").is_error);
+            let ask = |tool: EscalateToHumanTool, question: &'static str, gate: Arc<Barrier>| {
+                tokio::task::spawn_blocking(move || {
+                    gate.wait();
+                    tokio::runtime::Handle::current()
+                        .block_on(tool.execute(serde_json::json!({ "question": question })))
+                })
+            };
+            let a = ask(finance, "approve the Q3 budget?", gate.clone());
+            let b = ask(legal, "sign the NDA as-is?", gate.clone());
+            assert!(!a.await.expect("joins").expect("runs").is_error);
+            assert!(!b.await.expect("joins").expect("runs").is_error);
 
-        let drained = queue.drain(8);
-        let reasons: Vec<&String> = drained.requests.iter().map(|r| &r.reason).collect();
-        assert_eq!(
-            drained.requests.len(),
-            2,
-            "both concurrent questions must reach the queue, not just whichever wins the \
-             race: {reasons:?}"
-        );
-        for question in ["approve the Q3 budget?", "sign the NDA as-is?"] {
-            assert!(
-                reasons.iter().any(|reason| reason.contains(question)),
-                "the queue must hold each agent's own question, not one of them twice: \
-                 {reasons:?}"
+            let drained = queue.drain(8);
+            let reasons: Vec<&String> = drained.requests.iter().map(|r| &r.reason).collect();
+            assert_eq!(
+                drained.requests.len(),
+                2,
+                "round {round}: both concurrent questions must reach the queue, not just \
+                 whichever wins the race: {reasons:?}"
             );
+            for question in ["approve the Q3 budget?", "sign the NDA as-is?"] {
+                assert!(
+                    reasons.iter().any(|reason| reason.contains(question)),
+                    "round {round}: the queue must hold each agent's own question, not one of \
+                     them twice: {reasons:?}"
+                );
+            }
         }
     }
 
