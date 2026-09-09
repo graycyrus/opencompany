@@ -13,7 +13,6 @@ import {
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarInset,
   SidebarProvider,
   SidebarRail,
@@ -24,10 +23,11 @@ import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { OverviewButton } from "@/components/overview-button";
+import { TitleBarUtilities } from "@/components/title-bar-utilities";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
-import { SidebarCollapseButton, SidebarUtilityBar } from "@/components/sidebar-controls";
+import { SidebarCollapseButton } from "@/components/sidebar-controls";
 import { SectionContentRail } from "@/components/section-rail";
 import { SidebarNavigation } from "@/components/sidebar-navigation";
 import { RoomRailSlotProvider } from "@/components/room-rail";
@@ -3617,6 +3617,11 @@ export function AppShell({
             canCreateCompany={offersCompanyCreation(client)}
           />
         }
+        utilities={
+          // The three that were the sidebar's footer, beside Overview in the
+          // same group: all four are about the console rather than the page.
+          <TitleBarUtilities view={view} onNavigate={setView} />
+        }
         overview={
           // The console's front page, as a glyph. `NAV` still carries the
           // labelled row and will until the sidebar restructure removes it; in a
@@ -3693,9 +3698,13 @@ export function AppShell({
             the company, so they belong after the list of places you can go —
             and the header they used to occupy is gone entirely now that the
             switcher lives in the window's title row. */}
-        <SidebarFooter>
-          <SidebarUtilityBar view={view} onNavigate={setView} />
-        </SidebarFooter>
+        {/* No footer. Settings, Feedback and Discord are glyphs in the
+            window's title row now (`title-bar-utilities.tsx`): none of the
+            three is a place inside this company, which is the one thing this
+            column enumerates. The Overview row that sat with them, drawn
+            `md:hidden` as the complement of the title row's `hidden
+            md:inline-flex`, went with them — the glyph up there is on at every
+            width now, so the destination is still on screen exactly once. */}
         </nav>
         <SidebarRail />
       </Sidebar>

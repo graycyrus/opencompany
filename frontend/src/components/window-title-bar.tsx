@@ -64,14 +64,19 @@ import { cn } from "@/lib/utils";
  * the row and the most redundant one in it — the window already belongs to one
  * company, and the glyph, the chevron and the hover title all survive.
  *
- * **Overview goes third, and Approvals never does.** Overview is a destination
- * you *choose*; a pending count is one that *chooses you*. Between them that is
- * the whole argument for which of the two a narrow window keeps.
+ * **There is no third rung any more.** Overview used to be it, on the argument
+ * that Overview is a destination you *choose* while the pending count beside it
+ * is one that *chooses you*. Both halves of that pairing have since moved:
+ * Approvals is a sidebar row with its own count, and the sidebar footer that
+ * carried Overview at narrow widths is gone — so dropping the glyph would leave
+ * the page with no control at all below `md`, which is the P1 the old
+ * arrangement existed to answer. The four glyphs are 32px each and the two
+ * rungs above free far more than that.
  *
- * **The floor is approvals, autonomy and you.** What is waiting on you and what
- * the agents may do are the two things that must survive any width — a row that
- * has silently dropped either looks identical to a company with nothing pending
- * and no policy at all.
+ * **The floor is the glyph group, autonomy and you.** What the agents may do
+ * must survive any width — a row that has silently dropped it looks identical
+ * to a company with no policy at all — and so must a way to reach Settings and
+ * the page you came from.
  *
  * The tier's *name* never goes for the same reason. Nothing here wraps and
  * nothing scrolls — every item is `flex-none` except the deliberately elastic
