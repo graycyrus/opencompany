@@ -20,7 +20,6 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AgentProfileProvider } from "@/components/agent-profile-sheet";
-import { ApprovalsButton } from "@/components/approvals-button";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
@@ -3629,17 +3628,13 @@ export function AppShell({
             onNavigate={() => setView("overview")}
           />
         }
-        approvals={
-          // What is waiting on you, from every page in every sidebar state.
-          // `pending` is `feed.status.pending_approvals` passed straight
-          // through — the same single value the sidebar badge and the collapsed
-          // rail dot both used before this row took the signal off them.
-          <ApprovalsButton
-            pending={pending}
-            active={isNavigationActive("approvals", view)}
-            onNavigate={() => setView("approvals")}
-          />
-        }
+        // No `approvals` slot. It is a sidebar row again — a labelled place
+        // you go, rather than one unlabelled square between an Overview glyph
+        // and an autonomy pill. The count that kept it here (issue #1018: a
+        // signal must survive the rail collapsing) is answered in the column by
+        // `SidebarMenuBadge` and its icon-rail mirror `SidebarMenuDot`, so
+        // nothing about the signal depends on this row any more. See
+        // `NAV_SECTIONS`.
         autonomy={
           // What the agents in this company are allowed to do without asking.
           // Renders nothing until the host has said, rather than guessing a
