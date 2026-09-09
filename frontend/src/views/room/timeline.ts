@@ -769,8 +769,23 @@ function groupEpisodes(items: TimelineItem[], episodes: Episode[]): TimelineItem
   const out: TimelineItem[] = [];
   const blocks = new Map<string, Extract<TimelineItem, { kind: "episode" }>>();
 
+  const episodeAt = (item: TimelineItem): Episode | undefined => {
+    if (item.kind === "message") return owner.get(item.entry.message.id);
+    // An approval raised mid-deliberation belongs in that block too. Keeping it
+    // at its timestamp preserves the causal order instead of moving it below
+    // turns that happened after the approval was requested.
+    return episodes.find((candidate) => {
+      const rows = [...candidate.turns, ...candidate.referrals, ...candidate.failed];
+      const first = rows[0]?.at;
+      const last = candidate.reportId
+        ? Math.max(...rows.map((row) => row.at), item.at)
+        : rows.at(-1)?.at;
+      return first !== undefined && last !== undefined && item.at >= first && item.at <= last;
+    });
+  };
+
   for (const item of items) {
-    const episode = item.kind === "message" ? owner.get(item.entry.message.id) : undefined;
+    const episode = episodeAt(item);
     if (!episode) {
       out.push(item);
       continue;
@@ -908,4 +923,3 @@ export function clearTaskCardEverywhere(transcripts: Transcripts, taskId: string
   }
   return changed ? next : transcripts;
 }
-
