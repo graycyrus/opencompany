@@ -2892,7 +2892,7 @@ impl CompanyRuntime {
             .and_then(|conversation| conversation.parent);
         let step = match resolution.step.clone() {
             Some(step) => Some(step),
-            None => self.blocker_step_from_task_link(approval_id).await,
+            None => self.blocker_step_from_task_link(approval_id).await?,
         };
         let outcome = self
             .drive_blocker_resume(&resolution, step.as_ref(), thread.as_deref(), origin_parent)
@@ -2937,30 +2937,37 @@ impl CompanyRuntime {
     /// into the conversation instead.
     ///
     /// A link is weaker evidence than a step, so it is only followed to a card
-    /// the board still holds. A declared step names the thing that stopped; a
-    /// link only says a card was in hand when the question was raised. Reading
-    /// a link to a card that is gone as a card resume answers the operator
-    /// with *that card is no longer on the board* — a report about a card,
-    /// where what was asked for was an answer to a question.
+    /// the board still holds and still has paused. A declared step names the
+    /// thing that stopped; a link only says a card was in hand when the
+    /// question was raised. Reading a link to a card that is gone — or to one
+    /// an operator has since moved on, which both card resumes leave alone
+    /// without a word — answers the operator with a report about a card, or
+    /// with nothing at all, where what was asked for was an answer to a
+    /// question.
+    ///
+    /// A board that cannot be read is not a board without the card: the error
+    /// propagates, leaving the answer armed for the next attempt rather than
+    /// retiring it against a resume that never re-entered anything.
     ///
     /// [`TaskLink`]: crate::runtime::journal::TaskLink
     #[cfg(feature = "openhuman")]
     async fn blocker_step_from_task_link(
         &self,
         id: &ApprovalId,
-    ) -> Option<crate::ports::blockers::BlockerStep> {
+    ) -> Result<Option<crate::ports::blockers::BlockerStep>> {
         use crate::runtime::journal::TaskLink;
 
         let Some(Some(TaskLink::Task { id: task_id })) = self.journal.approval_task(id) else {
-            return None;
+            return Ok(None);
         };
-        let on_board = self
+        let paused = self
             .ops
             .tasks
             .list(&self.id)
-            .await
-            .is_ok_and(|tasks| tasks.iter().any(|task| task.id == task_id));
-        on_board.then_some(crate::ports::blockers::BlockerStep::Task { task_id })
+            .await?
+            .into_iter()
+            .any(|task| task.id == task_id && task.column == crate::ports::tasks::COLUMN_PAUSED);
+        Ok(paused.then_some(crate::ports::blockers::BlockerStep::Task { task_id }))
     }
 
     /// Routes a resolved blocker to the right resume by its
@@ -13445,6 +13452,28 @@ mod tests {
 
         /// What an agent's own `escalate_to_human` parks: a question with no
         /// step, because the tool holds neither a card nor a node.
+        async fn dm_notes(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
+            runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    crate::ports::types::CompanyEvent::AgentReply { chat_id, text, .. }
+                        if chat_id == "dm:eng" =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
         fn agent_question() -> BlockerPayload {
             BlockerPayload {
                 kind: BlockerKind::Information,
@@ -13588,6 +13617,52 @@ mod tests {
                 stored(&runtime, "t-1").await.column,
                 COLUMN_PAUSED,
                 "an unlinked question leaves every card where it was"
+            );
+        }
+
+        /// A card an operator moved on from is not the step, so the answer
+        /// goes back into the conversation.
+        ///
+        /// Both card resumes leave a card that is no longer paused exactly
+        /// where it is and return without a word, so following the link to one
+        /// would deliver the answer nowhere at all while the blocker is still
+        /// recorded as resumed.
+        #[tokio::test]
+        async fn an_agent_question_whose_card_moved_on_answers_the_conversation() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&agent_question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+            seed(&runtime, &card("t-1", COLUMN_IN_PROGRESS)).await;
+
+            runtime
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Amend,
+                    "the second brief is current",
+                    None,
+                )
+                .await
+                .expect("resumes");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_IN_PROGRESS,
+                "a card an operator moved on is left where they put it"
+            );
+            let notes = dm_notes(&runtime).await;
+            assert!(
+                notes.iter().any(
+                    |note| note == "Thanks — using that and carrying on from where it stopped."
+                ),
+                "the answer must reach the conversation it was asked in; posted: {notes:?}"
             );
         }
 
