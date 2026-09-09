@@ -6,10 +6,11 @@
 // the place every other app puts that, and opening the one form that changes it.
 
 import { useCallback, useEffect, useState } from "react";
+import { LogOut, UserRound } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { me as fetchMe, updateMe, type Me } from "@/api/auth";
+import { logout, me as fetchMe, updateMe, type Me } from "@/api/auth";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar";
@@ -32,12 +42,34 @@ import { toneFor } from "@/lib/team";
 export function ProfileRow({
   client,
   company,
+  variant = "sidebar",
+  onSignedOut,
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * What to do once the host has revoked this session.
+   *
+   * Omitted where nothing owns the connection's state, in which case the menu
+   * offers no sign-out rather than one that ends nowhere.
+   */
+  onSignedOut?: () => void;
+  /**
+   * Which chrome this is drawn in.
+   *
+   * `titlebar` is the home: the far right of the window's title row, opposite
+   * the company switcher. `sidebar` is the footer row it used to be, kept for
+   * any chrome that still gives it a column to sit at the bottom of.
+   *
+   * The two differ in shape and in nothing else. A sidebar footer row is a
+   * full-width menu item; a title-row control sizes to its own content and
+   * stops. Both open the same dialog.
+   */
+  variant?: "sidebar" | "titlebar";
 }) {
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -67,36 +99,125 @@ export function ProfileRow({
   if (!me || typeof me !== "object" || !("email" in me) || !("id" in me)) return null;
   const name = personName(me);
 
+  // 20px, not the 16px a sidebar icon slot would take: 16 is below the size a
+  // face can be read at (see `MessageRow`'s facepile note), and this is the one
+  // control on screen whose whole job is to show you yours. A row's icon slot
+  // sizes to its content, so the extra four pixels cost the label nothing.
+  const face = (
+    <TeammateAvatar
+      name={name}
+      tone={toneFor(me.id || me.email)}
+      avatar={personAvatar(me)}
+      // Round, not the sidebar's `rounded-[4px]`: in the title row this sits
+      // inside a circular button, and a squircle inside a circle reads as a
+      // mistake at 20px — the corners clip against the border on every side.
+      className="size-7 rounded-full text-2xs"
+    />
+  );
+
+  const dialog = (
+    <ProfileDialog
+      client={client}
+      company={company}
+      me={me}
+      open={open}
+      onOpenChange={setOpen}
+      onSaved={setMe}
+    />
+  );
+
+  // The host is the authority on whether the session ended, so the console is
+  // told nothing until it answers. A failed revocation leaves every bit of
+  // state alone and says so: dropping to a login screen over a session that is
+  // still live is the one outcome worse than a sign-out that visibly failed.
+  async function signOut() {
+    setSigningOut(true);
+    try {
+      await logout(client, company);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't sign you out. You're still signed in.",
+      );
+      return;
+    } finally {
+      setSigningOut(false);
+    }
+    setOpen(false);
+    onSignedOut?.();
+  }
+
+  const menu = (
+    <DropdownMenuContent align="end" data-testid="profile-menu">
+      <DropdownMenuGroup>
+        {/* Which account this menu would sign out, for the shared machine the
+            control exists for. */}
+        <DropdownMenuLabel className="max-w-56 truncate font-normal text-muted-foreground">
+          {me.email}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => setOpen(true)} data-testid="profile-open">
+          <UserRound className="mr-2 size-4" />
+          Your profile
+        </DropdownMenuItem>
+        {onSignedOut && (
+          <DropdownMenuItem
+            disabled={signingOut}
+            onClick={() => void signOut()}
+            data-testid="profile-sign-out"
+          >
+            <LogOut className="mr-2 size-4" />
+            {signingOut ? "Signing out…" : "Sign out"}
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuGroup>
+    </DropdownMenuContent>
+  );
+
+  if (variant === "titlebar") {
+    return (
+      <>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            data-testid="profile-row"
+            // Native `title` rather than the sidebar's tooltip component, which
+            // only renders while the rail is collapsed and needs the sidebar
+            // context to know it. This control is not in the rail any more.
+            title={name}
+            aria-label={name}
+            // The avatar alone. A title row is chrome, and the operator's own
+            // name is the one label they never need read back to them — it cost
+            // horizontal space at every window width to say something they
+            // already know. `title` and `aria-label` keep it reachable by
+            // pointer and by screen reader, so only the pixels are lost.
+            // A ring at rest, not only on hover: stripped to the avatar alone
+            // the control had no edge of its own, so it read as a decorative
+            // mark rather than something clickable.
+            className="flex items-center rounded-full border border-sidebar-border bg-sidebar/60 p-0.5 transition hover:border-sidebar-accent-foreground/30 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            {face}
+          </DropdownMenuTrigger>
+          {menu}
+        </DropdownMenu>
+        {dialog}
+      </>
+    );
+  }
+
   return (
     <SidebarMenu>
       <SidebarMenuItem>
-        <SidebarMenuButton
-          tooltip={name}
-          onClick={() => setOpen(true)}
-          data-testid="profile-row"
-        >
-          {/* 20px, not the 16px a sidebar icon slot would take: 16 is below the
-              size a face can be read at (see `MessageRow`'s facepile note), and
-              this is the one row on screen whose whole job is to show you yours.
-              A row's icon slot sizes to its content, so the extra four pixels
-              cost the label nothing. */}
-          <TeammateAvatar
-            name={name}
-            tone={toneFor(me.id || me.email)}
-            avatar={personAvatar(me)}
-            className="size-5 rounded-[4px] text-3xs"
-          />
-          <span className="truncate">{name}</span>
-        </SidebarMenuButton>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<SidebarMenuButton tooltip={name} />}
+            data-testid="profile-row"
+          >
+            {face}
+            <span className="truncate">{name}</span>
+          </DropdownMenuTrigger>
+          {menu}
+        </DropdownMenu>
       </SidebarMenuItem>
-      <ProfileDialog
-        client={client}
-        company={company}
-        me={me}
-        open={open}
-        onOpenChange={setOpen}
-        onSaved={setMe}
-      />
+      {dialog}
     </SidebarMenu>
   );
 }

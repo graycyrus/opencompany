@@ -85,14 +85,32 @@ pub enum RunStatus {
     /// dependency, a rate limit, a missing credential, a retry, an operator
     /// steer-to-pause. Neither cancelled nor failed.
     Paused,
+    /// Parked on a **question for a person** the work cannot answer itself
+    /// (issue #1861): a rejected model id, an expired credential, a missing
+    /// prerequisite, or an agent's own `escalate_to_human`.
+    ///
+    /// Distinct from both neighbours on purpose. [`Paused`](Self::Paused) is
+    /// documented as waiting on something *other than a person*, which is the
+    /// opposite of a blocker. [`WaitingApproval`](Self::WaitingApproval) is a
+    /// person deciding whether an effect may happen — there is an effect, and
+    /// approving it performs it; a blocker has no effect to approve, only an
+    /// answer to supply. Folding blockers into either would make "what is this
+    /// waiting for" unanswerable from the status, which is the whole point of
+    /// the epic.
+    ///
+    /// Parked, not terminal: the answer resumes the stopped step (#1863/#1864),
+    /// and an unanswered blocker expires through the approval TTL back to
+    /// `todo` carrying its question.
+    Blocked,
     /// Terminal: the attempt completed.
     Succeeded,
     /// Terminal: the attempt failed. [`RunRecord::error`] carries why.
     Failed,
     /// Terminal: the attempt was cancelled before it could settle.
     Cancelled,
-    /// Terminal: the workflow compiler **declined by design** to automate the
-    /// work — "better done once than built into a workflow" (issue #1809).
+    /// Terminal: work **declined by design** — either the workflow compiler
+    /// concluded it should not automate the card, or a running step correctly
+    /// concluded that advancing would be unnecessary or wrong.
     ///
     /// Neither an error nor an ordinary success: the builder was asked whether
     /// the card should become a workflow and its honest answer was "don't". It
@@ -112,6 +130,7 @@ impl RunStatus {
             Self::Running => "running",
             Self::WaitingApproval => "waiting_approval",
             Self::Paused => "paused",
+            Self::Blocked => "blocked",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -132,6 +151,7 @@ impl RunStatus {
             "running" => Self::Running,
             "waiting_approval" => Self::WaitingApproval,
             "paused" => Self::Paused,
+            "blocked" => Self::Blocked,
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -186,7 +206,7 @@ impl RunStatus {
 
     /// Whether the attempt is parked awaiting something outside the cycle.
     pub fn is_parked(self) -> bool {
-        matches!(self, Self::WaitingApproval | Self::Paused)
+        matches!(self, Self::WaitingApproval | Self::Paused | Self::Blocked)
     }
 
     /// Whether a run may move from `self` to `next`.
@@ -211,7 +231,7 @@ impl RunStatus {
         match self {
             Self::Pending => next == Self::Running || next.is_terminal(),
             Self::Running => next.is_parked() || next.is_terminal(),
-            Self::WaitingApproval | Self::Paused => {
+            Self::WaitingApproval | Self::Paused | Self::Blocked => {
                 next == Self::Running || next.is_parked() || next.is_terminal()
             }
             Self::Succeeded | Self::Failed | Self::Cancelled | Self::Declined => false,
@@ -270,6 +290,15 @@ pub struct RunRecord {
     /// append.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event_seq: Option<EventSeq>,
+    /// The conversation **thread** this attempt belongs to, within `chat_id`.
+    ///
+    /// See [`NewRun::thread_root`] for why `chat_id` alone is not enough.
+    /// Additive in the same shape `task_id`/`chat_id`/`workflow_run` took: a
+    /// row written before this field existed loads with `None` and
+    /// re-serializes byte-identically, so there is no backfill to write and an
+    /// older row simply reads as "rooted at the channel".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_root: Option<EventSeq>,
     /// Epoch-millis the row was minted.
     /// The workflow run whose node spawned this attempt, when one did.
     ///
@@ -380,6 +409,20 @@ pub struct NewRun {
     /// Falls back to the agent ref on a graph compiled before nodes carried a
     /// first-class id — the same honest fallback the blocked-node rows use.
     pub node_id: Option<String>,
+    /// The conversation **thread** this attempt belongs to, within `chat_id`.
+    ///
+    /// A channel holds many threads since #1890, and `chat_id` names only the
+    /// channel — so it cannot say which of them a running turn is in. Without
+    /// this the console has no way to tell, and gives up: it suppresses the
+    /// working indicator for the whole channel whenever any thread is open,
+    /// which hides a turn the host is actively running.
+    ///
+    /// The root is the event seq of the message that started the thread —
+    /// the operator message's own seq for a channel-level message, and the
+    /// parent it replied under for a threaded one. `None` for a card dispatch
+    /// and a workflow node, which belong to no conversation, and for a turn
+    /// whose root is the channel itself.
+    pub thread_root: Option<EventSeq>,
 }
 
 impl NewRun {
@@ -396,6 +439,7 @@ impl NewRun {
             chat_id: None,
             workflow_run_id: None,
             node_id: None,
+            thread_root: None,
         }
     }
 
@@ -412,7 +456,20 @@ impl NewRun {
             chat_id: Some(chat_id.into()),
             workflow_run_id: None,
             node_id: None,
+            thread_root: None,
         }
+    }
+
+    /// Names the thread this chat turn is in. See [`NewRun::thread_root`].
+    ///
+    /// Separate from [`for_chat`](Self::for_chat) rather than a fourth argument
+    /// to it: every existing call site means "the channel itself", which is what
+    /// `None` says, and a required argument would have made each of them assert
+    /// a root it had not actually resolved.
+    #[must_use]
+    pub fn in_thread(mut self, root: impl Into<Option<EventSeq>>) -> Self {
+        self.thread_root = root.into();
+        self
     }
 
     /// A run spawned by an `agent` node of a workflow run.
@@ -434,6 +491,7 @@ impl NewRun {
             chat_id: None,
             workflow_run_id: Some(workflow_run_id.into()),
             node_id: Some(node_id.into()),
+            thread_root: None,
         }
     }
 }
@@ -468,6 +526,29 @@ impl RunOutcome {
     /// Attaches a failure reason.
     pub fn with_error(mut self, error: impl Into<String>) -> Self {
         self.error = Some(error.into());
+        self
+    }
+
+    /// Carries an attempt's already-recorded usage into this settle.
+    ///
+    /// [`RunStore::finish_run`] **assigns** `usage` and `step_count` from the
+    /// outcome rather than merging them, and [`RunOutcome::new`] zeroes both. So
+    /// a settle that only means to change a row's *status* — an expiry
+    /// cancelling an attempt that was waiting on it, a reaper closing an
+    /// interrupted one — silently erases the tokens and cost that attempt
+    /// really did spend unless it carries them back (Codex, B-012 review).
+    /// Paired with [`with_step_count`](Self::with_step_count) for the same
+    /// reason.
+    pub fn with_usage(mut self, usage: TokenUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    /// Carries an attempt's already-recorded step count into this settle.
+    ///
+    /// See [`with_usage`](Self::with_usage) — same assignment, same erasure.
+    pub fn with_step_count(mut self, step_count: u32) -> Self {
+        self.step_count = step_count;
         self
     }
 }
@@ -865,11 +946,12 @@ mod test {
     /// Every status, so a table-driven test cannot silently miss a new variant
     /// (adding one without extending this list fails the exhaustiveness check
     /// in [`all_statuses_are_listed`]).
-    const ALL: [RunStatus; 8] = [
+    const ALL: [RunStatus; 9] = [
         RunStatus::Pending,
         RunStatus::Running,
         RunStatus::WaitingApproval,
         RunStatus::Paused,
+        RunStatus::Blocked,
         RunStatus::Succeeded,
         RunStatus::Failed,
         RunStatus::Cancelled,
@@ -886,6 +968,7 @@ mod test {
                 | RunStatus::Running
                 | RunStatus::WaitingApproval
                 | RunStatus::Paused
+                | RunStatus::Blocked
                 | RunStatus::Succeeded
                 | RunStatus::Failed
                 | RunStatus::Cancelled
@@ -896,6 +979,31 @@ mod test {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), ALL.len(), "status literals must be unique");
+    }
+
+    /// Issue #1861: a blocker waits on a person, so it is **parked** — not
+    /// terminal, and not active. A terminal blocker could never be answered;
+    /// an active one would be reclaimed by the boot reaper as an orphan while
+    /// somebody was still deciding what to say.
+    #[test]
+    fn a_blocker_is_parked_not_terminal() {
+        assert!(RunStatus::Blocked.is_parked());
+        assert!(!RunStatus::Blocked.is_terminal());
+        assert!(!RunStatus::Blocked.is_active());
+        assert_eq!(RunStatus::Blocked.phase(), "parked");
+    }
+
+    /// The answer resumes the work, and an unanswered blocker settles through
+    /// the TTL — so both edges out of `Blocked` have to exist.
+    #[test]
+    fn a_blocker_can_resume_or_settle() {
+        assert!(RunStatus::Blocked.can_transition_to(RunStatus::Running));
+        assert!(RunStatus::Blocked.can_transition_to(RunStatus::Failed));
+        assert!(RunStatus::Running.can_transition_to(RunStatus::Blocked));
+        assert!(
+            !RunStatus::Succeeded.can_transition_to(RunStatus::Blocked),
+            "a finished attempt cannot start waiting on somebody"
+        );
     }
 
     #[test]
@@ -1045,6 +1153,7 @@ mod test {
             attempt,
             status: RunStatus::Pending,
             trigger_event_seq: None,
+            thread_root: None,
             created_at_millis: created,
             started_at_millis: None,
             finished_at_millis: None,

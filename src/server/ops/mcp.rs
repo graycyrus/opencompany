@@ -1073,6 +1073,7 @@ role = "Chief Executive"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -1188,6 +1189,7 @@ role = "Chief Executive"
             description: None,
             members: vec!["jamie".to_string()],
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         scoped
             .overlay_desk_tools

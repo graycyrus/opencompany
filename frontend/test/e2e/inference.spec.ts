@@ -49,23 +49,53 @@ async function openConnections(page: Page) {
     });
 }
 
-test("a key typed for a BYOK provider is not discarded by switching to managed", async ({
+test("the managed brain is offered as something to switch to", async ({ page }) => {
+  await openConnections(page);
+
+  // The company has no `[inference]` section, so the host still answers
+  // `provider: "managed"`. `INFERENCE_MANAGED_HIDDEN` used to make the console
+  // pretend that was "Not configured" and fall the form back to OpenRouter,
+  // because choosing it meant minting a TinyHumans key by hand with nowhere in
+  // the console to do it. The one-click connect flow (`ConnectTinyHumansButton`)
+  // removed that gap, so hiding the route stopped being honest — a company
+  // already on it now sees its own real state, and it is a route an operator
+  // can actually finish setting up from here.
+  await expect(page.getByTestId("inference-current-provider")).toHaveText(
+    "Managed (TinyHumans)",
+    { timeout: 30_000 },
+  );
+  await expect(page.locator("#inference-provider")).toHaveText(/Managed \(TinyHumans\)/);
+
+  // And it is in the list, so it can be switched *to* as well as reported.
+  await page.locator("#inference-provider").click();
+  await expect(page.getByRole("option", { name: "OpenRouter", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("option", { name: "Managed (TinyHumans)", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+});
+
+test("a key typed for a BYOK provider is not discarded by switching provider", async ({
   page,
 }) => {
   await openConnections(page);
 
-  // Managed is the default selection, and since #585 it offers the key input
-  // like every other provider but Ollama — with the line that says what paying
-  // for the company actually means.
+  // Since #585 the key input is offered for every provider but Ollama — with
+  // the line that says what paying for the company actually means.
   await expect(page.locator("#inference-key")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("inference-key-note")).toBeVisible();
 
-  // Type a key under a BYOK provider, then switch back to managed. The value
-  // survives the switch — that is the state that used to lose it.
+  // Type a key under one provider, then switch to another and back. The value
+  // survives the switch — that is the state that used to lose it. The pair
+  // used to be OpenRouter and managed, back when managed was not selectable;
+  // Custom stands in for it here instead, but the defect was never about
+  // *which* two providers, only about crossing between any of them.
   await pickProvider(page, "OpenRouter");
   const typed = `pw-e2e-${Date.now()}`;
   await page.locator("#inference-key").fill(typed);
-  await pickProvider(page, "Managed (TinyHumans)");
+  await pickProvider(page, "Custom (OpenAI-compatible)");
+  await expect(page.locator("#inference-key")).toHaveValue(typed);
+  await pickProvider(page, "OpenRouter");
   await expect(page.locator("#inference-key")).toHaveValue(typed);
 
   // Saving now stores it rather than reverting past it. The credential is
@@ -80,7 +110,9 @@ test("a key typed for a BYOK provider is not discarded by switching to managed",
   expect(after.ok()).toBeTruthy();
   const body = await after.json();
   expect(body.keyConfigured).toBe(true);
-  // Setting only a key must not move the company off the managed brain.
+  // Setting a key under OpenRouter lands on OpenRouter — which is also what the
+  // legacy `managed` alias normalizes to, so this stays the same assertion it
+  // was when the switch above ended on managed.
   expect(body.provider).toBe("openrouter");
 
   // And it can be taken back off again — set / rotate / clear, all from here.
@@ -158,10 +190,21 @@ test("OpenRouter models are selected from the registry and persist through reloa
   await page.route("**/inference/models", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify([
-        { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
-        { id: "provider/catalog-reasoning", name: "Catalog Reasoning" },
-      ]),
+      // `GET …/inference/models` answers with the configured endpoint's own
+      // catalog — `{baseUrl, models, tierVocabulary, tierDefaults}` — not the
+      // bare array it used to return. These ids are neither the tier names nor
+      // the shipped concrete ids, so a real host classifies this endpoint
+      // `unknown` and supplies no tier defaults; the console then keeps
+      // prefilling from `status.defaultTierModels`, as it does here.
+      body: JSON.stringify({
+        baseUrl: "https://catalog.example.test/v1",
+        models: [
+          { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
+          { id: "provider/catalog-reasoning", name: "Catalog Reasoning" },
+        ],
+        tierVocabulary: "unknown",
+        tierDefaults: {},
+      }),
     });
   });
   await openConnections(page);
@@ -217,9 +260,13 @@ test("a saved OpenRouter tier override can be cleared back to the tier default (
   await page.route("**/inference/models", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify([
-        { id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 },
-      ]),
+      // Same catalog shape as the spec above: an object, not a bare array.
+      body: JSON.stringify({
+        baseUrl: "https://catalog.example.test/v1",
+        models: [{ id: "provider/catalog-chat", name: "Catalog Chat", contextLength: 128_000 }],
+        tierVocabulary: "unknown",
+        tierDefaults: {},
+      }),
     });
   });
   await openConnections(page);

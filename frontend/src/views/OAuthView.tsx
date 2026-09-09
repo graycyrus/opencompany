@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import {
+  CATALOG_READ_TIMEOUT_MS,
   disconnectComposioConnection,
   getComposioStatus,
   listComposioConnections,
@@ -40,30 +41,31 @@ interface Props {
 type Load = "loading" | "ready" | "unavailable";
 
 /**
- * How long the Composio status probe may take before the grid stops waiting on
- * it. Mirrors the host's own `COMPOSIO_PROBE_TIMEOUT` on the connections read
- * path (`src/server/ops/connections_read.rs`) — the same argument applies on
- * this side of the wire: the answer it contributes is which route a tile takes,
- * and a page that paints honestly beats a page that never paints.
- */
-const COMPOSIO_PROBE_TIMEOUT_MS = 5_000;
-
-/**
- * The value the probe race resolves when the timeout wins (issue #1478). A
- * unique sentinel, so "the probe timed out" is distinguishable from "the probe
- * answered `null`" — the two are different facts and must render differently.
- */
-const PROBE_TIMED_OUT = Symbol("composio-probe-timed-out");
-
-/**
- * OAuth: the third-party accounts this company signs in to and acts through.
+ * Apps: the third-party accounts this company signs in to and acts through.
  *
  * One question per page. This page used to be "Connections" and carried five
  * unrelated ones — the accounts below, the MCP tool servers, which model the
  * company thinks with, its Telegram channel and its bound repositories — so
  * every one of them was something an operator scrolled past on the way to
- * another. MCP (`#/settings/mcp`) and inference (`#/settings/inference`) are
+ * another. MCP (`#/connections/mcp`) and inference (`#/settings/inference`) are
  * their own pages now; channels and repositories left the product entirely.
+ *
+ * # Why the title is "Apps" and not "OAuth"
+ *
+ * It is called **Apps** since it moved to `#/connections/apps`. "OAuth" names
+ * the protocol a connection happens to run on, which is not the thing an
+ * operator came to this page to find — they are looking for Gmail, Slack,
+ * Notion. It also read as a stutter under a section already called Connections.
+ * The file, the component and every internal name stay `OAuth*`: the protocol
+ * is exactly what the code is about, and renaming it would be a mechanical
+ * diff across the module for no surface benefit. The same split Rule 1 of
+ * `docs/spec/runtime/ledgers-console-ia.md` makes for "ledger".
+ *
+ * Composio stays on this page. `ComposioSection` looks self-contained, but
+ * `ProvidersSection` reads its `credentialSource`, `granted`, `openMode` and
+ * catalog warning to decide what every provider tile renders — the credential
+ * is the engine the provider list runs on, and splitting them would separate a
+ * credential from what it unlocks.
  */
 export function OAuthView({ client, company }: Props) {
   const [load, setLoad] = useState<Load>("loading");
@@ -112,11 +114,10 @@ export function OAuthView({ client, company }: Props) {
   // `reach` reads "Not available on this host" — so every tile would flash that
   // and then flip to Connect a moment later.
   const [reachSettled, setReachSettled] = useState(false);
-  // Whether the Composio probe LOST ITS RACE against the timeout (issue #1478).
-  // Distinct from `status === null`, which is also what a genuine "no Composio
-  // surface" answer sets — collapsing the two rendered a timed-out probe as a
-  // confident "this host has no providers to offer yet". A slow host is the
-  // common case here: the probe reaches an external catalog.
+  // Whether the Composio probe could not be answered at all. Distinct from
+  // `status === null`, which is also what a genuine "no Composio surface"
+  // answer sets — collapsing the two renders "we could not check" as a
+  // confident "this host has no providers to offer yet".
   const [probeFailed, setProbeFailed] = useState(false);
   // Poll timers for Composio sign-ins in flight, keyed by toolkit, so a company
   // switch or unmount cannot leave one running.
@@ -181,40 +182,31 @@ export function OAuthView({ client, company }: Props) {
   // there is no native arm to fall back to any more.
   useEffect(() => {
     let live = true;
+    const abort = new AbortController();
     setReachSettled(false);
     setProbeFailed(false);
     void (async () => {
       try {
-        // Bounded: the shared client has no abort or timeout, and the grid now
-        // waits on this call before painting — so a host that accepts the
-        // connection and never answers would hold the page on skeletons forever.
-        // The timeout resolves a distinct SENTINEL rather than `null`, because a
-        // null answer and a request that never answered are different facts: the
-        // former is "no Composio surface", the latter is "we could not check",
-        // and rendering the second as the first is the #1478 defect.
-        const probed = await Promise.race([
-          getComposioStatus(client, company),
-          new Promise<typeof PROBE_TIMED_OUT>((resolve) =>
-            window.setTimeout(() => resolve(PROBE_TIMED_OUT), COMPOSIO_PROBE_TIMEOUT_MS),
-          ),
-        ]);
+        // Bounded and cancellable through the client itself. The bound must
+        // outlast the host's own upstream-catalog budget, or a cold catalog is
+        // abandoned at exactly the moment the host is about to answer with its
+        // flagged fallback — and the grid renders "couldn't check" for a host
+        // that could have explained itself.
+        const probed = await getComposioStatus(client, company, {
+          timeoutMs: CATALOG_READ_TIMEOUT_MS,
+          signal: abort.signal,
+        });
         if (!live) return;
-        if (probed === PROBE_TIMED_OUT) {
-          // Could not check — say so downstream rather than assembling a
-          // confident empty state from a request that never answered.
-          setStatus(null);
-          setAttested(false);
-          setProbeFailed(true);
-        } else {
-          setStatus(probed);
-          setAttested(probed?.credentialSource === "attested");
-        }
+        setStatus(probed);
+        setAttested(probed?.credentialSource === "attested");
       } catch (err) {
-        // A 404 is the honest "no Composio surface on this host" (issue #822):
-        // leave the page in its no-route state. Anything else — a 5xx, an
-        // offline network, an expired session — is UNKNOWN, not absent, so it
-        // takes the same `probeFailed` path as the timeout above. Collapsing it
-        // to a confident empty catalog is the #1478 defect one level down.
+        // A read this page tore down itself — a company switch, an unmount —
+        // says nothing about the host, so it must not leave a warning behind.
+        if (err instanceof Error && err.name === "AbortError") return;
+        // A 404 is the honest "no Composio surface on this host": leave the
+        // page in its no-route state. Anything else — a 5xx, an offline
+        // network, an expired session, a host that did not answer in time — is
+        // UNKNOWN, not absent, and says so.
         if (live) {
           setStatus(null);
           setAttested(false);
@@ -226,6 +218,7 @@ export function OAuthView({ client, company }: Props) {
     })();
     return () => {
       live = false;
+      abort.abort();
     };
     // `credentialGeneration` is load-bearing, not decoration: this probe feeds
     // `reach.hasCredential` and `attested`, both of which are downstream of the
@@ -533,7 +526,7 @@ export function OAuthView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
-        title="OAuth"
+        title="Apps"
         width="5xl"
         description={
           <>
@@ -583,9 +576,21 @@ export function OAuthView({ client, company }: Props) {
           </Alert>
         )}
 
-        {/* The general answer sits above the Composio-specific one: this key
-            authorizes every brokered surface, and the Composio token below is
-            the escape hatch (issue #586). */}
+        {/* The general answer above the Composio-specific one: one key
+            authorizing every brokered surface, with the Composio credential as
+            the escape hatch (issue #586).
+
+            This was hidden behind `COMPOSIO_MANAGED_HIDDEN` because asking for
+            a TinyHumans key meant sending an operator to another site to mint
+            one — a worse errand than the Composio key below, for a credential
+            most people did not have. The key grant removes the errand: the card
+            now leads with one button and falls back to the field only where a
+            grant cannot complete.
+
+            It is no longer gated by a flag at all. The card asks the host and
+            renders nothing when there is no credential plane to talk to, which
+            is a truer answer than a constant — and it keeps this flag meaning
+            the one thing it says, rather than two. */}
         <CompanyCredentialCard
           client={client}
           company={company}

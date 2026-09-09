@@ -16,7 +16,61 @@ backend derives the Composio entity from whatever bearer it is handed, and a
 TinyHumans key is a bearer it recognises. So the key **authorizes Composio
 directly** — there is no provisioning step that trades it for a second token,
 and no per-tenant provider application to register with Google, Slack or GitHub.
-A company with a key set connects Gmail by clicking Connect.
+
+### Not every TinyHumans key reaches Composio
+
+The bearer has to carry the `connections` scope. The backend requires it on
+*every* `/agent-integrations/composio` request, safe methods included, and
+refuses to mint it on `POST /api-keys` — so a key a person created by hand in
+their TinyHumans account, and then pasted into `PUT …/credential`, connects
+nothing. It is a real credential that authenticates fine and is refused at that
+one surface.
+
+Two principals do carry it:
+
+- **An attested hosted tenant.** The manager-issued, audience-bound cluster
+  token the instance authenticates with is granted
+  `read`/`connections`/`inference` automatically. A hosted company therefore
+  reaches Composio with no key set at all.
+- **A key issued by the grant flow below**, when the console that asked for it
+  is a provisioned tenant origin.
+
+This is worth stating plainly because the console cannot tell the difference
+from the outside: `PUT …/credential` accepts any string, and a pasted key
+reports `configured: true` and `source: company` whether or not it can do the
+thing the card describes.
+
+## Getting the key without pasting one
+
+`POST …/credential/link/start` → the hub → `POST …/credential/link/finish`.
+Modelled on OpenRouter's PKCE key exchange, and it exists because the
+alternative was an operator leaving the app to mint a key by hand and carrying
+it back on a clipboard.
+
+1. **Start.** The host mints a `code_verifier`, keeps it in memory
+   (`server::hub_link`), and answers with the hub URL to navigate to — carrying
+   only `base64url(sha256(verifier))` and an opaque `state`.
+2. **The hub.** The person signs in with their provider and approves a consent
+   screen naming the requesting origin and the scopes. The hub decides those
+   scopes from the callback origin: a **provisioned tenant origin** may receive
+   `connections`; a loopback console receives what a human could mint by hand.
+3. **Finish.** The browser returns with a single-use `code`. The host looks up
+   the verifier by `state`, redeems both at the hub, and stores what comes back.
+
+The verifier never leaves the host and the key never reaches the browser. That
+is the reason the exchange is server-side rather than done in the page: whatever
+redeems the code receives the key, and a `connections` key passing through a tab
+is a credential in a place nobody can account for.
+
+**One grant arms two credentials.** The minted key is stored as both
+`tinyhumans/key` and `inference/key`, and the company's inference provider is
+declared `managed`. An admin who had to run the flow once per page — once for
+Connections, once for Inference — would be back to two errands, which is the
+thing this replaces.
+
+The paste field stays. A host with no hub wired reports `hubLink: false` on
+`GET …/credential`, the console renders no button, and the screen is exactly
+what it was before this existed.
 
 ## Where a connection lives
 
@@ -91,6 +145,101 @@ always-compiled `company::` module rather than the feature-gated `harness::`
 one precisely so both callers can share it in every build; a console route that
 restated the precedence instead would keep confidently reporting a tier after
 the resolver stopped honouring it.
+
+## BYOK Composio: a route, not a tier
+
+Everything above answers *whose identity* a brokered call presents. Composio
+carries a second, orthogonal question — *which host* it is presented to — and
+that one is not a tier at all.
+
+| | managed | byok |
+| --- | --- | --- |
+| Host | the OpenHuman backend's `/agent-integrations/composio/*` | `backend.composio.dev` |
+| Credential | the precedence chain above | this company's own Composio API key (`composio/api_key`) |
+| Who bills | the platform | whoever owns that Composio account |
+| Toolkit gate | the backend's server-enforced allowlist | the company's own Composio dashboard |
+
+The mode is stored under `composio/mode` and defaults to `managed`, so a
+company that configures nothing is unaffected by any of this. Storing an API
+key through `PUT …/composio/api-key` selects `byok`; clearing it returns the
+company to `managed`. The two writes are one call deliberately: a mode without
+a key is a company with no Composio tools, and a key without a mode is a
+credential nothing reads.
+
+`resolve_access` is the one derivation of both answers, and every reader —
+`TenantComposio::resolve`, `GET …/composio`, `/capabilities` — asks it rather
+than restating the rule, for the same reason `resolve_credential` is derived
+once.
+
+**BYOK does not fall back.** With the mode set and no key stored, the answer is
+`Credential::None` and the company gets no Composio tools — it does not quietly
+drop to the managed chain. Falling back would connect providers into the wrong
+Composio tenant and bill the wrong party, which is a worse failure than having
+no tools. The mode is folded into the roster fingerprint, so a switch in either
+direction reaches the agents on their next turn with no restart.
+
+One thing the managed route carries and BYOK does not: per-toolkit
+`extra_params` at authorize time. The v3 link call takes no such field, and a
+BYOK operator sets those on the auth config in their own Composio account.
+
+**Revoking is not on that list**, though it was until it was checked. The
+vendored `ComposioTool` has no delete method and OpenHuman's direct mode routes
+its revoke through the backend — neither of which says anything about Composio,
+which exposes `DELETE /api/v3/connected_accounts/{id}` perfectly well (a no-auth
+probe answers `401` on it and `404` on a route that does not exist). Taking a
+gap in borrowed code for a gap in the product is how a console comes to hide a
+control that would have worked.
+
+### The catalog is OpenHuman's, even under BYOK
+
+A BYOK company is offered the **same 123 providers a managed one is**, fetched
+from OpenHuman's backend with the *managed-chain* credential
+(`TenantComposio::catalog`) while every Composio call still goes direct.
+Switching a company to its own Composio account changes **who it acts as**, not
+what the console lets it browse.
+
+Neither list a BYOK company can reach alone is the right one: Composio's own
+directory is 1501 entries, most of which this harness has no curated tool
+surface for, and the compiled-in shortlist (`agent_ready_toolkits`) is 31.
+OpenHuman's backend publishes the middle answer.
+
+The two credentials are kept strictly apart — the Composio key is what calls
+present, the managed bearer is *only* ever the curated list's — and both join
+the scrub vector, because both are live credentials on that call. The list
+itself is non-secret and cached for `CATALOG_TTL`; no Composio traffic is
+proxied through it and nothing is billed by it.
+
+With **no managed tier at all** (a standalone host carrying no TinyHumans
+identity) there is no curated list to fetch, and the catalog falls back to the
+company's own Composio directory rather than presenting the Composio key to the
+OpenHuman backend. That fallback is where the bound below applies.
+
+### That fallback is bounded, and says so
+
+Composio's v3 listings are cursor-paginated and large: **1501 toolkits over 8
+pages**, and an unscoped `/tools` query is 52,268 over 262. Following the
+toolkit cursor to the end measures ~8.4s, against a 5s budget on the host
+(`composio_toolkits::FETCH_TIMEOUT`) and another 5s on the console
+(`COMPOSIO_PROBE_TIMEOUT_MS`) — so a complete sweep would not merely be slow,
+it would always time out and degrade to the built-in fallback list.
+
+`MAX_PAGES` is therefore 3 (~600 toolkits, ~3.3s measured), and what it could
+not reach is **counted from Composio's own `total_items` and logged**, never
+dropped in silence: a grid showing 600 providers is indistinguishable from a
+complete one. Serving the whole directory would mean refreshing it off the
+request path rather than raising either budget; that is a follow-up, not
+something a larger timeout fixes.
+
+One parameter is worth knowing about, because Composio v3 **ignores unknown
+query parameters rather than refusing them**: tools are scoped with
+`toolkit_slug=a,b`, not `toolkits=`. The wrong spelling does not error — it
+returns the first page of all 52,268 tools alphabetically. Repeating the
+parameter returns an empty body; one comma-separated value is the working form.
+
+This mirrors OpenHuman's own `backend` / `direct` split
+(`vendor/openhuman/src/openhuman/integrations/composio/client.rs`); the
+vocabulary here is `managed` / `byok` to match `company::search`, which made the
+same choice first.
 
 ## Rotation
 

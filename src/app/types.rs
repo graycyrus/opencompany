@@ -22,7 +22,9 @@ use crate::{BUILD_COMMIT, VERSION, tiny::RuntimeModuleStatus};
 pub struct AppConfig {
     /// Address for the Axum HTTP server.
     pub bind: String,
-    /// Optional sibling OpenHuman checkout used by launcher commands.
+    /// Optional sibling OpenHuman checkout, recorded rather than used: `/spec`
+    /// reports whether one is set and nothing reads the path. `open-human`
+    /// launches a checkout, and takes its own `--root`.
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
@@ -437,6 +439,11 @@ pub struct AppState {
     /// self-hosted host) means the console offers no ecosystem sign-in at all,
     /// rather than offering a button that leads nowhere.
     hub_identity: Option<Arc<dyn crate::server::hub_identity::HubIdentityExchange>>,
+    /// Key-grant flows started and not yet finished, keyed by the opaque
+    /// `state` the browser carries. Holds the PKCE verifier, which is why it is
+    /// in memory and swept rather than persisted — see
+    /// [`hub_link`](crate::server::hub_link).
+    hub_links: Arc<crate::server::hub_link::HubLinks>,
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
@@ -482,6 +489,16 @@ pub struct AppState {
     /// request. Gated behind `tinyplace` so the default build links no crypto.
     #[cfg(feature = "tinyplace")]
     nonce: std::sync::Arc<crate::economy::NonceCache>,
+    /// Host-global spent-nonce set for inbound x402 payment authorizations.
+    ///
+    /// Separate from `nonce` because the two guard different values over
+    /// different windows: a SIWX signature is good for the clock-skew window,
+    /// an authorization nonce for
+    /// [`x402::MAX_AGE_SECS`](crate::economy::x402::MAX_AGE_SECS). Sharing one
+    /// set would let either keyspace prune the other's record, and a forgotten
+    /// payment nonce is a free task.
+    #[cfg(feature = "tinyplace")]
+    x402_nonce: std::sync::Arc<crate::economy::NonceCache>,
     /// In-flight console MCP OAuth flows, keyed by the opaque `state` the browser
     /// round-trips (issue #90). The `/mcp/servers/{name}/oauth/start` route parks
     /// a [`PendingOAuth`](crate::company::mcp_oauth::PendingOAuth) here; the
@@ -574,9 +591,14 @@ impl AppState {
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
             hub_identity: None,
+            hub_links: Arc::new(crate::server::hub_link::HubLinks::new()),
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
+            #[cfg(feature = "tinyplace")]
+            x402_nonce: std::sync::Arc::new(crate::economy::NonceCache::with_ttl(
+                crate::economy::x402::MAX_AGE_SECS,
+            )),
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             analytics: crate::analytics::null_tracker(),
@@ -650,6 +672,40 @@ impl AppState {
     #[cfg(feature = "acp")]
     pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
         Arc::clone(&self.acp_sessions)
+    }
+
+    /// Starts the process-wide ACP-session sweeper, reclaiming sessions idle
+    /// past their TTL. A no-op join handle when this build lacks the `acp`
+    /// feature.
+    ///
+    /// Always compiled and always callable, unlike [`Self::acp_sessions`] —
+    /// so an embedder linking this crate as a library (the desktop host,
+    /// `src-tauri/src/embedded.rs`) can call this the same way whether or not
+    /// its own default dependency features happen to include `acp`, rather
+    /// than needing `#[cfg(feature = "acp")]` of its own — which would need a
+    /// same-named feature declared on that crate purely to gate a `cfg`, and
+    /// this crate's own `acp`/`composio` are deliberately *not* forwarded
+    /// that way (see `src-tauri/Cargo.toml`'s comment on why: keeping its
+    /// `Cargo.lock` byte-identical between the default and release feature
+    /// sets is what lets a release still build `--locked`). The standalone
+    /// binary's own `spawn_acp_session_sweeper` mirrors this one line for
+    /// line; it stays `#[cfg(feature = "acp")]` there because it is not
+    /// compiled by anything but this crate itself.
+    #[cfg(feature = "acp")]
+    pub fn spawn_acp_session_sweeper(
+        &self,
+        shutdown: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        crate::server::acp::SessionSweeper::new(self.acp_sessions()).spawn(shutdown)
+    }
+
+    /// See the feature-enabled [`Self::spawn_acp_session_sweeper`] above.
+    #[cfg(not(feature = "acp"))]
+    pub fn spawn_acp_session_sweeper(
+        &self,
+        _shutdown: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {})
     }
 
     /// This host's in-place runtime rebuilder, when one is wired.
@@ -916,6 +972,16 @@ impl AppState {
         self.hub_identity.as_ref()
     }
 
+    /// The pending key-grant flows for this host.
+    ///
+    /// Always present, unlike [`Self::hub_identity`]: the map costs nothing on a
+    /// host that never starts a link, and making it optional would put a
+    /// `None` branch on a path that already refuses earlier when there is no
+    /// exchange to redeem against.
+    pub fn hub_links(&self) -> &Arc<crate::server::hub_link::HubLinks> {
+        &self.hub_links
+    }
+
     /// Installs platform (multi-tenant) auth. Mirrors [`Self::with_home`].
     pub fn with_platform_auth(mut self, platform_auth: PlatformAuthConfig) -> Self {
         self.config.platform_auth = Some(platform_auth);
@@ -1073,6 +1139,12 @@ impl AppState {
         &self.nonce
     }
 
+    /// The host-global spent-nonce set for inbound x402 authorizations.
+    #[cfg(feature = "tinyplace")]
+    pub fn x402_nonce(&self) -> &std::sync::Arc<crate::economy::NonceCache> {
+        &self.x402_nonce
+    }
+
     /// How long a parked OAuth flow stays reclaimable before it's swept. Longer
     /// than any realistic operator round-trip through the authorization server,
     /// short enough that an abandoned flow's secrets don't linger.
@@ -1142,11 +1214,7 @@ impl AppState {
                 "tiny",
             ],
             runtime_modules: RuntimeModuleStatus::all(),
-            openhuman_root: self
-                .config
-                .openhuman_root
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            openhuman_configured: self.config.openhuman_root.is_some(),
             api_url: self.config.api_url.clone(),
             cycles_available: self.config.cycles_available(),
             instance_id: self.instance_id().to_string(),
@@ -1179,6 +1247,13 @@ impl AppState {
     /// break a client that has not heard of the new entry.
     fn capabilities(&self) -> Vec<&'static str> {
         let mut out = vec!["rest", "graphql", "sse", "approvals"];
+        // The four-way blocker answer. Gated with the code that carries it out:
+        // a build without `openhuman` refuses `blocker_verdict` outright, so
+        // advertising it there would promise a resume this build cannot run.
+        // A console reading no entry must not send `skip` or `amend`, whose
+        // lowered two-way form asks an unaware host for a different action.
+        #[cfg(feature = "openhuman")]
+        out.push("blocker-verdict");
         if self.hub_identity.is_some() {
             out.push("hub-identity");
         }
@@ -1227,8 +1302,11 @@ pub struct AppSpec {
     pub modules: Vec<&'static str>,
     /// Runtime module integration status.
     pub runtime_modules: Vec<RuntimeModuleStatus>,
-    /// Configured OpenHuman checkout path, if any.
-    pub openhuman_root: Option<String>,
+    /// Whether an OpenHuman checkout is configured on this host.
+    ///
+    /// The bare fact, not the location: `/spec` is unauthenticated, so this
+    /// reports a checkout the same way [`Self::storage`] reports a backend.
+    pub openhuman_configured: bool,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
     /// Whether hosted cognition can run (hosted brain plus a credential this
@@ -1272,6 +1350,29 @@ mod tests {
     #[test]
     fn workspace_git_checkpoints_default_off() {
         assert!(!AppConfig::default().workspace_git_enabled);
+    }
+
+    /// Callable and finite in every build, `acp` feature or not — the whole
+    /// point of the facade: an embedder linking this crate as a library
+    /// (`src-tauri/src/embedded.rs`) cannot know at its own compile time
+    /// whether this crate's default dependency features happened to include
+    /// `acp`, so the call site must never need a `cfg` of its
+    /// own to stay buildable.
+    #[tokio::test]
+    async fn spawn_acp_session_sweeper_is_always_callable_and_stoppable() {
+        let state = AppState::new(AppConfig::default());
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle = state.spawn_acp_session_sweeper(Arc::clone(&shutdown));
+        // `notify_one`, not `notify_waiters`: this test is the only holder of
+        // `shutdown` and the sweeper its only waiter, and unlike
+        // `notify_waiters`, `notify_one` stores a permit for a task that has
+        // not registered as waiting yet — so this cannot lose the
+        // notification to a scheduling race.
+        shutdown.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("the sweeper task must stop once notified, in every build")
+            .expect("the sweeper task must not panic");
     }
 
     fn bound_to(bind: &str) -> AppConfig {

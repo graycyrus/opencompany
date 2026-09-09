@@ -89,6 +89,27 @@ export interface WorkflowNode {
    * classifies its call as reaching outside the company.
    */
   repeatable?: boolean;
+  /**
+   * A deterministic postcondition (issue #1866): a mechanical predicate
+   * checked against the node's output before it is allowed to flow
+   * downstream — `require` is `"non_empty"` | `"field_present"` |
+   * `"non_empty_list"`, `field` a dotted path into the output (required for
+   * `field_present`, optional for `non_empty_list`).
+   *
+   * Only ever set through the write route, on `agent` nodes today. This
+   * console has no control for it, so every read/write path here must carry
+   * it through verbatim like `onError`/`retry`/`requiresApproval`/
+   * `repeatable` — dropping it on an unrelated edit silently removes a
+   * run-safety gate the operator declared (issue #1937 review).
+   */
+  postcondition?: {
+    require: string;
+    field?: string;
+  };
+  /** Runs one semantic sufficiency judge pass after the deterministic check. */
+  verify?: {
+    criteria?: string;
+  };
   /** Where an `output` node's report goes when the run finishes. */
   destination?: WorkflowDestination;
 }
@@ -265,6 +286,13 @@ export interface DeliveryReport {
  * `blocked` and `awaiting-approval` because it contradicts them — both tell an
  * operator to go and decide something, and this is the state in which there is
  * nothing there.
+ *
+ * `degraded` is the newest addition (issue #1865): a node under
+ * `on_error: continue|route` errored and the graph kept going past it, or an
+ * agent node's turn truncated at the iteration cap. Checked LAST, immediately
+ * above `ok` — every reading above it describes something more actionable, so
+ * a run that is also failed, stopped, stranded, blocked, undelivered or
+ * awaiting approval reports that instead.
  */
 export type WorkflowRunVerdict =
   | "running"
@@ -274,6 +302,7 @@ export type WorkflowRunVerdict =
   | "blocked"
   | "undelivered"
   | "awaiting-approval"
+  | "degraded"
   | "ok";
 
 /** The result of a run: the engine's final state and any pending approvals. */
@@ -346,6 +375,14 @@ export interface WorkflowRunResult {
    * delivery failure, because the nodes really did run.
    */
   verdict?: WorkflowRunVerdict;
+  /**
+   * Whether the operator stopped this run before it settled (Codex review, PR
+   * #2053). The host has sent this on every settled body since before #981;
+   * added to the type now because deriving a legacy fallback verdict — see
+   * {@link legacyRunVerdict} — needs it and a `WorkflowRunVerdict | undefined`
+   * host predating #981 still sends it.
+   */
+  cancelled?: boolean;
 }
 
 /**
@@ -417,7 +454,7 @@ export interface WorkflowRunNode {
    * for a bug when the fix is a click in Approvals; rendering it as `ok` is the
    * lie the issue was filed about.
    */
-  status: "ok" | "error" | "blocked";
+  status: "ok" | "error" | "blocked" | "declined";
   /** Wall-clock duration of the node's execution, in milliseconds. */
   elapsedMs: number;
   /**
@@ -749,10 +786,11 @@ interface WiredChannelsResponse {
  * output node's `channel` destination may name (issue #813): its desk chats and
  * its enabled OpenHuman-provider manifest channels.
  *
- * **`operator` is not one of them** (issue #981). It is an in-memory response
- * surface with no durable reader, so workflow delivery refuses it by name; the
- * host used to include it here anyway, which offered authors the one target
- * guaranteed to fail.
+ * **`operator` is always one of them** (issue #1757). It was excluded per
+ * issue #981, back when the in-memory `operator` adapter had no durable reader
+ * and workflow delivery refused it by name; the built-in Operator channel is
+ * now a durable, journal-backed delivery target present on every running
+ * company, so the host serves it here like any other real channel.
  *
  * The console reads this to offer a picker instead of a free-text box that only
  * fails at delivery with `ChannelNotWired`. An empty list has two causes and the
@@ -1268,19 +1306,38 @@ export function updateWorkflow(
  * Follows the same runtime-vs-source contract as `deleteDesk`: a workflow
  * defined by a file in the company source tree cannot be removed from the
  * console and returns `409`; an unknown id is `404`.
+ *
+ * Resolves to how many in-flight runs the host's post-delete sweep actually
+ * stopped (CodeRabbit review, PR #2053) — **not** whether the caller was
+ * watching a run before it asked. Those can disagree with no race required: a
+ * long run can settle on its own in the seconds between the operator
+ * confirming the delete and this request reaching the host, and the sweep
+ * then truthfully stops nothing. `stoppedRuns` is the one place the real
+ * answer lives; the console's delete flow reads it rather than its own
+ * pre-request guess.
+ *
+ * **Tolerates an older host** (Codex review, PR #2053): before B-121 this
+ * route answered `204` with an empty body, and `OpenCompanyClient`'s generic
+ * request reader turns that into `undefined` rather than `{}`. Destructuring
+ * `stoppedRuns` straight off that would throw — after the host had already
+ * deleted the workflow — which would misreport a successful delete as a
+ * failure and leave the removed workflow selected until a reload. An absent
+ * response reads as `stoppedRuns: 0`, the only honest answer an old host that
+ * never ran a sweep at all can give.
  */
-export function deleteWorkflow(
+export async function deleteWorkflow(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
   expectedVersion?: string | null,
-): Promise<void> {
+): Promise<{ stoppedRuns: number }> {
   const query = expectedVersion
     ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
     : "";
-  return client.del<void>(
+  const body = await client.del<{ stoppedRuns: number } | undefined>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}${query}`,
   );
+  return { stoppedRuns: body?.stoppedRuns ?? 0 };
 }
 
 /**

@@ -142,7 +142,7 @@ use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 
 use crate::company::Policy;
 use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
-use crate::policy::{CallPath, McpReadSet};
+use crate::policy::{CallPath, McpReadSet, Standing};
 use crate::ports::UsageMeter;
 use crate::ports::types::{CompanyId, Effect, EffectGroup, Verdict};
 use crate::runtime::grants::{GrantSet, GrantSubject, GrantedCall};
@@ -726,6 +726,38 @@ impl ApprovalRequestQueue {
             .map_or(0, Vec::len)
     }
 
+    /// How many requests queued **since** `from` are blockers (issue #1861).
+    ///
+    /// Counted the same way [`stamp_run`](Self::stamp_run) stamps — over this
+    /// scope's bucket from the same boundary — so the two describe one set of
+    /// requests rather than two overlapping ones.
+    ///
+    /// `run_task` needs it to settle honestly. A turn that raised a question
+    /// has not succeeded, and it has not failed either; without this the
+    /// ending would come from the turn's own outcome and a turn that escalated
+    /// and then produced prose would land `in_review` with an unanswered
+    /// question attached to it.
+    ///
+    /// Keyed on the effect kind's [`BLOCKER_EFFECT_PREFIX`] rather than on a
+    /// flag: the kind is what the journal, the console and the approvals feed
+    /// all read, so a request that says `blocker.*` to them and something else
+    /// here could not happen.
+    ///
+    /// [`BLOCKER_EFFECT_PREFIX`]: crate::ports::blockers::BLOCKER_EFFECT_PREFIX
+    pub fn blockers_since(&self, from: usize) -> usize {
+        let scope = Self::current_scope();
+        let guard = self.inner.lock().expect("approval request queue");
+        let Some(bucket) = guard.get(&scope) else {
+            return 0;
+        };
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        bucket
+            .iter()
+            .skip(from)
+            .filter(|request| request.effect.kind.starts_with(&prefix))
+            .count()
+    }
+
     /// Stamps `run_id` onto every request queued at or after `from`, returning
     /// how many were stamped (issue #242).
     ///
@@ -857,6 +889,17 @@ pub struct ApprovalPolicy {
     /// S1 tells the agent to route these providers through Composio, this refuses
     /// the raw `http_request` / `curl` / `web_fetch` that ignores it.
     connected_composio_toolkits: Vec<String>,
+    /// The company's emergency-stop flag, consulted ahead of the mode dispatch
+    /// so a consequential call still refuses under `full` autonomy — the one
+    /// tier with no per-call gate to reach `ManifestApprovalGate::evaluate` or
+    /// `park` at all.
+    ///
+    /// `None` at every non-harness construction site and every test with no
+    /// company gate to ask, which keeps them dispatching exactly as before.
+    /// Only `build_roster` chains
+    /// [`with_emergency_gate`](Self::with_emergency_gate), from
+    /// `deps.emergency_gate`.
+    emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
 }
 
 #[derive(Clone)]
@@ -911,6 +954,10 @@ impl ApprovalPolicy {
             // No connected toolkits by default, so the S2 web-deflection arm is
             // inert — see `with_connected_composio_toolkits`.
             connected_composio_toolkits: Vec::new(),
+            // No gate by default, so every non-harness construction site and
+            // every test with no company to ask dispatches exactly as before —
+            // see `with_emergency_gate`.
+            emergency_gate: None,
         }
     }
 
@@ -942,6 +989,17 @@ impl ApprovalPolicy {
     /// effect knows whose tool call it came from (issue #243).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    /// Installs the company's emergency-stop flag, so `check` refuses a
+    /// consequential call under `full` autonomy the same way `evaluate` and
+    /// `park` already refuse one on every other tier.
+    pub fn with_emergency_gate(
+        mut self,
+        gate: Arc<crate::policy::gate::ManifestApprovalGate>,
+    ) -> Self {
+        self.emergency_gate = Some(gate);
         self
     }
 
@@ -1274,6 +1332,64 @@ impl ApprovalPolicy {
     /// **untouched at cap**. A spend cap caps spend; making a teammate unable to
     /// answer a question because it spent its budget this morning would be a
     /// different feature, and a worse one.
+    /// Record what a consequence floor would have done with this call, and
+    /// change nothing (issue #2147).
+    ///
+    /// Epic #1817 asks for outward, irreversible acts — publish, send, sign,
+    /// hire, identity, spend that leaves — to reach a person whatever tier the
+    /// company runs. Since #1925 nothing does: the bypass immediately below
+    /// this call site allows every classification-derived decision. Whether to
+    /// re-introduce a stop is a product question, and the honest input to it is
+    /// how often such a stop would actually fire on live traffic — a
+    /// taxonomically narrow floor can still be practically wide.
+    ///
+    /// So this emits one line per call the floor would have stopped, tagged
+    /// with the reason, the tier, and whether HITL was on at the time. Silent
+    /// calls emit nothing: the denominator is the tool-call trace the runs
+    /// already record, and logging every allowed call to count it would bury
+    /// the signal it exists to produce.
+    ///
+    /// [`floor::deferred_group`] is reported on its own axis so #658's
+    /// `publish_artifact` carve-out can be revisited with a number instead of
+    /// two opinions — it is counted, never folded into the floor's own count.
+    ///
+    /// Emitted through `tracing`, at the `policy::shadow_floor` target
+    /// `DEFAULT_LOG_FILTER` (`src/bin/opencompany.rs`) names explicitly. The
+    /// binary's default filter is bare `error`, and no container image,
+    /// compose file or deploy workflow sets `RUST_LOG` — the same shape issue
+    /// #450 already found once for the durable-append worker's `warn!` lines.
+    /// An `info!` with no matching exception is exactly as silent as those
+    /// were: a week of staging traffic would produce this measurement's
+    /// entire denominator and record none of it.
+    fn record_shadow_floor(&self, tool: &str, args: &serde_json::Value) {
+        // The per-call allowance, which is the cap a single call is measured
+        // against. The daily budget is a different question and has its own arm.
+        let verdict = crate::policy::floor::evaluate(tool, args, self.auto_approve_under_usd);
+        if verdict.requires_human() {
+            tracing::info!(
+                target: "policy::shadow_floor",
+                "[policy:shadow-floor] agent={} tool='{}' would_stop={} mode={:?} hitl={} issue=2147",
+                self.agent.as_deref().unwrap_or("-"),
+                tool,
+                verdict.reason_word(),
+                self.mode,
+                self.policy_hitl_enabled,
+            );
+        }
+        if let Some(group) = crate::policy::floor::deferred_group(tool, args) {
+            tracing::info!(
+                target: "policy::shadow_floor",
+                "[policy:shadow-floor] agent={} tool='{}' deferred_group={:?} mode={:?} hitl={} \
+                 issue=2147",
+                self.agent.as_deref().unwrap_or("-"),
+                tool,
+                group,
+                self.mode,
+                self.policy_hitl_enabled,
+            );
+        }
+    }
+
     fn is_priced_call(tool: &str, args: &serde_json::Value, declared_amount: Option<f64>) -> bool {
         declared_amount.is_some() || classify_group(tool, args) == EffectGroup::Spend
     }
@@ -1490,6 +1606,94 @@ impl ApprovalPolicy {
         }
         consequence
     }
+
+    /// Does the run this call is executing inside already carry an operator's
+    /// consent for it (issue #2150, Rung 3 of epic #1817)?
+    ///
+    /// Consulted only from inside the `auto` / `supervised` mode arms of
+    /// [`check`](ToolPolicy::check), which is what keeps this a narrowing: it
+    /// can turn a park those two tiers would otherwise raise into an allow,
+    /// and it is never reached for `readonly` (denies before the mode
+    /// dispatch) or `full` (never parks here at all). Everything above the
+    /// mode dispatch — the reserved `never_do` slot, the S2 web-deflection
+    /// deny, the `readonly` brake, both grant arms, `always_approve`, the
+    /// daily cap — has already had its say and none of it reads this.
+    ///
+    /// [`crate::harness::built_in::run_origin::current`] is fail-closed by
+    /// construction, so every early `false` below is this predicate refusing
+    /// to admit rather than the origin failing to supply an answer.
+    fn trusted_dispatch_admits(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        consequence: crate::policy::Consequence,
+    ) -> bool {
+        // Issue #674's split, reasserted here rather than merely documented:
+        // `judge` is silent on an authored workflow node, so admitting one
+        // through trust as well would remove the ceiling `always_approve`
+        // still leaves on that path. `for_authored_workflow_nodes` is the only
+        // constructor that sets this, and this arm must never fire for it.
+        if self.call_path != CallPath::Agent {
+            return false;
+        }
+        // `Standing::PerCall` is exactly "every call is its own decision" —
+        // the set an operator could never have handed over ahead of time, so
+        // there is nothing here for a dispatched run to have inherited.
+        if consequence.standing == Standing::PerCall {
+            return false;
+        }
+        // The consequence floor outranks every trust this module hands out.
+        // `None` for the cap matches `judge`'s own reading — any declared
+        // amount stops.
+        //
+        // It cannot change an outcome today, and that is worth saying rather
+        // than discovering. Two reasons, and both could stop being true:
+        // every tool the floor names is `PerCall`, which the arm above already
+        // refused (the one `Grantable` tool with a consequence group,
+        // `publish_artifact`, is deferred by #658 so the floor is silent on
+        // it); and the money arm is caught anyway by `judge` at the tail of
+        // `check`, which re-judges whatever the tier allowed.
+        //
+        // Removing it therefore keeps the suite green — verified, not assumed.
+        // It stays because the second reason is positional: if epic #1817's
+        // floor becomes an enforced arm ABOVE the `policy_hitl_enabled`
+        // bypass, `judge`'s tail placement no longer covers a call this
+        // function admitted, and this line is what keeps trust from outranking
+        // the floor on that day. The first reason is one `DECLARED` edit away
+        // from changing on its own.
+        if crate::policy::floor::evaluate_consequence(tool, consequence, args, None)
+            .requires_human()
+        {
+            return false;
+        }
+        let crate::harness::built_in::run_origin::RunOrigin::Dispatched { agent, scope, .. } =
+            crate::harness::built_in::run_origin::current()
+        else {
+            return false;
+        };
+        // The dispatched agent, not this call's arguments, is what earned the
+        // trust — and the checking policy's own `self.agent` is the identity
+        // actually making this call. A delegate running under an origin its
+        // dispatch never named is exactly the escalation `run_origin`'s own
+        // docs warn against; the mismatch here is what stops it.
+        if self.agent.as_deref() != Some(agent.as_str()) {
+            return false;
+        }
+        match consequence.standing {
+            Standing::Grantable => true,
+            Standing::ScopedGrantable => {
+                // A scope that cannot be derived refuses rather than admits —
+                // the same direction `StandingGrant::admits_scope` takes for a
+                // live call whose scope reads `None` against a scoped grant.
+                let Some(call_scope) = crate::policy::consequence::standing_scope_of(tool, args)
+                else {
+                    return false;
+                };
+                scope.as_deref() == Some(call_scope.as_str())
+            }
+            Standing::PerCall => unreachable!("returned above"),
+        }
+    }
 }
 
 #[async_trait]
@@ -1518,6 +1722,37 @@ impl ToolPolicy for ApprovalPolicy {
         // refused by the boundary above.
         if tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
             return ToolPolicyDecision::Allow;
+        }
+
+        // The emergency stop (issue #86), computed and enforced HERE — above
+        // every unconditional `Allow` this function can still reach below: a
+        // redeemed single-use grant, a standing grant, `policy_hitl_enabled ==
+        // false`, and `auto_approve_under_usd`. `ManifestApprovalGate` enforces
+        // the same veto at `evaluate`/`park`, but a harness tool call never
+        // reaches either — `check` decides `Allow` on its own, so any one of
+        // those branches returning first is a live bypass, not just `full`
+        // autonomy's blanket allow. Without this, an in-flight turn that
+        // survives the stop (by design — see
+        // `CompanyRuntime::ensure_not_emergency_stopped`) could still dispatch
+        // a consequential tool the containment story assumes the gate denies.
+        // `EffectGroup::Other` stays exempt, matching `evaluate`/`park`.
+        //
+        // `consequence_for` is computed here rather than at its original site
+        // near the mode dispatch, and reused there (see `let reach =
+        // consequence.reach;` below) — it depends only on `tool`/`args` and
+        // `self.mode`/`self.workspace`/`self.agent`, none of which the branches
+        // between here and there can change.
+        let consequence = self.consequence_for(tool, &request.arguments).await;
+        if consequence.group != EffectGroup::Other
+            && self
+                .emergency_gate
+                .as_deref()
+                .is_some_and(|gate| gate.is_emergency())
+        {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' was not run because the company is stopped and will run no work \
+                 until an operator releases it"
+            ));
         }
 
         // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
@@ -1562,13 +1797,33 @@ impl ToolPolicy for ApprovalPolicy {
         // family lives in `toolbelt`; this arm only joins them.
         if !self.connected_composio_toolkits.is_empty()
             && crate::harness::toolbelt::is_web_request_tool(tool)
-            && let Some(url) = request.arguments.get("url").and_then(|v| v.as_str())
-            && let Some(reason) = crate::harness::composio_catalog::web_call_deflection(
-                &self.connected_composio_toolkits,
-                url,
-            )
         {
-            return ToolPolicyDecision::deny(reason);
+            // Every tool this arm recognises declares `url` as a REQUIRED
+            // string in its own schema, so a call that does not carry one that
+            // way is not a legitimate call this guardrail failed to reach — it
+            // is malformed relative to the tool's own contract. Falling
+            // through silently would let exactly that malformed shape walk
+            // past the one thing standing between `full` autonomy and a
+            // connected provider's API host, so this arm fails CLOSED on it
+            // instead of treating "could not read a url" as "nothing to
+            // check".
+            match request.arguments.get("url").and_then(|v| v.as_str()) {
+                Some(url) => {
+                    if let Some(reason) = crate::harness::composio_catalog::web_call_deflection(
+                        &self.connected_composio_toolkits,
+                        url,
+                    ) {
+                        return ToolPolicyDecision::deny(reason);
+                    }
+                }
+                None => {
+                    return ToolPolicyDecision::deny(format!(
+                        "'{tool}' must be called with `url` as a plain string so it can be \
+                         checked against this company's connected toolkits; retry with a \
+                         string `url`"
+                    ));
+                }
+            }
         }
 
         // 1. `readonly` outranks a grant — the brake wins (issue #243).
@@ -1662,6 +1917,19 @@ impl ToolPolicy for ApprovalPolicy {
             );
         }
 
+        // Shadow measurement for issue #2147 — reads, records, decides nothing.
+        //
+        // Immediately ABOVE the bypass because that is the position the
+        // consequence floor epic #1817 proposes for a real arm, and a
+        // measurement taken anywhere else would be measuring a different
+        // question. Everything above has already returned for the calls it owns
+        // — a hard deny, a redeemed grant, a paid-media card — so what reaches
+        // here is exactly the population a floor would decide.
+        //
+        // It must stay incapable of changing an outcome: no early return, no
+        // mutation, no queue write. The only observable is a log line.
+        self.record_shadow_floor(tool, &request.arguments);
+
         // General approvals come only from `request_approval`; specialized
         // approval-producing tools such as paid media stage themselves above.
         // Keep the readonly brake and old-grant redemption above this point,
@@ -1715,7 +1983,8 @@ impl ToolPolicy for ApprovalPolicy {
         // operator who does want a per-call gate has
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
-        let consequence = self.consequence_for(tool, &request.arguments).await;
+        // `consequence` was computed, and the emergency stop already enforced
+        // against it, above — see the comment there for why this moved.
         let reach = consequence.reach;
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
@@ -1730,7 +1999,11 @@ impl ToolPolicy for ApprovalPolicy {
             // company-context downgrade, graded by `consequence_for` before the
             // table verdict is taken (issue #877).
             PolicyMode::Auto => {
-                if consequence.parks_under_auto() {
+                if !consequence.parks_under_auto()
+                    || self.trusted_dispatch_admits(tool, &request.arguments, consequence)
+                {
+                    ToolPolicyDecision::Allow
+                } else {
                     self.require_approval(
                         tool,
                         &request.arguments,
@@ -1738,19 +2011,19 @@ impl ToolPolicy for ApprovalPolicy {
                             "'{tool}' leaves the company or spends money, and this desk runs auto"
                         ),
                     )
-                } else {
-                    ToolPolicyDecision::Allow
                 }
             }
             PolicyMode::Supervised => {
-                if reach.parks_under_supervision() {
+                if !reach.parks_under_supervision()
+                    || self.trusted_dispatch_admits(tool, &request.arguments, consequence)
+                {
+                    ToolPolicyDecision::Allow
+                } else {
                     self.require_approval(
                         tool,
                         &request.arguments,
                         format!("'{tool}' has an external effect and this desk runs supervised"),
                     )
-                } else {
-                    ToolPolicyDecision::Allow
                 }
             }
             PolicyMode::Readonly => {
@@ -1963,6 +2236,34 @@ mod tests {
         );
     }
 
+    /// BOUND-axis (TOOL-001): the boundary is a `Cell<bool>` that starts at
+    /// `false` inside every fresh `turn_scoped` call — the zero-vs-one
+    /// transition `an_explicit_request_refuses_later_calls_in_the_same_turn`
+    /// above only tests the "one" side of (the second request is denied),
+    /// never asserting that the FIRST request in a brand new turn is not
+    /// itself refused by a boundary nothing has tripped yet.
+    #[tokio::test]
+    async fn the_first_explicit_request_in_a_fresh_turn_is_not_refused() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+
+        let first_request = claim
+            .scoped(queue.turn_scoped(policy.check(&request(
+                crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
+                serde_json::json!({ "title": "Ask", "question": "May I send this?" }),
+            ))))
+            .await;
+        assert_eq!(
+            first_request,
+            ToolPolicyDecision::Allow,
+            "the very first explicit request in a fresh turn must not be refused: \
+             {first_request:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_duplicate_explicit_request_still_establishes_a_fresh_turn_boundary() {
         let queue = ApprovalRequestQueue::default();
@@ -2075,6 +2376,198 @@ mod tests {
         assert_eq!(p.toolbelt_mode(), PolicyMode::Full);
     }
 
+    /// `toolbelt_mode` maps EVERY non-readonly tier to `Full` once policy HITL
+    /// is disabled, not just `supervised` — `auto` loses OpenHuman's own
+    /// `require_approval_for_medium_risk` exactly the same way, because
+    /// nothing in the mapping singles either tier out. `readonly` is the one
+    /// mode the guard excludes, so it must survive untouched.
+    #[tokio::test]
+    async fn disabled_hitl_maps_every_non_readonly_tier_to_full_toolbelt_mode() {
+        for mode in ["auto", "supervised", "full"] {
+            let p = policy(mode, &[], None).with_policy_hitl_disabled();
+            assert_eq!(
+                p.toolbelt_mode(),
+                PolicyMode::Full,
+                "{mode} with policy HITL disabled must hand OpenHuman Full, not its own tier"
+            );
+        }
+
+        let readonly = policy("readonly", &[], None).with_policy_hitl_disabled();
+        assert_eq!(
+            readonly.toolbelt_mode(),
+            PolicyMode::Readonly,
+            "readonly is the one tier the mapping excludes — even with policy HITL disabled, \
+             OpenHuman's own toolbelt must still see readonly"
+        );
+    }
+
+    /// The brake's other half: it denies now, but it does not consume the
+    /// grant. `readonly` is a mode a company sits in temporarily, so the same
+    /// approval must still be redeemable once the brake releases — inside its
+    /// TTL — exactly as if the readonly window had never happened.
+    #[tokio::test]
+    async fn a_readonly_denial_leaves_the_grant_redeemable_once_the_brake_releases() {
+        let locked_down_queue = ApprovalRequestQueue::default();
+        let grants = locked_down_queue.grants();
+        let args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", args.clone()));
+
+        let locked_down = policy("readonly", &[], None)
+            .with_requests(locked_down_queue)
+            .with_agent("finance");
+        assert!(
+            matches!(
+                locked_down
+                    .check(&request("payment.send", args.clone()))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly denies the call outright"
+        );
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released.check(&request("payment.send", args)).await,
+            ToolPolicyDecision::Allow,
+            "the same grant is still redeemable once the brake releases — the readonly denial \
+             must not have consumed it"
+        );
+    }
+
+    /// INPUT-axis (TOOL-004): the brake classifies purely on `tool` and the
+    /// INCOMING call's own arguments (`is_external_effect`), never on whether
+    /// those arguments happen to match a live grant. A malformed/empty
+    /// argument object — missing every field the grant itself was minted
+    /// with — must still be denied under readonly, and the unrelated,
+    /// well-formed grant must still be left intact rather than being touched
+    /// (or the classifier panicking) on the garbage shape.
+    #[tokio::test]
+    async fn a_readonly_denial_on_malformed_arguments_still_leaves_the_grant_intact() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let well_formed_args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", well_formed_args.clone()));
+
+        let locked_down = policy("readonly", &[], None)
+            .with_requests(queue)
+            .with_agent("finance");
+        assert!(
+            matches!(
+                locked_down
+                    .check(&request("payment.send", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly must deny an external-effect call even with a garbage/empty argument \
+             object, not just a well-formed one"
+        );
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released
+                .check(&request("payment.send", well_formed_args))
+                .await,
+            ToolPolicyDecision::Allow,
+            "the well-formed grant must be untouched by a denial evaluated against unrelated, \
+             malformed arguments"
+        );
+    }
+
+    /// CONC-axis (TOOL-004): the brake's early `return` happens strictly
+    /// before `consume_grant` is ever called, so it should be impossible for
+    /// a race to sneak a grant redemption in underneath a readonly deny. Two
+    /// threads hammer the SAME live grant concurrently while readonly, via
+    /// worker threads and a barrier — not `tokio::join!`, which has no
+    /// suspension point here to interleave on and would just run the two
+    /// calls to completion one after the other. Both must be denied, and the
+    /// grant must still redeem exactly once after the brake releases.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_calls_against_a_readonly_denied_grant_never_consume_it() {
+        use std::sync::{Arc, Barrier};
+
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let args = serde_json::json!({ "amount_usd": 40.0 });
+        grants.grant(granted("finance", "payment.send", args.clone()));
+
+        let locked_down = Arc::new(
+            policy("readonly", &[], None)
+                .with_requests(queue)
+                .with_agent("finance"),
+        );
+        let gate = Arc::new(Barrier::new(2));
+
+        let call = |policy: Arc<ApprovalPolicy>, args: serde_json::Value, gate: Arc<Barrier>| {
+            tokio::task::spawn_blocking(move || {
+                gate.wait();
+                tokio::runtime::Handle::current()
+                    .block_on(policy.check(&request("payment.send", args)))
+            })
+        };
+        let a = call(locked_down.clone(), args.clone(), gate.clone());
+        let b = call(locked_down.clone(), args.clone(), gate);
+        let (a, b) = (a.await.expect("joins"), b.await.expect("joins"));
+        assert!(matches!(a, ToolPolicyDecision::Deny { .. }), "{a:?}");
+        assert!(matches!(b, ToolPolicyDecision::Deny { .. }), "{b:?}");
+
+        let released = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(grants))
+            .with_agent("finance");
+        assert_eq!(
+            released.check(&request("payment.send", args.clone())).await,
+            ToolPolicyDecision::Allow,
+            "the grant must still be there, unconsumed by the race"
+        );
+        assert!(
+            matches!(
+                released.check(&request("payment.send", args)).await,
+                ToolPolicyDecision::RequireApproval { .. } | ToolPolicyDecision::Deny { .. }
+            ),
+            "and it must redeem exactly once — a second call must not still be Allow"
+        );
+    }
+
+    /// BOUND-axis (TOOL-004): the brake denies on the tool's classification,
+    /// not on the declared amount, so it must hold at both ends of the amount
+    /// range a grant could carry — a zero-amount call and one carrying an
+    /// enormous declared amount both deny under readonly with their
+    /// respective grants left intact.
+    #[tokio::test]
+    async fn a_readonly_denial_holds_at_zero_and_at_a_very_large_declared_amount() {
+        for amount in [0.0_f64, 1_000_000_000.0_f64] {
+            let queue = ApprovalRequestQueue::default();
+            let grants = queue.grants();
+            let args = serde_json::json!({ "amount_usd": amount });
+            grants.grant(granted("finance", "payment.send", args.clone()));
+
+            let locked_down = policy("readonly", &[], None)
+                .with_requests(queue)
+                .with_agent("finance");
+            assert!(
+                matches!(
+                    locked_down
+                        .check(&request("payment.send", args.clone()))
+                        .await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "amount {amount}: readonly must deny regardless of the amount at either bound"
+            );
+
+            let released = policy("full", &[], None)
+                .with_requests(ApprovalRequestQueue::with_grants(grants))
+                .with_agent("finance");
+            assert_eq!(
+                released.check(&request("payment.send", args)).await,
+                ToolPolicyDecision::Allow,
+                "amount {amount}: the grant must still be redeemable once the brake releases"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn disabled_policy_hitl_keeps_readonly_as_a_hard_denial() {
         let p = policy("readonly", &[], None).with_policy_hitl_disabled();
@@ -2095,6 +2588,64 @@ mod tests {
             .await,
             ToolPolicyDecision::Allow
         );
+    }
+
+    /// The shadow floor observes; it never decides (issue #2147).
+    ///
+    /// Every tool below is one the consequence floor names — a send, a launch,
+    /// an identity change, a call carrying money. With policy HITL disabled,
+    /// which is the production build, all of them must still be allowed. A
+    /// failure here means the measurement grew teeth, which is the one way this
+    /// instrumentation could do harm.
+    #[tokio::test]
+    async fn the_shadow_floor_decides_nothing_with_hitl_disabled() {
+        for mode in ["auto", "supervised", "full"] {
+            let p = policy(mode, &[], None).with_policy_hitl_disabled();
+            for (tool, args) in [
+                ("chargebee_send_invoice", serde_json::json!({})),
+                ("hosting_launch_site", serde_json::json!({})),
+                ("composio_authorize", serde_json::json!({})),
+                ("publish_artifact", serde_json::json!({})),
+                ("file_write", serde_json::json!({ "amount_usd": 500.0 })),
+                (
+                    "composio_execute",
+                    serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+                ),
+            ] {
+                assert_eq!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::Allow,
+                    "{tool} under {mode}: the shadow floor must observe, not gate"
+                );
+            }
+        }
+    }
+
+    /// The floor's own reading of a call agrees with what the tier does with it
+    /// while HITL is on.
+    ///
+    /// Not a tautology: it pins that the population the shadow counts is the
+    /// population a real floor arm would decide. If a later change moved the
+    /// shadow call site above a hard deny or below the tier, this is what
+    /// notices — the count would silently start describing a different
+    /// question, which is the failure mode a measurement cannot self-report.
+    #[tokio::test]
+    async fn what_the_shadow_counts_is_what_full_autonomy_already_stops() {
+        let p = policy("full", &[], None);
+        for tool in ["chargebee_send_invoice", "hosting_launch_site"] {
+            let args = serde_json::json!({});
+            assert!(
+                crate::policy::floor::evaluate(tool, &args, None).requires_human(),
+                "{tool} is a floor call"
+            );
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} is stopped by the judgement arm under full autonomy today"
+            );
+        }
     }
 
     /// Every tier is reachable from a manifest, parses to its own variant, and
@@ -2355,6 +2906,14 @@ mod tests {
                 "composio_execute",
                 serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" }),
             ),
+            (
+                "http_request",
+                serde_json::json!({ "method": "GET", "url": "https://api.example.com/items" }),
+            ),
+            (
+                "web_fetch",
+                serde_json::json!({ "url": "https://example.com/docs" }),
+            ),
             // Issue #903: handing the finished work to the operator. It writes
             // into the company's own workspace and artifact chain — no
             // counterparty, no address — and the chain versions it, so the
@@ -2397,9 +2956,18 @@ mod tests {
         // and a workflow whose contents this layer cannot see.
         for (tool, args) in [
             ("shell", serde_json::json!({})),
-            ("http_request", serde_json::json!({})),
-            ("curl", serde_json::json!({})),
-            ("web_fetch", serde_json::json!({})),
+            (
+                "http_request",
+                serde_json::json!({ "method": "POST", "url": "https://api.example.com/items" }),
+            ),
+            // `curl` always streams its response to a file under the
+            // workspace `downloads/` dir (`CurlTool::execute`), unlike
+            // `web_fetch`/read-shaped `http_request` — so a readable host
+            // must not exempt it from parking.
+            (
+                "curl",
+                serde_json::json!({ "url": "https://example.com/data.json" }),
+            ),
             ("git_operations", serde_json::json!({})),
             ("workspace_write", serde_json::json!({})),
             ("workspace_create", serde_json::json!({})),
@@ -2433,6 +3001,167 @@ mod tests {
                 "{tool} leaves the company or spends money and must still park under auto"
             );
         }
+    }
+
+    /// **Codex review finding on PR #2140 (`3952368155`).** `full` autonomy is
+    /// the one tier with no per-call gate at all
+    /// ([`PolicyMode::Full`](PolicyMode::Full) allows every consequential call
+    /// outright), so it never reaches `ManifestApprovalGate::evaluate` or
+    /// `park` — the choke point the emergency stop is enforced at everywhere
+    /// else. An in-flight turn that survives the stop by design (see
+    /// `CompanyRuntime::ensure_not_emergency_stopped`) could dispatch a
+    /// consequential harness tool through this tier with nothing to refuse it.
+    ///
+    /// `EffectGroup::Other` calls (`spawn_task` and the like) still run, matching
+    /// `evaluate`/`park`'s own exemption.
+    #[tokio::test]
+    async fn full_autonomy_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("full", &[], None).with_emergency_gate(gate.clone());
+
+        assert!(
+            matches!(
+                p.check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a consequential call must refuse under `full` once the company is stopped, \
+             the same way `evaluate`/`park` already refuse one on every other tier"
+        );
+
+        assert_eq!(
+            p.check(&request("spawn_task", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "an `EffectGroup::Other` call is exempt while stopped, matching evaluate/park"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("publish_artifact", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores `full`'s ordinary blanket allow"
+        );
+    }
+
+    /// **CodeRabbit review finding on PR #2140 (`3960328855`, CWE-863).** The
+    /// emergency-stop veto above used to sit AFTER a redeemed single-use
+    /// grant, `policy_hitl_enabled == false`, and `auto_approve_under_usd` —
+    /// each an unconditional `Allow` on its own, so any one of them let a
+    /// consequential call through on every tier, not just `full`. This one
+    /// pins the single-use-grant path.
+    #[tokio::test]
+    async fn a_redeemed_grant_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let (p, grants) = granting_policy("supervised", &[], "finance");
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "supervised".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        let p = p.with_emergency_gate(gate.clone());
+        let args = composio_send_args();
+        grants.grant(granted("finance", "composio_execute", args.clone()));
+
+        gate.set_emergency(true);
+        assert!(
+            matches!(
+                p.check(&request("composio_execute", args.clone())).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a live single-use grant must not let a consequential call through while stopped"
+        );
+        assert_eq!(
+            grants.live_count(),
+            1,
+            "the refused call must not consume the grant it never redeemed"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("composio_execute", args)).await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop lets the still-live grant redeem normally"
+        );
+    }
+
+    /// See the single-use-grant test above for the finding this pins. This one
+    /// covers the `policy_hitl_enabled == false` path — every production
+    /// roster (`with_policy_hitl_disabled` at construction).
+    #[tokio::test]
+    async fn disabled_policy_hitl_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_emergency_gate(gate.clone());
+
+        assert!(
+            matches!(
+                p.check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a roster built with policy HITL disabled must still refuse a consequential call \
+             while stopped"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("publish_artifact", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores the HITL-disabled blanket allow"
+        );
+    }
+
+    /// See the single-use-grant test above for the finding this pins. This one
+    /// covers the `auto_approve_under_usd` path.
+    #[tokio::test]
+    async fn auto_approve_under_usd_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "supervised".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: Some(50.0),
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("supervised", &[], Some(50.0)).with_emergency_gate(gate.clone());
+        let args = serde_json::json!({ "amount_usd": 10.0 });
+
+        assert!(
+            matches!(
+                p.check(&request("payment.send", args.clone())).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "an under-threshold auto-approved spend must still refuse while stopped"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("payment.send", args)).await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores the auto-approve-under-threshold allow"
+        );
     }
 
     /// **Issue #1124, end to end at the policy layer.** A bridge call to a
@@ -2860,19 +3589,15 @@ mod tests {
             "an allowed search must not queue an approval request"
         );
 
-        // Its sibling in the same research loop still parks — searching is
-        // carved out because it is a *read*, not because `web` was relaxed.
-        assert!(
-            matches!(
-                supervised
-                    .check(&request(
-                        "web_fetch",
-                        serde_json::json!({ "url": "https://a.test/" })
-                    ))
-                    .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "web_fetch must still park under supervised"
+        assert_eq!(
+            supervised
+                .check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://a.test/" })
+                ))
+                .await,
+            ToolPolicyDecision::Allow,
+            "free retrieval must not park under supervised"
         );
 
         let readonly = policy("readonly", &[], None);
@@ -3634,6 +4359,74 @@ mod tests {
         );
     }
 
+    /// CONC-axis (TOOL-021): the cap in `the_drain_is_capped_and_empties_the_queue`
+    /// above is proven with sequential pushes — each `check` is awaited before
+    /// the next fires. This drives the same overflow from genuinely concurrent
+    /// pushes, via real worker threads and a barrier (not `tokio::join!`, which
+    /// has no suspension point around `push`'s synchronous body and would just
+    /// serialise the two futures on one task — the exact false confidence this
+    /// lane's brief warns about). `push`'s per-scope `Mutex` must make every
+    /// racing call land exactly once: no card lost to a race, none double
+    /// counted, and `requests.len() + discarded` must equal the number of
+    /// calls that actually raced, every round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_pushes_past_the_cap_are_never_lost_or_double_counted() {
+        use std::sync::{Arc, Barrier};
+
+        const RACERS: usize = MAX_APPROVAL_REQUESTS_PER_TURN + 5;
+
+        for round in 0..20 {
+            let queue = ApprovalRequestQueue::default();
+            let gate = Arc::new(Barrier::new(RACERS));
+
+            let mut handles = Vec::with_capacity(RACERS);
+            for i in 0..RACERS {
+                let queue = queue.clone();
+                let gate = gate.clone();
+                handles.push(tokio::task::spawn_blocking(move || {
+                    gate.wait();
+                    queue.push(ApprovalRequest {
+                        tool: "composio_execute".to_string(),
+                        reason: format!("racer {i}"),
+                        effect: Effect {
+                            kind: format!("composio.call.{i}"),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({ "racer": i }),
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                }));
+            }
+            for handle in handles {
+                handle.await.expect("racer joins");
+            }
+
+            let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(
+                drained.requests.len(),
+                MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: the drain must be exactly full, not short a card a race lost"
+            );
+            assert_eq!(
+                drained.discarded,
+                RACERS - MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: every racer that did not fit must be counted, not silently \
+                 dropped from the tally"
+            );
+            let reasons: std::collections::HashSet<&String> =
+                drained.requests.iter().map(|r| &r.reason).collect();
+            assert_eq!(
+                reasons.len(),
+                MAX_APPROVAL_REQUESTS_PER_TURN,
+                "round {round}: no racer's card duplicated another's under the race: {reasons:?}"
+            );
+        }
+    }
+
     /// The ordinary path says nothing. A notice on every turn would train the
     /// operator to ignore the one that matters.
     #[tokio::test]
@@ -3739,6 +4532,182 @@ mod tests {
         assert!(
             !notice.contains(&MAX_APPROVAL_REQUESTS_PER_TURN.to_string()),
             "and not the constant the call site happened to have in scope: {notice}"
+        );
+    }
+
+    /// `escalate_to_human` (issue #1860's agent-question blocker), unlike
+    /// `request_approval`, never sets `EXPLICIT_REQUEST_PENDING` — so nothing
+    /// stops a model from calling it again inside the same turn. A ninth
+    /// distinct question in one turn overflows `MAX_APPROVAL_REQUESTS_PER_TURN`
+    /// and is dropped by the drain cap with no card ever raised for it, even
+    /// though the run may still park believing it asked something.
+    #[tokio::test]
+    async fn escalate_to_human_does_not_set_the_turn_boundary_and_can_overflow_the_cap() {
+        let queue = ApprovalRequestQueue::default();
+        let blocker_request = |i: usize| ApprovalRequest {
+            tool: crate::harness::built_in::blockers::ESCALATE_TO_HUMAN_TOOL.to_string(),
+            reason: format!("question {i}"),
+            effect: Effect {
+                kind: "blocker.information".to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({ "reason": format!("question {i}") }),
+                agent: None,
+                run_id: None,
+            },
+        };
+
+        queue
+            .turn_scoped(async {
+                for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
+                    queue.push(blocker_request(i));
+                }
+                assert!(
+                    !queue.explicit_request_pending(),
+                    "unlike request_approval, escalate_to_human never establishes the turn \
+                     boundary — nothing in the queue itself stops a model from calling it \
+                     again in the same turn"
+                );
+            })
+            .await;
+
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(
+            drained.discarded, 1,
+            "a ninth question in one turn overflows the cap and is silently dropped — no card \
+             is ever raised for it, though the run may still park expecting an answer"
+        );
+    }
+
+    /// `check`'s fail-closed boundary (the block right above `Deny`ing every
+    /// call once `request_approval` has fired) reads the same task-local as
+    /// `explicit_request_pending`. Since `escalate_to_human` never sets it, a
+    /// sibling gated call queued in the same turn right after a question is
+    /// evaluated on its own terms rather than refused outright the way a
+    /// second `request_approval` would be.
+    #[tokio::test]
+    async fn escalate_to_human_does_not_refuse_a_sibling_gated_call_in_the_same_turn() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("supervised", &[], None).with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+
+        // Through the tool, not a hand-built `ApprovalRequest`: the boundary is
+        // established by what `execute` does, so a fixture that pushes the
+        // request itself would keep passing if the tool later began setting the
+        // task-local — the one regression this case exists to catch.
+        let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
+            queue.clone(),
+            "engineer".to_string(),
+        );
+        let later_call = claim
+            .scoped(queue.turn_scoped(async {
+                let asked = tool
+                    .execute(serde_json::json!({ "question": "staging or prod?" }))
+                    .await
+                    .expect("the question runs");
+                assert!(!asked.is_error, "{}", asked.output());
+                policy
+                    .check(&request("composio_execute", composio_send_args()))
+                    .await
+            }))
+            .await;
+
+        assert!(
+            matches!(later_call, ToolPolicyDecision::RequireApproval { .. }),
+            "escalate_to_human must not trip the request_approval turn boundary — the sibling \
+             call should still be gated on its own terms, not refused outright: {later_call:?}"
+        );
+    }
+
+    /// A repeated identical question in one turn — a model retrying a call it
+    /// is unsure landed — collapses into the card already queued via `push`'s
+    /// per-scope de-duplication (issue #439), same as a duplicate
+    /// `request_approval`. Both calls still report success to the model, so a
+    /// distinct question asked right after must not vanish along with the
+    /// duplicate.
+    #[tokio::test]
+    async fn a_repeated_identical_escalation_collapses_but_a_distinct_one_survives() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        let queue = ApprovalRequestQueue::default();
+        let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
+            queue.clone(),
+            "engineer".to_string(),
+        );
+
+        let first = tool
+            .execute(serde_json::json!({ "question": "staging or prod?" }))
+            .await
+            .expect("the tool runs");
+        let second = tool
+            .execute(serde_json::json!({ "question": "staging or prod?" }))
+            .await
+            .expect("the tool runs");
+        assert!(!first.is_error);
+        assert!(!second.is_error, "a duplicate ask is not itself a failure");
+
+        let distinct = tool
+            .execute(serde_json::json!({ "question": "which key rotates first?" }))
+            .await
+            .expect("the tool runs");
+        assert!(!distinct.is_error);
+
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(
+            drained.requests.len(),
+            2,
+            "the repeated question collapses into the card already queued, but the distinct \
+             question still gets its own: {:?}",
+            drained
+                .requests
+                .iter()
+                .map(|r| &r.reason)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Outside `turn_scoped`, the task-local backing the boundary was never
+    /// installed. `explicit_request_pending` reads that absence through
+    /// `unwrap_or(false)` rather than erroring or denying, so a call site
+    /// that forgot to wrap its turn in `turn_scoped` gets "no request
+    /// pending" — the boundary fails OPEN outside its scope, not closed.
+    #[tokio::test]
+    async fn the_turn_boundary_reads_as_not_pending_outside_any_turn_scope() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+
+        // No `turn_scoped` anywhere in this call's ancestry.
+        queue.push(ApprovalRequest {
+            tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+            reason: "May I send this?".to_string(),
+            effect: Effect {
+                kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "title": "Send update",
+                    "question": "May I send it?"
+                }),
+                agent: Some("ceo".to_string()),
+                run_id: None,
+            },
+        });
+
+        let decision = policy
+            .check(&request("composio_execute", composio_send_args()))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "outside any turn_scoped call, the boundary reads as not-pending and does not \
+             refuse a sibling call: {decision:?}"
         );
     }
 
@@ -4363,6 +5332,189 @@ mod tests {
         assert!(
             !matches!(decision, ToolPolicyDecision::Deny { .. }),
             "a workflow standing denial must not be advertised on the gate path: {decision:?}"
+        );
+    }
+
+    /// An agent-scoped standing deny, for the four cases below. `scope`
+    /// mirrors the URL a `web_fetch` call to `docs.rs` computes through
+    /// `standing_scope_of`, so a call with a different (or absent) `url`
+    /// argument does not fall under it.
+    fn agent_standing_deny(
+        id: &str,
+        agent: &str,
+        expires_at_millis: u64,
+    ) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new(id),
+            agent: agent.to_string(),
+            workflow: None,
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        }
+    }
+
+    /// INPUT-axis (TOOL-006): `standing_deny_applies` derives the call's own
+    /// scope from its arguments (`standing_scope_of`) before matching it
+    /// against the grant's stored scope. A call with no `url` at all — a
+    /// malformed shape relative to what `web_fetch` normally carries —
+    /// resolves to no scope, and a scoped denial requires an EXACT match
+    /// (`admits_scope`), so it must not apply to a scope-less call rather
+    /// than being (mis)treated as a wildcard match either way.
+    #[tokio::test]
+    async fn a_scoped_standing_deny_does_not_apply_to_a_call_with_no_url_argument() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+
+        let p = policy("full", &[], None)
+            .with_requests(queue)
+            .with_agent("engineer");
+        let decision = p.check(&request("web_fetch", serde_json::json!({}))).await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a scoped denial must not match a call whose scope could not be computed at all: \
+             {decision:?}"
+        );
+    }
+
+    /// CONC-axis (TOOL-006): unlike a single-use grant, a standing denial is
+    /// never consumed — two concurrent calls against the SAME live denial
+    /// must both see it, with no race letting one slip through as if the
+    /// first call had "used it up". Driven from real worker threads and a
+    /// barrier, not `tokio::join!` — `check` has no suspension point here to
+    /// interleave two joined futures on, so they would just run serially and
+    /// prove nothing about a race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_calls_against_the_same_standing_deny_are_both_refused() {
+        use std::sync::{Arc, Barrier};
+
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+        let p = Arc::new(
+            policy("full", &[], None)
+                .with_requests(queue)
+                .with_agent("engineer"),
+        );
+        let gate = Arc::new(Barrier::new(2));
+        let call = |p: Arc<ApprovalPolicy>, gate: Arc<Barrier>| {
+            tokio::task::spawn_blocking(move || {
+                gate.wait();
+                tokio::runtime::Handle::current().block_on(p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://docs.rs/x" }),
+                )))
+            })
+        };
+        let a = call(p.clone(), gate.clone());
+        let b = call(p, gate);
+        let (a, b) = (a.await.expect("joins"), b.await.expect("joins"));
+        assert!(matches!(a, ToolPolicyDecision::Deny { .. }), "{a:?}");
+        assert!(matches!(b, ToolPolicyDecision::Deny { .. }), "{b:?}");
+    }
+
+    /// FAIL-axis (TOOL-006): a standing denial past its own TTL is stale data
+    /// — the mint side's sweep may not have gotten to it yet — and must not
+    /// keep enforcing a refusal the operator's decision no longer covers.
+    #[tokio::test]
+    async fn an_expired_standing_deny_no_longer_applies() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis().saturating_sub(1_000),
+        ));
+
+        let p = policy("full", &[], None)
+            .with_requests(queue)
+            .with_agent("engineer");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "an expired standing denial must not still be enforced: {decision:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-006): the expiry boundary is strictly `<`
+    /// (`StandingGrant::is_live_at`) — live comfortably before its deadline,
+    /// already expired exactly AT it. Pinned through the policy entry point,
+    /// not just the grant set directly, so a change to either side of that
+    /// `<` is caught where it is actually consulted.
+    ///
+    /// The "live" side uses a generous window rather than the deadline minus
+    /// one millisecond: `check` calls `now_millis()` again internally, so a
+    /// one-millisecond margin captured before the call is not guaranteed to
+    /// survive the dispatch to `standing_deny_applies` and would make this
+    /// test flaky on nothing but scheduling noise. The "expired" side has no
+    /// such problem — real time only moves forward, so a deadline equal to a
+    /// `now` captured strictly before the call is guaranteed to have already
+    /// passed by the time `check` reads the clock again.
+    #[tokio::test]
+    async fn a_standing_deny_expires_exactly_at_its_deadline_not_after() {
+        let live_grants = GrantSet::default();
+        live_grants.grant_standing(agent_standing_deny(
+            "deny-1",
+            "engineer",
+            crate::ports::now_millis() + 60 * 60 * 1000,
+        ));
+        let live = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(live_grants))
+            .with_agent("engineer");
+        assert!(
+            matches!(
+                live.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://docs.rs/x" })
+                ))
+                .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "comfortably before its deadline the denial must still be live"
+        );
+
+        let now = crate::ports::now_millis();
+        let expired_grants = GrantSet::default();
+        expired_grants.grant_standing(agent_standing_deny("deny-1", "engineer", now));
+        let expired = policy("full", &[], None)
+            .with_requests(ApprovalRequestQueue::with_grants(expired_grants))
+            .with_agent("engineer");
+        assert!(
+            !matches!(
+                expired
+                    .check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/x" })
+                    ))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "at the deadline instant itself (now already >= expires_at_millis by the time \
+             `check` reads the clock) the denial must already read as expired"
         );
     }
 
@@ -5425,23 +6577,9 @@ mod tests {
         );
     }
 
-    /// **Issue #673's acceptance, through the real gate, in both tiers.**
-    ///
-    /// Worth stating why this can go through `check()` when #457's Composio twin
-    /// below cannot: a catalogue read stopped parking at the tier in #559, so
-    /// the scope was never reached there. An outward fetch still parks under
-    /// `supervised` *and* under `auto` — that is the whole purpose of
-    /// [`Standing::ScopedGrantable`](crate::policy::Standing::ScopedGrantable) —
-    /// so the grant is genuinely the thing deciding, and the assertion is not
-    /// being satisfied by a tier that waved the call through upstream.
-    ///
-    /// `auto` is in the loop deliberately. The naive fix for #673 declared
-    /// `web_fetch` `Grantable`, which made `parks_under_auto` false and let every
-    /// agent fetch any address unattended for as long as the company sat in
-    /// `auto` — no card, so the host scope was never consulted at all. Running
-    /// both tiers here is what would catch a future edit that re-fuses the two.
+    /// External reads are decided before standing grants are consulted.
     #[tokio::test]
-    async fn a_fetch_grant_scoped_to_one_host_admits_it_and_re_parks_another() {
+    async fn a_fetch_grant_does_not_narrow_free_external_reads() {
         for tier in ["supervised", "auto"] {
             let queue = ApprovalRequestQueue::default();
             let grants = queue.grants();
@@ -5455,8 +6593,6 @@ mod tests {
                 far_future(),
             ));
 
-            // A second fetch of the granted host, at a different path. This is
-            // inside the sentence the operator consented to.
             assert!(
                 matches!(
                     p.check(&request(
@@ -5469,35 +6605,26 @@ mod tests {
                 "a second fetch of the granted host must run unattended under `{tier}`"
             );
 
-            // A different host. Same agent, same tool, same grant, still live —
-            // the scope is the one thing that says no.
-            assert!(
-                matches!(
-                    p.check(&request(
-                        "web_fetch",
-                        serde_json::json!({ "url": "https://crates.io/crates/serde" })
-                    ))
-                    .await,
-                    ToolPolicyDecision::RequireApproval { .. }
-                ),
-                "'fetch from docs.rs' is not consent to fetch anywhere else — `{tier}`"
+            assert_eq!(
+                p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://crates.io/crates/serde" })
+                ))
+                .await,
+                ToolPolicyDecision::Allow,
+                "external reads do not depend on a host grant — `{tier}`"
             );
 
-            // A subdomain of the granted host is a different host.
-            assert!(
-                matches!(
-                    p.check(&request(
-                        "web_fetch",
-                        serde_json::json!({ "url": "https://evil.docs.rs/x" })
-                    ))
-                    .await,
-                    ToolPolicyDecision::RequireApproval { .. }
-                ),
-                "a subdomain was never on the card — `{tier}`"
+            assert_eq!(
+                p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://evil.docs.rs/x" })
+                ))
+                .await,
+                ToolPolicyDecision::Allow,
+                "a subdomain is still an external read — `{tier}`"
             );
 
-            // A call whose URL cannot be read is not grantable at all, so the
-            // grant cannot admit it however well it matches on (agent, tool).
             assert!(
                 matches!(
                     p.check(&request(
@@ -5507,34 +6634,14 @@ mod tests {
                     .await,
                     ToolPolicyDecision::RequireApproval { .. }
                 ),
-                "an unreadable URL has no scope for a scoped grant to admit — `{tier}`"
+                "a URL with no readable host stays gated rather than free — `{tier}`"
             );
         }
     }
 
-    /// **Issue #842's security property, stated as the mixed batch it is
-    /// about.**
-    ///
-    /// A research turn asks about three sites in one card. The operator ticks
-    /// two and leaves the third; the two approvals mint a host-scoped grant
-    /// each and the untouched one mints nothing. What must come out the other
-    /// side is exactly this: the two granted hosts run unattended, and the
-    /// third parks again as if it had never been on the card — because it was
-    /// never approved.
-    ///
-    /// The reason this is worth its own test beside the single-grant one above
-    /// is that batching creates a shape that could not previously exist: two
-    /// live grants for one agent and one tool, differing only in scope. A fix
-    /// that batched the *grant* instead of the *asking* — one permission
-    /// covering "the sites in that request" — would pass every assertion about
-    /// espn and bbc and fail the third one silently, which is precisely the
-    /// leak #739 exists to prevent. The declined host is therefore the
-    /// load-bearing assertion here, not an afterthought.
-    ///
-    /// Both parking tiers, for the reason the test above runs both: an outward
-    /// fetch parks under `auto` too, so the grant is genuinely what decides.
+    /// Existing batch grants do not turn external reads back into parked calls.
     #[tokio::test]
-    async fn approving_two_items_of_a_batch_grants_two_hosts_and_leaves_the_third_parking() {
+    async fn batch_grants_leave_external_reads_free() {
         for tier in ["supervised", "auto"] {
             let queue = ApprovalRequestQueue::default();
             let grants = queue.grants();
@@ -5542,8 +6649,6 @@ mod tests {
                 .with_requests(queue)
                 .with_agent("seo");
 
-            // What approving two of the three items mints: one host-scoped
-            // grant per approved item, exactly as a lone approval would.
             grants.grant_standing(scoped_standing(
                 "seo",
                 crate::policy::consequence::WEB_FETCH,
@@ -5574,56 +6679,41 @@ mod tests {
                 );
             }
 
-            // The item the operator left unticked. Same agent, same tool, same
-            // turn, two live grants — and none of them says yes to this host.
-            assert!(
-                matches!(
-                    p.check(&request(
-                        "web_fetch",
-                        serde_json::json!({ "url": "https://theguardian.com/uk" })
-                    ))
-                    .await,
-                    ToolPolicyDecision::RequireApproval { .. }
-                ),
-                "approving two sites is not consent to the third — `{tier}`"
+            assert_eq!(
+                p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://theguardian.com/uk" })
+                ))
+                .await,
+                ToolPolicyDecision::Allow,
+                "an external read does not need a batch grant — `{tier}`"
             );
 
-            // And a host nobody ever asked about is no more reachable for
-            // having been adjacent to two that were.
-            assert!(
-                matches!(
-                    p.check(&request(
-                        "web_fetch",
-                        serde_json::json!({ "url": "https://crates.io/crates/serde" })
-                    ))
-                    .await,
-                    ToolPolicyDecision::RequireApproval { .. }
-                ),
-                "a host that was never on the card parks — `{tier}`"
+            assert_eq!(
+                p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://crates.io/crates/serde" })
+                ))
+                .await,
+                ToolPolicyDecision::Allow,
+                "an unrelated external read remains free — `{tier}`"
             );
         }
     }
 
-    /// Without a grant an outward fetch still parks in both parking tiers — the
-    /// status quo #673 must not have widened.
-    ///
-    /// This is the assertion that fails if `web_fetch` is ever declared
-    /// `Grantable` outright: under `auto` it would be allowed here with no
-    /// operator in the loop.
+    /// External reads run without a standing grant in both active tiers.
     #[tokio::test]
-    async fn an_ungranted_fetch_still_parks_under_supervised_and_auto() {
+    async fn an_ungranted_fetch_runs_under_supervised_and_auto() {
         for tier in ["supervised", "auto"] {
             let p = policy(tier, &[], None);
-            assert!(
-                matches!(
-                    p.check(&request(
-                        "web_fetch",
-                        serde_json::json!({ "url": "https://docs.rs/serde" })
-                    ))
-                    .await,
-                    ToolPolicyDecision::RequireApproval { .. }
-                ),
-                "an outward fetch with no grant must park under `{tier}`"
+            assert_eq!(
+                p.check(&request(
+                    "web_fetch",
+                    serde_json::json!({ "url": "https://docs.rs/serde" })
+                ))
+                .await,
+                ToolPolicyDecision::Allow,
+                "an outward read runs without a grant under `{tier}`"
             );
         }
     }
@@ -5708,6 +6798,58 @@ mod tests {
             grants.standing_count(),
             1,
             "none of those refusals spent the permission"
+        );
+    }
+
+    /// Companion to `a_grant_scoped_to_one_provider_does_not_admit_another_providers_read`,
+    /// for `web_fetch`'s own host scope. Pinned directly against
+    /// `standing_grant_allows` for the same reason that one is: under
+    /// `supervised`/`auto`, `Reach::ExternalRead` no longer parks, so `check()`
+    /// allows an external read long before any grant is consulted and a
+    /// `check()`-level assertion would prove nothing about scope enforcement
+    /// (`batch_grants_leave_external_reads_free` documents exactly that). The
+    /// scope machinery — `admits_scope`'s exact host match — still exists and
+    /// still refuses a grant with the wrong scope; this is the test that says
+    /// so.
+    #[test]
+    fn a_web_fetch_grant_scoped_to_one_host_does_not_admit_another() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue)
+            .with_agent("seo");
+        grants.grant_standing(scoped_standing(
+            "seo",
+            crate::policy::consequence::WEB_FETCH,
+            "https://espn.com",
+            far_future(),
+        ));
+
+        assert!(
+            p.standing_grant_allows(
+                "web_fetch",
+                &serde_json::json!({ "url": "https://espn.com/nba/scores" })
+            ),
+            "the granted host admits its own fetch"
+        );
+
+        assert!(
+            !p.standing_grant_allows(
+                "web_fetch",
+                &serde_json::json!({ "url": "https://bbc.com/sport/football" })
+            ),
+            "a grant scoped to one host does not admit a different one"
+        );
+
+        assert!(
+            !p.standing_grant_allows("web_fetch", &serde_json::json!({ "url": "not-a-url" })),
+            "an unresolvable URL has no scope for a scoped grant to admit"
+        );
+
+        assert_eq!(
+            grants.standing_count(),
+            1,
+            "none of those checks spent the permission"
         );
     }
 
@@ -5947,6 +7089,24 @@ mod tests {
             .check(&request("frobnicate_the_widget", serde_json::json!({})))
             .await;
         assert_eq!(decision_name(&d), "park");
+    }
+
+    /// `curl` is declared `EffectGroup::Other`, so the irreversible-group rule
+    /// does not reach it, and it is declared, so the undeclared-tool rule does
+    /// not either. `judge`'s `UNBOUNDED` list is the only remaining gate once
+    /// `PolicyMode::Full` has already returned `Allow` above — and `curl`
+    /// writes an arbitrary response into the workspace `downloads/` directory,
+    /// which this layer cannot bound. It must still park on a `full` desk.
+    #[tokio::test]
+    async fn curl_still_parks_under_full_via_the_judgement_arm() {
+        let p = policy("full", &[], None);
+        let d = p
+            .check(&request(
+                "curl",
+                serde_json::json!({ "url": "https://example.com/report.csv" }),
+            ))
+            .await;
+        assert_eq!(decision_name(&d), "park", "`curl` must stop under full");
     }
 
     /// Every stop reaches the operator. A `RequireApproval` that skipped
@@ -6243,6 +7403,189 @@ mod tests {
         }
     }
 
+    /// INPUT-axis (TOOL-003): the deflection reads `arguments["url"]` as a
+    /// plain string. A call missing `url` entirely — despite every deflectable
+    /// tool declaring it required — must not read as "nothing to check" and
+    /// walk past the guardrail; it must fail CLOSED, the same as a real
+    /// connected-provider hit would.
+    #[tokio::test]
+    async fn s2_deflection_fails_closed_when_url_is_missing() {
+        let p = full_with_connected(&["github"]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "method": "GET" }),
+            ))
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a missing `url` must not walk past the guardrail unchecked: {decision:?}"
+        );
+    }
+
+    /// The other half: `url` present but not a plain string — a number, an
+    /// object, an array — is exactly as unreadable to `.as_str()` as a missing
+    /// key, so it must fail CLOSED on the same terms rather than silently
+    /// passing through because the type did not match.
+    #[tokio::test]
+    async fn s2_deflection_fails_closed_when_url_is_not_a_string() {
+        let p = full_with_connected(&["github"]);
+        for bad_url in [
+            serde_json::json!(12345),
+            serde_json::json!({ "host": "api.github.com" }),
+            serde_json::json!(["https://api.github.com"]),
+            serde_json::json!(null),
+        ] {
+            let decision = p
+                .check(&request(
+                    "http_request",
+                    serde_json::json!({ "url": bad_url }),
+                ))
+                .await;
+            assert!(
+                matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "a non-string `url` ({bad_url:?}) must not walk past the guardrail unchecked: \
+                 {decision:?}"
+            );
+        }
+    }
+
+    /// Requirement #2 still holds once the arm fails closed: with NO connected
+    /// toolkits at all, a missing/malformed `url` is not this guardrail's
+    /// business — the arm's outer condition (`!connected_composio_toolkits.is_empty()`)
+    /// never engages, so the call falls through to whatever the ordinary
+    /// policy decides for an `http_request`/`curl`/`web_fetch` with no
+    /// bounded target. That ordinary decision may reasonably be a park (an
+    /// unbounded target is not automatically safe) — the property this pins
+    /// is narrower and precise: it must never be a DENY manufactured by THIS
+    /// arm, since with nothing connected the arm has nothing to deny it for.
+    #[tokio::test]
+    async fn s2_missing_url_passes_through_with_no_connected_toolkits() {
+        for tool in ["http_request", "curl", "web_fetch"] {
+            let decision = full_with_connected(&[])
+                .check(&request(tool, serde_json::json!({ "method": "GET" })))
+                .await;
+            assert!(
+                !matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "with nothing connected, a missing `url` on `{tool}` must not be denied by this \
+                 arm: {decision:?}"
+            );
+        }
+    }
+
+    /// STATE-axis (TOOL-003): the "connected" state a company record supplies
+    /// is free text an operator or an upstream sync wrote, not a normalised
+    /// key, so it can arrive with stray casing or whitespace. Deflection must
+    /// still recognise it — the same normalisation
+    /// `http_request_to_a_connected_provider_is_denied_with_the_composio_route`
+    /// relies on implicitly, pinned here explicitly against a messy entry.
+    #[tokio::test]
+    async fn s2_deflection_normalises_a_messily_cased_connected_toolkit_entry() {
+        let p = full_with_connected(&["  GitHub  "]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        assert!(
+            matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a connected entry with stray case/whitespace must still be recognised: {decision:?}"
+        );
+    }
+
+    /// FAIL-axis (TOOL-003): a `url` that IS a plain string but does not parse
+    /// as one (unlike the INPUT-axis cases above, which are the wrong JSON
+    /// *type*) intentionally passes through — `url::Url::parse` fails,
+    /// `web_call_deflection` has no host to check, and nothing this call could
+    /// reach depends on that host either, since the underlying web tool cannot
+    /// make an unparseable string into a request. Fail-open here is the
+    /// deliberate, safe direction; pinned so it is not confused with the
+    /// missing/wrong-type cases that were fixed to fail closed.
+    #[tokio::test]
+    async fn s2_deflection_passes_through_an_unparseable_url_string() {
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "not a url" }),
+            ))
+            .await;
+        let guarded = full_with_connected(&["github"])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "not a url" }),
+            ))
+            .await;
+        assert_eq!(
+            guarded, baseline,
+            "a syntactically invalid url string cannot resolve to any host, so it must pass \
+             through exactly as if nothing were connected: {guarded:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-003): the path-prefix boundary on a toolkit whose
+    /// table requires one (`gmail`'s `www.googleapis.com` entry). A path that
+    /// starts with the required prefix is caught; a path one character short
+    /// of it — missing the trailing slash the table requires — is not, and
+    /// must pass through rather than being caught by a looser `starts_with`.
+    #[tokio::test]
+    async fn s2_deflection_respects_the_path_prefix_boundary() {
+        let p = full_with_connected(&["gmail"]);
+        let inside = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail/v1/users/me" }),
+            ))
+            .await;
+        assert!(
+            matches!(inside, ToolPolicyDecision::Deny { .. }),
+            "a path starting with the required prefix must be caught: {inside:?}"
+        );
+
+        let one_short = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail" }),
+            ))
+            .await;
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://www.googleapis.com/gmail" }),
+            ))
+            .await;
+        assert_eq!(
+            one_short, baseline,
+            "a path one character short of the required prefix (no trailing slash) must not be \
+             caught by a looser match: {one_short:?}"
+        );
+    }
+
+    /// BOUND-axis (TOOL-003), the other edge: a connected-toolkit list that is
+    /// non-empty but holds only blank entries must behave like the empty-list
+    /// baseline — a stray blank string must not accidentally become a
+    /// wildcard that matches every host.
+    #[tokio::test]
+    async fn s2_deflection_skips_blank_connected_entries_without_matching_everything() {
+        let p = full_with_connected(&["", "   "]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        let baseline = full_with_connected(&[])
+            .check(&request(
+                "http_request",
+                serde_json::json!({ "url": "https://api.github.com/repos/o/r" }),
+            ))
+            .await;
+        assert_eq!(
+            decision, baseline,
+            "blank connected entries must not match any host: {decision:?}"
+        );
+    }
+
     /// The deflection outranks a single-use grant: a grant is an operator
     /// approving one call, but a raw call to a connected provider cannot succeed
     /// by this route for anyone, so the guardrail still refuses it.
@@ -6260,5 +7603,425 @@ mod tests {
             ),
             "the S2 arm must sit above the grant checks"
         );
+    }
+
+    // Issue #2150 (Rung 3, epic #1817): trusted-dispatch-origin admission.
+    //
+    // These tests exercise `trusted_dispatch_admits` both through `check()`
+    // (real declared tools, real tiers) and directly (the `ScopedGrantable`
+    // scope-matching branch, which no tool in today's declaration table
+    // reaches through `check()` — the same gap
+    // `a_grant_scoped_to_one_provider_does_not_admit_another_providers_read`
+    // above records for the standing-grant scope check this mirrors).
+
+    use crate::harness::built_in::run_origin::{DispatchSource, RunOrigin, claim};
+
+    fn dispatched(agent: &str) -> crate::harness::built_in::run_origin::RunOriginClaim {
+        claim(RunOrigin::Dispatched {
+            agent: agent.to_string(),
+            source: DispatchSource::Task,
+            scope: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_unlabelled_turn_decides_exactly_as_before() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        assert!(
+            matches!(
+                p.check(&request("file_write", serde_json::json!({}))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "no origin was scoped, so this must park exactly as it did before #2150"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_operator_origin_decides_the_same_as_unlabelled() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let origin = claim(RunOrigin::Operator);
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a live operator turn earns no trust from this arm — only `Dispatched` does"
+        );
+    }
+
+    /// The headline case: a call an operator could already have granted
+    /// standing for (`Standing::Grantable`, so no scope to check) parks under
+    /// `supervised` absent a grant — `an_expired_standing_grant_re_parks`
+    /// above pins that baseline — and a dispatched run whose agent matches is
+    /// admitted without ever raising an approval row.
+    #[tokio::test]
+    async fn a_dispatched_run_admits_a_grantable_call_with_no_approval_row() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        assert_eq!(
+            origin
+                .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                .await,
+            ToolPolicyDecision::Allow,
+            "a scratch write is exactly what an operator could have granted standing for"
+        );
+        assert_eq!(
+            queue.queued(),
+            0,
+            "an admitted call must never raise an approval row"
+        );
+    }
+
+    /// A dispatched run carrying money still reaches a person.
+    ///
+    /// This pins the **outcome**, not any one arm, and the distinction is
+    /// deliberate. `trusted_dispatch_admits` consults the consequence floor,
+    /// but deleting that consultation leaves this test — and the whole suite —
+    /// green, because `judge` re-judges whatever the tier allowed and stops a
+    /// declared amount at the tail of `check`. The floor consultation is a belt
+    /// whose braces are `judge`; see the note at that line for the two facts
+    /// that make it unreachable today and what would change either.
+    ///
+    /// What this test is worth is the property itself: trust granted for being
+    /// dispatched must not become permission to spend. Whichever arm enforces
+    /// that, an operator sees the call.
+    ///
+    /// `supervised` rather than `auto`, deliberately: under `auto` a
+    /// `Grantable` tool never reaches the trusted arm at all, so the test would
+    /// pass without exercising the admission path.
+    #[tokio::test]
+    async fn the_consequence_floor_outranks_a_trusted_dispatch() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        let spend = serde_json::json!({ "amount_usd": 500.0 });
+        assert!(
+            matches!(
+                origin.scoped(p.check(&request("file_write", spend))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a dispatched run carrying money must reach a person, whatever the tool's standing"
+        );
+        assert_eq!(
+            queue.queued(),
+            1,
+            "and it must raise exactly one approval row for them to answer"
+        );
+    }
+
+    /// The same run, calling a `Standing::PerCall` tool, still raises exactly
+    /// one approval row — trust never reaches a call nobody could have handed
+    /// over ahead of time.
+    #[tokio::test]
+    async fn a_dispatched_run_still_parks_a_percall_send() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue.clone())
+            .with_agent("ops");
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("composio_execute", composio_send_args())))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a send is `Standing::PerCall` — nothing here for a dispatch to have earned"
+        );
+        assert_eq!(queue.queued(), 1, "exactly one approval row for the send");
+    }
+
+    /// Delegation must not be a privilege-escalation primitive: an origin
+    /// dispatched to one agent must not admit a call from a different agent's
+    /// policy instance, even though the task-local is still ambient (the
+    /// same-task inheritance `run_origin`'s own tests cover).
+    #[tokio::test]
+    async fn a_mismatched_agent_does_not_admit() {
+        let p = policy("supervised", &[], None).with_agent("marketing");
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "the dispatch named `ops`; a different agent's policy must not be trusted by it"
+        );
+    }
+
+    /// Issue #674's split, reasserted at the constructor: `judge` is silent on
+    /// an authored workflow node, so admitting one through trust as well would
+    /// remove the ceiling `always_approve` still leaves on that path.
+    #[tokio::test]
+    async fn the_arm_never_fires_for_an_authored_workflow_node() {
+        let p = policy("supervised", &[], None)
+            .with_agent("ops")
+            .for_authored_workflow_nodes();
+        let origin = dispatched("ops");
+        assert!(
+            matches!(
+                origin
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "an authored node must never be admitted by this arm, whatever the origin says"
+        );
+    }
+
+    /// `shell` is `Standing::PerCall` (arbitrary code, unbounded reach) and an
+    /// undeclared tool defaults to `Standing::PerCall` too (never `Grantable`
+    /// by omission) — both stop for a human whatever this run's origin says.
+    #[tokio::test]
+    async fn shell_and_an_undeclared_tool_still_park_under_a_dispatched_origin() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        for tool in ["shell", "some_tool_nobody_declared"] {
+            let origin = dispatched("ops");
+            assert!(
+                matches!(
+                    origin
+                        .scoped(p.check(&request(tool, serde_json::json!({}))))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "`{tool}` must still park inside a dispatched run"
+            );
+        }
+    }
+
+    /// The consequence floor (issue #1817's own arm) outranks a trusted
+    /// origin for every tool it declares irreversible — exhaustive over the
+    /// declaration table, the same style `floor`'s own tests use, so a future
+    /// tool added to either table is covered without a second hand-written
+    /// list.
+    #[tokio::test]
+    async fn a_dispatched_origin_still_parks_every_floor_covered_tool() {
+        for tool in crate::policy::consequence::declared_tools() {
+            let args = serde_json::json!({});
+            let consequence = crate::policy::consequence_of(tool, &args);
+            if !crate::policy::floor::evaluate_consequence(tool, consequence, &args, None)
+                .requires_human()
+            {
+                continue;
+            }
+            for mode in ["auto", "supervised"] {
+                let p = policy(mode, &[], None).with_agent("ops");
+                let origin = dispatched("ops");
+                let decision = origin.scoped(p.check(&request(tool, args.clone()))).await;
+                assert!(
+                    !matches!(decision, ToolPolicyDecision::Allow),
+                    "`{tool}` commits the company under `{mode}`; a dispatched origin must \
+                     never admit it, got {decision:?}"
+                );
+            }
+        }
+    }
+
+    /// [`crate::policy::consequence::standing_scope_of`] is the same reader a
+    /// standing grant's mint side uses. Pinned **directly** against
+    /// `trusted_dispatch_admits` rather than through `check()` — no tool in
+    /// today's declaration table reaches `Standing::ScopedGrantable` with a
+    /// reach that parks (`web_fetch` is the only classifier that produces the
+    /// variant, and it pairs the variant exclusively with `Reach::ExternalRead`,
+    /// which parks nowhere — see `a_grant_scoped_to_one_provider_does_not_admit_another_providers_read`
+    /// above for the same gap on the standing-grant path). A synthetic
+    /// `Consequence` is the only way to exercise the branch this codebase's own
+    /// tables cannot reach yet.
+    fn scoped_grantable() -> crate::policy::Consequence {
+        crate::policy::Consequence {
+            group: EffectGroup::Other,
+            reach: crate::policy::Reach::Consequence,
+            standing: Standing::ScopedGrantable,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scope_matched_call_inside_a_trusted_run_is_admitted() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let origin = claim(RunOrigin::Dispatched {
+            agent: "ops".to_string(),
+            source: DispatchSource::Task,
+            scope: Some("gmail".to_string()),
+        });
+        let admitted = origin
+            .scoped(async {
+                p.trusted_dispatch_admits(
+                    "composio_execute",
+                    &composio_send_args(),
+                    scoped_grantable(),
+                )
+            })
+            .await;
+        assert!(
+            admitted,
+            "the call's own scope (gmail, from GMAIL_SEND_EMAIL) matches the run's declared scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_out_of_scope_call_inside_a_trusted_run_still_parks() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        let origin = claim(RunOrigin::Dispatched {
+            agent: "ops".to_string(),
+            source: DispatchSource::Task,
+            scope: Some("github".to_string()),
+        });
+        let admitted = origin
+            .scoped(async {
+                p.trusted_dispatch_admits(
+                    "composio_execute",
+                    &composio_send_args(),
+                    scoped_grantable(),
+                )
+            })
+            .await;
+        assert!(
+            !admitted,
+            "the run is scoped to github; a call whose own scope resolves to gmail must still park"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_underivable_scope_refuses_rather_than_admits() {
+        let p = policy("supervised", &[], None).with_agent("ops");
+        // No scope declared on the run either — the underivable-call-scope
+        // refusal must hold even when it would otherwise be the more
+        // permissive reading (an unscoped run admitting an unscoped call).
+        let origin = dispatched("ops");
+        let admitted = origin
+            .scoped(async {
+                p.trusted_dispatch_admits(
+                    "composio_execute",
+                    &composio_unclassified_args(),
+                    scoped_grantable(),
+                )
+            })
+            .await;
+        assert!(
+            !admitted,
+            "an action the catalogue cannot place resolves no scope; refuse rather than admit"
+        );
+    }
+
+    /// Everything above the mode dispatch keeps deciding first, whatever this
+    /// run's origin says: the `readonly` brake, `always_approve`, the daily
+    /// spend cap, and a standing deny.
+    #[tokio::test]
+    async fn a_dispatched_origin_does_not_bypass_the_arms_above_the_mode_dispatch() {
+        // `readonly` denies an external effect before any grant or origin is
+        // consulted.
+        let p = policy("readonly", &[], None).with_agent("ops");
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "readonly must still deny, dispatched origin or not"
+        );
+
+        // `always_approve` wins over every tier, `full` included.
+        let p = policy("full", &["file_write"], None).with_agent("ops");
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "always_approve must still park under full, dispatched origin or not"
+        );
+
+        // The per-agent daily cap parks a priced call once the agent is out of
+        // budget, above the tier dispatch entirely.
+        let meter = FixedMeter::with(vec![spend_sample("ops", 5.00, today())]);
+        let (capped, _) = capped_policy("supervised", None, 5.0, "ops", meter);
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(capped.check(&request(
+                        "web_search",
+                        serde_json::json!({ "query": "acme pricing" })
+                    )))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "the daily cap must still park at cap, dispatched origin or not"
+        );
+
+        // A standing deny is a company saying "not this", which a run's own
+        // origin cannot override.
+        let (denying, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing_verdict(
+            "ops",
+            "file_write",
+            far_future(),
+            Verdict::Deny,
+        ));
+        assert!(
+            matches!(
+                dispatched("ops")
+                    .scoped(denying.check(&request("file_write", serde_json::json!({}))))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a standing deny must still refuse, dispatched origin or not"
+        );
+    }
+
+    /// Structural proof that the arm adds nothing outside `auto`/`supervised`:
+    /// scoping a dispatched origin must never change `full`'s or `readonly`'s
+    /// verdict, because the code for this arm is not reachable from either of
+    /// their match arms.
+    #[tokio::test]
+    async fn the_arm_is_inert_under_full_and_readonly() {
+        for mode in ["full", "readonly"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            let baseline = p.check(&request("file_write", serde_json::json!({}))).await;
+            let with_origin = dispatched("ops")
+                .scoped(p.check(&request("file_write", serde_json::json!({}))))
+                .await;
+            assert_eq!(
+                with_origin, baseline,
+                "`{mode}` must decide identically whether or not a dispatch origin is scoped"
+            );
+        }
+    }
+
+    /// [`standing`] mints an `Approve` grant; this is its `Deny` twin, needed
+    /// once here to prove a standing deny still outranks a trusted origin.
+    fn standing_verdict(
+        agent: &str,
+        tool: &str,
+        expires_at_millis: u64,
+        verdict: Verdict,
+    ) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("deny-standing-1"),
+            agent: agent.to_string(),
+            workflow: None,
+            tool: tool.to_string(),
+            verdict,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-deny-1"),
+            at_millis: 1_000,
+            expires_at_millis,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: None,
+        }
     }
 }

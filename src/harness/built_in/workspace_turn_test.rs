@@ -267,6 +267,8 @@ async fn harness(
         .unwrap();
 
     let deps = HarnessDeps {
+        emergency_gate: None,
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -348,6 +350,7 @@ async fn harness(
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
 
     let pool = HarnessPool::new();
@@ -804,6 +807,7 @@ async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRe
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
     record.manifest.tools.allow = manifest(grants).tools.allow;
     let pool = HarnessPool::new();

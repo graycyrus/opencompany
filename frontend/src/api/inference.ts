@@ -46,12 +46,17 @@ export interface InferenceStatus {
   /** Abstract-tier → concrete model id. */
   models: Record<string, string>;
   /**
-   * The shipped tier → model defaults, independent of `provider`/`models`
-   * above. The console's OpenRouter preset used to hard-code its own copy of
-   * these ids so the form had something to prefill before an operator typed
-   * an override; that duplicate could silently drift from what the host
+   * The shipped tier → model defaults — **OpenRouter's vocabulary**, and
+   * nothing wider. The console's OpenRouter preset used to hard-code its own
+   * copy of these ids so the form had something to prefill before an operator
+   * typed an override; that duplicate could silently drift from what the host
    * actually defaults to. This is read off the host on every status load, so
    * the preset is never more than one request stale.
+   *
+   * It is only that preset. These are OpenRouter catalog ids and mean nothing
+   * at another endpoint; what the *configured* endpoint wants is
+   * `InferenceModelCatalog.tierDefaults`, derived from that endpoint's own
+   * published catalog.
    */
   defaultTierModels: Record<string, string>;
   /** Provenance badge. */
@@ -86,6 +91,31 @@ export interface InferenceStatus {
    */
   harnessReachable: boolean;
   /**
+   * Whether this company can run a profile design pass — the one behind
+   * `POST {scope}/team/design` and the two `/team/…/draft` routes.
+   *
+   * Optional because an older host does not send it. `undefined` means "this
+   * host did not say", which is read exactly as `cognition: null` is: the
+   * capability is unknown, so the reduced dialog is offered and the refusal
+   * (if any) is met honestly. Only an explicit `false` retires it up front.
+   *
+   * Here at all because the console had no way to ask, and was inferring the
+   * answer from `cognition`: the reduced Add-teammate dialog treated every
+   * path but `echo` as able to draft. That is wrong for three of the six —
+   * `profile_drafter()` on the host is built from `workflow_harness_deps`,
+   * which is assigned in exactly one place, inside the embedded harness arm of
+   * `RuntimeBuilder::build`. So `hosted`, `sidecar` and `custom` companies
+   * have no drafter either, and every create through the reduced dialog on
+   * them went: type a sentence, press Create, wait on a model call that could
+   * only answer `no_model`, then meet the full form and write it by hand.
+   *
+   * Not the same question as `harnessReachable`, which is the pool being
+   * *attached* rather than this company having *booted onto* it: a company
+   * whose config failed to resolve at boot reports `harnessReachable: true`
+   * and has no drafter.
+   */
+  designsProfiles?: boolean;
+  /**
    * Whether this host can rebuild the company's runtime in place, so the
    * console may offer to perform the restart `restartRequired` names (issue
    * #1736).
@@ -116,11 +146,67 @@ export interface InferenceMutation {
   note: string;
 }
 
-/** One model published by the OpenRouter registry. */
+/** One model published by the configured provider's catalog. */
 export interface InferenceModel {
   id: string;
   name?: string;
   contextLength?: number;
+}
+
+/**
+ * How the configured endpoint spells a tier.
+ *
+ * - `tiers` — it publishes the tier names themselves (`chat-v1`, `agentic-v1`)
+ *   and resolves them against its own registry, so a tier is what it wants.
+ * - `concrete` — it publishes the ids `defaultTierModels` names, so a bare tier
+ *   would be rejected and the shipped mapping is the right default.
+ * - `unknown` — its catalog publishes neither, so there is no default anyone can
+ *   supply and the operator has to name a model per tier.
+ *
+ * Absent (`undefined`) means the catalog could not be read at all, which is a
+ * different thing from `unknown` and must not be shown as one.
+ */
+export type TierVocabulary = "tiers" | "concrete" | "unknown";
+
+/**
+ * The catalog of the endpoint **this company is configured against**.
+ *
+ * This route used to answer with a bare array that was always OpenRouter's
+ * public registry, whatever endpoint the company had been pointed at: the
+ * console listed 421 models to a company whose provider published eleven, the
+ * operator picked one the console had offered, and the provider rejected it.
+ * Discovery follows the configured base URL now, and the response says which
+ * endpoint answered so the console can name it rather than imply a vendor.
+ */
+export interface InferenceModelCatalog {
+  /** The endpoint the catalog was read from. */
+  baseUrl: string;
+  /** Every model that endpoint publishes, sorted. Empty when `error` is set. */
+  models: InferenceModel[];
+  /**
+   * How this endpoint spells a tier.
+   *
+   * `null` when the catalog could not be read — which is a different fact from
+   * `"unknown"` ("the endpoint answered, and publishes neither vocabulary") and
+   * must not be shown as one. The host sends the field either way:
+   * `ModelCatalogDto::tier_vocabulary` is an `Option` with no
+   * `skip_serializing_if`, so the wire carries an explicit `null` rather than
+   * omitting the key (CodeRabbit review on #2045). Optional as well as nullable
+   * because a stub or an older host may omit it; both mean "no vocabulary".
+   */
+  tierVocabulary?: TierVocabulary | null;
+  /**
+   * The tier → model mapping this endpoint's vocabulary implies. Empty for
+   * `unknown` and for an unreadable catalog: prefilling ids the endpoint has
+   * already told us it does not publish is the defect this field replaces.
+   */
+  tierDefaults: Record<string, string>;
+  /**
+   * Why the catalog is empty, naming the endpoint — a 200 rather than a 5xx,
+   * because an empty picker with no explanation reads as "this provider has no
+   * models", which nobody established.
+   */
+  error?: string;
 }
 
 /** The live-probe result. */
@@ -140,12 +226,12 @@ export function getInferenceStatus(
   return client.get<InferenceStatus>(`${client.scopeFor(company)}/inference`);
 }
 
-/** The cached OpenRouter model catalog exposed by the company host. */
+/** The model catalog of the endpoint this company is configured against. */
 export function listInferenceModels(
   client: OpenCompanyClient,
   company: string | null,
-): Promise<InferenceModel[]> {
-  return client.get<InferenceModel[]>(`${client.scopeFor(company)}/inference/models`);
+): Promise<InferenceModelCatalog> {
+  return client.get<InferenceModelCatalog>(`${client.scopeFor(company)}/inference/models`);
 }
 
 /** Set (or replace) the runtime provider override, optionally rotating the key. */

@@ -39,6 +39,19 @@ export interface CompanyStatus {
   emergency_paused?: boolean;
 }
 
+/**
+ * `GET /api/v1/companies/provisioning` — the sign-in mode a company provisioned
+ * on this host right now would land in, so the create/reset dialog can collect
+ * the right identity field before it builds a manifest. Mirrors
+ * `ProvisioningInfoDto` in `src/server/provision.rs`.
+ */
+export interface ProvisioningInfo {
+  /** The effective sign-in mode: `wallet`, `email`, or `none`. */
+  auth_mode: "wallet" | "email" | "none";
+  /** Whether provisioning requires at least one `[users].wallets` address. */
+  wallets_required: boolean;
+}
+
 /** What kind of processing step this is (drives the timeline icon). */
 export type TurnStepKind = "tool_call" | "thinking" | "note";
 
@@ -218,6 +231,23 @@ export interface DeskDto {
 }
 
 /**
+ * `GET {scope}/operator-channel` — the identity of the company's
+ * always-present, durable Operator feed (issue #1757 rework): a read-only
+ * "what happened" feed aggregating workflow-run reports and the owner/
+ * no-mailbox fallback. Its own surface, not a desk — the console pins it
+ * below a divider in the chat rail instead of folding it into `GET
+ * {scope}/desks`. Mirrors `OperatorChannelDto` in `src/server/operator.rs`.
+ */
+export interface OperatorChannelDto {
+  /** The channel id — the `desk` query param `chat/history` reads through. */
+  id: string;
+  /** Always "Operator" — the console's pinned-row label. */
+  name: string;
+  /** The channel's purpose line, shown under the name in the pinned row. */
+  description: string;
+}
+
+/**
  * Body for `POST {scope}/desks` — create a desk. `name` is required; `id` is
  * derived from the name when omitted; `members` are optional roster teammate
  * ids (the first becomes the lead).
@@ -241,11 +271,46 @@ export interface CreateDeskInput {
  * projection logic with the GraphQL `Chat.history` resolver, so the two can
  * never disagree about a desk's history (issue #65).
  */
+/**
+ * Where a message came from when another desk caused it (tinyhivemind P15).
+ *
+ * A crossing referral runs a turn on a desk the asker is not a member of, so
+ * the message needs to say so on its face — otherwise a turn that exists only
+ * because engineering asked reads as design's own idea.
+ *
+ * The labels are **captured with the row**, never resolved at render, for the
+ * reason `SessionAuthor` captures its own: a desk renamed later must not
+ * rewrite what the transcript said at the time.
+ */
+export interface ReferredFromDto {
+  deskId: string;
+  deskName: string;
+  askerId: string;
+  askerLabel: string;
+  /** The asking message, so the chip can link straight to it. */
+  sequence: number;
+  /**
+   * Which leg of the referral this message is: the outbound ask, or the answer
+   * arriving home.
+   *
+   * The host says it because only the host can. Both legs are agent-authored
+   * lines on a desk, so `from`, `byPerson` and the author all read identically
+   * on each — a console that guesses from those gets every return wrong, which
+   * is exactly what it did before this field existed.
+   *
+   * Optional: a host that predates it says nothing, and the chip then falls
+   * back to "asked", which is what every marker written before the return leg
+   * shipped actually was.
+   */
+  direction?: "asked" | "answered";
+}
+
 export interface ChatHistoryMessageDto {
   id: string;
   channel: string;
   author: string;
   text: string;
+  referredFrom?: ReferredFromDto;
   atMillis: number;
   mine: boolean;
   /**
@@ -406,6 +471,42 @@ export interface ChatResponse {
    * field.
    */
   outcome?: ResolveOutcome;
+  /**
+   * Set when a thread reply was intercepted as review feedback on an
+   * `in_review` dispatch card and re-dispatched it instead of answering with
+   * `responses` here. The re-run's own reply still arrives later on the event
+   * stream and in `chat/history` — this only tells the console not to read an
+   * empty `responses` as "the turn produced nothing." Absent on every other
+   * answer, and on a host that predates the field.
+   */
+  reviewFeedbackApplied?: boolean;
+  /**
+   * On a resolve: every approval it settled, when it settled more than the one
+   * addressed. A blocker answered here fans its verdict to its whole
+   * root-cause group, so the queue owes the siblings the same removal it gives
+   * the card that was clicked. Absent on every other answer, and on a host that
+   * predates the field.
+   */
+  settledIds?: string[];
+}
+
+/**
+ * Where a reviewed card lands: `done` on approve, `in_progress` on revise —
+ * or `in_review`, unchanged, on a revise whose note was blank. The host
+ * treats an empty note as nothing to re-run on and leaves the card where it
+ * was rather than dispatching an identical attempt a second time.
+ */
+export type ChatReviewColumn = "done" | "in_progress" | "in_review";
+
+/**
+ * The card a thread review verdict left behind, so the console can reconcile
+ * its optimistic move. Mirrors `ChatReviewReceipt` in `src/server/operator.rs`.
+ */
+export interface ChatReviewReceipt {
+  /** The reviewed card's id. */
+  taskId: string;
+  /** The column it landed in — see {@link ChatReviewColumn}. */
+  column: ChatReviewColumn;
 }
 
 /**
@@ -646,6 +747,35 @@ export interface ApprovalSummary {
    * that can be decided.
    */
   batch?: string | null;
+  /**
+   * The shared root cause a blocker has with its siblings (#1862) — a
+   * connection id, an integration name — so every card stalled on one broken
+   * integration folds into a single question and one verdict fans back to them
+   * all.
+   *
+   * Distinct from {@link batch}: a batch is "asked in the same turn", a group
+   * is "blocked by the same cause". Absent for an ordinary approval and for a
+   * blocker particular to its own step; those group alone.
+   */
+  group_key?: string | null;
+  /**
+   * Which kind of stopped step this blocker names (#2028) — `"task"` for a
+   * paused board card, `"node"` for a stopped workflow-run node. Mirrors
+   * `ApprovalSummary::blocker_step_kind` in `src/runtime/types.rs`; the
+   * tokens are the wire tokens.
+   *
+   * A `skip` or `cancel` does not do the same thing on both: a card
+   * redispatches on skip and returns to To-do on cancel, while a node
+   * produces nothing on skip and stops the run on cancel — so a caller
+   * wording a verdict's consequence must not describe one path's behaviour
+   * on the other's card.
+   *
+   * Absent for a non-blocker approval, a blocker with no step behind it (a
+   * bare agent question), and a host that predates the field. All three read
+   * as "unknown" — a caller must not assume either kind's behaviour, and
+   * should fall back to wording that is true regardless.
+   */
+  blocker_step_kind?: BlockerStepKind;
 }
 
 /**
@@ -688,9 +818,53 @@ export interface ResolveReceipt {
    * predates the field.
    */
   stillAwaiting?: number;
+  /**
+   * Every approval this resolve settled, when it settled more than the one
+   * addressed — the receipt twin of {@link ChatResponse.settledIds}.
+   */
+  settledIds?: string[];
 }
 
 export type Verdict = "approve" | "deny";
+
+/**
+ * What an operator asks a parked **blocker** to do — the four-way answer the
+ * two-value {@link Verdict} cannot carry. Mirrors `BlockerVerdict` in
+ * `src/ports/blockers.rs`; the tokens are the wire tokens.
+ *
+ * It narrows the verdict rather than replacing it: `retry`, `amend` and `skip`
+ * ride an `approve`, `cancel` rides a `deny`, and the host refuses a pair that
+ * disagrees.
+ */
+export type BlockerVerdict = "retry" | "amend" | "skip" | "cancel";
+
+/**
+ * Which kind of stopped step a parked blocker names — `"task"` for a paused
+ * board card, `"node"` for a stopped workflow-run node. Mirrors
+ * {@link ApprovalSummary.blocker_step_kind}; see there for what "unknown"
+ * (the field absent) means and why a caller must not guess between the two.
+ */
+export type BlockerStepKind = "task" | "node";
+
+/**
+ * How every surface hands a decision back: one approval, its two-value verdict,
+ * what an approve buys, and — for a parked blocker — which of the four things
+ * the operator asked the stopped step to do.
+ *
+ * One alias rather than the signature written at each hop, so a surface cannot
+ * be wired up while quietly dropping the blocker verdict on the way down.
+ */
+export type DecideApproval = (
+  approval: ApprovalSummary,
+  verdict: Verdict,
+  scope: GrantScope,
+  blocker?: { verdict: BlockerVerdict; answer?: string },
+) => void;
+
+/** The `approve`/`deny` a blocker verdict must be sent with. */
+export function blockerEventVerdict(verdict: BlockerVerdict): Verdict {
+  return verdict === "cancel" ? "deny" : "approve";
+}
 
 /**
  * What an approve buys (#374).
@@ -715,13 +889,6 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  * structurally unable to be widened into an argument-matching rule, and why this
  * list needs no redaction of its own.
  */
-/**
- * A durable re-issue marker (issue #1846), as
- * `GET {scope}/agents/{agentId}/budget-pause` and its `/redeem` twin return
- * it. Parked when a turn pauses for lack of inference budget/credits;
- * redeeming re-dispatches `message` from the top on `chatId` (not true
- * resume — see the endpoint's doc comment in `src/server/ops/budget_pause.rs`).
- */
 export interface BudgetPauseMarker {
   id: string;
   agent: string;
@@ -733,42 +900,13 @@ export interface BudgetPauseMarker {
 
 export interface StandingGrant {
   id: string;
-  /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
-   * which names its subject in `workflow` instead. */
   agent: string;
-  /** The authored workflow allowed to redeem it, when the grant is to a
-   * workflow rather than a teammate (issue #1098) — `agent` is empty then.
-   * Absent on every teammate grant. */
   workflow?: string;
-  /** The tool it admits, with any arguments. */
   tool: string;
   verdict: Verdict;
-  /** Who granted it: a signed-in user, or the platform credential. */
   granted_by: { kind: string; id: string };
   at_millis: number;
-  /** Epoch-millis it stops admitting calls. */
   expires_at_millis: number;
-  /**
-   * The slice of the tool it is confined to, when the tool's name is not the
-   * whole of what it can do (#457).
-   *
-   * **Two kinds of value, in one untyped string** — both minted by the host's
-   * `standing_scope_of`, and a reader that assumes either one is the bug #785
-   * was:
-   *
-   * * a **Composio toolkit** identifier like `github` — a slug, which has to be
-   *   spelled out before an operator can read it;
-   * * a **URL origin** like `https://docs.rs`, added for `web_fetch` by
-   *   #673/#739 — already exactly what the operator approved, and to be shown
-   *   untouched.
-   *
-   * Render it through `grantHeadline` in `lib/language`, which is the one place
-   * that tells them apart. Do not spell a scope out at a call site.
-   *
-   * Absent for every tool whose name already says everything, and absent from
-   * an older host that predates the field. Both mean "nothing to narrow", so
-   * the row simply says what it always said.
-   */
   scope?: string;
 }
 

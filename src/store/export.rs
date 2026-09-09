@@ -491,6 +491,11 @@ impl BundleContents {
                     setup: self.setup.clone(),
                     name_confirmed: self.name_confirmed,
                     activation_completed_at: self.activation_completed_at,
+                    // Bundle export/import never carries a creation timestamp
+                    // through (`BundleMeta`/`BundleContents` have no
+                    // `created_at_millis` field) — `None` here matches every
+                    // other `CompanyRecord` this module constructs.
+                    created_at_millis: None,
                 },
                 self.activation_gate_seen,
             )
@@ -1084,6 +1089,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -1466,6 +1472,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1552,6 +1559,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1689,6 +1697,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1786,6 +1795,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1882,6 +1892,7 @@ mod test {
                 description: Some("Marketing pod".into()),
                 members: vec!["ceo".into()],
                 responder: crate::ports::types::ResponderMode::default(),
+                hive: Default::default(),
             },
             OverlayDesk {
                 id: "launch".into(),
@@ -1889,6 +1900,7 @@ mod test {
                 description: None,
                 members: vec!["ceo".into(), "cto".into()],
                 responder: crate::ports::types::ResponderMode::Auto,
+                hive: Default::default(),
             },
         ];
         // A workflow graph authored at runtime (issue #168). On a hosted tenant
@@ -1923,6 +1935,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2144,6 +2157,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2308,6 +2322,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2406,6 +2421,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2497,6 +2513,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();

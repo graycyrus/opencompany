@@ -38,7 +38,7 @@ use crate::harness::publish::PUBLISH_ARTIFACT_TOOL;
 use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
 use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::brain::{Brain, CycleHost};
-use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskRecord, TaskStore};
+use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskRecord, TaskStore, TaskTitle};
 use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, ToolCall, ToolResult,
@@ -301,6 +301,8 @@ fn brain_with(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        emergency_gate: None,
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -378,6 +380,7 @@ fn brain_with(
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
     (
         // Issue #339: the run store is wired here so a dispatch carrying a
@@ -408,13 +411,13 @@ fn company() -> CompanyId {
 fn card(id: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
-        title: "Draft the launch spec".to_string(),
+        title: TaskTitle::authored("Draft the launch spec"),
         note: None,
         column: COLUMN_IN_PROGRESS.to_string(),
         priority: "medium".to_string(),
         assignee: AGENT.to_string(),
         updated_at_millis: 1,
-        origin_chat_id: None,
+        origin: None,
         parent_task_id: None,
         output: None,
         plan: None,
@@ -423,6 +426,8 @@ fn card(id: &str) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
+        bounced: None,
     }
 }
 

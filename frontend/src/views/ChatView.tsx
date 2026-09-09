@@ -9,58 +9,64 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
+import { createPortal } from "react-dom";
 import { TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
-import type { OpenTurn } from "@/lib/live-reply";
+import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
+import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
+import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import {
   ApiError,
   type ApprovalSummary,
   type AttachmentDto,
   type CognitionState,
-  type GrantScope,
+  type DecideApproval,
+  type OperatorChannelDto,
   type TeamMemberDto,
   type TurnStep,
   type Verdict,
   isDetachedChat,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fromHistory,
+  isGeneralChannel,
   makeMessage,
+  markSendFailed,
   reconcileIds,
+  replyVoice,
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
 import { settingsHref } from "@/views/settings-pages";
-import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
   addMemberFailure,
   reportAddMember,
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
+import { usd } from "@/lib/money";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { personAvatar, personName } from "@/lib/person";
-import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
-import { useIsDesktop } from "@/hooks/use-mobile";
+import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
-import { PageHeader } from "@/components/page-header";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { TypingLine } from "./chat/TypingLine";
+import { InflightRunBar } from "./chat/InflightRunBar";
 import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
@@ -72,12 +78,15 @@ import {
 } from "./chat/mentions";
 import { echoCause } from "./chat/EchoPlaceholder";
 import { MessageTimeline } from "./chat/MessageTimeline";
+import type { ChatReceipt } from "./chat/ChatLiveReceipt";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import {
   buildChannels,
   buildTimeline,
   buildTimelineItems,
+  budgetPauseRedeemId,
+  canSubmitReview,
   channelIdFromSegment,
   channelMembers,
   channelTitle,
@@ -86,16 +95,21 @@ import {
   dmThreadId,
   findChannel,
   firstChannel,
+  generalChannelId,
   historyReady,
   HISTORY_UNTRACKED,
-  budgetPauseRedeemId,
   clearTaskCardEverywhere,
   directMessageChannels,
   directMessageForId,
+  inlineReplyIds,
+  isOperatorChannelDto,
   latestBudgetPauseMessageIdByAgent,
   mergeBudgetPauseMarkerRead,
   offersDeliverableChoice,
+  operatorSection,
+  repliesInThread,
   resolveDmChannelId,
+  reviewAnchorsForThread,
   toggleReaction,
   type DecidedApproval,
   type HistoryHydration,
@@ -120,7 +134,44 @@ interface Props {
   company: string | null;
   /** The hash's second segment — the channel id, e.g. `main` in `#/chat/main`. */
   sub: string | null;
+  /**
+   * Whether `#/chat` is the address on screen.
+   *
+   * The shell keeps this view mounted on **every** route since issue #2130,
+   * because the sidebar's channel rail is portalled out of here and is pinned
+   * there on every section — see `components/room-rail.tsx` for the two ways
+   * that could have been done and why this is the one taken.
+   *
+   * So the rail renders unconditionally and everything that belongs to the Room
+   * *route* — the transcript, the header, the members pane — renders only when
+   * this is true. It also gates `chatPaneVisible`: a transcript that is mounted
+   * but not routed must not mark a mention read, for the same reason the phone's
+   * covering sheet must not.
+   *
+   * Optional, defaulting to **true**: a caller that renders this view as a page
+   * — every unit test, a future embed — means the transcript, and should not
+   * have to say so. It is the shell keeping it mounted off-route that is the
+   * unusual case, and the shell is the one that says it. Same rule
+   * `useRoomRailSlot` follows when there is no provider: the standalone shape
+   * is the one that works with nothing configured.
+   */
+  routeOpen?: boolean;
   onNavigate: (channelId: string) => void;
+  /**
+   * Leave chat for a teammate's detail page, with `edit` opening its edit form
+   * too (issue #1989).
+   *
+   * The one navigation out of this view, and it exists for one reason: the
+   * reduced Add-teammate dialog collects a name and a sentence, and the copilot
+   * that drafts the description and the persona lives in that form. Creating a
+   * teammate here and staying in chat would leave them half-written with
+   * nothing pointing at where to finish them.
+   *
+   * Optional, so `ChatView` still mounts standalone in tests — but a mount
+   * without it turns the reduced dialog's create into a dead end, so the shell
+   * always passes it.
+   */
+  onOpenAgent?: (agentId: string, options?: { edit?: boolean }) => void;
   /** Called after a reply lands, so the shell can refresh approvals/status. */
   onReply?: () => void;
   /**
@@ -146,8 +197,15 @@ interface Props {
    * flight. Without this bracket the shell's live injection and the awaited
    * reply below both render and the bubble doubles — the exact duplicate-bubble
    * race the Conversation surface already brackets against.
+   *
+   * Returns the generation the shell stamped this send's receipt with (issue
+   * #1935 review). `send` threads it back through whichever terminal callback
+   * this POST reaches, so the shell can tell "my own armed receipt settling"
+   * apart from "a newer send already re-armed this reused thread id" — see
+   * `shouldClearReceipt`. `undefined` when the shell has nothing to say (no
+   * handler wired), which callers must treat the same as "clear unconditionally".
    */
-  onSendStart?: (threadId: string) => void;
+  onSendStart?: (threadId: string) => number | undefined;
   /**
    * Who is present right now, keyed by user id. Empty when the host has no
    * presence route, or when nobody else is connected to this replica.
@@ -171,14 +229,25 @@ interface Props {
   resolveTypingNames?: (chatId: string, parentId?: string) => string[];
   /** Called as a composer is typed in; the caller throttles. */
   onTyping?: (chatId: string, parentId?: string) => void;
-  onSendEnd?: (threadId: string) => void;
+  /**
+   * `responseTexts` is every reply line this settled POST's own body carried
+   * (issue #101 review, PR #2052) — what `PendingSyncPosts.ended` needs to
+   * tell a held **system**-attributed live frame (never the operator's own
+   * reply, which is always in the response) apart from one the response never
+   * carried: a `system_notice` fallback (approval overflow, "Acknowledged.")
+   * is folded into this same response body, but B-101's mention-ambiguity
+   * note deliberately never is. Without it, either every held system frame
+   * had to be discarded (silently losing the ambiguity note) or none did
+   * (double-rendering the ones the response does carry).
+   */
+  onSendEnd?: (threadId: string, gen?: number, responseTexts?: readonly string[]) => void;
   /**
    * The host accepted the turn and answered `202` instead of the reply
    * (issue #983). Distinct from `onSendEnd`, which says the turn is *over*:
    * this one says the POST is over and the turn is not, so the shell keeps the
    * working row up and stops suppressing the live reply frame.
    */
-  onSendDetached?: (threadId: string, turnId?: string) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   /**
    * The chat POST **threw** rather than answering (issue #1000).
    *
@@ -189,9 +258,9 @@ interface Props {
    * the request that started it, so that held frame is the only copy of the
    * answer anyone is going to get.
    */
-  onSendFailed?: (threadId: string) => void;
+  onSendFailed?: (threadId: string, gen?: number) => void;
   /** Called when a delayed response belongs to a previous company scope. */
-  onSendStale?: (threadId: string) => void;
+  onSendStale?: (threadId: string, gen?: number) => void;
   /**
    * The shell's live company ref, so the stale-response check keeps observing
    * company switches after this view unmounts.
@@ -226,6 +295,28 @@ interface Props {
    * started, which is most of what issue #367 is about.
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
+  /**
+   * Live rows per query, keyed by the asking message's id (see
+   * `MessageTimeline`). Passed straight through — unlike `liveStepsByThread`,
+   * nothing here has to resolve a key for it: the message id is the key, so it
+   * needs neither `activeThreadId` nor the desk map, and cannot be affected by
+   * their load order.
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
+  /**
+   * The live receipt for a synchronous chat turn in flight, keyed by **host
+   * thread id** (issue #1934) — resolved to this channel's thread the same way
+   * `liveStepsByThread` is. Present between the operator's send and the reply
+   * landing; absent otherwise. Drives the "Sent → Picked up → on step" row that
+   * fills the gap the composer used to leave silent.
+   */
+  receiptByThread?: Record<string, ChatReceipt>;
+  /**
+   * Roster agent id → display name, captured by the shell's desks/roster read
+   * (issue #1934). Lets the receipt name whoever picked the turn up rather than
+   * rendering a raw id; a miss falls back to the channel voice.
+   */
+  agentNames?: Record<string, string>;
   /** Channel id → unread count, for the rail's badges. Owned by the shell. */
   unread?: Record<string, number>;
   /**
@@ -265,9 +356,10 @@ interface Props {
     loadedMessageIds?: ReadonlySet<string>,
   ) => void;
   /**
-   * Reports whether the transcript is actually on screen right now — below
-   * `lg`, `mobilePane === "rail"` hides it behind the channel list even
-   * though `onChannelViewed`'s last report still names that channel.
+   * Reports whether the transcript is actually on screen right now — on a
+   * phone the sidebar holding the channel list is a sheet over the whole
+   * screen, and it hides the transcript even though `onChannelViewed`'s last
+   * report still names that channel.
    * Distinct from `onChannelViewed`'s own channel memory (which the shell
    * also uses to address an unaddressed system line after the operator walks
    * off to Approvals, and must keep doing even while the rail is showing):
@@ -291,6 +383,14 @@ interface Props {
   chatChannelByThread?: Record<string, string>;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /**
+   * The company's steerable runs, whole. Separate from `taskStatusByTaskId`
+   * because that map is card-keyed and a delegation has no card, so the runs
+   * that most need a control here are exactly the ones it cannot carry.
+   */
+  inflightRuns?: readonly InflightRun[];
+  /** Re-read the in-flight list after a steer lands. */
+  onInflightSteered?: () => void | Promise<void>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -298,7 +398,7 @@ interface Props {
    * witnessed verdict survives this view unmounting — the operator can walk to
    * Approvals and back mid-turn.
    */
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecideApproval?: DecideApproval;
   /** The verdict each card is waiting on, and the ones already witnessed. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Record<string, DecidedApproval>;
@@ -336,11 +436,26 @@ const FIRST_TEAM_BRIEF =
  * backend. Threads and reactions are console-local for the same reason: the
  * host has no surface for either yet.
  */
+/**
+ * The host seq a console message id names, for keying live-turn state.
+ *
+ * `undefined` for an unthreaded send and for a local id the host has not
+ * reconciled yet — both of which key at the channel, which is what they are.
+ */
+function threadRootOf(parentId: string | undefined): number | undefined {
+  const seq = toHostMessageId(parentId);
+  if (seq === null) return undefined;
+  const n = Number(seq);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function ChatView({
   client,
   company,
   sub,
+  routeOpen = true,
   onNavigate,
+  onOpenAgent,
   onReply,
   transcripts,
   setTranscripts,
@@ -357,6 +472,9 @@ export function ChatView({
   scopeRef,
   openTurns,
   liveStepsByThread,
+  liveStepsByMessage,
+  receiptByThread,
+  agentNames,
   unread,
   mentions,
   mentionFeedRevision,
@@ -365,6 +483,8 @@ export function ChatView({
   approvals,
   chatChannelByThread,
   taskStatusByTaskId,
+  inflightRuns,
+  onInflightSteered,
   now,
   onDecideApproval,
   decidingApprovals,
@@ -375,6 +495,46 @@ export function ChatView({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
+  /**
+   * How many times Room has been entered — the mount this view no longer has
+   * (Codex P2 review on #2130).
+   *
+   * Every read below was keyed on `[client, company]` alone, and that was
+   * sufficient while navigating away unmounted the view: coming back was a
+   * mount, and a mount re-read everything. It is not sufficient now. Add a
+   * teammate on Company, delete a desk on the org chart, and the pinned rail
+   * would go on showing the roster and channels it loaded once — until a reload
+   * or a company switch, and in plain sight, because the rail is on screen the
+   * whole time.
+   *
+   * A counter incremented on ENTRY, rather than `routeOpen` in each dependency
+   * list, for two reasons. `routeOpen` moves in both directions, so leaving Room
+   * would spend a second round of reads on a section the operator has just left.
+   * And gating the reads on `routeOpen` instead would leave the rail empty on a
+   * console loaded straight onto `#/company`, which is the one thing this whole
+   * change exists to prevent — the reads still run on mount, wherever that is.
+   *
+   * The cognition read is in the set too, and it was not at first: it already
+   * refreshes on `visibilitychange`, which sounded like enough and is not. That
+   * event is about the *tab*, not the route — an admin who follows the Room
+   * warning to Settings → Inference, configures a provider and comes back has
+   * never hidden the tab, so the stale warning and its echo placeholders would
+   * have stayed (Codex P2 review).
+   */
+  const [roomVisits, setRoomVisits] = useState(0);
+  const wasRouteOpen = useRef(routeOpen);
+  useEffect(() => {
+    // A `false → true` transition, and only after the mount (Codex P2 review).
+    // Bumping on `routeOpen` being true at all counted the ordinary startup —
+    // the console opens on `#/chat` — so every read below ran twice in a row,
+    // and `loadDesks` clears the desk list on its way, dropping the pane back to
+    // its loading state a frame after it had arrived. The mount's own pass is
+    // the first visit; this counts the ones after it.
+    const entered = routeOpen && !wasRouteOpen.current;
+    wasRouteOpen.current = routeOpen;
+    if (entered) setRoomVisits((n) => n + 1);
+  }, [routeOpen]);
+
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
   /**
@@ -421,6 +581,15 @@ export function ChatView({
   const [desks, setDesks] = useState<Desk[] | null>(null);
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
+  /**
+   * The identity of the always-present Operator feed (issue #1757 rework) —
+   * fetched separately from `desks`, since it is its own surface now rather
+   * than an entry `list_desks` returns. `null` until `/operator-channel` has
+   * answered; a fetch failure leaves it `null` rather than surfacing an
+   * error, since the pinned row degrading to absent is a much smaller loss
+   * than blocking the rest of Chat on it.
+   */
+  const [operator, setOperator] = useState<OperatorChannelDto | null>(null);
   const [sending, setSending] = useState(false);
   const [composerPrefill, setComposerPrefill] = useState<{
     text: string;
@@ -428,6 +597,13 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
+  /** Every card whose review verdict is currently in flight — one entry per
+   * task, not a single global slot, so a click on one card's Approve/Revise
+   * control never gets silently dropped by a DIFFERENT card's in-flight
+   * verdict (Codex #3906779123). See {@link canSubmitReview}. */
+  const [reviewingCardIds, setReviewingCardIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /** Issue #1846: which teammate's budget-pause redeem is in flight, if any —
    * so only that notice's button shows a busy state. */
   const [redeemingBudgetPauseAgent, setRedeemingBudgetPauseAgent] = useState<string | null>(
@@ -437,27 +613,27 @@ export function ChatView({
   const [addOpen, setAddOpen] = useState(false);
   // The rail's "+" (issue #1835) — chat's own door for creating a channel.
   const [channelCreateOpen, setChannelCreateOpen] = useState(false);
-  const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
-  // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
-  // transcript share the viewport (`hidden lg:flex`), so it is visible even
-  // while `mobilePane` says "rail"; below that the pane toggle is the whole
-  // story. Mention clearing is gated on this so a mention cannot be marked
-  // read while only the rail is showing (codex P1 review).
-  const isDesktop = useIsDesktop();
-  const chatPaneVisible = mobilePane === "chat" || isDesktop;
-  const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
+  // The channel list is a section of the app sidebar now, so the sidebar owns
+  // where it is, how dense it is, and whether it is covering the transcript.
+  // See `components/room-rail.tsx`.
+  const roomRail = useRoomRailSlot();
+  // Whether the transcript is actually on screen. Two ways for it not to be,
+  // and both have to be said here. The operator may be on another section
+  // entirely — this view stays mounted to keep feeding the sidebar's rail
+  // (#2130), so being mounted is no longer evidence of being visible. Or the
+  // sidebar may be a sheet covering the whole screen, which is the phone.
+  //
+  // Mention clearing is gated on this so a mention cannot be marked read while
+  // the operator is looking at the channel list (codex P1 review) — or at
+  // Company, which would be the same defect one route further away.
+  const chatPaneVisible = routeOpen && !roomRail.covering;
+  const channelsCollapsed = roomRail.collapsed;
   // Section disclosure is shared by the desktop and sub-`lg` rail instances
   // (codex P2 review): each instance would otherwise keep its own fold state,
   // so dropping below `lg` reopened every section the operator had folded.
   const [railOpenSections, setRailOpenSections] = useState<Record<string, boolean>>({});
   const toggleRailSection = (id: string) =>
     setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
-  // The header's density toggle stays mounted across a collapse/expand, but the
-  // compact rail's expand button does not — expanding unmounts it while a
-  // keyboard user is still focused on it, dropping them at the document. The
-  // ref lets the expand action hand focus to the header toggle instead (the
-  // fix for the rail's issue #1340 focus review).
-  const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   /** Your own avatar reference, once `loadViewer` has resolved who you are. */
   const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
@@ -467,12 +643,6 @@ export function ChatView({
   const [people, setPeople] = useState<Person[]>([]);
   // The member whose budget dialog is open, if any.
   const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
-
-  // A host switch keeps this mounted briefly, so replace rather than carry the
-  // previous connection's layout preference into the next company.
-  useEffect(() => {
-    setChannelsCollapsed(readChannelRailCollapsed(scope));
-  }, [scope]);
 
   /**
    * Ask the host whether this company can think (issues #1734, #1735).
@@ -539,7 +709,7 @@ export function ChatView({
       live = false;
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   /**
    * The host's answer *for the company on screen right now*, or `null` while
@@ -563,22 +733,42 @@ export function ChatView({
   const echoing = echoCause(cognition) !== null;
 
   function toggleChannels() {
-    setChannelsCollapsed((collapsed) => {
-      const next = !collapsed;
-      writeChannelRailCollapsed(scope, next);
-      // Expanding from the compact rail unmounts the button that carried focus;
-      // hand it to the header toggle, which is mounted on both density states.
-      // `next` is the rail's new collapsed state, so expanding is `!next` —
-      // collapsing from the header's own toggle leaves that button mounted,
-      // and the focus it already holds is the right place to stay.
-      if (!next) channelsToggleRef.current?.focus();
-      return next;
-    });
+    const expanding = channelsCollapsed;
+    roomRail.expand();
+    // Expanding unmounts the compact rail's own expand button while a keyboard
+    // user is still on it, dropping them at the document (issue #1340). Hand
+    // focus to the sidebar's collapse control, which is the one control mounted
+    // on BOTH density states now that the chat header no longer carries a
+    // duplicate of it. Queried by its test id rather than threaded as a ref:
+    // it is rendered by the shell, two components above this one, and that id
+    // is already the contract `sidebar-toggle-reachable.spec.ts` pins it by.
+    if (expanding) {
+      window.requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>('[data-testid="sidebar-collapse"]')?.focus(),
+      );
+    }
   }
 
+  /**
+   * Which roster read this is, so only the newest may write — the same guard
+   * `loadDesks`, `viewerRun` and `directoryEpoch` each keep, and the one this
+   * read was missing (Codex P2 review on #2130).
+   *
+   * Two of these could not overlap while the read happened once per mount. They
+   * can now: a console that loads off Room and is taken *into* Room before the
+   * first `listTeam` settles starts a second one beside it. And the failure path
+   * is the dangerous half — it writes unconditionally, so a slow older rejection
+   * landing after a newer success replaces a real roster with `[]` and
+   * `fromHost: false`. Direct messages vanish and "New channel" goes with them,
+   * until some later entry to Room happens to fix it.
+   */
+  const rosterRead = useRef(0);
   const boot = useCallback(async () => {
+    const ticket = ++rosterRead.current;
+    const isCurrent = () => ticket === rosterRead.current;
     try {
       const roster = await client.listTeam(company);
+      if (!isCurrent()) return;
       if (roster.length) {
         setMembers(roster.map(fromDto));
         setFromHost(true);
@@ -592,13 +782,17 @@ export function ChatView({
       }
     } catch {
       // The roster read failed, so we do not know who works here. Still nobody:
-      // guessing a team is what this change exists to stop.
+      // guessing a team is what this change exists to stop. Guarded in both
+      // directions — a stale rejection overwriting a fresh success is the same
+      // bug with the sign flipped, which is the rule the cognition read already
+      // states.
+      if (!isCurrent()) return;
       setMembers([]);
       setFromHost(false);
     } finally {
-      setLoadingTeam(false);
+      if (isCurrent()) setLoadingTeam(false);
     }
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   /**
    * Hiding the budget controls from a non-admin is **courtesy, not
@@ -644,7 +838,7 @@ export function ChatView({
       // Attribution falls back to "an admin"; not worth a toast.
       setPeople([]);
     }
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   useEffect(() => {
     setLoadingTeam(true);
@@ -680,7 +874,7 @@ export function ChatView({
       // Update the one card from the host's answer rather than refetching the
       // roster: the response IS the new state, so a refetch could only disagree.
       setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to $${cap.toFixed(2)}.`);
+      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
     } catch (error) {
       toast.error(budgetError(error, "Couldn't change the daily cap."));
     }
@@ -765,49 +959,92 @@ export function ChatView({
         error instanceof Error ? error.message : "Couldn't load this company's channels.",
       );
     }
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   useEffect(() => {
     void loadDesks();
   }, [loadDesks]);
 
   /**
-   * Re-entering Chat with no channel in the hash returns the operator to the
-   * one they were last reading (issue #412).
+   * The always-present Operator feed's identity (issue #1757 rework),
+   * fetched in parallel with `loadDesks` rather than derived from it — it is
+   * its own surface now, not an entry `list_desks` returns. A failure is
+   * swallowed rather than surfacing `desksError`: losing the pinned row is a
+   * much smaller degradation than blocking the whole channel list on it, and
+   * the fetch is retried on every company switch same as desks are.
    *
-   * Leaving Chat drops the hash's second segment, so coming back used to fall
-   * straight through to `firstChannel` — which is not memory, it is whichever
-   * channel sorts first, and it cost a re-navigation on every trip.
+   * One bounded retry (issue #1781 review, Codex P2), the same
+   * `fetchWithOneRetry` wrapper `app-shell.tsx`'s independent hydration pass
+   * already uses for this identity: without it, a single dropped request
+   * here — while the shell's own, retried lookup succeeds — left `operator`
+   * `null` even though history kept hydrating, so the pinned row stayed
+   * absent until the client/company changed or the page reloaded. See
+   * `fetchWithOneRetry`'s doc for why the retry itself lives there rather
+   * than inline.
    *
-   * The remembered id is written into the **hash**, not held here, for three
-   * reasons: the channel on screen stays shareable, it survives a reload, and a
-   * remembered channel that has since been removed then falls through the exact
-   * same stale-id path as a bad deep link — so it raises the unknown-channel
-   * notice from issue #370 rather than needing a second one, and lands on the
-   * fallback visibly rather than silently. The `onChannelViewed` report for
-   * whatever it fell back to re-remembers that instead, so a vanished channel
-   * corrects itself after one visit.
-   *
-   * A hash that already names a channel is a deep link and always outranks
-   * memory; this only runs when there is nothing to override. The ref makes it
-   * one attempt per bare-hash entry, so it can never fight a navigation.
+   * `fetchWithOneRetry` already collapses a genuine fetch failure to `null`
+   * (issue #1781 review, tinysweeper): that and a 2xx response that simply
+   * is not `OperatorChannelDto`-shaped both degrade to no pinned row here,
+   * on purpose — see `isOperatorChannelDto`'s doc comment. But a non-`null`
+   * value that still fails the shape check is a schema drift the fetch
+   * itself did not report as an error, so it is logged (not surfaced —
+   * still the same silent degrade) to keep that distinct from an ordinary
+   * offline/older-host miss.
    */
-  const restoredFor = useRef<string | null | undefined>(undefined);
+  const operatorRun = useRef(0);
   useEffect(() => {
-    if (sub) {
-      // A channel is named, so the next bare `#/chat` is a fresh re-entry.
-      restoredFor.current = undefined;
-      return;
-    }
-    // Scoped like `readLastChannel(scope)`: two connections serving the same
-    // company must each restore their own remembered channel, so a host switch
-    // cannot be mistaken for a re-entry into the previous host's state.
-    const scopeKey = `${scope.connection}::${scope.company ?? "single"}`;
-    if (restoredFor.current === scopeKey) return;
-    restoredFor.current = scopeKey;
-    const remembered = readLastChannel(scope);
-    if (remembered) onNavigate(remembered);
-  }, [company, scope, sub, onNavigate]);
+    const run = ++operatorRun.current;
+    setOperator(null);
+    void fetchWithOneRetry(() => client.getOperatorChannel(company)).then((dto) => {
+      if (run !== operatorRun.current) return;
+      if (isOperatorChannelDto(dto)) {
+        setOperator(dto);
+      } else if (dto !== null) {
+        console.debug("[ChatView] getOperatorChannel returned an unexpected shape", dto);
+      }
+    });
+  }, [client, company, roomVisits]);
+
+  /** One attempt per bare-hash entry; see the effect below `channel`, which
+   * is the single owner of what a bare `#/chat` resolves to. */
+  const restoredFor = useRef<string | null | undefined>(undefined);
+
+  /**
+   * What a failed send needs to be sent again (B-099), by the optimistic id of
+   * the row it failed on.
+   *
+   * A ref, not state: nothing rendered depends on it — `message.sendFailed` is
+   * what draws the row — and a re-render per failed send would be a re-render
+   * for a value only a click ever reads.
+   *
+   * It is deliberately not stored on the `ChatMessage`. Two of these five
+   * fields are not on the bubble and cannot be recovered from it: the wire
+   * `mentions` carry a target the rendered chip does not, and an `attachment`
+   * is a workspace node reference rather than the projection the row shows. A
+   * Retry rebuilt from the rendered message would quietly send a *different*
+   * message — chip-less, or without its file — which is a worse failure than
+   * the one being fixed.
+   *
+   * Declared **here**, beside the other long-lived refs, rather than beside
+   * `retrySend` where it is read: three early returns sit between the two
+   * (`desksError`, `!desks`, `!channel`), and a hook below them runs on some
+   * renders and not others. That is React error 310 — a blank console with no
+   * composer at all, on exactly the first paint, where `desks` is still `null`.
+   * Every hook in this component belongs above those returns.
+   */
+  const failedSends = useRef<
+    Map<
+      string,
+      {
+        target: string;
+        text: string;
+        intent?: MessageIntent;
+        parentId?: string;
+        attachments?: AttachmentDto[];
+        mentions?: Mention[];
+      }
+    >
+  >(new Map());
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
@@ -819,10 +1056,13 @@ export function ChatView({
   // keeps updating its ref on every connection/company change, mounted or not,
   // so the comparison in `send` stays honest after Chat is gone (codex P1).
 
-  const sections = useMemo(
-    () => (desks ? buildChannels(members, desks, transcripts) : []),
-    [members, desks, transcripts],
-  );
+  // The pinned Operator row is appended *last* (issue #1757 rework) — after
+  // every desk/DM section `buildChannels` produces — so `firstChannel` below
+  // still defaults to a writable desk rather than the read-only feed.
+  const sections = useMemo(() => {
+    const base = desks ? buildChannels(members, desks, transcripts) : [];
+    return operator ? [...base, operatorSection(operator)] : base;
+  }, [members, desks, transcripts, operator]);
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
   // it matched nothing once a company's real desks loaded and matched the same
@@ -843,6 +1083,34 @@ export function ChatView({
       ? resolveDmChannelId(decodedSub, members)
       : null;
   /**
+   * A General *spelling* in the hash, mapped onto the channel that actually
+   * renders the company-wide line.
+   *
+   * The host folds four addresses into one conversation — `""`, `main`,
+   * `general` and `General`, case-insensitively (`isGeneralChannel`, mirroring
+   * `is_general_chat`) — and everything downstream of a live frame already
+   * applies that fold. Routing did not, so which of the four opened the channel
+   * depended on how the company was declared: the built-in channel is `main`,
+   * while a blueprint `[[group_chat]] id = "general"` is grandfathered onto the
+   * line and the built-in steps aside for it ({@link generalChannelId}). One
+   * spelling therefore worked and the other raised issue #370's "isn't a channel
+   * here" — for the same conversation, in the same company.
+   *
+   * Only ever a *fallback*: the exact id is asked first, so a real desk whose id
+   * happens to be a General spelling still wins its own channel, and this cannot
+   * reroute anything that already resolves. It takes precedence over
+   * `resolvedSub` for the reason `channelForThread` gives — a teammate whose id
+   * is a General spelling does not inherit the company's line.
+   *
+   * The guided tour depends on it (PR #1984): its two composer stops address
+   * `#/chat/main` explicitly so they cannot land on the read-only Operator feed,
+   * which renders no composer and would silently skip both stops.
+   */
+  const generalSub =
+    desks && decodedSub && isGeneralChannel(decodedSub) && !findChannel(sections, decodedSub)
+      ? generalChannelId(desks)
+      : null;
+  /**
    * The channel the hash names, else the first one that exists.
    *
    * The rail only carries DMs with a transcript (issue #1335), so `findChannel`
@@ -853,10 +1121,86 @@ export function ChatView({
    * takes over, without ever adding the inactive DM to the rail.
    */
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? decodedSub) ??
-      directMessageForId(members, resolvedSub ?? decodedSub) ??
+    ? (findChannel(sections, generalSub ?? resolvedSub ?? decodedSub) ??
+      directMessageForId(members, generalSub ?? resolvedSub ?? decodedSub) ??
       firstChannel(sections))
     : null;
+
+  /**
+   * A bare `#/chat` is resolved **into the hash**, so which conversation is open
+   * is routed state rather than derived state (B-096).
+   *
+   * Two facts made a draft escape into somebody else's DM. The first is that a
+   * bare hash never named a channel: the magic-link landing route puts the
+   * console on `#/chat` with no second segment, `useHashView` canonicalises the
+   * *view* and knows nothing about chat's channels, and nothing else wrote one —
+   * so `channel` above stayed the value of an expression over `members`,
+   * `desks`, `transcripts` and `operator`, every one of which lands
+   * asynchronously and can re-order what `firstChannel` answers. The second is
+   * that the composer is deliberately ONE instance shared by every channel, and
+   * its draft deliberately survives a channel change (see `MessageComposer`'s
+   * `suppressed` doc, PR #1984) — so when the derived channel moved, the
+   * half-written message moved with it and `send` addressed whatever `channel`
+   * had become. The founder watched a message they wrote in `#general` post into
+   * a private DM with a teammate.
+   *
+   * Keeping a draft across a switch is right and stays. What is wrong is a
+   * conversation that can change with no navigation behind it, so this closes
+   * the gap at that end: the moment there is a channel to name, its id goes in
+   * the hash, and from then on `decodedSub` pins it. A deep link outranks
+   * everything (`sub` short-circuits), so this can never fight one.
+   *
+   * It also subsumes issue #412's restore, which used to be its own effect
+   * above. That is not a merge of convenience — two effects both writing the
+   * hash for a bare entry raced, and the loser silently won: memory would
+   * navigate to the remembered channel and the normaliser would immediately
+   * replace it with `firstChannel`. One effect, one decision, memory first.
+   *
+   * `restoredFor` keeps this to one attempt per bare-hash entry per scope, so a
+   * remembered channel the operator then navigates away from is not yanked back;
+   * `sub` becoming truthy re-arms it for the next re-entry. The `!channel` guard
+   * sits BEFORE the ref is stamped, so an entry that arrives before `/desks` has
+   * answered waits for a real channel instead of burning its one attempt on
+   * nothing.
+   *
+   * **Only while Chat is the open route** — `routeOpen`, PR #2134. This view is
+   * mounted on *every* route since #2130, and a route that names no second
+   * segment (`#/workflows`, `#/connections`) reaches this effect with a bare
+   * `sub` and no channel in the hash, indistinguishable from a bare `#/chat`.
+   * Writing a channel into the hash there restores nothing: it navigates the
+   * operator straight OUT of the section they just opened, which is what
+   * clicking Flows did before that guard — it landed on `#/chat/main`.
+   *
+   * That guard matters *more* here than it did before this change, not less.
+   * The old effect only navigated when there was something remembered
+   * (`if (remembered)`), so an operator who had never opened a channel was
+   * accidentally spared; this one always resolves — memory, else `channel.id` —
+   * which is the entire point of routing the decision instead of deriving it,
+   * and would bounce every such operator out of Flows on the first paint.
+   */
+  useEffect(() => {
+    if (!routeOpen) return;
+    if (sub) {
+      // A channel is named, so the next bare `#/chat` is a fresh re-entry.
+      restoredFor.current = undefined;
+      return;
+    }
+    // Nothing to normalise *to* yet. `channel` is null until `/desks` answers.
+    if (!channel) return;
+    // Scoped like `readLastChannel(scope)`: two connections serving the same
+    // company must each restore their own remembered channel, so a host switch
+    // cannot be mistaken for a re-entry into the previous host's state.
+    const scopeKey = `${scope.connection}::${scope.company ?? "single"}`;
+    if (restoredFor.current === scopeKey) return;
+    restoredFor.current = scopeKey;
+    // Memory outranks the fallback, and is written into the hash rather than
+    // held here (issue #412): the channel on screen stays shareable, survives a
+    // reload, and a remembered channel that has since been removed falls through
+    // the same stale-id path as a bad deep link — raising issue #370's
+    // unknown-channel notice rather than landing somewhere else in silence.
+    onNavigate(readLastChannel(scope) ?? channel.id);
+  }, [routeOpen, scope, sub, channel, onNavigate]);
+
   /**
    * The hash named a channel this company doesn't have, and the first-channel
    * fallback answered instead.
@@ -871,11 +1215,16 @@ export function ChatView({
    * picker just opened, but `directMessageForId` still resolves it against the
    * whole roster. Check that resolver explicitly rather than leaning on
    * `resolvedSub`, whose legacy-id shim is meant to be deletable.
+   *
+   * Nor is a General spelling the company renders under another id: `generalSub`
+   * resolved it to a real channel, so naming it unknown would put a notice over
+   * the conversation the operator actually asked for.
    */
   const unknownChannel =
     desks &&
     decodedSub &&
     !resolvedSub &&
+    !generalSub &&
     !findChannel(sections, decodedSub) &&
     !directMessageForId(members, decodedSub)
       ? decodedSub
@@ -949,7 +1298,7 @@ export function ChatView({
     return () => {
       directoryEpoch.current += 1;
     };
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   /**
    * The directory with this channel's teammates marked, so they rank first.
@@ -1001,9 +1350,16 @@ export function ChatView({
    * `subjectId` on a mention notification meets through `hostMessageId`.
    */
   const replyParents = useMemo(() => {
+    // Issue #1890 D: only the **folded** replies belong here. Since part 2 a
+    // thread's first reply can render inline, and an inline reply is on screen
+    // the moment the channel is — deferring its mention would leave a badge
+    // that opening the channel cannot clear and no thread panel exists to.
+    // Asked of `buildTimeline`'s own rule rather than re-derived, so the two
+    // surfaces cannot drift about what is visible.
+    const inline = inlineReplyIds(messages);
     const map = new Map<string, string>();
     for (const m of messages) {
-      if (m.parentId) map.set(m.id, m.parentId);
+      if (m.parentId && !inline.has(m.id)) map.set(m.id, m.parentId);
     }
     return map;
   }, [messages]);
@@ -1149,11 +1505,120 @@ export function ChatView({
     // re-runs with the new scope's notices.
   }, [budgetPauseMessageIdByAgent]);
 
-  // An open thread only makes sense while its parent is on screen; switching
-  // channels closes it rather than leaving a panel pointing at nothing.
+  /**
+   * The `?thread=<id>` the address names right now, tracked reactively.
+   *
+   * `useHashView` deliberately parses only the path segments, so
+   * `#/chat/general` → `#/chat/general?thread=h41` changes neither `sub` nor
+   * `channel.id` and re-renders nothing an effect keyed on those would see. A
+   * subscription of its own is the answer, and it is the one `useHashFlag`
+   * already uses for `?new` — same event, same reason.
+   *
+   * `hashchange` is enough on its own. Every navigation in this console reaches
+   * the address through `window.location.hash = …` (`useHashView`'s `navigate`,
+   * `useHashFlag`'s setter) or through Back/Forward, and all of those fire it.
+   * The one write that does not is `replaceState`, which is exactly how the
+   * query below is *consumed* — so consuming leaves this value where it is and
+   * the effect cannot loop on its own write.
+   *
+   * Carried with a **nonce**, not as a bare string, and that is not decoration:
+   * consuming `?thread=h41` strips it from the address, so opening h41 a second
+   * time is a real hash change whose parsed value is the one already held.
+   * React would bail out of the re-render and the panel would not reopen —
+   * verified in a browser, where the third of three `?thread=` links was the
+   * one that did nothing. The nonce makes every hash change distinct; what
+   * stops the effect acting on the ones that are not about threads is
+   * `threadResolvedFor` below.
+   */
+  const [threadQuery, setThreadQuery] = useState<{ value: string | null; nonce: number }>({
+    value: null,
+    nonce: 0,
+  });
   useEffect(() => {
-    setOpenThreadId(null);
-  }, [channel?.id]);
+    const read = () => {
+      const [, query = ""] = window.location.hash.split("?");
+      return new URLSearchParams(query).get("thread");
+    };
+    const apply = () => setThreadQuery((prev) => ({ value: read(), nonce: prev.nonce + 1 }));
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
+  }, []);
+
+  /**
+   * Which channel the thread panel was last resolved for, so "you arrived here"
+   * can be told apart from "the address changed while you were already here".
+   *
+   * Only an arrival closes an open thread. A hash change that names no thread is
+   * some other surface's query moving — or this effect's own `replaceState`
+   * consuming the one it just opened — and neither is a reason to shut a panel
+   * the operator is reading.
+   */
+  const threadResolvedFor = useRef<string | null>(null);
+
+  /**
+   * The nonce of the `?thread=` already acted on, so one link opens one thread
+   * once (Codex P2 review on #2130).
+   *
+   * Consuming is a `replaceState`, which fires no `hashchange` — so the query
+   * state keeps naming the thread it just opened until the address next moves.
+   * `useHashView.navigate` writes `window.location.hash` and calls `setRoute`
+   * **synchronously**, and `hashchange` arrives a task later: so picking another
+   * channel re-runs this effect for the new `channel.id` while the query still
+   * says `h41`. Without this ref that reopened h41 on the channel the operator
+   * had just switched to, and the correcting pass could not undo it — by then
+   * `threadResolvedFor` held the new channel, so `arrived` was false and the
+   * stale panel stayed, suppressing that channel's live steps and receipt.
+   *
+   * A ref rather than clearing the state: clearing is a second render for a
+   * fact that is not rendered. And a nonce rather than a boolean, because the
+   * same thread id can legitimately arrive twice.
+   */
+  const consumedThreadNonce = useRef<number | null>(null);
+
+  // An open thread only makes sense while its parent is on screen; arriving at
+  // a channel closes whatever was open rather than leaving a panel pointing at
+  // nothing. `?thread=<id>` on the hash opens straight into that thread
+  // instead, and is consumed (stripped via `replaceState`) so it does not
+  // reopen on a later switch back to this channel.
+  //
+  // `routeOpen` is both a guard and a dependency, and it has to be both since
+  // #2130 (Codex P2 review on that PR).
+  //
+  // As a **dependency**, because arriving on Room no longer remounts this view.
+  // A task card's "Opened from chat" link goes `#/tasks/<id>` →
+  // `#/chat/<channel>?thread=<id>`, and this view can already be sitting on that
+  // very channel — the shell replays the last chat segment while the address
+  // belongs to another section. Only `routeOpen` and the query then change, so
+  // keyed on `channel?.id` alone this never fired: the thread did not open and
+  // the query was never consumed, so it lay in wait for a later switch.
+  //
+  // As a **guard**, because a view mounted off its own route must not rewrite
+  // another section's address. This calls `replaceState` on whatever hash it
+  // finds, and the hash it finds off Room belongs to Company or Flows.
+  //
+  // `threadQuery` is the third dependency, and it is what makes a same-channel
+  // link work: `#/chat/general` → `#/chat/general?thread=h41` moves nothing else
+  // (CodeRabbit review on #2130). That gap predates the rail work — the effect
+  // was keyed on `channel?.id` alone before it — and is closed here rather than
+  // carried, because pinning the rail made the same-channel case the *common*
+  // one: this view now sits on a channel far more often than it used to.
+  useEffect(() => {
+    if (!routeOpen || !channel?.id) return;
+    const arrived = threadResolvedFor.current !== channel.id;
+    threadResolvedFor.current = channel.id;
+    if (threadQuery.value !== null && consumedThreadNonce.current !== threadQuery.nonce) {
+      consumedThreadNonce.current = threadQuery.nonce;
+      setOpenThreadId(threadQuery.value);
+      const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+      const params = new URLSearchParams(query);
+      params.delete("thread");
+      const qs = params.toString();
+      window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+      return;
+    }
+    if (arrived) setOpenThreadId(null);
+  }, [routeOpen, channel?.id, threadQuery]);
 
   // Whoever owns the unread counts needs to know what is actually being looked
   // at. Re-runs as the open channel's transcript grows, not only on a switch:
@@ -1163,11 +1628,11 @@ export function ChatView({
   // replies' mentions — which the channel-open alone must not clear — clear
   // the moment the thread makes them visible.
   //
-  // Gated on the transcript actually being on screen: below `lg`, `mobilePane
-  // === "rail"` hides the pane, and a mention that lands while the operator is
-  // only looking at the channel rail must not be marked read behind their back.
-  // The gate itself is a dependency, so re-opening the pane from the rail
-  // re-runs the report and clears whatever is newly visible.
+  // Gated on the transcript actually being on screen: on a phone the sidebar
+  // holding the channel list is a sheet over the whole screen, and a mention
+  // that lands while the operator is only looking at that list must not be
+  // marked read behind their back. The gate itself is a dependency, so closing
+  // the sheet re-runs the report and clears whatever is newly visible.
   useEffect(() => {
     if (channel && chatPaneVisible)
       onChannelViewed?.(
@@ -1200,6 +1665,34 @@ export function ChatView({
   useEffect(() => {
     onChatPaneVisibilityChange?.(chatPaneVisible);
   }, [chatPaneVisible, onChatPaneVisibilityChange]);
+
+  /**
+   * Close the dialogs that belong to the Room *route* when the operator leaves
+   * it (Codex P2 review on #2130).
+   *
+   * Both of these open from the members pane, which is inside the `routeOpen`
+   * gate — but the dialogs themselves are deliberately outside it, because two
+   * of their siblings have triggers painted in the sidebar and must open from
+   * any section. That is right for those two and wrong for these: leaving Room
+   * on Back, Forward or a typed hash used to unmount this whole view, and now
+   * leaves an "Add teammate" sheet standing over Company. `BudgetDialog` is
+   * worse than untidy — it holds the member it was opened for, so it would come
+   * back later still pointing at them.
+   *
+   * Closed rather than unmounted, so returning to Room does not find them
+   * reopened by state nobody cleared.
+   */
+  useEffect(() => {
+    if (routeOpen) return;
+    setAddOpen(false);
+    setBudgetFor(null);
+    // And the thread panel, which used to close because leaving Room unmounted
+    // the whole view. Clearing the marker with it makes the next arrival an
+    // arrival, so Room opens on the channel rather than on a panel the operator
+    // left behind two sections ago.
+    setOpenThreadId(null);
+    threadResolvedFor.current = null;
+  }, [routeOpen]);
 
   // Upload one attachment's bytes for the composer (issue #1682). Bound to the
   // active connection's client/company so the composer stays agnostic of both.
@@ -1244,38 +1737,87 @@ export function ChatView({
     [client, company],
   );
 
+  /*
+    Chat is its own content (`components/page-header.tsx`'s `hidden` variant):
+    the channel it opens on already carries its own visible title
+    (`ChatHeader`'s own `h1`), so the page keeps only an accessible name and
+    paints nothing over it.
+
+    Read once into a const rather than duplicated into every early return —
+    `SearchView` and `FinancesView` take the same shape. Without it, the two
+    states below rendered nothing before `ChatHeader` mounts: a company still
+    loading its desks, or one with no channel to open at all, so a screen
+    reader got a page with no accessible name until a channel existed
+    (issue #1781 review, Codex P2; `page-header-precedes-every-return.test.ts`
+    covers every routed view, this one included).
+  */
+  const header = <PageHeader hidden title="Chat" />;
+
+  // Off Room this view exists only to keep the channel rail alive in the
+  // sidebar, and in all three states below there is no rail to render — no
+  // desks, or none that loaded. Whatever section the operator actually is in
+  // owns the content area, so contribute nothing to it rather than painting a
+  // chat empty-state over Company.
+  if (!routeOpen && (desksError || !desks || !channel)) return null;
+
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
   // nothing" are different facts and only one of them is worth acting on.
   if (desksError) {
     return (
-      <EmptyPane
-        title="Couldn't load this company's channels"
-        body={desksError}
-        action={{ label: "Retry", onClick: () => void loadDesks() }}
-      />
+      <>
+        {header}
+        <EmptyPane
+          title="Couldn't load this company's channels"
+          body={desksError}
+          action={{ label: "Retry", onClick: () => void loadDesks() }}
+        />
+      </>
     );
   }
-  if (!desks) return <LoadingPane />;
+  if (!desks) {
+    return (
+      <>
+        {header}
+        <LoadingPane />
+      </>
+    );
+  }
   if (!channel) {
     return (
-      <EmptyPane
-        title="No channels yet"
-        body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a teammate and their direct message shows up here."
-        action={{ label: "Add a teammate", onClick: () => setAddOpen(true) }}
-        after={
-          <AddMemberDialog
-            open={addOpen}
-            onOpenChange={setAddOpen}
-            onAdd={(fields) => void addMember(fields)}
-          />
-        }
-      />
+      <>
+        {header}
+        <EmptyPane
+          title="No channels yet"
+          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a teammate and their direct message shows up here."
+          action={{ label: "Add a teammate", onClick: () => setAddOpen(true) }}
+          after={
+            <AddMemberDialog
+              open={addOpen}
+              onOpenChange={setAddOpen}
+              onAdd={addMember}
+              client={client}
+              company={company}
+            />
+          }
+        />
+      </>
     );
   }
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
+  // Whether the open channel is a real, host-backed desk — as opposed to the
+  // built-in `#general` channel, a DM, or a fallback desk (`lib/desks.ts`,
+  // used before `/desks` answers). The built-in channel is `kind: "channel"`
+  // and carries `memberIds` exactly like a desk does, so neither alone tells
+  // them apart; asking the desk list is what keeps the lead badge and the
+  // org-chart link off a channel the host does not list under `GET .../desks`.
+  const activeIsDesk = active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
+  // Issue #1757: the Operator channel is a read-only "what happened" feed. Its
+  // composer is disabled and the host also refuses a send to it, so this is UX,
+  // not the enforcement.
+  const readOnly = Boolean(channel?.system);
   // The host thread this channel is addressed on. A real desk channel's id
   // doubles as its thread id (`deskFromDto`), so addressing by it routes to
   // that desk's lead. A DM's id is console-local (`dmChannelId`), not a host
@@ -1283,39 +1825,18 @@ export function ChatView({
   // (`responder_for` in `src/harness/brain.rs`), which is exactly what a DM's
   // `member.id` is, so a DM addresses that teammate the same way a desk
   // addresses its lead. It is also the id every live turn frame carries.
-  //
-  // **Except** a teammate whose id is itself a General spelling. The host folds
-  // the bare key to the company's line before it ever reaches the roster —
-  // deliberately, so `main` cannot be captured by a teammate called `main` —
-  // and a DM composed here was therefore written and answered in `#general`,
-  // under a transcript its own DM could not read back. `mint_agent_id` reserves
-  // these spellings, but a manifest can still declare one, so this is
-  // grandfathered state rather than a hypothesis. That one DM is addressed
-  // prefixed, which `chat_responder` unwraps and resolves
-  // (`chat_responder("dm:main") == Some("main")`), and which
-  // `channelIdForThread` maps back. Every other DM keeps the bare id issue #364
-  // re-keyed it onto.
-  const activeThreadId =
-    active.kind === "channel" ? active.id : active.member && dmThreadId(active.member);
-  /**
-   * Whether the active channel is a **host desk** — the thing every desk
-   * affordance below is derived from.
-   *
-   * Asked of the desk list, not of the id's spelling. The built-in `#general`
-   * (issue #1743) is the one channel carrying `memberIds` that is not a desk,
-   * and it is in no desk list, so this excludes it for the reason it should be
-   * excluded rather than by matching its name. A blueprint that declares
-   * `[[group_chat]] id = "general"` is the case an id test gets wrong: the host
-   * grandfathers it (`is_general_channel` is guarded on `!desk_exists`), so it
-   * is a real desk with a real lead that the org chart holds — and spelling
-   * alone would have hidden both.
-   *
-   * `desks` is `null` until `/desks` answers, and the fallback desks carry no
-   * `memberIds`, so neither offers an affordance either way.
-   */
-  const activeIsDesk =
-    active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
+  const activeThreadId = active.system
+    ? undefined
+    : active.kind === "channel"
+      ? active.id
+      : active.member
+        ? dmThreadId(active.member)
+        : undefined;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
+  // The live receipt for this channel's thread (issue #1934), resolved exactly
+  // as `liveSteps` above — same host thread id, same open-thread exclusion at
+  // the render site below.
+  const receipt = activeThreadId ? receiptByThread?.[activeThreadId] : undefined;
   /**
    * The turn this channel is waiting on, if any (issue #983).
    *
@@ -1324,7 +1845,52 @@ export function ChatView({
    * false on every reload and on every walk to another view. An open turn is a
    * fact about the company, so the indicator survives both.
    */
-  const openTurn = activeThreadId ? openTurns?.[activeThreadId]?.[0] : undefined;
+  /**
+   * The turns open in this channel, split by whether they belong to the thread
+   * the panel is showing.
+   *
+   * They used to be one lookup on the channel id, which could not tell the two
+   * apart — so `ChatView` suppressed the channel's indicator whenever any
+   * thread was open, and a turn the host was actively running showed nowhere at
+   * all. The shell now keys them per thread (`turnStateKey`), which is what
+   * makes this split expressible.
+   *
+   * `channelTurn` deliberately spans *every other* thread in the channel rather
+   * than only channel-rooted turns: from the channel timeline, a turn running in
+   * a thread you are not reading is still this channel's work, and saying
+   * nothing about it is the failure this replaces.
+   */
+  // Only when a thread is actually open. Without the `openThreadId` guard this
+  // collapses to the channel key for an unthreaded view, and `openTurn` below —
+  // which excludes it — would then hide the channel's own turn: the exact
+  // silence this change exists to remove, reintroduced one line down.
+  const threadTurnKey =
+    activeThreadId && openThreadId
+      ? turnStateKey(activeThreadId, threadRootOf(openThreadId))
+      : undefined;
+  const threadTurn = threadTurnKey ? openTurns?.[threadTurnKey]?.[0] : undefined;
+  const openTurn = (() => {
+    if (!activeThreadId) return undefined;
+    const candidates = Object.entries(openTurns ?? {})
+      .filter(
+        ([key, turns]) =>
+          key !== threadTurnKey &&
+          (key === activeThreadId || key.startsWith(`${activeThreadId}#`)) &&
+          turns.length > 0,
+      )
+      // Every turn, not each list's head. `mergeOpenTurns` appends rather than
+      // re-sorts, so a reload re-arm racing a detached POST can leave a running
+      // row *behind* a queued one in the same list — and a search over heads
+      // alone would never see it, which is the same "Queued…" over live work
+      // this is here to prevent (Codex review on #2044).
+      .flatMap(([, turns]) => turns);
+    // A running turn outranks a queued one. Taking the first match instead
+    // would let map order decide the wording, and map order follows `/runs`,
+    // which is newest-first — so the ordinary serialized case (an older turn
+    // working while a newer one waits on the company lock) rendered "Queued…"
+    // over live work (Codex review on #2042).
+    return candidates.find((t) => !t.queued) ?? candidates[0];
+  })();
   /**
    * The count beside the channel title.
    *
@@ -1353,6 +1919,38 @@ export function ChatView({
 
   const append = (channelId: string, ...added: ChatMessage[]) =>
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
+
+
+  /**
+   * Send a failed line again (B-099).
+   *
+   * The failed row is dropped first, because `send` appends its own optimistic
+   * bubble: keeping both would show the operator their message twice, one of
+   * them a corpse. Its retry payload goes with it, so a Retry cannot be
+   * replayed twice from one click; a second failure re-registers a fresh one
+   * under the new row's id.
+   *
+   * Nothing is retried automatically. A throw is ambiguous — the host may have
+   * journaled the message before the request died (see `send`'s doc) — so an
+   * automatic resend would risk posting the same instruction twice. Whether
+   * that is worth it is the operator's call, which is exactly what a button is.
+   */
+  const retrySend = (messageId: string) => {
+    // `send` itself no-ops while a POST is already in flight (`if (sending)
+    // return false`). Checked here too, before the payload and failed row are
+    // consumed, because otherwise a Retry clicked mid-send would drop both —
+    // silently losing the only copy of the retry (CodeRabbit review) — and
+    // `send`'s own guard would have nothing left to return `false` about.
+    if (sending) return;
+    const payload = failedSends.current.get(messageId);
+    if (!payload) return;
+    failedSends.current.delete(messageId);
+    setTranscripts((t) => ({
+      ...t,
+      [payload.target]: (t[payload.target] ?? []).filter((m) => m.id !== messageId),
+    }));
+    void send(payload.text, payload.intent, payload.parentId, payload.attachments, payload.mentions);
+  };
 
   /**
    * Post a line and thread the company's answer back into the same place.
@@ -1449,7 +2047,43 @@ export function ChatView({
     // `AgentReply` for our own turn too and pushes it over SSE mid-await, so
     // without this the shell injects that echo *and* the awaited reply lands
     // below — two bubbles for one turn.
-    if (chatId) onSendStart?.(chatId);
+    //
+    // The generation the shell stamped this send's receipt with, if any
+    // (issue #1935 review). Threaded through to whichever terminal callback
+    // this POST reaches below, so a clear this send triggers can never delete
+    // a receipt a *later* send has since armed for the same (possibly
+    // cross-company-reused) thread id — see `shouldClearReceipt`.
+    // Armed under the same key the reload leg folds runs into, or the two
+    // legs describe the same turn under two names and the indicator that
+    // survives a reload is not the one the POST armed.
+    //
+    // **Unthreaded (`parentId` unset) always keys the channel outright** —
+    // `turnStateKey(chatId)` with no root — regardless of what thread happens
+    // to be open in the panel beside it. The channel composer always sends
+    // `parentId: undefined`, and the channel row's own Retry button lives on
+    // that same top-level transcript, so both a fresh top-level send and a
+    // top-level failure's Retry can fire while an *unrelated* thread in this
+    // channel is open in the panel (`openThreadId` naming that other thread's
+    // root). Keying on `openThreadId` there used to mis-file the whole send —
+    // its receipt and open-turn recovery registered under a thread it never
+    // touched, so the panel showed work it did not start while the channel
+    // that actually ran it showed nothing (codex P2, PR #2052 review). A
+    // threaded retry cannot hit this: its Retry button only renders inside
+    // the thread panel for the thread it belongs to, so `openThreadId`
+    // already names that same thread whenever it is clickable.
+    //
+    // **Threaded (`parentId` set) still keys off `openThreadId`, not
+    // `parentId` itself.** A review reply is anchored to a *reply*
+    // (`threadReviewAnchor.anchorId`), not to the thread root, so keying on
+    // the parent would arm a key the panel's own lookup — which keys on the
+    // open thread — could never match. `parentId` stays what it was: the
+    // host's `parent`, for `client.chat` alone.
+    const stateKey = chatId
+      ? parentId === undefined
+        ? turnStateKey(chatId)
+        : turnStateKey(chatId, threadRootOf(openThreadId ?? undefined))
+      : undefined;
+    const gen = stateKey ? onSendStart?.(stateKey) : undefined;
     // Which of the POST's three outcomes actually happened, decided here and
     // reported once in the `finally`. Only `"resolved"` means the reply is on
     // screen; the other two leave a turn running on the host and the stream as
@@ -1457,6 +2091,11 @@ export function ChatView({
     // working row down mid-turn (detached) or throw away the reply it was
     // holding (failed). See `PendingSyncPosts` for the table.
     let outcome: "resolved" | "detached" | "failed" | "stale" = "resolved";
+    // Every reply line a settled response actually carries, read by
+    // `onSendEnd` (issue #101 review) to tell a held system frame the
+    // response duplicates from one it never will. Declared here, not inside
+    // the `try` block that fills it in, so `finally` below can still see it.
+    let responseTexts: string[] = [];
     try {
       const answer = await client.chat(
         text,
@@ -1492,7 +2131,7 @@ export function ChatView({
           scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
-        if (chatId) onSendStale?.(chatId);
+        if (chatId) onSendStale?.(chatId, gen);
         // The POST itself succeeded and journaled — this branch only
         // discards the reply because the scope moved on, so anything the
         // request carried (an attachment among them) is durably claimed.
@@ -1514,13 +2153,33 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (chatId) onSendDetached?.(chatId, answer.turnId);
+        // The desk goes with the state key: the key can be composite and the
+        // shell's settle poll has to ask the host about a real desk.
+        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen, chatId);
         return true;
       }
       const reply = answer;
+      // What `onSendEnd` hands `PendingSyncPosts.ended`, unconditionally —
+      // even the `(no reply)` / review-feedback branches count as "this
+      // response carried nothing", which is exactly what an empty array
+      // already says correctly.
+      responseTexts = reply.responses.map((r) => r.text);
+      // Fired here, BEFORE `append` below, and not from the `finally` block
+      // this used to run from (Codex review, PR #2052). `onSendEnd` releases
+      // any held system frame the response above didn't carry — B-101's
+      // mention-ambiguity note, always journaled on the host *before* the
+      // reply it is about. Releasing it after `append` would render the
+      // reply first and the note second, the reverse of `chat/history`'s own
+      // order, so the note visibly jumps backward past the answer on the
+      // very next reload. Firing it here instead keeps the live order and
+      // the durable order the same. `finally` below no longer fires it for
+      // the `"resolved"` case this is the only path that reaches.
+      if (stateKey) onSendEnd?.(stateKey, gen, responseTexts);
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
-            makeMessage("company", r.text, {
+            // Same rule as the live path and `fromHistory`: a host-authored
+            // response renders as a centred row, not an agent bubble.
+            makeMessage(replyVoice(r.channel), r.text, {
               channel: r.channel,
               parentId,
               steps: r.steps,
@@ -1529,7 +2188,9 @@ export function ChatView({
               mentions: r.mentions,
             }),
           )
-        : [makeMessage("system", "(no reply)", { parentId })];
+        : reply.reviewFeedbackApplied
+          ? []
+          : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
       // The synchronous response predates mention metadata on some hosts. A
       // reply is already journaled by the time this response arrives, so fetch
@@ -1583,7 +2244,7 @@ export function ChatView({
           scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
-        if (chatId) onSendStale?.(chatId);
+        if (chatId) onSendStale?.(chatId, gen);
         // Unlike the try-block's stale branch above, the request THREW here —
         // whether it journaled before failing is unknown, not "no" (see this
         // function's doc comment), so this is `undefined`, not `false`.
@@ -1592,10 +2253,34 @@ export function ChatView({
       // Still said, even when the reply arrives on the stream a moment later:
       // the request did fail, and an operator not told that has no way to know
       // whether their message was taken at all. The two facts are not in
-      // competition — this line reports the request, the shell renders whatever
-      // the turn goes on to produce.
+      // competition — this marks the request, the shell renders whatever the
+      // turn goes on to produce.
+      //
+      // Marked ON the message rather than appended beside it (B-099). The old
+      // sibling `system` line left the bubble itself indistinguishable from a
+      // delivered one — same avatar, same timestamp, no warning of any kind —
+      // so scrolling away, or a message long enough to push the note off
+      // screen, left something that reads as sent and was not. `sendFailed` is
+      // a field of the row, so no renderer can draw the bubble without it, and
+      // the row can carry its own Retry.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
-      append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
+      setTranscripts((t) => ({
+        ...t,
+        [target]: markSendFailed(t[target] ?? [], local.id, msg),
+      }));
+      // What Retry needs to send this line again, kept off the message: the
+      // wire `mentions` carry targets the rendered chips do not, and an
+      // attachment is a node reference rather than the projection on the
+      // bubble. Keyed by the optimistic id, which is the id the failed row
+      // still has — a throw never reaches the `reconcileIds` above it.
+      failedSends.current.set(local.id, {
+        target,
+        text,
+        intent,
+        parentId,
+        attachments,
+        mentions,
+      });
       // Ambiguous, not a confirmed non-send — see this function's doc comment.
       return undefined;
     } finally {
@@ -1610,10 +2295,12 @@ export function ChatView({
       // carries on regardless, so the frame it holds is the only copy of the
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
-      if (chatId) {
-        if (outcome === "resolved") onSendEnd?.(chatId);
-        else if (outcome === "failed") onSendFailed?.(chatId);
-      }
+      //
+      // The `"resolved"` case no longer fires `onSendEnd` from here (issue
+      // #101 review, PR #2052) — it fires earlier, in the try block, before
+      // `append` renders the response's own replies. See that call site's
+      // comment for why the order matters. This block still owns `"failed"`.
+      if (stateKey && outcome === "failed") onSendFailed?.(stateKey, gen);
       setSending(false);
     }
   }
@@ -1708,6 +2395,40 @@ export function ChatView({
   }
 
   /**
+   * Settle the in-review dispatch card a finished card's settle pill links to.
+   * Approve finishes it; Revise re-runs it with a note — though the console
+   * reaches Revise through a thread reply, not this button.
+   *
+   * The board move is left to the host's own `task_card_changed` over the SSE
+   * feed — the same path a drag settles through — so the Approve control drops
+   * off the pill the moment the card leaves `in_review`. This only carries the
+   * verdict and its busy state; `taskId` is the pill's card, sent so the host
+   * settles that specific card rather than whichever one it would otherwise
+   * pick for the thread.
+   */
+  async function reviewCard(taskId: string, decision: "approve" | "revise") {
+    if (activeThreadId === undefined || !canSubmitReview(reviewingCardIds, activeThreadId, taskId))
+      return;
+    setReviewingCardIds((prev) => new Set(prev).add(taskId));
+    try {
+      await client.reviewCard(activeThreadId, taskId, decision, undefined, company);
+      toast.success(decision === "approve" ? "Card approved." : "Sent for another pass.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : "Couldn't record that review.",
+      );
+    } finally {
+      setReviewingCardIds((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
+  }
+
+  /**
    * The Add-Credits CTA (issue #1846): redeems the parked marker and
    * re-dispatches the original message. The redeemed turn's own reply arrives
    * over the SSE feed like any other, so there is nothing to inject here on
@@ -1763,7 +2484,9 @@ export function ChatView({
       if (error instanceof ApiError && error.status === 404) {
         toast("Nothing to resend — that pause was already handled.");
       } else if (error instanceof ApiError && error.status === 409) {
-        toast("That pause has changed since it was shown — check the latest message and try again.");
+        toast(
+          "That pause has changed since it was shown — check the latest message and try again.",
+        );
       } else {
         toast.error(
           error instanceof Error && error.message
@@ -1814,11 +2537,27 @@ export function ChatView({
    * falling back to a local-only add for a host without the write plane yet —
    * the same 404 fallback `boot` uses for the roster read itself.
    */
-  async function addMember(fields: NewMemberFields) {
+  /**
+   * Writes the teammate and answers whether the write landed (issue #1989).
+   *
+   * The boolean is what lets the dialog keep the operator's sentence and the
+   * design the host was paid for when this fails — it used to be called
+   * fire-and-forget and the dialog cleared itself regardless.
+   */
+  async function addMember(fields: NewMemberFields): Promise<boolean> {
     let created: TeamMemberDto | null = null;
     try {
       created = await client.addTeamMember(
-        { name: fields.name, role: fields.role, description: fields.description || undefined },
+        {
+          name: fields.name,
+          role: fields.role,
+          description: fields.description || undefined,
+          // Issue #1989: the reduced dialog arrives with a persona the host
+          // designed alongside the role and the mandate, so the teammate is
+          // born complete. Omitted by the full form, which collects none — an
+          // absent key leaves the blueprint's own wording in force.
+          instructions: fields.instructions?.trim() || undefined,
+        },
         company,
       );
     } catch (error) {
@@ -1827,7 +2566,9 @@ export function ChatView({
         setMembers((m) => [...m, newMember(fields)]);
       } else {
         reportAddMember(addMemberFailure(error));
-        return;
+        // The dialog keeps what it holds: this is the transient case, and a
+        // retry must not cost a second design pass.
+        return false;
       }
     }
     let outcome: AddMemberOutcome;
@@ -1871,6 +2612,13 @@ export function ChatView({
     }
     setAddOpen(false);
     reportAddMember(outcome);
+    // Issue #1989: the reduced dialog collected a name and a sentence, so the
+    // rest of the teammate is still to be written — on their own page, beside
+    // the copilot that drafts it. Guarded on `created`, not on the flag alone:
+    // the 404 fallback above adds a console-only row with no host id, and there
+    // is no detail page for a teammate the host has never heard of.
+    if (fields.landOnProfile && created) onOpenAgent?.(created.id, { edit: true });
+    return true;
   }
 
   /**
@@ -1915,382 +2663,530 @@ export function ChatView({
 
   function selectChannel(id: string) {
     onNavigate(id);
-    setMobilePane("chat");
+    // On a phone the rail is painted inside the sidebar's sheet, which covers
+    // the whole screen. Navigating without closing it leaves the operator
+    // looking at the channel list they just chose from rather than the
+    // transcript they chose — and every other row in this sidebar closes the
+    // sheet as it navigates (`SidebarNavigation`), the channel list being one
+    // of its sections now (codex P2 review). `dismiss` is `undefined` at every
+    // width where the rail is a column beside the transcript, so this is a
+    // no-op on desktop rather than a second opinion about layout.
+    roomRail.dismiss?.();
   }
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
-  const threadReplies = parent ? messages.filter((m) => m.parentId === parent.id) : [];
+  const threadReplies = parent ? repliesInThread(parent, messages) : [];
+  // Asked of `buildTimeline`'s own rule rather than re-derived, for the reason
+  // the mention map above gives: the panel's count and the channel's chip must
+  // not drift about what is already on screen. See `ThreadPanel`'s prop docs.
+  const threadInlineReplyIds = parent ? inlineReplyIds(messages) : undefined;
+  // Every review surface this thread hangs off, newest first — the thread
+  // root itself when opened directly on the pill/relay, or one of its
+  // replies when the card that produced them was sent inside an
+  // already-open thread. Usually zero or one entry; two when a second card
+  // was dispatched into this thread before the first was settled (Codex
+  // #3906594069) — the newest still drives the composer's own target and
+  // "ready for review" notice below, but every other entry gets its own
+  // Approve control so it does not have to wait on the newest one settling.
+  const threadReviewAnchors =
+    parent !== undefined && taskStatusByTaskId !== undefined
+      ? reviewAnchorsForThread(parent, threadReplies, messages, taskStatusByTaskId)
+      : [];
+  const threadReviewAnchor = threadReviewAnchors[0];
+  const threadReviewing = threadReviewAnchor !== undefined;
+  const additionalThreadReviewAnchors = threadReviewAnchors.slice(1);
 
   return (
-    <div className="flex min-h-0 flex-1">
-      {/* The channel rail and the chat pane share the viewport with the app
-          sidebar. That sidebar is on from `md` (≥768), so a rail that also came
-          in at `md` gave two rails plus content a ~290px pane from 768–1023px —
-          Send fell off the right edge with no scroll to reach it (issue #1383).
-          The rail now waits for `lg` (≥1024); from 768–1023 the pane runs
-          single-column and the "Show channels" toggle in the header (also
-          `lg:hidden`) swaps to the rail, mirroring the sub-`md` mobile flow. */}
-      <ChannelRail
-        sections={sections}
-        activeId={channel.id}
-        unread={unread ?? {}}
-        mentions={mentions}
-        onSelect={selectChannel}
-        openSections={railOpenSections}
-        onToggleSection={toggleRailSection}
-        directMessages={directMessageChannels(members)}
-        onStartDirectMessage={selectChannel}
-        onAddChannel={onAddChannel}
-        className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
-      />
-      <ChannelRail
-        sections={sections}
-        activeId={channel.id}
-        unread={unread ?? {}}
-        mentions={mentions}
-        onSelect={selectChannel}
-        openSections={railOpenSections}
-        onToggleSection={toggleRailSection}
-        directMessages={directMessageChannels(members)}
-        onStartDirectMessage={selectChannel}
-        onAddChannel={onAddChannel}
-        collapsed={channelsCollapsed}
-        onExpand={toggleChannels}
-        className="hidden lg:flex"
-      />
+    <>
+      {/* ONE rail, painted in the app sidebar under the Room row.
+          `createPortal` moves the node, not the component: every prop below is
+          still this view's state, and the dialogs the rail opens still mount
+          inside this tree.
 
-      <div
-        className={cn(
-          "min-w-0 flex-1 flex-col",
-          mobilePane === "chat" ? "flex" : "hidden lg:flex",
+          There used to be two of these — an `lg:hidden` one that took over the
+          pane below 1024px and a `hidden lg:flex` one beside the transcript —
+          because the rail was a second column competing with the app sidebar
+          for the viewport (issue #1383). It is not a second column any more, so
+          the breakpoint dance goes with it: the sidebar already decides whether
+          it is a column, a 3rem rail or a sheet, at exactly one set of
+          breakpoints, and the channel list follows it. */}
+      {roomRail.element !== null &&
+        createPortal(
+          <ChannelRail
+            sections={sections}
+            activeId={channel.id}
+            unread={unread ?? {}}
+            mentions={mentions}
+            onSelect={selectChannel}
+            openSections={railOpenSections}
+            onToggleSection={toggleRailSection}
+            directMessages={directMessageChannels(members)}
+            onStartDirectMessage={selectChannel}
+            onAddChannel={onAddChannel}
+            collapsed={channelsCollapsed}
+            onExpand={toggleChannels}
+            // Off Room the marked channel is where Room will take you back to,
+            // not the page being read — so it stops claiming to be the current
+            // page. Without this, `#/finances/wallet` had two nodes answering
+            // `aria-current="page"`: this rail's open channel and the section
+            // rail's open sub-page.
+            currentPage={routeOpen}
+            // In the sidebar the rail IS the column: it drops its own width,
+            // its own border and its own fill, and lets the sidebar's scroll
+            // container handle a long list.
+            className="flex w-full overflow-visible border-r-0 bg-transparent"
+          />,
+          roomRail.element,
         )}
-      >
-        <ChatHeader
-          channel={channel}
-          memberCount={headerCount}
-          membersOpen={membersOpen}
-          onToggleMembers={() => setMembersOpen((o) => !o)}
-          onOpenRail={() => setMobilePane("rail")}
-          channelsCollapsed={channelsCollapsed}
-          onToggleChannels={toggleChannels}
-          channelsToggleRef={channelsToggleRef}
-        />
 
+      {/* Everything that belongs to the Room *route*: the transcript, its
+          header and the members pane.
+
+          Gated, because this view is mounted on every section now to keep
+          the rail above fed (#2130) — and a transcript that is mounted
+          without being routed must not paint over the section the operator
+          is actually in. The dialogs below are deliberately OUTSIDE this
+          gate: their triggers are painted in the sidebar, so they have to
+          open from Company and Flows as readily as from Room. */}
+      {routeOpen && (
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
-            {unknownChannel && (
-              <p
-                role="status"
-                className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
-              >
-                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0 truncate">
-                  <span className="font-medium text-foreground">#{unknownChannel}</span> isn&apos;t a
-                  channel here — showing {channelTitle(active)} instead.
-                </span>
-              </p>
-            )}
-            {/* Issues #1734 / #1735. Above the scroller rather than inside it,
-                like the two strips it sits between: this is a standing fact
-                about the company, not a row in the transcript, and it must not
-                scroll away from the operator who is reading the replies it
-                explains. `role="status"` (not `alert`) for the reason
-                `components/ui/alert.tsx` gives — a notice present on mount
-                should not interrupt a screen reader. */}
-            {echoing && (
-              <p
-                role="status"
-                data-testid="chat-cognition-banner"
-                className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
-              >
-                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0">
-                  {cognition === "unconfigured" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        Teammates can&apos;t think yet.
-                      </span>{" "}
-                      This company has no model configured, so the replies below come from the
-                      offline echo brain rather than the teammate they appear under. Choose a
-                      provider in{" "}
-                      <a
-                        className="font-medium text-foreground underline-offset-4 hover:underline"
-                        href={settingsHref("inference")}
-                      >
-                        Settings → Inference
-                      </a>
-                      .
-                    </>
-                  )}
-                  {/* A provider is configured and resolves; the runtime just
-                      predates it. Saying "no model configured" here sends an
-                      operator who did exactly the right thing back to redo it,
-                      which is why this is its own state. The link goes to the
-                      card that owns the restart — and stops there, because
-                      whether a restart can be performed in place is that card's
-                      fact to report (#1736), not a promise to make from here. */}
-                  {cognition === "restart-required" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        Teammates can&apos;t think yet — the model isn&apos;t live.
-                      </span>{" "}
-                      A provider is configured, but this company&apos;s runtime was built before
-                      it was saved, so the replies below still come from the offline echo brain
-                      rather than the teammate they appear under. Finish the switch in{" "}
-                      <a
-                        className="font-medium text-foreground underline-offset-4 hover:underline"
-                        href={settingsHref("inference")}
-                      >
-                        Settings → Inference
-                      </a>
-                      .
-                    </>
-                  )}
-                  {cognition === "unavailable" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        This host cannot reach a model — no agent harness is available.
-                      </span>{" "}
-                      The replies below come from the offline echo brain rather than the teammate
-                      they appear under. No setting changes that: it takes a host built and
-                      started with the harness.
-                    </>
-                  )}
-                  {/* The host is on the echo brain and cannot say why: it could
-                      not read this company's inference configuration. Names no
-                      remedy on purpose — an unreadable config is no evidence
-                      that saving one would help, which is the same #266
-                      doctrine that stops the workflow-run route answering
-                      `inference_required` in this state. A settings link here
-                      would be the switch that does nothing, one more time. */}
-                  {cognition === "undetermined" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        Teammates can&apos;t think, and this host can&apos;t say why.
-                      </span>{" "}
-                      Its inference configuration could not be read, so the replies below come
-                      from the offline echo brain rather than the teammate they appear under.
-                      Until the host can read that configuration, saving a provider is not known
-                      to help.
-                    </>
-                  )}
-                </span>
-              </p>
-            )}
-            <MessageTimeline
+            <ChatHeader
               channel={channel}
-              items={items}
-              cognition={cognition}
-              historyPending={historyPending}
-              openThreadId={openThreadId}
-              // An open turn keeps the row up after the POST has resolved, and
-              // puts it back on a console that reloaded mid-turn (#983).
-              typing={(sending || !!openTurn) && !openThreadId}
-              queued={!!openTurn?.queued}
-              liveSteps={openThreadId ? undefined : liveSteps}
-              onOpenThread={setOpenThreadId}
-              onReact={react}
-              onDismissCard={(taskId) => void dismissCard(taskId)}
-              dismissingCardId={dismissingCardId}
-              resolveAttachmentUrl={resolveAttachmentUrl}
-              taskStatusByTaskId={taskStatusByTaskId}
-              onStartBrief={() =>
-                setComposerPrefill((current) => ({
-                  text: FIRST_TEAM_BRIEF,
-                  revision: (current?.revision ?? 0) + 1,
-                }))
-              }
-              onAddPeople={() => setMembersOpen(true)}
-              now={now}
-              askerNames={askerNames}
-              decidingApprovals={decidingApprovals}
-              failedApprovals={failedApprovals}
-              onDecideApproval={onDecideApproval}
-              onRedeemBudgetPause={(agentId, noticeMessageId) =>
-                void redeemBudgetPause(agentId, noticeMessageId)
-              }
-              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-              latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
+              memberCount={headerCount}
+              membersOpen={membersOpen}
+              onToggleMembers={() => setMembersOpen((o) => !o)}
+              onOpenRail={roomRail.reveal}
             />
-            {budgetProximity && (
-              <p
-                role="status"
-                className="flex shrink-0 items-center gap-1.5 border-t border-status-blocked/30 bg-status-blocked-soft px-3 py-1.5 text-xs text-status-blocked-text"
-              >
-                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0 flex-1">{budgetProximity.message}</span>
-                {onDismissBudgetProximity && (
-                  <button
-                    type="button"
-                    onClick={onDismissBudgetProximity}
-                    className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-status-blocked-soft"
+
+            <div className="flex min-h-0 flex-1">
+              <div className="flex min-w-0 flex-1 flex-col">
+                {unknownChannel && (
+                  <p
+                    role="status"
+                    className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
                   >
-                    Dismiss
-                  </button>
+                    <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                    <span className="min-w-0 truncate">
+                      <span className="font-medium text-foreground">#{unknownChannel}</span> isn&apos;t a
+                      channel here — showing {channelTitle(active)} instead.
+                    </span>
+                  </p>
                 )}
-              </p>
-            )}
-            {consoleOnlyMember && (
-              <p
-                role="status"
-                className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
-              >
-                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0">
-                  <span className="font-medium text-foreground">{consoleOnlyMember}</span> only
-                  exists in this console — the company has no such teammate, so nobody answers
-                  here. The transcript is still saved and survives a reload.
-                </span>
-              </p>
-            )}
-            <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
-            <MessageComposer
-              placeholder={`Message ${channelTitle(channel)}`}
-              disabled={sending}
-              prefill={composerPrefill ?? undefined}
-              // Not voided (unlike the thread composer below): the composer
-              // awaits this to know whether an attachment it carried actually
-              // journaled, so it can clean up one that did not (codex review
-              // finding on #1682) — see `deleteAttachment` and `send`'s doc.
-              onSend={(text, intent, attachments, mentions) =>
-                send(text, intent, undefined, attachments, mentions)
-              }
-              // Issue #1682: only the channel/DM composer attaches — the paperclip
-              // is present exactly because this prop is.
-              uploadAttachment={uploadAttachment}
-              // Cleans up a staged upload that never got sent (codex review
-              // finding on #1682) — see `deleteAttachment`.
-              deleteAttachment={deleteAttachment}
-              // Every keystroke asks; the hook throttles to one ping per
-              // channel per few seconds and skips entirely while the event
-              // stream is down.
-              onTyping={() => onTyping?.(active.id)}
-              // Channel *and* DM composers offer "just chatting" / "do it once" /
-              // "build me the workflow" (issues #580, #845, #1152) — see
-              // `offersDeliverableChoice`, which owns the rule and is unchanged:
-              // the new position inherits the same channel+DM gating. Only the
-              // thread and copilot composers below go without.
-              deliverableChoice={offersDeliverableChoice(active.kind)}
-              mentionables={mentionables}
-              channelMemberIds={inChannel?.map((m) => m.id)}
-            />
+                <MessageTimeline
+                  channel={channel}
+                  items={items}
+                  cognition={cognition}
+                  historyPending={historyPending}
+                  openThreadId={openThreadId}
+                  // An open turn keeps the row up after the POST has resolved, and
+                  // puts it back on a console that reloaded mid-turn (#983).
+                  // `!openThreadId` used to be here, blanking the channel's row for
+                  // every turn whenever any thread was open. `openTurn` now
+                  // excludes the open thread's own turn, so the row can stay for
+                  // the work that is genuinely the channel's.
+                  typing={sending || !!openTurn}
+                  queued={!!openTurn?.queued}
+                  liveSteps={openThreadId ? undefined : liveSteps}
+                  // NOT excluded when a thread is open: these rows render inside
+                  // their own message rather than as one strip for the channel, so
+                  // there is no ambiguity about which turn they describe — which is
+                  // the whole reason `liveSteps` above is withheld.
+                  liveStepsByMessage={liveStepsByMessage}
+                  // Thread-panel receipts are out of v1 (issue #1934): excluded here
+                  // the same way `liveSteps` is when a thread is open.
+                  receipt={openThreadId ? undefined : receipt}
+                  agentNames={agentNames}
+                  onOpenThread={setOpenThreadId}
+                  onReact={react}
+                  onDismissCard={(taskId) => void dismissCard(taskId)}
+                  dismissingCardId={dismissingCardId}
+                  onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+                  reviewingCardIds={reviewingCardIds}
+                  resolveAttachmentUrl={resolveAttachmentUrl}
+                  taskStatusByTaskId={taskStatusByTaskId}
+                  onRetrySend={retrySend}
+                  onStartBrief={() =>
+                    setComposerPrefill((current) => ({
+                      text: FIRST_TEAM_BRIEF,
+                      revision: (current?.revision ?? 0) + 1,
+                    }))
+                  }
+                  onAddPeople={() => setMembersOpen(true)}
+                  now={now}
+                  askerNames={askerNames}
+                  decidingApprovals={decidingApprovals}
+                  failedApprovals={failedApprovals}
+                  onDecideApproval={onDecideApproval}
+                  onRedeemBudgetPause={(agentId, noticeMessageId) =>
+                    void redeemBudgetPause(agentId, noticeMessageId)
+                  }
+                  redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+                  latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
+                />
+                {budgetProximity && (
+                  <p
+                    role="status"
+                    className="flex shrink-0 items-center gap-1.5 border-t border-status-blocked/30 bg-status-blocked-soft px-3 py-1.5 text-xs text-status-blocked-text"
+                  >
+                    <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                    <span className="min-w-0 flex-1">{budgetProximity.message}</span>
+                    {onDismissBudgetProximity && (
+                      <button
+                        type="button"
+                        onClick={onDismissBudgetProximity}
+                        className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-status-blocked-soft"
+                      >
+                        Dismiss
+                      </button>
+                    )}
+                  </p>
+                )}
+                {consoleOnlyMember && (
+                  <p
+                    role="status"
+                    className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+                  >
+                    <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                    <span className="min-w-0">
+                      <span className="font-medium text-foreground">{consoleOnlyMember}</span> only
+                      exists in this console — the company has no such teammate, so nobody answers
+                      here. The transcript is still saved and survives a reload.
+                    </span>
+                  </p>
+                )}
+                {readOnly && (
+                  <p
+                    role="status"
+                    className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+                  >
+                    <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                    <span className="min-w-0">
+                      The <span className="font-medium text-foreground">Operator</span> channel is a
+                      read-only feed of workflow reports and notifications — a scannable “what
+                      happened” view. There is nothing to reply to here.
+                    </span>
+                  </p>
+                )}
+                <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
+                {/* Issues #1734 / #1735, repositioned. Directly above the composer,
+                    not above the transcript: what the notice warns about — a reply
+                    that comes from the echo brain rather than the teammate it appears
+                    under — is the consequence of pressing Send, and a caveat at the
+                    other end of the page from the control it qualifies is one the
+                    operator reads before it means anything and has forgotten by the
+                    time it does. It stays OUTSIDE the scroller (a sibling strip,
+                    `shrink-0`) like the read-only and budget strips above it, because
+                    it is a standing fact about the company rather than a row in the
+                    transcript.
+
+                    It sits BELOW `TypingLine`, not above it. Proximity to the
+                    composer is the whole reason this strip moved, and a typing line
+                    between the two put a row back in the gap in exactly the case
+                    where it matters most — mid-conversation, with someone at a
+                    keyboard (CodeRabbit review on #1984). `chat-cognition-banner`'s
+                    sibling-order test pins this WITH a typing line present, because
+                    the order read correct with nobody typing and wrong with someone
+                    typing.
+
+                    Kept on a read-only channel, where there is no composer at all.
+                    The suppression this replaced argued that nothing can be sent
+                    there, so a caveat about what sending produces has nothing left to
+                    qualify. But the sentence is not about sending — every state below
+                    says the replies in this conversation come from the echo brain
+                    rather than the teammate they appear under, which is a claim about
+                    the messages already on screen. `readOnly` is
+                    `Boolean(channel?.system)`, i.e. the `#Operator` feed.
+
+                    Its rows are NOT under a roster teammate, and the difference
+                    matters (codex review on #2159). `DurableOperatorChannel` journals
+                    them under the reserved authors `workflow-report` and
+                    `owner-fallback-report` (`runtime/channel.rs`), which `senderOf`
+                    titleizes into "Workflow Report" and "Owner Fallback Report" —
+                    author lines naming no person at all. That makes the case for the
+                    strip stronger, not weaker: `MessageRow` still marks every one of
+                    those rows, because `project` sets `by_person: false` on an
+                    `AgentReply` whichever brain produced it, and the marker they get
+                    is `EchoPlaceholder` — a non-focusable `<span>` whose entire
+                    explanation is a `title`, reaching neither keyboard, touch nor
+                    screen reader, and reading "Workflow Report did not write this".
+                    Without this strip the operator is left with a "Placeholder" pill
+                    against a name that is not a person, on a feed that takes no
+                    replies, and nothing anywhere saying what did write it.
+
+                    All four states below say "the replies in this conversation", not
+                    "the replies below". They said "below" while this strip sat above
+                    the transcript, and moving it made that word point at the composer
+                    and the keyboard hint instead of at any reply — the copy asserted
+                    a position rather than a fact. Direction-free is what keeps the
+                    sentence true wherever this strip is put next; do not reintroduce
+                    a directional word here.
+
+                    `role="status"` (not `alert`) for the reason
+                    `components/ui/alert.tsx` gives — a notice present on mount should
+                    not interrupt a screen reader. */}
+                {echoing && (
+                  <p
+                    role="status"
+                    data-testid="chat-cognition-banner"
+                    className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+                  >
+                    <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                    <span className="min-w-0">
+                      {cognition === "unconfigured" && (
+                        <>
+                          <span className="font-medium text-foreground">
+                            Teammates can&apos;t think yet.
+                          </span>{" "}
+                          This company has no model configured, so the replies in this
+                          conversation come from the offline echo brain rather than the teammate
+                          they appear under. Choose a provider in{" "}
+                          <a
+                            className="font-medium text-foreground underline-offset-4 hover:underline"
+                            href={settingsHref("inference")}
+                          >
+                            Settings → Inference
+                          </a>
+                          .
+                        </>
+                      )}
+                      {/* A provider is configured and resolves; the runtime just
+                          predates it. Saying "no model configured" here sends an
+                          operator who did exactly the right thing back to redo it,
+                          which is why this is its own state. The link goes to the
+                          card that owns the restart — and stops there, because
+                          whether a restart can be performed in place is that card's
+                          fact to report (#1736), not a promise to make from here. */}
+                      {cognition === "restart-required" && (
+                        <>
+                          <span className="font-medium text-foreground">
+                            Teammates can&apos;t think yet — the model isn&apos;t live.
+                          </span>{" "}
+                          A provider is configured, but this company&apos;s runtime was built before
+                          it was saved, so the replies in this conversation still come from the
+                          offline echo brain rather than the teammate they appear under. Finish
+                          the switch in{" "}
+                          <a
+                            className="font-medium text-foreground underline-offset-4 hover:underline"
+                            href={settingsHref("inference")}
+                          >
+                            Settings → Inference
+                          </a>
+                          .
+                        </>
+                      )}
+                      {cognition === "unavailable" && (
+                        <>
+                          <span className="font-medium text-foreground">
+                            This host cannot reach a model — no agent harness is available.
+                          </span>{" "}
+                          The replies in this conversation come from the offline echo brain
+                          rather than the teammate they appear under. No setting changes that:
+                          it takes a host built and started with the harness.
+                        </>
+                      )}
+                      {/* The host is on the echo brain and cannot say why: it could
+                          not read this company's inference configuration. Names no
+                          remedy on purpose — an unreadable config is no evidence
+                          that saving one would help, which is the same #266
+                          doctrine that stops the workflow-run route answering
+                          `inference_required` in this state. A settings link here
+                          would be the switch that does nothing, one more time. */}
+                      {cognition === "undetermined" && (
+                        <>
+                          <span className="font-medium text-foreground">
+                            Teammates can&apos;t think, and this host can&apos;t say why.
+                          </span>{" "}
+                          Its inference configuration could not be read, so the replies in this
+                          conversation come from the offline echo brain rather than the teammate
+                          they appear under. Until the host can read that configuration, saving a
+                          provider is not known to help.
+                        </>
+                      )}
+                    </span>
+                  </p>
+                )}
+                {/* No composer at all on a read-only channel, rather than a disabled
+                    one. A disabled control is still a claim that the action exists:
+                    the strip above says "there is nothing to reply to here", and a
+                    greyed-out reply box with a Send button and an "Enter to send"
+                    hint under it says the opposite in the same breath. The notice is
+                    what should occupy this space.
+
+                    `disabled` therefore no longer carries `readOnly` — nothing can be
+                    read-only and rendered here at the same time. The server's
+                    read-only guard and `ThreadPanel`'s no-op `onSend` (issue #1757)
+                    are untouched: this removes the affordance, not the belt.
+
+                    `suppressed`, not `{!readOnly && …}`. The element stays in the
+                    tree so React keeps the instance — and with it the draft, the
+                    staged attachment, the resolved mentions and the selected intent,
+                    all of which are state inside `MessageComposer`. Gating the
+                    element itself unmounted it, so an operator who opened `#Operator`
+                    for a moment with an unsent message in `#general` came back to an
+                    empty box (codex review on PR #1984): the disabled composer this
+                    PR removed was accidentally holding the draft across channel
+                    navigation. `suppressed` renders `null` after its hooks, so the
+                    DOM gets nothing — no textarea, no Send, no `data-tour` anchor —
+                    while the draft survives. See that prop's doc for why a
+                    `display:none` wrapper is not the same thing. */}
+                {/* Above the composer, and outside the read-only branch: a channel
+                    nobody may post in is still a place the company's runs are
+                    visible, and stopping one is not posting. */}
+                {inflightRuns !== undefined && onInflightSteered !== undefined && (
+                  <InflightRunBar
+                    client={client}
+                    company={company}
+                    runs={inflightRuns}
+                    onSteered={onInflightSteered}
+                  />
+                )}
+                <MessageComposer
+                  suppressed={readOnly}
+                  placeholder={`Message ${channelTitle(channel)}`}
+                  disabled={sending}
+                  prefill={composerPrefill ?? undefined}
+                  // Not voided (unlike the thread composer below): the composer
+                  // awaits this to know whether an attachment it carried actually
+                  // journaled, so it can clean up one that did not (codex review
+                  // finding on #1682) — see `deleteAttachment` and `send`'s doc.
+                  onSend={(text, intent, attachments, mentions) =>
+                    send(text, intent, undefined, attachments, mentions)
+                  }
+                  // Issue #1682: only the channel/DM composer attaches — the paperclip
+                  // is present exactly because this prop is.
+                  uploadAttachment={uploadAttachment}
+                  // Cleans up a staged upload that never got sent (codex review
+                  // finding on #1682) — see `deleteAttachment`.
+                  deleteAttachment={deleteAttachment}
+                  // Every keystroke asks; the hook throttles to one ping per
+                  // channel per few seconds and skips entirely while the event
+                  // stream is down.
+                  onTyping={() => onTyping?.(active.id)}
+                  // Channel *and* DM composers offer "just chatting" / "do it once" /
+                  // "build me the workflow" (issues #580, #845, #1152) — see
+                  // `offersDeliverableChoice`, which owns the rule and is unchanged:
+                  // the new position inherits the same channel+DM gating. Only the
+                  // thread and copilot composers below go without.
+                  deliverableChoice={offersDeliverableChoice(active.kind)}
+                  mentionables={mentionables}
+                  channelMemberIds={inChannel?.map((m) => m.id)}
+                />
+              </div>
+
+              {parent && (
+                <ThreadPanel
+                  channel={channel}
+                  members={members}
+                  parent={parent}
+                  replies={threadReplies}
+                  inlineReplyIds={threadInlineReplyIds}
+                  // A query typed into this panel renders only here — parented
+                  // messages never reach the channel timeline — so the panel needs
+                  // the per-query rows too, or its turns show nothing at all.
+                  liveStepsByMessage={liveStepsByMessage}
+                  sending={sending}
+                  mentionables={mentionables}
+                  channelMemberIds={inChannel?.map((m) => m.id)}
+                  readOnly={readOnly}
+                  reviewing={threadReviewing}
+                  reviewTaskId={threadReviewAnchor?.taskId}
+                  onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+                  reviewInFlight={
+                    threadReviewAnchor !== undefined &&
+                    reviewingCardIds.has(threadReviewAnchor.taskId)
+                  }
+                  additionalReviewAnchors={additionalThreadReviewAnchors}
+                  reviewingTaskId={reviewingCardIds}
+                  youAvatar={youAvatar}
+                  resolveAttachmentUrl={resolveAttachmentUrl}
+                  onSend={(text, _intent, _attachments, mentions) => {
+                    // Belt to `ThreadPanel`'s own `readOnly` brace: never mutate
+                    // state or call `client.chat` for a channel the server's
+                    // read-only guard will refuse anyway (issue #1757).
+                    if (readOnly) return;
+                    void send(text, undefined, threadReviewAnchor?.anchorId ?? parent.id, undefined, mentions);
+                  }}
+                  onClose={() => setOpenThreadId(null)}
+                  typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
+                  openTurn={threadTurn}
+                  onTyping={() => onTyping?.(active.id, parent.id)}
+                  onRetrySend={retrySend}
+                  // A thread is not a lesser transcript (issue #1734): an echoed
+                  // reply read here is the same false attribution as one read in
+                  // the channel, so the panel marks its rows from the same state.
+                  cognition={cognition}
+                  onRedeemBudgetPause={(agentId, noticeMessageId) =>
+                    void redeemBudgetPause(agentId, noticeMessageId)
+                  }
+                  redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+                  latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
+                />
+              )}
+
+              {membersOpen && !readOnly && (
+                <MembersPane
+                  channelMembers={inChannel}
+                  others={outsideChannel}
+                  people={companyPeople}
+                  presence={presence}
+                  leadId={
+                    // An `auto` channel has no lead (issue #1835): its memberIds
+                    // are the channel's membership in the host's order, not a
+                    // hierarchy, so badging [0] would state a rank nothing
+                    // confers — the host's own `desk_lead` is `None` for it.
+                    activeIsDesk && !active.leadless ? active.memberIds?.[0] : undefined
+                  }
+                  loading={loadingTeam}
+                  fromHost={fromHost}
+                  onToggleInbox={(m) => void toggleMemberInbox(m)}
+                  onRemove={(id) => {
+                    const member = members.find((m) => m.id === id);
+                    if (member) void removeMember(member);
+                  }}
+                  onAdd={() => setAddOpen(true)}
+                  onMessage={(m) => selectChannel(dmChannelId(m))}
+                  /**
+                   * The way from this channel to the desk it is (issue #485).
+                   *
+                   * Only for a host-backed desk channel. A DM is not a desk, and a
+                   * fallback desk (`lib/desks.ts`) carries no `memberIds` because
+                   * the host has no desks surface at all — the chart would have
+                   * nothing to open. Both simply get no link rather than one that
+                   * lands nowhere.
+                   *
+                   * A desk's channel id **is** its desk id (`deskFromDto`), so
+                   * there is no mapping to keep in step. Written to the hash rather
+                   * than routed through a callback, as `ArtifactsTab`'s "Open in
+                   * workspace" does: this is a cross-view address, and the shell
+                   * only hands chat a chat-scoped navigate.
+                   */
+                  onManageDesk={
+                    activeIsDesk && active.memberIds
+                      ? () => {
+                          window.location.hash = `/company/${active.id}`;
+                        }
+                      : undefined
+                  }
+                  canEditBudget={isAdmin && fromHost}
+                  onEditBudget={setBudgetFor}
+                  onRemoveCap={(m) => void applyBudget(m, null)}
+                  onResetBudget={(m) => void resetBudget(m)}
+                  setByLabel={(m) => (m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined)}
+                />
+              )}
+            </div>
           </div>
-
-          {parent && (
-            <ThreadPanel
-              channel={channel}
-              members={members}
-              parent={parent}
-              replies={threadReplies}
-              sending={sending}
-              mentionables={mentionables}
-              channelMemberIds={inChannel?.map((m) => m.id)}
-              youAvatar={youAvatar}
-              resolveAttachmentUrl={resolveAttachmentUrl}
-              onSend={(text, _intent, _attachments, mentions) =>
-                void send(text, undefined, parent.id, undefined, mentions)
-              }
-              onClose={() => setOpenThreadId(null)}
-              typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
-              onTyping={() => onTyping?.(active.id, parent.id)}
-              // A thread is not a lesser transcript (issue #1734): an echoed
-              // reply read here is the same false attribution as one read in
-              // the channel, so the panel marks its rows from the same state.
-              cognition={cognition}
-              // Issue #1846 review (Codex #3870168372): a budget-pause notice
-              // that answered a thread reply is journaled with THIS thread's
-              // parent, which routes it out of the main channel timeline and
-              // in here — the CTA has to be wired into this panel too, or a
-              // thread-parented notice is unreachable.
-              onRedeemBudgetPause={(agentId, noticeMessageId) =>
-                void redeemBudgetPause(agentId, noticeMessageId)
-              }
-              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-              latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
-            />
-          )}
-
-          {membersOpen && (
-            <MembersPane
-              channelMembers={inChannel}
-              others={outsideChannel}
-              people={companyPeople}
-              presence={presence}
-              leadId={
-                  // Two different channels have no lead, and both have to be
-                  // excluded here.
-                  //
-                  // The built-in `#general` (issue #1743) is not a desk at all:
-                  // its `memberIds` are the roster in roster order, so `[0]` is
-                  // whoever happens to be listed first. `activeIsDesk` asks the
-                  // desk list rather than the id's spelling, which is why it
-                  // answers correctly for a blueprint desk that claims the line.
-                  //
-                  // An `auto` channel (issue #1835) *is* a desk, but a leadless
-                  // one: its members are the host's order, not a hierarchy, and
-                  // the host's own `desk_lead` is `None` for it.
-                  //
-                  // Either way, badging `[0]` states a rank nothing confers.
-                  activeIsDesk && !active.leadless ? active.memberIds?.[0] : undefined
-              }
-              loading={loadingTeam}
-              fromHost={fromHost}
-              onToggleInbox={(m) => void toggleMemberInbox(m)}
-              onRemove={(id) => {
-                const member = members.find((m) => m.id === id);
-                if (member) void removeMember(member);
-              }}
-              onAdd={() => setAddOpen(true)}
-              onMessage={(m) => selectChannel(dmChannelId(m))}
-              /**
-               * The way from this channel to the desk it is (issue #485).
-               *
-               * Only for a host-backed desk channel. A DM is not a desk, and a
-               * fallback desk (`lib/desks.ts`) carries no `memberIds` because
-               * the host has no desks surface at all — the chart would have
-               * nothing to open. Both simply get no link rather than one that
-               * lands nowhere.
-               *
-               * Nor is the built-in `#general` (issue #1743), which *does*
-               * carry `memberIds` — the whole roster, derived — and would
-               * otherwise have passed this test and opened `#/company/main` on
-               * a desk that does not exist. It is deliberately not a desk: it
-               * has no lead, no hierarchy, and no membership to manage, and the
-               * host refuses every desk write aimed at it with a reason. The
-               * rule this file already follows (`api/setup.ts:58`) is not to
-               * offer a control that will be refused, so there is no link and
-               * no disabled one either — absence is the honest state.
-               *
-               * Decided by {@link activeIsDesk} — whether the desk list holds
-               * this id — rather than by the id's spelling. A blueprint that
-               * declares `[[group_chat]] id = "general"` keeps a real desk with
-               * a real lead, which the host lists and the org chart holds; an
-               * id test would have hidden that desk's lead and its link.
-               *
-               * A desk's channel id **is** its desk id (`deskFromDto`), so
-               * there is no mapping to keep in step. Written to the hash rather
-               * than routed through a callback, as `ArtifactsTab`'s "Open in
-               * workspace" does: this is a cross-view address, and the shell
-               * only hands chat a chat-scoped navigate.
-               */
-              onManageDesk={
-                activeIsDesk && active.memberIds
-                  ? () => {
-                      window.location.hash = `/company/${active.id}`;
-                    }
-                  : undefined
-              }
-              canEditBudget={isAdmin && fromHost}
-              onEditBudget={setBudgetFor}
-              onRemoveCap={(m) => void applyBudget(m, null)}
-              onResetBudget={(m) => void resetBudget(m)}
-              setByLabel={(m) => (m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined)}
-            />
-          )}
         </div>
-      </div>
+      )}
 
-      <AddMemberDialog open={addOpen} onOpenChange={setAddOpen} onAdd={(fields) => void addMember(fields)} />
+      <AddMemberDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onAdd={addMember}
+        client={client}
+        company={company}
+      />
       <ChannelCreateDialog
         client={client}
         company={company}
@@ -2324,7 +3220,7 @@ export function ChatView({
           if (target) void applyBudget(target, cap);
         }}
       />
-    </div>
+    </>
   );
 }
 
@@ -2339,17 +3235,6 @@ export function ChatView({
 function LoadingPane() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/*
-        `#/chat` has an `h1` in every state (codex review, #1785). The loaded
-        pane's is `ChatHeader`'s channel name; these three channel-less states
-        returned before it ever mounted, leaving a page with an `sr-only`
-        sentence and no heading at all.
-
-        `hidden` for the same reason Chat's own header is: the pane is the
-        content, and this state is a skeleton — there is nothing for a title
-        bar to sit above.
-      */}
-      <PageHeader title="Chat" hidden />
       <div className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
         <Skeleton className="size-4 rounded" />
         <Skeleton className="h-4 w-32 rounded" />
@@ -2379,9 +3264,6 @@ function EmptyPane({
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-      {/* See `LoadingPane`: the page keeps its name in every channel-less
-          state. The `h2` below names the *state*, not the page. */}
-      <PageHeader title="Chat" hidden />
       <div className="max-w-sm space-y-1.5">
         <h2 className="text-base font-semibold tracking-tight">{title}</h2>
         <p className="text-sm text-muted-foreground">{body}</p>

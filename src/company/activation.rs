@@ -232,6 +232,15 @@ pub(crate) async fn any_workflow_run_succeeded(
             deliveries,
             pending_approvals: pending_approvals.len(),
             stranded_approvals: 0,
+            // Issue #1865: `WorkflowRunFinished` carries no per-node status —
+            // that lives on the separate `WorkflowNodeFinished` events this
+            // scan does not read — so this cannot distinguish a `degraded` run
+            // from a clean one. Zero preserves this check's pre-#1865 reading
+            // exactly: activation only needs "a run went through without
+            // stopping, cancelling, blocking, dropping a report or being left
+            // waiting", which a soft node error under `on_error: continue`
+            // does not change.
+            errored_nodes: 0,
         }) == WorkflowRunVerdict::Ok
     }))
 }
@@ -443,6 +452,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -766,6 +776,7 @@ mod test {
                         approval_ids: Vec::new(),
                         unparkable: 0,
                         stranded: 0,
+                        blockers: 0,
                     }],
                     approvals: Vec::new(),
                 },

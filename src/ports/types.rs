@@ -617,6 +617,29 @@ impl StartedBy {
     }
 }
 
+/// Separates the other desk's actual answer from the note addressed to the
+/// asker, in a returning relay.
+///
+/// # Why the two have to be separable
+///
+/// The relay is normally dropped from the projection, so the note is private to
+/// the asker and can say things only the asker should read. But the drop is
+/// conditional: if the asker's report never lands — a failed turn, an empty
+/// model response — the relay renders instead, because a line in the wrong
+/// voice is a smaller failure than an answer nobody can see.
+///
+/// That fallback used to publish the note along with it. An operator watching
+/// #engineering was told "you are the only one who has seen it" by an agent
+/// that is not on their desk. So the answer goes FIRST and everything the host
+/// added goes after this marker, and the projection renders only what precedes
+/// it — which is exactly the other desk's own words, the thing the fallback
+/// exists to preserve.
+///
+/// Written to be unmistakable rather than pretty: a bare `---` is a markdown
+/// rule an answer may legitimately contain, and truncating on one would eat
+/// half of it.
+pub const RELAY_NOTE_MARKER: &str = "\n\n[referral-note]\n";
+
 /// An external stimulus fed into a company's cycle loop.
 ///
 /// Serialized internally-tagged under `kind` so each JSONL line is
@@ -624,6 +647,56 @@ impl StartedBy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum CompanyEvent {
+    /// A crossing referral's child turn was durably created (tinyhivemind P15).
+    ///
+    /// The idempotency marker, and the only reason this is journaled at all: a
+    /// referral is triggered by a COMMITTED reply, so anything that reprocesses
+    /// that reply — a restart, a redelivered frame, a retry — would decide the
+    /// same referral again and ask the target desk twice. The queue writes this
+    /// under the trigger's identity and refuses a second enqueue that finds it.
+    ///
+    /// Not a conversational line: `chat_history::owns` does not admit it and no
+    /// transcript renders it.
+    ReferralEnqueued {
+        /// The desk the triggering reply was committed on.
+        from_desk: String,
+        /// Sequence of that reply — with `from_desk`, the idempotency key.
+        trigger_sequence: u64,
+        /// The asking desk's display name, captured now.
+        ///
+        /// The console renders this on the referred message, and a desk renamed
+        /// later must not rewrite what the transcript said at the time — the
+        /// same rule `SessionAuthor` follows for its own labels.
+        ///
+        /// **Defaulted, because the journal is append-only.** Markers written
+        /// before this field existed must still deserialize: a required field
+        /// here made every older marker unreadable, and because the history
+        /// projection reads the journal, that took the whole transcript with
+        /// it. Any field added to a journaled event has to default.
+        #[serde(default)]
+        from_desk_name: String,
+        /// Whether this marker is a RETURN — the answer coming home — rather
+        /// than the outbound ask. Defaulted for the reason above.
+        ///
+        /// The console draws a different word for each ("Asked by Design" vs
+        /// "Answered by Design"), and it cannot work this out for itself: both
+        /// legs are agent-authored lines on a desk, so every signal the console
+        /// holds says the same thing about each. `tinyhivemind` decided it
+        /// already — `ReferralKind` — and this carries that decision rather
+        /// than letting the render side infer a second, disagreeing answer.
+        #[serde(default)]
+        returning: bool,
+        /// The agent that asked. Defaulted for the reason above.
+        #[serde(default)]
+        asker: String,
+        /// That agent's display label, captured now, for the same reason.
+        #[serde(default)]
+        asker_label: String,
+        /// The desk the child turn runs on.
+        to_desk: String,
+        /// The agent the child turn runs as.
+        target: String,
+    },
     /// A human sent a chat message.
     OperatorMessage {
         /// The message text.
@@ -1028,6 +1101,34 @@ pub enum CompanyEvent {
         /// moment a loop was being chased.
         #[serde(default, skip_serializing_if = "is_zero_depth")]
         mention_depth: u8,
+        /// The teammates this reply is addressed to, when that is **narrower
+        /// than the desk it was written on** — a private aside
+        /// (`docs/spec/runtime/hivemind-asides.md`).
+        ///
+        /// Empty is the ordinary case and means desk-visible: every row written
+        /// before this field existed, and every row this host writes unless a
+        /// desk opted in to asides and one was authorized. The audience is the
+        /// author **plus** these ids; the author is not repeated here.
+        ///
+        /// Privacy between agents, never a security boundary. An operator and
+        /// every person reads an aside in full; what narrows is the projection
+        /// handed to a *peer agent*, and even there the row is elided rather
+        /// than removed — its sequence, author and audience stay visible, so a
+        /// `^N` citation still resolves and a peer can see that an exchange it
+        /// may not read happened. Nothing downstream should treat this as
+        /// access control.
+        ///
+        /// Fixed at append time. Widening one later could never be redelivered
+        /// (a sharing watermark advances past filtered rows unconditionally)
+        /// and would invalidate citations besides.
+        ///
+        /// Additive on exactly the terms `task_id`, `parent` and `mentions`
+        /// above are: `#[serde(default)]` is what lets an already-persisted log
+        /// load, and `skip_serializing_if` is what keeps a desk-visible reply
+        /// serializing byte-for-byte as it did before this field existed, so no
+        /// stored record needs migrating.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audience: Vec<String>,
     },
     /// A reaction was set or cleared on one chat message (issue #364).
     ///
@@ -1440,6 +1541,29 @@ pub enum CompanyEvent {
         /// board-created card adds nothing to the log.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin_chat_id: Option<String>,
+        /// The thread within [`origin_chat_id`](Self::DeskTaskCompleted::origin_chat_id)
+        /// the card was raised in (issue #1890 B) —
+        /// [`TaskRecord::origin_parent`](crate::ports::tasks::TaskRecord::origin_parent),
+        /// stamped here at the moment the run settles.
+        ///
+        /// **Captured, never derived**, for the same reason its channel half is:
+        /// nothing else on this event knows which thread asked for the work, and
+        /// a second place deciding "which conversation is this?" is the drift
+        /// issue #435 exists to have removed. The card has recorded it since
+        /// #1890 B on every conversational path that opens one, so the terminal
+        /// carries what the card already knows.
+        ///
+        /// **Read as a pair with the channel, never alone.** `None` here means
+        /// the channel-level conversation *when a channel is named*, and means
+        /// nothing at all when it is not — a board-created card has both absent.
+        /// So a marker is filed by `origin_chat_id` first and only then narrowed
+        /// by this.
+        ///
+        /// Additive: `#[serde(default)]` so every journal line written before
+        /// this field existed still replays, and skipped when absent so an
+        /// unthreaded settle adds nothing to the log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_parent: Option<EventSeq>,
     },
     /// A human posted to a task's discussion thread (issue #335).
     ///
@@ -1730,6 +1854,9 @@ pub enum CompanyEvent {
         /// existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_by: Option<StartedBy>,
+        /// Whether this attempt continued at a node boundary or re-ran from its trigger.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_semantic: Option<crate::ports::ResumeSemantic>,
     },
     /// One non-trigger node of a workflow run began executing (issue #382),
     /// reported by the engine's `RunObserver` immediately before the node's
@@ -1971,6 +2098,7 @@ impl CompanyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::ReferralEnqueued { .. } => "ReferralEnqueued",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnFailed { .. } => "TurnFailed",
             Self::RunStatusChanged { .. } => "RunStatusChanged",
@@ -2046,6 +2174,16 @@ impl CompanyEvent {
     pub fn retention_class(&self) -> crate::ports::events::RetentionClass {
         use crate::ports::events::RetentionClass::{Permanent, Prunable};
         match self {
+            // **Permanent, and this one is load-bearing** (tinyhivemind P15).
+            //
+            // It is the idempotency marker for a crossing referral: the queue
+            // refuses a second enqueue that finds it. Prune it and a replayed
+            // trigger stops finding it, so the target desk is asked twice —
+            // silently, and only for triggers old enough to have been swept.
+            // It passes the doc's three questions the other way round from its
+            // neighbours: nothing points at it, but something very much reads
+            // it back, and that read is the whole reason it exists.
+            Self::ReferralEnqueued { .. } => Permanent,
             Self::WorkflowRunStarted { .. }
             | Self::WorkflowRunFinished { .. }
             | Self::WorkflowNodeStarted { .. }
@@ -2203,6 +2341,10 @@ pub enum WorkflowNodeStatus {
     /// failure count would hide real failures among approvals nobody has
     /// answered yet.
     Blocked,
+    /// The node intentionally stopped because advancing would be incorrect or
+    /// unnecessary. Host-reclassified from the capability error used to halt
+    /// the branch; never emitted by tinyflows and not an error.
+    Declined,
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
@@ -3409,6 +3551,26 @@ pub struct OverlayDesk {
     /// no such field.
     #[serde(default, skip_serializing_if = "ResponderMode::is_lead")]
     pub responder: ResponderMode,
+    /// How this desk deliberates and whether it may refer across desks — the
+    /// overlay analogue of `[[group_chat]].hive`.
+    ///
+    /// Without it a console-created desk could not answer either question. The
+    /// hive config was read from the manifest only, and the responder mode from
+    /// the overlay only, so the two surfaces each carried half the settings and
+    /// a desk could never hold both: an overlay desk deliberated because the
+    /// default says so and could not opt out, and could never opt IN to
+    /// referral, because there was no `[[group_chat]]` entry to hang the block
+    /// on. A company whose desks are all operator-created — which is every
+    /// company that builds its desks in the console — therefore had cross-desk
+    /// referral permanently unavailable.
+    ///
+    /// Defaulted and skipped when empty, so every record written before this
+    /// field existed deserializes and re-serializes unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::hivemind::HiveConfig::is_default"
+    )]
+    pub hive: crate::hivemind::HiveConfig,
 }
 
 /// A workflow graph body authored at runtime (the console's create dialog or
@@ -3743,9 +3905,22 @@ pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverr
 /// on `[tools]` exists to prevent. `media` is absent for the same reason: it
 /// spends real money and has no connect page to be dead-ended on.
 ///
+/// `mcp_registry` joins the list for the same reason `composio` is in it: the
+/// registry's own install form (`McpRegistryBrowser`) is the credential step —
+/// some servers ask for one, some do not, but installing is always the
+/// deliberate act the grant is the second half of — and without an entry here
+/// a hosted tenant, whose manifest is a read-only boot snapshot, could install
+/// a registry server no agent could ever be granted access to.
+///
 /// Sorted, so the console's own ordering is not a second source of truth.
-pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 5] =
-    ["chargebee", "composio", "hosting", "paypal", "search"];
+pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 6] = [
+    "chargebee",
+    "composio",
+    "hosting",
+    "mcp_registry",
+    "paypal",
+    "search",
+];
 
 /// Whether `namespace` is one the console is allowed to grant.
 pub fn console_grantable(namespace: &str) -> bool {
@@ -3983,6 +4158,10 @@ pub struct OverlayBlob {
     /// [`CompanyRecord::activation_completed_at`].
     #[serde(default)]
     pub activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created. See
+    /// [`CompanyRecord::created_at_millis`].
+    #[serde(default)]
+    pub created_at_millis: Option<u64>,
     /// Whether this bundle has ever been saved by activation-aware code — the
     /// sqlite/mongodb-backed marker behind
     /// [`CompanyStore::activation_gate_seen`] (PR #1875 review finding: the
@@ -4043,6 +4222,7 @@ impl OverlayBlob {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            created_at_millis: record.created_at_millis,
             activation_gate_seen,
         }
     }
@@ -4082,6 +4262,11 @@ impl OverlayBlob {
                     // what supplies the right answer for an existing company.
                     name_confirmed: false,
                     activation_completed_at: None,
+                    // A legacy bare-array row predates this field by an even
+                    // longer way — `None` is exactly right, not a gap: it is
+                    // what marks the record eligible for the grandfather
+                    // back-fill above in the first place.
+                    created_at_millis: None,
                     // Same reasoning again: a legacy bare-array row predates
                     // activation tracking (and this field) entirely, so it
                     // has never been seen by activation-aware code — exactly
@@ -4111,8 +4296,8 @@ impl OverlayBlob {
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
 ///
-/// [`MAIN_THREAD_ID`](crate::server::chat_history::MAIN_THREAD_ID) and
-/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK) join them for
+/// [`MAIN_THREAD_ID`](tinyhivemind_core::chat::MAIN_THREAD_ID) and
+/// [`GENERAL_DESK`](tinyhivemind_core::chat::GENERAL_DESK) join them for
 /// issue #1743, and both are ordinary slugs — a teammate named "Main" or
 /// "General" mints straight onto one. That id is a chat address: `responder_for`
 /// checks roster ids before it falls back to the orchestrator, so the teammate
@@ -4120,13 +4305,22 @@ impl OverlayBlob {
 /// console would render the line's transcript as that teammate's DM. Desk ids
 /// and names are already excluded a few lines below; these are the two keys
 /// that route like a desk without being one.
+///
+/// The General entry is the **identity** constant, not
+/// `server::ops::language::DEFAULT_DESK`, the operator-facing glossary word
+/// that happens to be the same literal. What is reserved here is a chat
+/// address, and this is the port layer: a port naming a server constant is the
+/// upward reach the shared crate exists to remove. The two cannot drift — a
+/// `const` assertion in [`crate::server::chat_history`] pins them together at
+/// compile time — so the reservation still covers a teammate named "General"
+/// however the host chooses to spell that word.
 pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
-    crate::server::chat_history::MAIN_THREAD_ID,
-    crate::server::ops::language::DEFAULT_DESK,
+    tinyhivemind_core::chat::MAIN_THREAD_ID,
+    tinyhivemind_core::chat::GENERAL_DESK,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -4335,6 +4529,28 @@ pub struct CompanyRecord {
     /// onboarding flow it has no memory of starting.
     #[serde(default)]
     pub activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created, stamped once by
+    /// `RuntimeBuilder::build` the first time it sees a given company id
+    /// (`existing: None`) and carried forward untouched on every later
+    /// rebuild — never backdated, never refreshed. Surfaced to the console
+    /// through the GraphQL `Company.createdAtMillis` field
+    /// (`server/graphql/observability.rs`).
+    ///
+    /// `None` for every record written before this field existed. It was
+    /// briefly also the discriminator for [`Self::activation_completed_at`]'s
+    /// `running`-lifecycle back-fill, telling "predates activation tracking"
+    /// apart from "created moments ago and restarted before finishing
+    /// onboarding" — `lifecycle` is `running` from the very first save in
+    /// both cases. That role now belongs to
+    /// [`CompanyStore::activation_gate_seen`](crate::ports::store::CompanyStore::activation_gate_seen)
+    /// (PR #1875 review finding), a store-level marker that survives a
+    /// record whose `created_at_millis` is itself absent for an unrelated
+    /// reason (a legacy backend row, a partially-imported bundle). This
+    /// field remains purely informational for the activation migration; do
+    /// not gate new logic on it being `None` vs `Some`. `#[serde(default)]`
+    /// is the same backward-compat fallback the two fields above use.
+    #[serde(default)]
+    pub created_at_millis: Option<u64>,
 }
 
 /// What a teammate key an operator or a model typed resolves to on a company's
@@ -4521,11 +4737,11 @@ impl CompanyRecord {
         if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
             return Some(exact.id.clone());
         }
-        if !crate::server::chat_history::is_general_chat(Some(key))
+        if !tinyhivemind_core::chat::is_general_chat(Some(key))
             && let Some(exact) = self
                 .overlay_desks
                 .iter()
-                .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
                 .find(|d| d.id == key)
         {
             return Some(exact.id.clone());
@@ -4537,7 +4753,7 @@ impl CompanyRecord {
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
-                if crate::server::chat_history::is_general_chat(Some(key)) {
+                if tinyhivemind_core::chat::is_general_chat(Some(key)) {
                     return None;
                 }
                 self.overlay_desks
@@ -4550,7 +4766,7 @@ impl CompanyRecord {
                     // that every desk mutation refuses. Its lead would answer,
                     // and the reply would be journaled under a thread the
                     // console renders no channel for.
-                    .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                    .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
@@ -4577,10 +4793,11 @@ impl CompanyRecord {
     /// overlay tier only when the manifest has no match at all.
     pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
         if self.manifest.group_chats.iter().any(|c| c.id == key)
-            || (!crate::server::chat_history::is_general_chat(Some(key))
-                && self.overlay_desks.iter().any(|d| {
-                    d.id == key && !crate::server::chat_history::is_general_chat(Some(&d.id))
-                }))
+            || (!tinyhivemind_core::chat::is_general_chat(Some(key))
+                && self
+                    .overlay_desks
+                    .iter()
+                    .any(|d| d.id == key && !tinyhivemind_core::chat::is_general_chat(Some(&d.id))))
         {
             return false;
         }
@@ -4593,12 +4810,12 @@ impl CompanyRecord {
         if manifest_matches > 0 {
             return manifest_matches > 1;
         }
-        if crate::server::chat_history::is_general_chat(Some(key)) {
+        if tinyhivemind_core::chat::is_general_chat(Some(key)) {
             return false;
         }
         self.overlay_desks
             .iter()
-            .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+            .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
             .filter(|d| d.name.eq_ignore_ascii_case(key))
             .count()
             > 1
@@ -4635,6 +4852,132 @@ impl CompanyRecord {
         !self.is_retired(agent_id)
             && (self.manifest.agents.iter().any(|a| a.id == agent_id)
                 || self.overlay_agents.iter().any(|a| a.id == agent_id))
+    }
+
+    /// The chat id the durable Operator system feed journals under for this
+    /// company (issue #1781 review — CodeRabbit Major + Codex P2; stability
+    /// after removal — Codex P2 follow-up; desk-collision divert — CodeRabbit
+    /// P2 follow-up).
+    ///
+    /// Ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL)
+    /// itself. Diverted to
+    /// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+    /// whenever anything grandfathered already holds the literal id **or
+    /// display name** `operator`: a roster **teammate** — `is_roster_agent`
+    /// true (still on the roster) **or** [`is_retired`](Self::is_retired)
+    /// true (removed since) — or a real **desk**
+    /// ([`resolve_desk_id`](Self::resolve_desk_id) matches it, by id or
+    /// case-insensitive name). Using
+    /// `OPERATOR_CHANNEL` for either would put that other surface's own
+    /// transcript and the public "what happened" system feed on one address:
+    /// for a teammate, a post to the visible read-only feed could reach
+    /// them, and a delivered report would be indistinguishable from their own
+    /// words; for a desk, `server::operator::operator_channel` hands this id
+    /// straight to the console as the pinned Operator row, appended
+    /// (`operatorSection`, `frontend/src/views/ChatView.tsx`) *after* the
+    /// desk's own section — so `findChannel`, which returns the first
+    /// section match, would always resolve the pinned row to the desk
+    /// instead, and `send_to_channel_adapter` would journal every workflow
+    /// report onto the desk's own `chat_id`, mixing "Workflow report — …"
+    /// rows into its ordinary conversation.
+    ///
+    /// The `is_retired` half matters because the divert has to **stay put**
+    /// once it has ever applied: removing a manifest teammate always tombstones
+    /// its id in [`overlay_retired_agents`](Self::overlay_retired_agents)
+    /// (`server::ops::team::remove_member`) rather than rewriting
+    /// `company.toml`, and that tombstone never clears. Checking
+    /// `is_roster_agent` alone flips the address back to `OPERATOR_CHANNEL`
+    /// the moment the teammate is retired — orphaning every report already
+    /// journaled under the fallback from `/desks`, and letting the retired
+    /// teammate's own historical DM rows (stored under `chat_id ==
+    /// "operator"`) surface as if they belonged to the "new" system feed.
+    /// Diverting is collision-impossible by construction (see the fallback
+    /// constant's doc for why nothing can ever mint that id) and, with the
+    /// tombstone check, permanent by construction too — nothing already
+    /// stored is renamed, and where NEW system-feed content lands never moves
+    /// back.
+    ///
+    /// This method only decides where the *feed* journals — it never changes
+    /// what a client can address by typing `operator` itself. A desk that
+    /// owns the id stays reachable and writable through it exactly as before:
+    /// [`CompanyRuntime::ensure_desk_writable`](crate::company::runtime::CompanyRuntime::ensure_desk_writable)
+    /// resolves `OPERATOR_CHANNEL` against `desk_exists`/`is_roster_agent`
+    /// directly, independent of this divert.
+    ///
+    /// Checking `desk_exists` alone (id only) missed a desk grandfathered
+    /// under a harmless id but the display name `Operator` — the validator
+    /// reserves that name outright for new manifests
+    /// (`CompanyManifest::validate`), but `from_path_for_reload` admits an
+    /// existing one (issue #1757 postdates real companies, same carve-out as
+    /// the id case above), and `server::operator::resolve_desk` matches a
+    /// `?desk=` selector by id *or* case-insensitive name — the same rule
+    /// [`resolve_desk_id`](Self::resolve_desk_id) implements. Left
+    /// undiverted, the pinned console row's `?desk=operator` read would
+    /// resolve to that desk's own transcript instead of the system feed
+    /// (issue #1781 review, CodeRabbit P2 follow-up).
+    ///
+    /// Diverting to [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK) does not itself
+    /// re-check whether *that* address is free — see
+    /// [`operator_feed_channel_fallback_shadowed`](Self::operator_feed_channel_fallback_shadowed)
+    /// for the residual double-collision this leaves and why it is logged
+    /// rather than resolved here.
+    ///
+    /// The **desk** half of the collision needs the identical stay-put
+    /// treatment `is_retired` gives the agent half, for the identical reason:
+    /// `desk_exists`/`resolve_desk_id` are live checks, so `delete_desk`
+    /// removing the colliding overlay desk would otherwise flip this back to
+    /// `OPERATOR_CHANNEL` on its own, orphaning reports already journaled
+    /// under the fallback and letting the deleted desk's own transcript
+    /// resurface as system-feed content — unlike the agent-removal path,
+    /// `delete_desk` had no tombstone at all (issue #1781 review, Codex P2
+    /// follow-up). [`Self::is_operator_feed_diverted`], set from
+    /// `delete_desk` via [`Self::divert_operator_feed_permanently`], closes
+    /// this the same way: sticky once true, checked here alongside
+    /// `is_retired`.
+    pub fn operator_feed_channel(&self) -> &'static str {
+        if self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+            || self
+                .resolve_desk_id(crate::runtime::channel::OPERATOR_CHANNEL)
+                .is_some()
+            || self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL)
+            || self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL)
+            || self.is_operator_feed_diverted()
+        {
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+        } else {
+            crate::runtime::channel::OPERATOR_CHANNEL
+        }
+    }
+
+    /// Whether [`operator_feed_channel`](Self::operator_feed_channel) has
+    /// diverted to [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK) ("operator-feed")
+    /// and that address is *itself* shadowed by a second grandfathered desk
+    /// name (issue #1781 review, CodeRabbit P2 follow-up to `316bc9229`).
+    ///
+    /// `resolve_desk_id`'s name match makes this theoretically reachable: a
+    /// manifest desk cannot claim the fallback by **id** (`is_valid_desk_id`
+    /// rejects the hyphen, so nothing can ever mint it — see the constant's
+    /// own doc), but a *different* desk's display **name** can, the same way
+    /// a desk named `Operator` shadows the primary address above. `316bc9229`
+    /// and `16dcce235` already close every creation path going forward — a
+    /// manifest authored through `opencompany check`/`from_path`, or an
+    /// overlay desk created through `POST .../desks`, can never be named
+    /// "operator-feed" again — so this can only happen to a manifest edited
+    /// outside those paths (hand-authored `company.toml` on disk) and loaded
+    /// through [`CompanyManifest::from_path_for_reload`], the same
+    /// grandfathering that makes the *primary* collision reachable at all.
+    ///
+    /// There is no third, similarly collision-proof address to divert to —
+    /// picking one would only shrink this residual gap, not close it, the
+    /// same way the fallback itself does not fully close the primary's. This
+    /// predicate exists so the delivery layer can at least log the double
+    /// collision instead of misrouting a report with no trace: see its call
+    /// site in `workflows::delivery::send_to_channel_adapter`.
+    pub fn operator_feed_channel_fallback_shadowed(&self) -> bool {
+        self.operator_feed_channel() == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+            && self
+                .resolve_desk_id(crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+                .is_some()
     }
 
     /// Mints the roster id for a teammate about to be added under
@@ -4959,6 +5302,44 @@ impl CompanyRecord {
         if !self.is_retired(agent_id) {
             self.overlay_retired_agents.push(agent_id.to_string());
         }
+    }
+
+    /// Whether [`operator_feed_channel`](Self::operator_feed_channel) has ever
+    /// diverted because a **desk** (as opposed to a roster agent — see
+    /// [`Self::is_retired`] for that half) occupied the id or display name
+    /// `operator` (issue #1781 review, Codex P2).
+    ///
+    /// Backed by [`Self::overlay_retired_agents`] — the same tombstone list
+    /// [`Self::is_retired`] reads — keyed on
+    /// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+    /// ("operator-feed") rather than on any agent id. That key can never
+    /// collide with a real manifest agent id: agent ids, like desk ids, are
+    /// restricted to lowercase ascii/digits/underscore (`into_validated`'s
+    /// id rule), and "operator-feed" fails it on the hyphen alone — the same
+    /// reasoning [`OPERATOR_CHANNEL_COLLISION_FALLBACK`]'s own doc gives for
+    /// why nothing can ever *mint* that id. Reusing the list instead of a new
+    /// field keeps this sticky-tombstone semantics free of a second field to
+    /// thread through every store backend (fs/sqlite/mongodb) and the ~100
+    /// existing `CompanyRecord` literals across the crate.
+    pub fn is_operator_feed_diverted(&self) -> bool {
+        self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+    }
+
+    /// Records that the operator feed has diverted because of a **desk**
+    /// collision, permanently and idempotently (issue #1781 review, Codex
+    /// P2).
+    ///
+    /// Call this before removing whatever desk is holding
+    /// [`operator_feed_channel`](Self::operator_feed_channel) on the fallback
+    /// address — `desk_exists`/`resolve_desk_id` are live checks, so once the
+    /// desk is gone the divert would otherwise revert on its own: existing
+    /// reports already journaled under the fallback would vanish from the
+    /// pinned feed, and the deleted desk's own historical transcript (stored
+    /// under `chat_id == "operator"`) would resurface as if it were system-feed
+    /// content. See [`Self::retire_agent`] for the identical reasoning on the
+    /// agent-collision half, which this mirrors.
+    pub fn divert_operator_feed_permanently(&mut self) {
+        self.retire_agent(crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK);
     }
 
     /// One manifest roster row with the operator's edits applied — who this
@@ -5417,6 +5798,7 @@ mod test {
             setup: Some(answers.clone()),
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
@@ -5615,6 +5997,7 @@ mod test {
     #[test]
     fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
         let event = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             chat_id: "general".to_string(),
             agent_id: "ceo".to_string(),
             text: "hi".to_string(),
@@ -5913,6 +6296,7 @@ mod test {
 
         // A tool-less reply serializes without the `steps` key.
         let tool_less = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -5927,6 +6311,7 @@ mod test {
 
         // A reply with a timeline round-trips it.
         let with_steps = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -5968,6 +6353,7 @@ mod test {
 
         // An untagged reply keeps the legacy wire shape exactly.
         let untagged = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -5984,6 +6370,7 @@ mod test {
 
         // A dispatch-produced reply carries the key and round-trips.
         let tagged = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6019,6 +6406,7 @@ mod test {
             column: "in_review".to_string(),
             artifact_ids: Vec::new(),
             origin_chat_id: None,
+            origin_parent: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(json.contains(r#""kind":"DeskTaskCompleted""#));
@@ -6052,6 +6440,7 @@ mod test {
             column: "in_review".to_string(),
             artifact_ids: Vec::new(),
             origin_chat_id: Some("engineering".to_string()),
+            origin_parent: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(json.contains(r#""origin_chat_id":"engineering""#), "{json}");
@@ -6078,8 +6467,54 @@ mod test {
                 column: "in_review".to_string(),
                 artifact_ids: Vec::new(),
                 origin_chat_id: None,
+                origin_parent: None,
             },
             "a pre-#377 journal line must replay with no origin, not fail"
+        );
+    }
+
+    /// Issue #1890 B: the thread half of that origin round-trips, is skipped
+    /// when absent, and a line written before it existed replays as
+    /// channel-level — which is the truth about such a line, not a default
+    /// standing in for one.
+    #[test]
+    fn the_terminal_carries_the_thread_its_card_was_raised_in() {
+        let threaded = CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "ceo".to_string(),
+            output: "shipped".to_string(),
+            column: "in_review".to_string(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("growth".to_string()),
+            origin_parent: Some(EventSeq::new(41)),
+        };
+        let json = serde_json::to_string(&threaded).unwrap();
+        assert!(json.contains(r#""origin_parent":41"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            threaded,
+            "the root must survive the round trip"
+        );
+
+        // Skipped when absent, so an unthreaded settle is byte-identical to a
+        // pre-B one and adds nothing to the log.
+        let flat = CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "ceo".to_string(),
+            output: "shipped".to_string(),
+            column: "in_review".to_string(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("growth".to_string()),
+            origin_parent: None,
+        };
+        let json = serde_json::to_string(&flat).unwrap();
+        assert!(!json.contains("origin_parent"), "{json}");
+
+        let legacy = r#"{"kind":"DeskTaskCompleted","task_id":"t-1","desk":"ceo","output":"shipped","column":"in_review","origin_chat_id":"growth"}"#;
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(legacy).unwrap(),
+            flat,
+            "a pre-#1890-B line must replay as channel-level, not fail"
         );
     }
 
@@ -6098,6 +6533,7 @@ mod test {
             column: "in_review".to_string(),
             artifact_ids: vec!["art-1".to_string(), "art-2".to_string()],
             origin_chat_id: None,
+            origin_parent: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(
@@ -6120,6 +6556,7 @@ mod test {
                 column: "in_review".to_string(),
                 artifact_ids: Vec::new(),
                 origin_chat_id: None,
+                origin_parent: None,
             },
             "a pre-#244 journal line must replay with no artifacts, not fail"
         );
@@ -6172,6 +6609,7 @@ mod test {
         );
 
         let answered = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: Some(EventSeq::new(41)),
@@ -6698,6 +7136,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -7081,6 +7520,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "sales".into(),
@@ -7088,6 +7528,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(
@@ -7116,6 +7557,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -7145,6 +7587,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
         // …while the overlay desk's id is reserved exactly like a manifest one.
@@ -8195,6 +8638,7 @@ mod test {
             description: None,
             members: vec!["eng".into()],
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         // Resolves by id and by case-insensitive name.
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -8241,6 +8685,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "ops".into(),
@@ -8248,6 +8693,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["ceo".into()],
+            hive: Default::default(),
         });
 
         for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
@@ -8292,6 +8738,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             record.resolve_desk_id("Front office"),
@@ -8316,6 +8763,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             ordinary.resolve_desk_id("Front office").as_deref(),
@@ -8600,6 +9048,7 @@ mod test {
             run_id: "run-1".to_string(),
             scheduled: true,
             started_by: Some(StartedBy::Operator),
+            resume_semantic: None,
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -8618,6 +9067,7 @@ mod test {
                 run_id: "run-1".to_string(),
                 scheduled: matches!(started_by, StartedBy::Schedule),
                 started_by: Some(started_by.clone()),
+                resume_semantic: None,
             };
             assert_eq!(
                 round_trip(&event),
@@ -8661,6 +9111,7 @@ mod test {
             // test of its own so a fourth reading cannot be added without
             // someone editing this list.
             WorkflowNodeStatus::Blocked,
+            WorkflowNodeStatus::Declined,
         ] {
             let event = CompanyEvent::WorkflowNodeFinished {
                 workflow_id: "digest".to_string(),
@@ -8745,6 +9196,7 @@ mod test {
             run_id: "run-1".to_string(),
             scheduled: false,
             started_by: None,
+            resume_semantic: None,
         })
         .expect("serialize");
         assert_eq!(
@@ -9167,5 +9619,209 @@ mod test {
         let round_one = r#"{"nodeId":"node-3","name":"old.png","mime":"image/png","size":10}"#;
         let loaded: Attachment = serde_json::from_str(round_one).unwrap();
         assert_eq!(loaded.extracted_text, None);
+    }
+
+    /// Issue #1781 review (Codex P2): a grandfathered manifest teammate at the
+    /// literal id `operator` diverts the durable system feed to
+    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` (see `operator_feed_channel`
+    /// above). Retiring that teammate must not flip the feed back onto
+    /// `OPERATOR_CHANNEL` — the tombstone in `overlay_retired_agents` is
+    /// permanent (manifest removal always goes through `retire_agent`, never a
+    /// TOML rewrite), so the reports already journaled under the fallback
+    /// address would be orphaned from `/desks` and the retired teammate's own
+    /// historical DM rows (`chat_id == "operator"`) would start bleeding into
+    /// the "new" system feed the moment the id looked free again.
+    #[test]
+    fn operator_feed_channel_stays_diverted_after_the_collision_is_retired() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "fixture must start in the collision state this test exercises"
+        );
+
+        record.retire_agent(crate::runtime::OPERATOR_CHANNEL);
+        assert!(!record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL));
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed address must stay stable once anything has ever held the \
+             `operator` id — flipping back to OPERATOR_CHANNEL would orphan the \
+             fallback's existing reports and resurface the retired teammate's \
+             own DM history in the system feed"
+        );
+    }
+
+    /// Issue #1781 review, Codex P2 follow-up: a direct, focused test of
+    /// `divert_operator_feed_permanently`/`is_operator_feed_diverted`
+    /// themselves, isolated from the HTTP route the desk- and teammate-
+    /// deletion regression tests exercise them through.
+    ///
+    /// The specific risk this closes: `divert_operator_feed_permanently`
+    /// tombstones through `retire_agent`, keyed on
+    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` ("operator-feed") — a string
+    /// that fails the manifest agent-id format rule on its hyphen alone. If
+    /// `retire_agent` ever grew id validation (it does not today — it is a
+    /// bare idempotent push), that key would be silently rejected,
+    /// `is_operator_feed_diverted` would always read `false`, and the
+    /// tombstone this whole fix depends on would be a no-op with nothing
+    /// here to notice. Calling it on a record with **no live collision at
+    /// all** isolates exactly that: nothing but the divert call itself
+    /// explains the fallback staying live.
+    #[test]
+    fn divert_operator_feed_permanently_sticks_with_no_live_collision() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL,
+            "fixture must start on the literal address — nothing here collides \
+             with `operator` yet"
+        );
+        assert!(!record.is_operator_feed_diverted());
+
+        record.divert_operator_feed_permanently();
+
+        assert!(
+            record.is_operator_feed_diverted(),
+            "the tombstone must read back as set immediately after the call"
+        );
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "operator_feed_channel must divert on the tombstone alone, with no \
+             live desk/agent collision in the record at all — proving \
+             `retire_agent` actually accepted the hyphenated fallback key \
+             rather than silently rejecting it"
+        );
+
+        // Idempotent, like `retire_agent` itself: calling it again must not
+        // duplicate the tombstone or otherwise change the outcome.
+        record.divert_operator_feed_permanently();
+        assert_eq!(
+            record.overlay_retired_agents.len(),
+            1,
+            "a second call must not push a duplicate tombstone entry"
+        );
+    }
+
+    /// The third grandfather case (PR #1781 review, CodeRabbit): a real
+    /// **desk** already owning `operator` must divert the feed exactly like
+    /// the roster-teammate case above, not stay on the literal id. Left on
+    /// `OPERATOR_CHANNEL`, the feed's id equals the desk's own id, and two
+    /// surfaces collide on it: `server::operator::operator_channel` hands
+    /// that id to the console as the pinned Operator row, appended (`
+    /// operatorSection`, `frontend/src/views/ChatView.tsx`) *after* the desk
+    /// section `buildChannels` already put the same id in — so `findChannel`,
+    /// which returns the first section match, resolves the pinned row to the
+    /// desk every time. And `send_to_channel_adapter` journals each workflow
+    /// report under `operator_feed_channel()`'s result, so with no divert
+    /// those reports land in `chat_id == "operator"` too — the desk's own
+    /// ordinary transcript, not a distinguishable feed.
+    #[test]
+    fn operator_feed_channel_diverts_off_a_grandfathered_desks_own_operator_line() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Operator Desk\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert!(record.desk_exists(crate::runtime::OPERATOR_CHANNEL));
+        assert!(!record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL));
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "a desk already owning `operator` must divert the feed off that \
+             same address, the same way a roster teammate holding it does — \
+             otherwise the pinned Operator row and the desk share one id and \
+             `findChannel` always resolves it to the desk"
+        );
+    }
+
+    /// PR #1781 review follow-up (Codex P2, second pass): a desk grandfathered
+    /// at a harmless id but the display name `Operator` must divert the feed
+    /// exactly like the same-id case above — `desk_exists` alone (id-only)
+    /// missed it. `from_path_for_reload` already admits this exact shape
+    /// (`from_path_for_reload_grandfathers_a_group_chat_named_operator` in
+    /// `company::manifest`), and `server::operator::resolve_desk` matches a
+    /// `?desk=operator` selector by name as readily as by id, so the pinned
+    /// console row would resolve to this desk's own transcript instead of the
+    /// system feed if the divert never fired.
+    #[test]
+    fn operator_feed_channel_diverts_off_a_grandfathered_desks_own_operator_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"legacy_ops\"\nname = \"Operator\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert!(
+            !record.desk_exists(crate::runtime::OPERATOR_CHANNEL),
+            "fixture must actually be in the id-is-free, name-collides state \
+             this test exercises, or it is not distinguishing this case from \
+             `operator_feed_channel_diverts_off_a_grandfathered_desks_own_operator_line`"
+        );
+        assert!(!record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL));
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "a desk named \"Operator\" must divert the feed off that address \
+             even though its id is free — `resolve_desk` shadows by name too, \
+             so the pinned Operator row would otherwise resolve to this \
+             desk's own transcript"
+        );
+    }
+
+    /// PR #1781 review follow-up (CodeRabbit P2): a double legacy collision —
+    /// one desk shadowing the primary `operator` address *and a second,
+    /// different* desk shadowing the collision-fallback's own display name
+    /// ("operator-feed") — leaves `operator_feed_channel` with nowhere safe
+    /// left to divert to. `316bc9229` and `16dcce235` block both names from
+    /// ever being (re-)created going forward, so this fixture only models a
+    /// manifest hand-edited outside those guards and reloaded via
+    /// `from_path_for_reload`, the same grandfathering the single-collision
+    /// cases above rely on.
+    ///
+    /// `operator_feed_channel_fallback_shadowed` exists precisely so this
+    /// residual gap is detectable rather than silent — asserted here directly
+    /// since the logging it drives (`workflows::delivery::send_to_channel_adapter`)
+    /// has no return value to assert on.
+    #[test]
+    fn operator_feed_channel_fallback_shadowed_detects_a_double_collision() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"legacy_ops\"\nname = \"Operator\"\nmembers = []\n\
+             [[group_chat]]\nid = \"ops2\"\nname = \"operator-feed\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the primary collision alone still diverts to the fallback address \
+             — this fixture must reach the same divert as the single-collision \
+             case above before the double-collision check means anything"
+        );
+        assert!(
+            record.operator_feed_channel_fallback_shadowed(),
+            "a second desk named \"operator-feed\" shadows the fallback the \
+             same way the first desk shadows the primary — `resolve_desk` \
+             would fold a `?desk=operator-feed` read onto that second desk \
+             instead of the system feed, and this predicate must catch it"
+        );
+    }
+
+    /// Sibling to the double-collision case above: a fallback-name collision
+    /// with **no** primary collision must not trip the predicate — the divert
+    /// never fires, so the fallback address was never actually depended on.
+    #[test]
+    fn operator_feed_channel_fallback_shadowed_is_false_without_a_primary_collision() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"ops2\"\nname = \"operator-feed\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL,
+            "no primary collision exists in this fixture, so the feed must \
+             stay on the literal `operator` address"
+        );
+        assert!(
+            !record.operator_feed_channel_fallback_shadowed(),
+            "the fallback address is never consulted unless the feed actually \
+             diverted to it"
+        );
     }
 }

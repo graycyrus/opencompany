@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::blockers::BlockerVerdict;
 use crate::ports::events::EventStreamItem;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{
@@ -38,6 +39,7 @@ use crate::ports::types::{
     OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
     TurnStep, Verdict,
 };
+use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
@@ -47,13 +49,13 @@ use crate::server::chat_history::{
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::ops::language::{self, DEFAULT_DESK};
-use crate::server::ops::{ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 use crate::server::platform_auth::{CompanyAuth, authorize_address, refuse_until_password_changed};
 use crate::server::provision::{emit_cycle_webhooks, emit_feedback_webhook};
 
 /// Builds the operator route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/companies", get(list_companies))
         .route("/api/v1/companies/{id}", get(company_status))
         .route("/api/v1/companies/{id}/chat", post(operator_chat))
@@ -69,14 +71,6 @@ pub fn router() -> Router<AppState> {
             post(react_to_message_scoped),
         )
         .route("/api/v1/companies/{id}/approvals", get(list_approvals))
-        .route(
-            "/api/v1/companies/{id}/approvals/{aid}",
-            post(resolve_approval),
-        )
-        .route(
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
-            post(extend_approval),
-        )
         // Single-company aliases (no id; resolved via the sole registered company).
         .route("/api/v1/company/chat", post(operator_chat_single))
         .route("/api/v1/company/chat/history", get(chat_history_single))
@@ -89,14 +83,12 @@ pub fn router() -> Router<AppState> {
             post(react_to_message_single),
         )
         .route("/api/v1/company/approvals", get(list_approvals_single))
-        .route(
-            "/api/v1/company/approvals/{aid}/extend",
-            post(extend_approval_single),
-        )
-        .route(
-            "/api/v1/company/approvals/{aid}",
-            post(resolve_approval_single),
-        )
+        // Deciding an approval, and extending the deadline that would otherwise
+        // decide it by default, settle an effect for the whole company, so both
+        // demand authority over it rather than membership in it. Registered
+        // through `scoped` so the two address forms cannot drift apart.
+        .merge(scoped("/approvals/{aid}", post(resolve_approval)))
+        .merge(scoped("/approvals/{aid}/extend", post(extend_approval)))
         // The company's desks (group chats), under both scope forms — the
         // console builds its chat threads from these (issue #53). `POST` creates
         // a desk through the operator overlay (the manifest is never rewritten).
@@ -114,6 +106,11 @@ pub fn router() -> Router<AppState> {
         // Desk member ordering / hierarchy (issue #131): set the operator's
         // explicit member order for a desk. Registered under both scope forms.
         .merge(scoped("/desks/{desk_id}/order", put(set_desk_order)))
+        // The always-present, durable Operator feed — its own surface, not a
+        // desk (issue #1757 rework). Read-only identity lookup: the console
+        // pins it below a divider in the chat rail rather than folding it
+        // into `GET {scope}/desks`.
+        .merge(scoped("/operator-channel", get(operator_channel)))
         // The company → operator attention feed (issue #66): a live SSE stream of
         // the attention-worthy events already on the company's event log, under
         // both scope forms.
@@ -121,7 +118,22 @@ pub fn router() -> Router<AppState> {
         // Standing permissions (issue #374): what the operator has opened up,
         // and how to take it back. Registered under both scope forms.
         .merge(scoped("/grants", get(list_grants)))
-        .merge(scoped("/grants/{gid}", delete(revoke_grant)))
+        .merge(scoped("/grants/{gid}", delete(revoke_grant)));
+    with_review_routes(router)
+}
+
+/// Registers the thread-scoped review verdict route — Approve finishes a
+/// settled `in_review` dispatch card, Revise re-runs it. Gated with the harness
+/// that dispatches cards in the first place; the default build has no such card
+/// to review, so the route is not mounted.
+#[cfg(feature = "openhuman")]
+fn with_review_routes(router: Router<AppState>) -> Router<AppState> {
+    router.merge(scoped("/chat/review", post(review_card)))
+}
+
+#[cfg(not(feature = "openhuman"))]
+fn with_review_routes(router: Router<AppState>) -> Router<AppState> {
+    router
 }
 
 /// One desk (group chat) as the console renders it. Mirrors `DeskDto` in
@@ -195,18 +207,24 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     overlay_created: false,
                 }
             });
-            // An overlay desk standing where `#general` does is not projected:
-            // the console would show it as the company-wide line, offer the
-            // edit and delete controls a desk row carries, and every one of
-            // them would be refused (`is_general_channel`). The rule this file
-            // follows is not to offer a control that will be refused. Nothing
-            // is lost by hiding it — its transcript is already folded into
-            // `#general` by `is_general_chat`, and that channel's membership is
-            // the whole roster, a superset of whatever this desk held.
+            // An overlay desk whose own **id** is a General spelling is not
+            // projected (issue #1781 review, Codex P2) — the grandfathered
+            // shape `POST .../desks` accepted `general` / `main` ids under
+            // before issue #1743 reserved them. `CompanyRecord::resolve_desk_id`
+            // already excludes exactly this desk from routing (see its own
+            // filter, same `is_general_chat(Some(&d.id))` check), so listing it
+            // here would show the console a desk `buildChannels` treats as the
+            // company-wide line — offering edit/delete controls and a member
+            // list that has nothing to do with where a message to it actually
+            // routes (the built-in `#general`, per `resolve_desk_id`'s
+            // fallback). Nothing is lost by hiding it: its transcript is
+            // already folded into `#general` by `is_general_chat`, and that
+            // channel's membership is the whole roster, a superset of whatever
+            // this desk held.
             let overlay_desks = record
                 .overlay_desks
                 .iter()
-                .filter(|desk| !shadows_general_channel(desk))
+                .filter(|desk| !crate::server::chat_history::is_general_chat(Some(&desk.id)))
                 .map(|desk| {
                     let members = record.effective_desk_members(&desk.id);
                     // For an overlay desk the founding members are `desk.members`;
@@ -228,67 +246,100 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                 });
             manifest_desks.chain(overlay_desks).collect()
         })
+        // A company that failed to load surfaces no desks — the console falls
+        // back to its static default threads (issue #1757 rework: the Operator
+        // feed is its own surface now, fetched through `GET
+        // {scope}/operator-channel` rather than injected here).
         .unwrap_or_default();
     Ok(Json(desks))
 }
 
+/// The identity of the company's always-present, durable Operator feed
+/// (issue #1757 rework). Mirrors `OperatorChannelDto` in
+/// `frontend/src/api/types.ts`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorChannelDto {
+    /// The channel id — the `desk` query param `GET
+    /// {scope}/chat/history?desk=<id>` reads its transcript through.
+    id: String,
+    /// Always "Operator" — the console's pinned-row label.
+    name: String,
+    /// The channel's purpose line, shown under the name in the pinned row.
+    description: String,
+}
+
+/// `GET {scope}/operator-channel` — the identity of the company's dedicated,
+/// durable Operator feed: where "what happened and what needs you" workflow
+/// reports and the owner/no-mailbox fallback land. A pinned surface, not a
+/// desk — the console renders it as its own row below a divider rather than
+/// folding it into `GET {scope}/desks`, and it carries no member or mutation
+/// routes.
+///
+/// `id` resolves through
+/// [`CompanyRecord::operator_feed_channel`](crate::ports::types::CompanyRecord::operator_feed_channel)
+/// — ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL), or
+/// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+/// for the one grandfathered company shape where a roster teammate already
+/// owns that id — so this and delivery
+/// (`workflows::delivery::send_to_channel_adapter`) always agree on where the
+/// feed lives. A company with no record yet still gets the default id, so the
+/// console always has a channel to point its history read at — but a store
+/// read failure is propagated as an error rather than silently answered with
+/// the default id: for the grandfathered collision-fallback company, treating
+/// a transient failure as "no record" would label the operator's real
+/// `operator-feed` transcript as `operator` while delivery keeps targeting the
+/// collision-aware address once the store recovers.
+async fn operator_channel(
+    scope: ScopedCompany,
+) -> Result<Json<OperatorChannelDto>, crate::server::Rejection> {
+    let id = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await?
+        .map(|record| record.operator_feed_channel().to_string())
+        .unwrap_or_else(|| crate::runtime::OPERATOR_CHANNEL.to_string());
+    Ok(Json(OperatorChannelDto {
+        id,
+        name: "Operator".to_string(),
+        description: "Workflow reports and notifications — what happened and what needs you"
+            .to_string(),
+    }))
+}
+
 /// Whether `desk_id` names the built-in `#general` channel rather than a desk
-/// (issue #1743).
+/// (issue #1743; restored PR #1781 review, CodeRabbit P2 — see below).
 ///
 /// `#general` is the company-wide conversation this host has always folded
 /// every General spelling into — `general`, `General`, `main`, and the empty
 /// string all name it, which is exactly what
 /// [`is_general_chat`](crate::server::chat_history::is_general_chat) decides.
 /// It is deliberately **not** a desk: it has no lead, no hierarchy, and its
-/// membership is the whole roster derived at read time, so there is nothing for
-/// a desk mutation to change. Every one of them is therefore refused with a
-/// reason rather than answered with a bare `404`, which is a different fact —
-/// an id the host reserves is not an id nobody created.
+/// membership is the whole roster derived at read time, so there is nothing
+/// for a desk mutation to change.
 ///
-/// Guarded on the **manifest** on purpose: a company whose blueprint really
-/// does declare a `[[group_chat]]` with one of those ids keeps behaving exactly
-/// as it did. This only ever replaces the "no such desk" answer; it never takes
-/// a desk away from a manifest that has one.
+/// Guarded on **manifest** desks only, not `desk_exists` (id in manifest *or*
+/// overlay) as this predicate's original `da98130c1` shape checked: a company
+/// whose blueprint really does declare a `[[group_chat]]` with one of those
+/// ids keeps behaving exactly as it did, but an *overlay* desk can only ever
+/// hold a reserved id by predating the id/name guards `create_desk` has
+/// carried since `da98130c1` and `16dcce235` — the exact grandfathered shape
+/// `list_desks` and [`CompanyRecord::resolve_desk_id`] already keep out of the
+/// desk list and out of routing (`0c07873db`). Treating it as a real,
+/// mutable desk here would contradict that: every other surface already
+/// agrees it shadows General, not that it is a desk.
 ///
-/// Deliberately *not* `desk_exists`, which also admits operator-created overlay
-/// desks. `create_desk` refuses these ids now, but it did not before issue
-/// #1743 — so an instance can be carrying a persisted overlay desk called
-/// `general` or `main`, and exempting it would leave the channel this issue
-/// promises is permanent staffable, reorderable and deletable after all. Such a
-/// desk is excluded from `GET .../desks` too ([`shadows_general_channel`]), so
-/// the refusal is never a control the console offered.
+/// That read/list-side exclusion (`0c07873db`) is where the gap actually
+/// starts: this mutation-side guard (originally `da98130c1`) was dropped by
+/// an unrelated refactor (`3cbdb7a5f`) and never restored alongside it — a
+/// direct `POST`/`DELETE`/`PUT` to `.../desks/{id}` could still staff,
+/// reorder, or delete a desk no read surface exposes, and a write against a
+/// bare General spelling with no legacy overlay row regressed from this 409
+/// to a misleading 404.
 fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
-    let declared = record
-        .manifest
-        .group_chats
-        .iter()
-        .any(|c| c.id == desk_id || c.name.eq_ignore_ascii_case(desk_id));
-    !declared && crate::server::chat_history::is_general_chat(Some(desk_id))
-}
-
-/// Whether an operator-created overlay desk stands where the built-in
-/// `#general` channel does (issue #1743).
-///
-/// **By id, and only by id** — because that is exactly what
-/// [`CompanyRecord::resolve_desk_id`](crate::ports::types::CompanyRecord::resolve_desk_id)
-/// refuses. It declines to match an overlay desk against a General key, so a
-/// desk merely *named* `General` no longer shadows anything: it is addressed by
-/// its own id, its lead still answers there, `delegate_to_desk` still reaches
-/// it, and every write to it still works. Hiding it here would take a live desk
-/// and its transcript out of Chat while the API kept routing to it — the
-/// mirror image of the defect this projection exists to prevent.
-///
-/// A desk whose **id** is a General spelling is a different matter: no key
-/// resolves it, so there is nothing left to address and every desk write aimed
-/// at it is refused. Creation refuses both spellings now, but neither was
-/// refused before, so both are reachable persisted state rather than a
-/// hypothesis.
-///
-/// Only overlay desks. A manifest desk answering to one of those spellings is
-/// the blueprint's own General desk, which this host has always honoured, and
-/// it keeps the company-wide line along with its row here.
-fn shadows_general_channel(desk: &crate::ports::types::OverlayDesk) -> bool {
-    crate::server::chat_history::is_general_chat(Some(&desk.id))
+    crate::server::chat_history::is_general_chat(Some(desk_id))
+        && !record.manifest.group_chats.iter().any(|c| c.id == desk_id)
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -353,7 +404,8 @@ async fn add_desk_member(
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
     // The built-in `#general` channel is not a desk and never was — refuse the
     // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
     if is_general_channel(&record, &desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
             language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
@@ -428,7 +480,8 @@ async fn set_desk_order(
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
     // The built-in `#general` channel is not a desk and never was — refuse the
     // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
     if is_general_channel(&record, &desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
             language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
@@ -502,7 +555,8 @@ async fn remove_desk_member(
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
     // The built-in `#general` channel is not a desk and never was — refuse the
     // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
     if is_general_channel(&record, &desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
             language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
@@ -681,6 +735,55 @@ async fn create_desk(
             language::GENERAL_CHANNEL_RESERVED.to_string(),
         )));
     }
+    // Issue #1757: `operator` is reserved for the built-in, read-only Operator
+    // system channel — `desk_exists` alone would miss this, since the system
+    // channel is never a manifest or overlay desk. Without this, a created
+    // overlay desk with this id would collide with the system channel in the
+    // desk list, and every message to it would be refused by the read-only
+    // guard in `chat_and_emit`, which treats any `chat_id == OPERATOR_CHANNEL`
+    // as the system feed regardless of where it came from.
+    //
+    // The **display name** is reserved for the same reason the General
+    // display name is, above, and not a weaker one (PR #1781 review,
+    // CodeRabbit P2 follow-up to `316bc9229`): `CompanyRecord::resolve_desk_id`
+    // matches an overlay desk by id *or* case-insensitive name, so
+    // `{"id": "ops", "name": "Operator"}` resolves a `?desk=Operator` selector
+    // to this desk exactly as thoroughly as claiming the literal id would.
+    // Refused at creation like the General case above, for the same reason:
+    // no manifest can reach this API path, so no existing company loses a
+    // desk — a *newly created* overlay desk can never reach the shape below.
+    //
+    // A **manifest** desk grandfathered onto this name from before
+    // `316bc9229` — the case this creation guard cannot cover, since it
+    // already existed — used to hit exactly the mismatch this paragraph
+    // warned about: `ensure_desk_writable` (`company/runtime.rs`) checked the
+    // *raw* selector string against `OPERATOR_CHANNEL` before any resolution
+    // ran, so a write addressed to the desk's `Operator` alias was refused as
+    // the read-only system feed while a write addressed to its real id sailed
+    // straight through. Fixed (issue #1781 review, Codex P1 follow-up):
+    // `ensure_desk_writable` now resolves the raw selector through
+    // `resolve_desk_id` first, so it agrees with the read path on which desk
+    // a caller meant. The fallback address
+    // (`OPERATOR_CHANNEL_COLLISION_FALLBACK`, "operator-feed")
+    // is reserved by name for the identical reason `316bc9229` reserved it on
+    // the manifest side — `resolve_desk` folds a `?desk=` selector against it
+    // the same way — but not by id: `is_valid_desk_id` above already rejects
+    // any hyphen, so no `id` can ever equal the hyphenated fallback constant.
+    if id == crate::runtime::OPERATOR_CHANNEL
+        || name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL)
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            "the id \"operator\" is reserved for the built-in Operator channel — choose a different id"
+                .to_string(),
+        )));
+    }
+    if name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            "the name \"operator-feed\" is reserved for the built-in Operator channel's \
+             fallback feed — choose a different name"
+                .to_string(),
+        )));
+    }
     if record.desk_exists(&id) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
             "a desk with id {id:?} already exists"
@@ -721,6 +824,9 @@ async fn create_desk(
         description: description.clone(),
         members: members.clone(),
         responder: body.responder,
+        // A desk created here starts with no hive block of its own and takes
+        // the defaults, exactly as a manifest desk that declares none does.
+        hive: crate::hivemind::HiveConfig::default(),
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
@@ -769,7 +875,8 @@ async fn delete_desk(
 
     // The built-in `#general` channel is not a desk and never was — refuse the
     // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
     if is_general_channel(&record, &desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
             language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
@@ -780,6 +887,18 @@ async fn delete_desk(
         return Err(ApiError(OpenCompanyError::Conflict(
             language::MANIFEST_DESK_DELETE.to_string(),
         )));
+    }
+    // Tombstone the operator-feed divert before it can be lost (issue #1781
+    // review, Codex P2): `operator_feed_channel` currently diverts only while
+    // *something* live holds the id or display name `operator`, and the desk
+    // this call is about to remove may be that something. Recorded here,
+    // before the removal, while the live check can still see it — see
+    // `CompanyRecord::divert_operator_feed_permanently`'s doc for why this
+    // has to survive the desk being gone.
+    if record.operator_feed_channel()
+        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+    {
+        record.divert_operator_feed_permanently();
     }
     let before = record.overlay_desks.len();
     record.overlay_desks.retain(|d| d.id != desk_id);
@@ -824,6 +943,51 @@ impl Drop for SseStreamGuard {
 /// user added or renamed after the stream opened picks up the new label.
 const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 
+/// Re-derives whether `actor` (the human behind an open SSE connection) still
+/// holds admin access, for [`company_events`]'s periodic refresh AND its
+/// per-item revalidation of an owner-fallback report.
+///
+/// Fixes issue #1781 review (Codex P1): the `is_admin` this feeds used to be
+/// captured once at stream-open time and never reconsidered, so a mid-stream
+/// demotion kept projecting the admin-only owner-fallback report to the
+/// now-non-admin user for as long as their tab stayed open — `PATCH
+/// …/users/{id}` updates the stored role without revoking sessions on a plain
+/// demotion (only a suspension does that; see `src/server/users/admin.rs`'s
+/// `update_user`), and an already-open SSE response performs no further
+/// authentication of its own.
+///
+/// Returns `previous` unchanged only for the machine principal (`actor:
+/// None`, unrestricted by construction per [`ScopedCompany::is_admin`]'s own
+/// doc) — every other outcome (`Ok(None)`, the user record has gone missing,
+/// or `Err`, the store read itself failed) returns `false` (issue #1781
+/// review, Codex P1 follow-up to this fix). Fail-open on a lookup failure was
+/// the original shape, on the reasoning that "a transient read failure
+/// should not flip a live connection's access either way" — true for the
+/// periodic refresh alone, which only ever *feeds* a decision, but
+/// [`is_admin_for_item`] also calls this synchronously, per item, as the
+/// actual gate on the one admin-only content class this whole mechanism
+/// exists to protect. There, `previous` is exactly the stale cached value a
+/// demotion may have already invalidated — failing open on top of a store
+/// hiccup would hand a demoted, now-unconfirmable actor the benefit of the
+/// doubt on the read that was supposed to catch the demotion. A human
+/// principal whose current role cannot be confirmed is treated as not admin;
+/// only the always-safe machine principal keeps its unconditional pass.
+async fn refreshed_is_admin(
+    runtime: &CompanyRuntime,
+    actor: Option<&Actor>,
+    previous: bool,
+) -> bool {
+    let Some(actor) = actor else {
+        return previous;
+    };
+    match runtime.users().get_user(runtime.id(), &actor.id).await {
+        Ok(Some(user)) => {
+            user.role.may_administer() && user.status == crate::ports::users::UserStatus::Active
+        }
+        _ => false,
+    }
+}
+
 /// `GET {scope}/events` — the company → operator attention feed (issue #66).
 ///
 /// Subscribes to the company's [`EventLog`](crate::ports::EventLog) and streams a
@@ -845,6 +1009,23 @@ async fn company_events(
         .as_ref()
         .map(|actor| Viewer::User(actor.id.clone()))
         .unwrap_or(Viewer::Operator);
+    // Threaded into the projection below so a live `AgentReply` from the
+    // owner-fallback pseudo-author is gated the same way a reload's
+    // `history_for_desk` already gates it (issue #1781 review, Codex P1) — a
+    // non-admin must never see the admin-only report just because they had
+    // the stream open when it landed.
+    //
+    // Held in a shared cell, not a captured `bool`: `scope.is_admin` is only
+    // this connection's role *at open time*, and this stream can outlive a
+    // demotion. `PATCH …/users/{id}` updates the stored role without
+    // revoking sessions on a plain demotion (only a suspension does that),
+    // and an already-open SSE response performs no further authentication —
+    // so a captured `true` would keep projecting the owner-fallback report to
+    // a now-non-admin user for as long as their tab stayed open (issue #1781
+    // review, Codex P1). The periodic refresh below re-derives it from the
+    // live user record, the same bounded staleness window the label refresh
+    // just below already accepts for mention chips.
+    let is_admin = Arc::new(std::sync::atomic::AtomicBool::new(scope.is_admin));
     let subscription = scope.runtime.events().subscribe(&company);
     // Roster display labels for mention chips. Held in a shared lock rather
     // than captured once: the stream outlives membership changes that can add
@@ -859,6 +1040,8 @@ async fn company_events(
     let label_refresh = {
         let runtime = scope.runtime.clone();
         let shared = Arc::clone(&authors);
+        let is_admin_cell = Arc::clone(&is_admin);
+        let actor = scope.actor.clone();
         tokio::spawn(async move {
             let mut cancel = cancel_rx;
             loop {
@@ -874,6 +1057,9 @@ async fn company_events(
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
                 }
+                let previous = is_admin_cell.load(std::sync::atomic::Ordering::Relaxed);
+                let refreshed = refreshed_is_admin(&runtime, actor.as_ref(), previous).await;
+                is_admin_cell.store(refreshed, std::sync::atomic::Ordering::Relaxed);
             }
         })
     };
@@ -882,15 +1068,28 @@ async fn company_events(
         cancel: Some(cancel),
         label_refresh: Some(label_refresh),
     };
+    // A second handle on the same runtime/actor the label-refresh task above
+    // captured its own clones of — needed here too, for the per-item
+    // revalidation below (issue #1781 review, Codex P1 follow-up).
+    let runtime = scope.runtime.clone();
+    let actor = scope.actor.clone();
     let durable = subscription.filter_map(move |item| {
         // Keep the teardown guard alive for the life of the stream.
         let _ = &guard;
-        let authors = authors
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let event = project_stream_item_for_viewer(&item, &authors, &viewer)
-            .map(|value| Ok(Event::default().data(value.to_string())));
-        std::future::ready(event)
+        let authors = Arc::clone(&authors);
+        let is_admin_cell = Arc::clone(&is_admin);
+        let runtime = runtime.clone();
+        let actor = actor.clone();
+        let viewer = viewer.clone();
+        async move {
+            let cached = is_admin_cell.load(std::sync::atomic::Ordering::Relaxed);
+            let is_admin = is_admin_for_item(&item, &runtime, actor.as_ref(), cached).await;
+            let authors = authors
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
+                .map(|value| Ok(Event::default().data(value.to_string())))
+        }
     });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
     // turn emits while it runs — see [`crate::turn_stream`]) onto the same feed.
@@ -940,15 +1139,62 @@ fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&s
     )
 }
 
+/// Whether `item` is the one content class [`company_events`]'s `is_admin`
+/// gates: an owner-fallback [`AgentReply`](CompanyEvent::AgentReply) —
+/// journaled under
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// (issue #1781 review, Codex P1 follow-up).
+///
+/// A cheap, synchronous pre-check so `company_events`'s per-item revalidation
+/// only spends a store read on the one content class that needs fresher-than-
+/// `LABEL_REFRESH_EVERY` staleness — every other event (and a stream `Gap`)
+/// keeps using the cached snapshot with no store read added to its path.
+fn is_owner_fallback_report(item: &EventStreamItem) -> bool {
+    matches!(
+        item,
+        EventStreamItem::Event(StoredEvent {
+            event: CompanyEvent::AgentReply { agent_id, .. },
+            ..
+        }) if agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+    )
+}
+
+/// The `is_admin` value [`company_events`] projects `item` under (issue #1781
+/// review, Codex P1 follow-up).
+///
+/// `cached` is the periodic `LABEL_REFRESH_EVERY`-bounded snapshot every other
+/// event uses unchanged. An owner-fallback report is revalidated fresh
+/// instead — the P1 finding's fix: without this, a demotion landing after the
+/// last periodic refresh still let an already-open stream project an
+/// admin-only report for up to another `LABEL_REFRESH_EVERY` (60s), since
+/// `cached` alone would not see the demotion until its own next tick.
+/// Revalidating only for this one content class keeps every other event on
+/// the cheap cached read — no store lookup added to the hot path.
+async fn is_admin_for_item(
+    item: &EventStreamItem,
+    runtime: &CompanyRuntime,
+    actor: Option<&Actor>,
+    cached: bool,
+) -> bool {
+    if is_owner_fallback_report(item) {
+        refreshed_is_admin(runtime, actor, cached).await
+    } else {
+        cached
+    }
+}
+
 /// Projects a live subscription item into the operator stream's safe wire
 /// shape. A gap is an unpersisted control frame, deliberately structural-only.
 fn project_stream_item_for_viewer(
     item: &EventStreamItem,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
+    is_admin: bool,
 ) -> Option<serde_json::Value> {
     match item {
-        EventStreamItem::Event(stored) => project_event_for_viewer(stored, authors, viewer),
+        EventStreamItem::Event(stored) => {
+            project_event_for_viewer(stored, authors, viewer, is_admin)
+        }
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
             "missed": missed,
@@ -973,15 +1219,34 @@ fn project_stream_item_for_viewer(
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
+///
+/// [`Viewer::Operator`] is always admin here, same as `Chat.history`'s
+/// GraphQL resolver treats the platform bearer (issue #1781 review, Codex
+/// P1) — this test helper's callers all use that viewer.
 #[cfg(test)]
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
-    project_event_for_viewer(stored, &std::collections::HashMap::new(), &Viewer::Operator)
+    project_event_for_viewer(
+        stored,
+        &std::collections::HashMap::new(),
+        &Viewer::Operator,
+        true,
+    )
 }
 
+/// `is_admin` gates an owner-fallback `AgentReply` — journaled under
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// — the same way [`history_for_desk`](crate::server::chat_history::history_for_desk)
+/// already gates it for a reload (issue #1781 review, Codex P1): a non-admin
+/// viewer must never see the admin-only report just because it landed while
+/// their SSE stream was open. The row is dropped outright rather than
+/// projected with a redacted body — this stream has no partial-reveal shape
+/// for any other event either, and a live listener that cannot see the row on
+/// reload should not see it live.
 fn project_event_for_viewer(
     stored: &StoredEvent,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
+    is_admin: bool,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
 
@@ -1004,6 +1269,11 @@ fn project_event_for_viewer(
             mentions,
             ..
         } => {
+            // See this fn's doc: an owner-fallback report is admin-only, live
+            // exactly as it is on reload (issue #1781 review, Codex P1).
+            if !is_admin && agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR {
+                return None;
+            }
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
@@ -1133,6 +1403,7 @@ fn project_event_for_viewer(
             desk,
             column,
             origin_chat_id,
+            origin_parent,
             ..
         } => {
             let mut o = envelope("desk_task_completed");
@@ -1141,6 +1412,20 @@ fn project_event_for_viewer(
             o["column"] = json!(column);
             if let Some(chat_id) = origin_chat_id {
                 o["chatId"] = json!(chat_id);
+            }
+            // **Widened again** by #1890 B, with the thread inside that
+            // channel. Omitted rather than null on exactly the terms `chatId`
+            // is, and read the same way: absent means the channel-level
+            // conversation, which is where every marker landed before.
+            //
+            // The live frame and `chat/history`'s rehydrated twin must agree on
+            // this or the marker would render inline live and jump into a
+            // thread on reload — the split the `h<seq>` identity dedupe exists
+            // to prevent. Stringified for the same reason the history
+            // projection's `parentId` is: the console keys threads by message
+            // id, and a message id is a string there.
+            if let Some(parent) = origin_parent {
+                o["parentId"] = json!(parent.value().to_string());
             }
             o
         }
@@ -1383,6 +1668,7 @@ fn project_event_for_viewer(
             run_id,
             scheduled,
             started_by,
+            ..
         } => {
             let mut o = envelope("workflow_run_started");
             o["workflowId"] = json!(workflow_id);
@@ -1663,8 +1949,9 @@ struct ChatMessage {
     /// those ids here. The host re-resolves each within this company's own
     /// workspace and takes the name / mime / size from the store — so a foreign
     /// or spoofed reference cannot cross a company boundary or misdescribe its
-    /// payload (see `resolve_attachments`). An id that resolves to no binary
-    /// node in this company is a `400`.
+    /// payload (see `resolve_attachments`). Any file in the tree may be
+    /// attached, however it was written; an id naming a folder, or naming
+    /// nothing in this company, is a `400`.
     ///
     /// Additive in both directions: this struct has no `deny_unknown_fields`,
     /// so a newer console against an older host has its ids ignored and its
@@ -1720,6 +2007,23 @@ struct ChatResponse {
     /// exactly as it did before rather than guessing.
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<&'static str>,
+    /// Set when a thread reply was intercepted as review feedback on an
+    /// `in_review` dispatch card and re-dispatched it, rather than answered
+    /// with `responses` here (Codex #3903907771). The re-run's own reply
+    /// still arrives later on the event stream and in `chat/history` — this
+    /// only tells the console not to read an empty `responses` as "the turn
+    /// produced nothing."
+    ///
+    /// Omitted (not `false`) on every other response, so a host predating
+    /// this field is indistinguishable from one that never took this branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_feedback_applied: Option<bool>,
+    /// The same list [`ResolveReceiptDto::settled_ids`] carries, for the
+    /// non-detached resolve the Approvals page makes: a blocker answered there
+    /// settles its whole root-cause group, and the page owes those siblings the
+    /// same removal it gives the card that was clicked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settled_ids: Option<Vec<String>>,
 }
 
 /// The `detach: true` response (issue #983): the turn's id and the durable id of
@@ -1942,7 +2246,12 @@ async fn run_chat(
     let not_work = message
         .deliverable
         .is_some_and(crate::ports::types::MessageIntent::is_chat);
-    if let Some(title) = (!confined && !not_work)
+    // The lexical layer answers two questions at once, and only the first is a
+    // decision: whether this message becomes a card, and — for a host with no
+    // model wired — what to call it. The second is now a fallback. Keeping it
+    // matters: the classifier returns a *tidied* title, so discarding it would
+    // make an offline company's cards worse than before rather than no better.
+    let lexical = (!confined && !not_work)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
             crate::company::task_intent::MessageTriage::Track(title) => Some(title),
@@ -1952,12 +2261,19 @@ async fn run_chat(
         .or_else(|| {
             workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
         })
-        .filter(|title| !title.trim().is_empty())
-    {
-        // Keep the full message as the note only when the title was shortened
-        // from it, so a one-line ask doesn't duplicate itself.
-        let note =
-            (title.trim_end_matches('…') != message.text.trim()).then(|| message.text.clone());
+        .filter(|title| !title.trim().is_empty());
+    if let Some(lexical) = lexical {
+        let title = crate::ports::tasks::mint_task_title(
+            message.text.trim(),
+            Some(&lexical),
+            runtime.titler(),
+        )
+        .await;
+        // The full ask, kept as the note whenever the headline is not already
+        // the whole of it — which a named title almost always is not. This is
+        // where the context, the caveats and the operator's own wording live now
+        // that the title is a name rather than an excerpt.
+        let note = (title.as_str() != message.text.trim()).then(|| message.text.clone());
         // Issue #576: the prompt box opens the card **already in Planning**, so
         // the spine epic #183 draws — prompt in, deliverable out — runs without
         // a human dragging the first step. The card is created *directly* in
@@ -2009,14 +2325,37 @@ async fn run_chat(
             priority: "medium".to_string(),
             assignee,
             updated_at_millis: crate::ports::now_millis(),
-            // Issue #982: the thread this card was opened from, so the settle
-            // marker lands back in the conversation that asked for the work
-            // rather than only on the board. This is the field #151 added for
-            // exactly that (`relay_reply` answers in the origin thread), and the
-            // console already renders a marker in a DM channel — nothing there
-            // changes. `None` for an unaddressed message, which is every card
-            // this site opened before and therefore no change for one.
-            origin_chat_id: message.chat.clone(),
+            // Issue #982 + #1890 B, reconciled with D: the conversation this
+            // card was opened from, so the settle marker lands back where the
+            // work was asked for rather than only on the board. `relay_reply`
+            // answers in it, and the console already renders a marker in a DM
+            // channel — nothing there changes. `None` for an unaddressed
+            // message, which is every card this site opened before.
+            //
+            // The thread half is **the same rule by which an answer to this
+            // message threads**, which is why it is `reply_thread` and not
+            // `thread_root()`. B alone read the message's own `parent`, so a
+            // card raised from a channel-level question recorded no thread.
+            // That was right while a thread was only ever something an operator
+            // opened by hand. D changed what a thread IS: an answer now parents
+            // to the message that opened the exchange, so that question is a
+            // root, and a card raised from it belongs to the thread it just
+            // started.
+            //
+            // Left as `thread_root()`, the two disagreed about one message: the
+            // answer landed in a thread and the card's settle marker landed
+            // flat in the channel — the conversation and its outcome in
+            // different places, which is the failure B exists to prevent,
+            // reintroduced by D moving the ground under it.
+            //
+            // Found by hand-testing B and D together. Neither suite could catch
+            // it: B's has no auto-threading and D's has no cards. Step 5 is why
+            // it cannot come back: the desk and the thread are one value now,
+            // built by one constructor, so there is no second field to forget.
+            origin: crate::ports::TaskOrigin::new(
+                message.chat.clone(),
+                reply_thread(accepted.thread_root(), accepted.message_seq),
+            ),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -2043,10 +2382,45 @@ async fn run_chat(
             // behind a chat turn, and inventing one would be a lie the board
             // then carries forever.
             origin_run_id: accepted.turn_id.clone(),
+            // The message this card was opened for. The runtime turn that
+            // follows finds the card by this and nothing else, so the headline
+            // above is free to be a name rather than an excerpt.
+            origin_message_seq: Some(accepted.message_seq),
             origin_workflow_id: None,
+            bounced: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
+            // CHAT-021: a card-open failure used to end here — logged
+            // server-side, and the chat turn otherwise proceeded to a normal
+            // 200. To the operator, the message they had just asked to be
+            // tracked simply never became a card, with no word anywhere in
+            // the product that it had tried and failed. Same shape and author
+            // as the turn-failure notice above: a direct `AgentReply` in the
+            // same desk this card would have opened in, so it round-trips
+            // through history like any other reply.
+            let notice = CompanyEvent::AgentReply {
+                audience: Vec::new(),
+                parent: reply_thread(accepted.thread_root(), accepted.message_seq),
+                chat_id: message
+                    .chat
+                    .clone()
+                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                text: "This should have opened a task card, but the card could not be saved. \
+                       Nothing else was lost — send the message again, or open the card by hand."
+                    .to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            };
+            if let Err(journal_err) = runtime.events().append(runtime.id(), notice).await {
+                tracing::warn!(
+                    error = %journal_err,
+                    "failed to journal the card-open failure notice itself"
+                );
+            }
         }
     }
     // Issue #983: the message is already in the journal — `accept_chat_turn`
@@ -2082,6 +2456,30 @@ struct AcceptedTurn {
     /// store refused — the turn still runs, untracked, because record-keeping
     /// does not get to fail the work it records.
     turn_id: Option<String>,
+}
+
+impl AcceptedTurn {
+    /// The thread this turn was typed in (issue #1890 B) — `None` is the
+    /// channel-level conversation.
+    ///
+    /// Read off the **journaled event**, not off the request body, for the same
+    /// reason [`run_chat`] takes this type rather than a loose parent: the body
+    /// names a parent by id as a string and this is the parsed, validated fact
+    /// the append actually recorded. Two readings of one thread root is how the
+    /// board and the transcript drift.
+    ///
+    /// A message's own `parent` IS its root — a reply is parented to its
+    /// question's parent, never to the question — so there is no chain to walk.
+    fn thread_root(&self) -> Option<EventSeq> {
+        match &self.message_event {
+            CompanyEvent::OperatorMessage { parent, .. } => *parent,
+            // Unreachable: `accept_chat_turn` journals an `OperatorMessage` and
+            // nothing else. An arm rather than an `unwrap`, because the honest
+            // answer for any other event is "no thread", not a panic on a path
+            // that owes the operator a reply.
+            _ => None,
+        }
+    }
 }
 
 /// Journals an operator message and mints the turn owed for it (issue #983).
@@ -2165,24 +2563,38 @@ async fn resolve_attachments(
     let tree = runtime.workspace().tree(id).await?;
     let mut resolved = Vec::with_capacity(node_ids.len());
     for node_id in node_ids {
-        let node = tree
-            .iter()
-            .find(|n| &n.id == node_id && n.is_binary())
-            .ok_or_else(|| {
-                ApiError(OpenCompanyError::InvalidRequest(format!(
-                    "attachment {node_id} is not a file in this company's workspace"
-                )))
-            })?;
-        let extracted_text = extracted_attachment_text(runtime, id, node).await;
+        let node = tree.iter().find(|n| &n.id == node_id).ok_or_else(|| {
+            ApiError(OpenCompanyError::InvalidRequest(format!(
+                "attachment {node_id} is not in this company's workspace"
+            )))
+        })?;
+        if node.kind != crate::ports::workspace::NodeKind::File {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "attachment {node_id} is a folder, not a file"
+            ))));
+        }
+        let (mime, size, extracted_text) = if node.is_binary() {
+            (
+                node.mime.clone().unwrap_or_default(),
+                node.size.unwrap_or(0),
+                extracted_attachment_text(runtime, id, node).await,
+            )
+        } else {
+            let (content, size) = note_within_extract_cap(runtime, id, &node.id).await;
+            (
+                mime_guess::from_path(&node.name)
+                    .first_raw()
+                    .unwrap_or("text/plain")
+                    .to_string(),
+                size,
+                extracted_note_text(&content),
+            )
+        };
         resolved.push(Attachment {
             node_id: node.id.clone(),
             name: node.name.clone(),
-            // A binary node always carries both — `is_binary()` is exactly
-            // `mime.is_some()`, and the store computes `size` alongside it —
-            // so the defaults are unreachable and exist only to keep this
-            // total without an `unwrap` a later store change could break.
-            mime: node.mime.clone().unwrap_or_default(),
-            size: node.size.unwrap_or(0),
+            mime,
+            size,
             extracted_text,
         });
     }
@@ -2217,6 +2629,47 @@ const MAX_ATTACHMENT_EXTRACT_BYTES: u64 = 4 * 1024 * 1024;
 /// carries the operator's own words too, so no single attachment may be free
 /// to crowd out the rest of the turn.
 const MAX_ATTACHMENT_EXTRACT_CHARS: usize = 6_000;
+
+/// One prose node's byte length, and its body only while that length stays
+/// within [`MAX_ATTACHMENT_EXTRACT_BYTES`].
+///
+/// [`WorkspaceStore::read_capped`](crate::ports::workspace::WorkspaceStore::read_capped)
+/// rather than a read and a length check, so the ceiling holds where the binary
+/// path's does — before the transfer, not after it. A plain `read` would
+/// materialise the whole note to discover it must be discarded, and a message
+/// may carry [`MAX_CHAT_ATTACHMENTS`] of them.
+///
+/// Best-effort on the same terms as [`extracted_attachment_text`]: a read that
+/// races a delete or hits a transient store error leaves the reference itself
+/// intact rather than failing the send. The size is then `0`, which is what the
+/// caller can honestly say about a body it could not measure.
+async fn note_within_extract_cap(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node_id: &str,
+) -> (String, u64) {
+    runtime
+        .workspace()
+        .read_capped(id, node_id, MAX_ATTACHMENT_EXTRACT_BYTES)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, body, len)| (body, len))
+        .unwrap_or_default()
+}
+
+/// A prose attachment's text for the brain, `None` when there is none to carry
+/// — an empty note, or one the store withheld for weighing more than the
+/// extraction cap.
+fn extracted_note_text(content: &str) -> Option<String> {
+    if content.is_empty() {
+        return None;
+    }
+    Some(crate::ledger::budget::truncate(
+        content,
+        MAX_ATTACHMENT_EXTRACT_CHARS,
+    ))
+}
 
 /// Reads and extracts one binary node's text where the format and size allow
 /// it, `None` otherwise (issue #1682, codex review finding).
@@ -2331,6 +2784,14 @@ async fn accept_chat_turn(
     // message that points at a file this company does not have.
     let attachments = resolve_attachments(runtime, id, &message.attachments).await?;
 
+    // Both halves of one resolution: who this message reached, and every
+    // `@name` that reached more than one thing and therefore reached nobody
+    // (B-101). The second half is reported below, after the message is
+    // journaled, so the notice can never precede the line it is about.
+    let resolved = runtime
+        .resolve_mentions_reporting(&message.text, message.mentions.clone(), by)
+        .await;
+
     let message_event = CompanyEvent::OperatorMessage {
         text: message.text.clone(),
         by: by.cloned(),
@@ -2350,14 +2811,19 @@ async fn accept_chat_turn(
         // routing decision that follows read the same list. The picker's answer
         // when it sent one, extraction from the text when it did not — and
         // either way re-validated against the live roster.
-        mentions: runtime
-            .resolve_mentions(&message.text, message.mentions.clone(), by)
-            .await,
+        mentions: resolved.mentions.clone(),
         // Issue #1682: the store-resolved references, so the durable record
         // carries the name/mime/size the store computed and never the client's
         // claim. Empty on a message with no attachment, which skips the field.
         attachments,
     };
+    // Asked again, immediately before the durable write. The check above sits
+    // two awaits back — attachment and mention resolution both yield — and a
+    // stop landing in that window would leave a message in the transcript that
+    // no turn will ever answer, on a company that has already reported itself
+    // stopped. The first check is still worth keeping: it refuses before the
+    // resolution work rather than after it.
+    runtime.ensure_accepting().map_err(ApiError)?;
     let message_seq = runtime
         .events()
         .append(id, message_event.clone())
@@ -2384,12 +2850,35 @@ async fn accept_chat_turn(
             .await;
     }
 
+    // The other half of the same resolution (B-101): every `@name` that reached
+    // two things and therefore reached nobody. Posted after the message's own
+    // append so the notice can never sort above the line it is about, and on
+    // the same not-fatal terms as the notifications above — a message whose
+    // advisory could not be written is still a delivered message.
+    runtime
+        .post_mention_ambiguity_note(desk, parent, &resolved.ambiguous)
+        .await;
+
     let turn_id = crate::ports::generate_id();
     let turn_id = match runtime
         .runs()
         .create_run(
             id,
-            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk),
+            // Which *thread* this turn is in, not just which channel. A
+            // channel holds many threads since #1890 and `chat_id` names only
+            // the channel, so without this the console cannot tell whose turn
+            // is running and suppresses the working indicator for the whole
+            // channel whenever any thread is open — hiding a turn the host is
+            // actively running.
+            //
+            // Only a threaded reply carries a root. A message sent from the
+            // channel composer is left unrooted deliberately: its turn is the
+            // channel's own, it is what the channel timeline shows, and the
+            // console has to arm its indicator optimistically at POST time —
+            // before the host has assigned this message a seq. Rooting it at
+            // its own seq would key the two legs differently and the reload
+            // leg would stop matching the arm.
+            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk).in_thread(parent),
         )
         .await
     {
@@ -2502,6 +2991,18 @@ async fn chat_and_emit(
         .chat
         .clone()
         .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+    // Issue #1757: the Operator channel is a **read-only** aggregation surface —
+    // a "what happened" feed of workflow reports, not a conversation. Refuse a
+    // send addressed to it rather than journaling an `OperatorMessage` under the
+    // `operator` line (which would both make it writable and mix chatter into the
+    // report feed). The frontend hides its send box; this is the safety net.
+    //
+    // The check (migration carve-outs, error text) lives on `CompanyRuntime`
+    // itself now — `ensure_desk_writable` — so the ACP `session/prompt` route
+    // (issue #1781 review, Codex P1), which journals straight to
+    // `runtime.events()` without ever calling this function, runs the exact
+    // same guard rather than a second hand-copied one that could drift.
+    runtime.ensure_desk_writable(&desk).await?;
     // Issue #364: a thread reply names its parent by id. Rejected here rather
     // than dropped, so a console sending a malformed parent learns that its
     // reply would have landed in the channel instead of quietly finding it
@@ -2510,6 +3011,104 @@ async fn chat_and_emit(
         Some(raw) => Some(parse_message_id(raw)?),
         None => None,
     };
+    // A reply to a settled `in_review` dispatch card's settle pill or relay
+    // bubble is review feedback, not a fresh turn. It is appended to the card
+    // and re-runs it through the dispatch choke point; the re-run journals its
+    // own relay on settle. Only a threaded message can be review feedback, so a
+    // top-level line never reaches here.
+    #[cfg(feature = "openhuman")]
+    if let Some(parent) = parent {
+        let _serialized = runtime.task_writes.lock().await;
+        if let Some(card) = runtime.review_feedback_target(&desk, parent).await? {
+            let accepted =
+                accept_chat_turn(&runtime, id, &message, by.as_ref(), Some(parent), &desk).await?;
+            let message_id = accepted.message_seq.value().to_string();
+            let turn_id = accepted.turn_id.clone();
+            let review = runtime
+                .apply_review_feedback(&card, &message.text, by.as_ref())
+                .await
+                .map_err(ApiError);
+            settle_chat_turn(&runtime, id, turn_id.as_deref(), review.as_ref().err()).await;
+            review?;
+            return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                responses: Vec::new(),
+                message_id: Some(message_id),
+                still_awaiting: None,
+                turn_id,
+                outcome: None,
+                review_feedback_applied: Some(true),
+                settled_ids: None,
+            })));
+        }
+    }
+    // Issue #1862: a reply that answers a parked blocker settles its verdict
+    // rather than running a fresh turn. A reply parented to a blocker card
+    // resolves that card's group; free text in a DM that holds a single blocked
+    // thing resolves it; free text where several are blocked asks which. Runs
+    // after the review check above — the two anchor on different event kinds, so
+    // neither steals the other's replies — and only reaches here when the reply
+    // is a verdict for a blocker actually pending in this conversation;
+    // otherwise it falls through to the ordinary turn.
+    #[cfg(feature = "openhuman")]
+    {
+        // The guard covers the read-and-classify only, and is released before
+        // anything is settled. `apply_blocker_reply` waits on a follow-up that
+        // runs on a spawned task and takes `task_writes` for the board edit its
+        // resume makes, so holding the lock across it would wait forever on a
+        // task that is waiting for this lock. Nothing between the two needs it:
+        // `accept_chat_turn` journals the message and touches no board.
+        let plan = {
+            let _serialized = runtime.task_writes.lock().await;
+            runtime
+                .plan_blocker_reply(&desk, parent, &message.text)
+                .await?
+        };
+        match plan {
+            crate::company::runtime::BlockerReplyPlan::Resolve { ids, intent } => {
+                let accepted =
+                    accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
+                let message_id = accepted.message_seq.value().to_string();
+                let turn_id = accepted.turn_id.clone();
+                let applied = runtime
+                    .apply_blocker_reply(&ids, intent, &message.text, by.as_ref())
+                    .await
+                    .map_err(ApiError);
+                settle_chat_turn(&runtime, id, turn_id.as_deref(), applied.as_ref().err()).await;
+                applied?;
+                return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                    responses: Vec::new(),
+                    message_id: Some(message_id),
+                    still_awaiting: None,
+                    turn_id,
+                    outcome: None,
+                    review_feedback_applied: Some(true),
+                    settled_ids: None,
+                })));
+            }
+            crate::company::runtime::BlockerReplyPlan::AskWhich { prompt } => {
+                let accepted =
+                    accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
+                let message_id = accepted.message_seq.value().to_string();
+                let turn_id = accepted.turn_id.clone();
+                let posted = runtime
+                    .post_blocker_prompt(&desk, &prompt)
+                    .await
+                    .map_err(ApiError);
+                settle_chat_turn(&runtime, id, turn_id.as_deref(), posted.as_ref().err()).await;
+                posted?;
+                return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                    responses: Vec::new(),
+                    message_id: Some(message_id),
+                    still_awaiting: None,
+                    turn_id,
+                    outcome: None,
+                    review_feedback_applied: Some(true),
+                    settled_ids: None,
+                })));
+            }
+            crate::company::runtime::BlockerReplyPlan::NotBlocker => {}
+        }
+    }
     // The turn runs on its own task, and the replies are journaled there too
     // (issue #882). Both used to sit in this handler's future, which hyper drops
     // the moment the peer goes away — and a reverse proxy in front of a hosted
@@ -2595,7 +3194,7 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let responses = report.responses.clone();
+    let responses = readable_responses(report.responses.clone());
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -2610,7 +3209,228 @@ async fn chat_and_emit(
         turn_id,
         // …and it resolves nothing, so there is no resolve outcome to report.
         outcome: None,
+        review_feedback_applied: None,
+        settled_ids: None,
     })))
+}
+
+/// The HTTP status written immediately after `marker` in `lower`, when one is.
+///
+/// `lower` must already be lowercased. Only a three-digit run counts, so a
+/// message that merely mentions the marker cannot produce a status.
+///
+/// Needed because our own errors read `inference returned 429 Too Many
+/// Requests: …`, and `structured_http_status` looks for a status at the start
+/// of the string, after a `(`, or behind an `http`/`status:` marker — none of
+/// which that shape offers. The status we already knew was therefore invisible
+/// to the classifier, leaving classification to whatever prose the provider
+/// happened to choose.
+fn status_after_marker(lower: &str, marker: &str) -> Option<u16> {
+    let rest = lower.split_once(marker)?.1.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() != 3 {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod turn_failure_notice_tests {
+    use super::{provider_failure_sentence, turn_failure_notice};
+
+    /// The failure that put a wall of provider JSON into company chat, verbatim
+    /// from the 1/9 round (issue #2016). None of it may reach the operator, and
+    /// what they read instead has to say whether waiting will help.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn a_rate_limit_reaches_the_operator_as_a_sentence_not_a_payload() {
+        let raw = concat!(
+            "turn for 'frontend_engineer': inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"Provider returned error","code":429,"metadata":"#,
+            r#"{"raw":"deepseek/deepseek-chat is temporarily rate-limited upstream. "#,
+            r#"Please retry shortly, or add your own key to accumulate your rate limits: "#,
+            r#"https://openrouter.ai/settings/integrations","provider_name":"DeepInfra"}}}"#,
+        );
+        let notice = turn_failure_notice(raw);
+
+        assert!(notice.contains("rate-limiting"), "{notice}");
+        for leaked in ["{", "openrouter.ai", "deepseek", "DeepInfra", "429"] {
+            assert!(
+                !notice.contains(leaked),
+                "the provider payload leaked {leaked:?} into chat: {notice}"
+            );
+        }
+    }
+
+    /// An empty inference is its own message: the harness has already retried it
+    /// by the time this is written, so leading with "try again" is wrong advice
+    /// and the cause is worth naming.
+    #[test]
+    fn an_empty_inference_says_so() {
+        let notice = turn_failure_notice(concat!(
+            "inference response carried neither choices[0].message.content nor tool_calls ",
+            "(finish_reason: failed; choices: 1; usage: in=0 out=0 total=0)"
+        ));
+
+        assert!(notice.contains("empty response"), "{notice}");
+        assert!(
+            !notice.contains("finish_reason"),
+            "diagnostics leaked into chat: {notice}"
+        );
+    }
+
+    /// Quota exhaustion is not wait-and-retry — somebody has to go and fix the
+    /// account — so it must not be worded like a transient blip.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn quota_exhaustion_points_at_the_account() {
+        let notice = turn_failure_notice(concat!(
+            "inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"insufficient balance"}}"#
+        ));
+
+        assert!(notice.contains("quota or credit"), "{notice}");
+        assert!(notice.contains("Settings"), "{notice}");
+    }
+
+    /// A status our own error format hides from `structured_http_status`. With
+    /// it invisible, a 402 fell through to the `Retryable` default and was
+    /// reported as "temporarily unavailable" — telling an operator to wait for
+    /// something that will never clear on its own.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn a_status_only_our_own_prefix_carries_is_still_classified() {
+        let notice = turn_failure_notice("inference returned 402 Payment Required: no credit");
+
+        assert!(notice.contains("rejected the request"), "{notice}");
+    }
+
+    /// The guard against over-claiming. `classify_provider_failure` falls back
+    /// to `Retryable` for text it recognizes nothing in, so a tool that ran out
+    /// of wall-clock would otherwise be reported as a provider outage.
+    #[test]
+    fn a_failure_that_is_not_the_providers_is_not_blamed_on_it() {
+        let raw = "the tool call exceeded its wall-clock budget";
+
+        assert!(
+            provider_failure_sentence(raw).is_none(),
+            "a non-provider failure must not be classified as one"
+        );
+        let notice = turn_failure_notice(raw);
+        assert!(notice.contains("something went wrong"), "{notice}");
+        assert!(!notice.contains("provider"), "{notice}");
+    }
+
+    /// Whatever the cause, the operator is told the turn left nothing behind —
+    /// the one fact they need in order to decide whether to re-send.
+    #[test]
+    fn every_notice_states_that_nothing_was_half_done() {
+        for raw in [
+            "inference returned 429 Too Many Requests: rate limited",
+            "inference response carried neither choices[0].message.content nor tool_calls",
+            "something else entirely",
+        ] {
+            assert!(
+                turn_failure_notice(raw).contains("Nothing was left half-done"),
+                "missing for: {raw}"
+            );
+        }
+    }
+}
+
+/// What an operator is told when a turn could not be finished.
+///
+/// The raw error is a diagnostic and never belongs in company chat. On the
+/// rate-limit path it was a wall of provider JSON with a settings URL in it,
+/// which is what a tester saw instead of an answer (issue #2016). It is logged
+/// in full at the call site; this renders the one sentence that tells the
+/// operator whether to wait, retry, or go and fix something.
+///
+/// Deliberately narrow about when it blames the provider. `classify_provider_
+/// failure` falls back to `Retryable` for text it recognizes nothing in, so
+/// classifying every failure would describe a tool that timed out as a provider
+/// outage. A cause is named only when the error is one the inference path
+/// actually emits; anything else keeps the generic wording.
+fn turn_failure_notice(detail: &str) -> String {
+    const CLOSING: &str = "Nothing was left half-done.";
+    let cause = provider_failure_sentence(detail).unwrap_or(
+        "This turn couldn't be finished — something went wrong or a step took too long.",
+    );
+    format!("{cause} {CLOSING} Send the message again to retry.")
+}
+
+/// The operator-facing sentence for a failure the inference path produced, or
+/// `None` when the failure did not come from there.
+///
+/// Deliberately narrow about when it blames the provider. The classifier falls
+/// back to `Retryable` for text it recognizes nothing in, so classifying every
+/// failure indiscriminately would report a tool that ran out of wall-clock as a
+/// provider outage. A cause is named only when the error is one the inference
+/// path actually emits, or carries a recognizable HTTP status.
+fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
+    let lower = detail.to_ascii_lowercase();
+
+    // An empty turn is its own case, and not one more retrying fixes: the
+    // harness has already retried it by the time this is written. Recognized
+    // from our own error text, so it holds in every build.
+    if lower.contains("carried neither") {
+        return Some(
+            "This turn couldn't be finished — the AI provider returned an empty response.",
+        );
+    }
+
+    let status = status_after_marker(&lower, "inference returned ");
+    let from_inference = lower.contains("inference returned")
+        || lower.contains("inference request failed")
+        || lower.contains("inference response")
+        || lower.contains("configured inference model");
+    if !from_inference && status.is_none() {
+        return None;
+    }
+
+    classified_provider_sentence(status, detail)
+}
+
+/// The sentence for a recognized provider failure, classified through the
+/// harness's own [`classify_provider_failure`].
+///
+/// Reused rather than re-implemented: the crate already knows which 429s are
+/// transient and which mean an account needs topping up, and a second
+/// classifier here would drift from the one that decides whether to retry.
+///
+/// [`classify_provider_failure`]: tinyagents_harness::retry::classify_provider_failure
+#[cfg(feature = "openhuman")]
+fn classified_provider_sentence(status: Option<u16>, detail: &str) -> Option<&'static str> {
+    use tinyagents_harness::retry::{
+        ProviderFailureClass, classify_provider_failure, structured_http_status,
+    };
+
+    let status = status.or_else(|| structured_http_status(detail));
+    Some(match classify_provider_failure(status, None, detail) {
+        ProviderFailureClass::RateLimited => {
+            "This turn couldn't be finished — the AI provider is rate-limiting requests."
+        }
+        ProviderFailureClass::NonRetryableRateLimit => {
+            "This turn couldn't be finished — the AI provider reports no quota or credit left. \
+             An admin needs to check the provider account under Settings."
+        }
+        ProviderFailureClass::NonRetryable => {
+            "This turn couldn't be finished — the AI provider rejected the request, usually a \
+             model or configuration mismatch. An admin can check Settings."
+        }
+        ProviderFailureClass::UpstreamUnhealthy | ProviderFailureClass::Retryable => {
+            "This turn couldn't be finished — the AI provider is temporarily unavailable."
+        }
+    })
+}
+
+/// The default build links no inference harness at all — it keeps the
+/// echo-brained offline behaviour — so it produces no provider failures to
+/// classify and has no classifier to reach for. The generic notice is the
+/// honest answer there.
+#[cfg(not(feature = "openhuman"))]
+fn classified_provider_sentence(_status: Option<u16>, _detail: &str) -> Option<&'static str> {
+    None
 }
 
 /// Everything a chat turn needs once it is off the request's future.
@@ -2670,21 +3490,40 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 // bubble. `err.0` is the inner error (it carries `Display`);
                 // the `ApiError` newtype does not.
                 let notice = CompanyEvent::AgentReply {
-                    parent,
+                    audience: Vec::new(),
+                    // Issue #1890 D: threaded on exactly the terms a successful
+                    // reply is. This notice IS the answer when there is no
+                    // other one, and `reply_thread`'s whole argument is that
+                    // `parent` must not be a function of what happened at run
+                    // time — deciding it by race timing was the case it names,
+                    // and deciding it by whether the model answered is the same
+                    // mistake. Left as the raw `parent`, one operator message
+                    // opened a thread when the turn worked and stayed flat when
+                    // it did not, so two identical sends produced two different
+                    // transcripts depending on the weather.
+                    //
+                    // Found by hand-testing the epic against a company whose
+                    // provider refused every turn — which is exactly the state
+                    // that makes this the ONLY reply an operator gets.
+                    parent: reply_thread(parent, accepted.message_seq),
                     chat_id: desk.clone(),
                     agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
-                    text: format!(
-                        "This turn couldn't be finished — something went wrong or \
-                         a step took too long ({}). Nothing was left half-done. \
-                         Send the message again to retry; if it keeps failing, \
-                         try breaking it into a smaller request.",
-                        err.0
-                    ),
+                    text: turn_failure_notice(&err.0.to_string()),
                     steps: Vec::new(),
                     task_id: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
                 };
+                // The raw provider text is a diagnostic, not an operator
+                // message: it is unbounded, provider-shaped, and on the rate-limit
+                // path it carried a wall of JSON and a settings URL into company
+                // chat. It stays here, in full (issue #2016).
+                tracing::warn!(
+                    company = %company,
+                    desk = %desk,
+                    detail = %err.0,
+                    "a chat turn could not be finished"
+                );
                 if let Err(journal_err) = runtime.events().append(&company, notice).await {
                     tracing::warn!(
                         company = %company,
@@ -2696,10 +3535,195 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 return Err(err);
             }
         };
-        journal_chat_replies(&runtime, &company, &desk, parent, &mut report).await;
+        let reply_parent = reply_thread(parent, accepted.message_seq);
+        journal_chat_replies(&runtime, &company, &desk, reply_parent, &mut report).await;
+        // SPIKE (tinyhivemind P15): a committed reply may refer work to another
+        // desk. AFTER journaling, never before — the referral is keyed on the
+        // reply's own sequence, so it has to exist first.
+        #[cfg(feature = "hivemind")]
+        refer_committed_replies(&runtime, &company, &desk, &report, None, 0).await;
         settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
         Ok((report, feedback_note))
     })
+}
+
+/// Offer each committed agent reply to the referral decision (tinyhivemind P15).
+///
+/// The decision is pure and the queue is the only thing that acts, so this is
+/// safe to run over every reply: a message that refers nobody costs one
+/// in-memory decision and calls the queue zero times.
+///
+/// Policy is deliberately hard-coded here for the spike. In production it is an
+/// operator setting — `ReferralPolicy::DEFAULT` has every knob off, and that is
+// the shipping default the library intends.
+#[cfg(feature = "hivemind")]
+pub(crate) async fn refer_committed_replies(
+    runtime: &Arc<CompanyRuntime>,
+    company: &CompanyId,
+    desk: &str,
+    report: &CycleReport,
+    // The referral these replies are ANSWERING, when they are answering one.
+    //
+    // This is the back edge, and it is the host's to carry: "when a host runs
+    // a child turn that carried a `ReferralOrigin`, it must pass that origin
+    // back in the next `ReferralInput`, or the answer has no way home. Nothing
+    // in the library remembers it."
+    origin: Option<tinyhivemind_core::referral::ReferralOrigin>,
+    // Depth of the reply being offered — NOT of the child it might spawn.
+    //
+    // A reply to an operator message is 0, so every operator message starts a
+    // fresh chain. Otherwise it is the depth of the turn that produced this
+    // reply, which is what makes the count accumulate: the policy compares it
+    // against `max_hops` and hands the child `hop + 1`, and that child's own
+    // replies come back here at that number. Passing a constant here — as this
+    // did — makes every generation claim the same depth, and a bound that never
+    // advances bounds nothing.
+    hop: u32,
+) {
+    use tinyhivemind::referral::dispatch_referral;
+
+    let Ok(Some(record)) = runtime.store().load(company).await else {
+        return;
+    };
+    let members = crate::runtime::hivemind::roster_members(&record);
+    let people: Vec<tinyhivemind_core::roster::Person> = Vec::new();
+    let retired: Vec<String> = Vec::new();
+    let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
+    let desks = crate::runtime::hivemind::desk_snapshots(&record);
+    let gate = runtime.referral_gate();
+
+    // **The desk's own `[[group_chat]].hive.referral` block, not a constant.**
+    //
+    // Referral is opt-in per desk and off by default: crossing costs a full
+    // model turn on somebody else's desk, and tinyhivemind's own benchmark
+    // measured it changing no answer and costing twice the turns on desks that
+    // are individually unbiased. A company that says nothing therefore behaves
+    // exactly as it did before this existed, which is the direction a mechanism
+    // that spends other people's turns should fail in.
+    //
+    // This replaces a hardcoded `enabled: true` with `max_hops` fixed in the
+    // source — a policy no operator could see, let alone change.
+    let config = crate::runtime::hivemind::referral_config(&record, desk);
+    let policy = config.policy();
+    if !policy.enabled {
+        return;
+    }
+
+    // ONE queue for the whole report, which is what makes `peer_cap` mean
+    // anything: the cap counts crossing questions across every reply this turn
+    // produced, and a queue rebuilt per reply would start each count at zero.
+    let queue = crate::runtime::hivemind::JournalReferralQueue::new(
+        runtime.clone(),
+        gate.clone(),
+        config.peer_cap(),
+        policy.max_hops,
+    );
+
+    for response in &report.responses {
+        let (Some(agent), Some(id)) = (response.agent.as_deref(), response.message_id.as_deref())
+        else {
+            continue;
+        };
+        let Ok(sequence) = id.parse::<u64>() else {
+            continue;
+        };
+        let mentions = tinyhivemind_core::mention::resolve(
+            &response.text,
+            None,
+            &tinyhivemind_core::mention::MentionAuthor::Agent {
+                id: agent.to_string(),
+            },
+            &roster,
+            &desks.set(),
+        );
+        let input = tinyhivemind_core::referral::ReferralInput {
+            key: tinyhivemind_core::dispatch::DispatchKey {
+                trigger_sequence: sequence,
+            },
+            conversation: tinyhivemind_core::dispatch::DispatchConversation {
+                desk_id: desk.to_string(),
+                thread_root: None,
+            },
+            author_id: agent.to_string(),
+            content: response.text.clone(),
+            mentions,
+            hop,
+            origin: origin.clone(),
+        };
+        match dispatch_referral(&queue, policy, &input, &roster, &desks.set()).await {
+            Ok(outcome) => tracing::info!(
+                company = %company,
+                desk = %desk,
+                author = %agent,
+                ?outcome,
+                "[referral] decided"
+            ),
+            Err(err) => tracing::warn!(error = %err, "[referral] decision failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod readable_responses_test {
+    use super::readable_responses;
+    use crate::ports::types::OutboundMessage;
+
+    fn reply(text: &str) -> OutboundMessage {
+        OutboundMessage {
+            channel: "engineering".to_string(),
+            agent: Some("software_engineer".to_string()),
+            text: text.to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+            task_id: None,
+            message_id: None,
+            mentions: Vec::new(),
+        }
+    }
+
+    /// **A row must read the same live as it does after a reload.**
+    ///
+    /// The history projection cleaned deliberation grammar; the POST did not.
+    /// So a turn arriving live showed `!support #lazy-load ^3 agreed` and the
+    /// same turn after a refresh showed `agreed` — one message, two renderings,
+    /// separated by a page reload.
+    #[test]
+    fn a_live_reply_reads_as_the_reloaded_one_will() {
+        let cleaned = readable_responses(vec![
+            reply("!support #lazy-load ^3 agreed, and it is reversible"),
+            reply("here is the summary you asked for"),
+        ]);
+
+        assert_eq!(
+            cleaned[0].text, "agreed, and it is reversible",
+            "the grammar is gone on the live path too"
+        );
+        assert_eq!(
+            cleaned[1].text, "here is the summary you asked for",
+            "and an ordinary reply is untouched"
+        );
+    }
+}
+
+/// The same rendering `chat_history` applies, for replies going out on the POST
+/// rather than being read back.
+///
+/// A deliberation turn is journaled with its grammar and cleaned when the
+/// history is projected — but a reply returned to the caller never passes
+/// through that projection, so the console showed `!support #lazy-load ^3` on
+/// a row that arrived live and plain prose on the same row after a reload.
+/// Two readers of one message, disagreeing, with a page refresh between them.
+///
+/// The stored row keeps its markers either way; the fold reads them off the
+/// journal, not off this.
+fn readable_responses(
+    mut responses: Vec<crate::ports::types::OutboundMessage>,
+) -> Vec<crate::ports::types::OutboundMessage> {
+    for response in &mut responses {
+        response.text =
+            crate::server::chat_history::readable_moves(std::mem::take(&mut response.text));
+    }
+    responses
 }
 
 /// Awaits a spawned chat turn, turning a task that never finished into an error.
@@ -2721,12 +3745,30 @@ async fn join_chat_turn(
 ///
 /// Runs inside the spawned turn (issue #882) so the record survives a client or
 /// proxy that gave up waiting.
+/// The thread an answer belongs in (issue #1890 D part 1).
 ///
-/// `pub(crate)` since issue #1846 review (Codex #3870168362): the budget-pause
-/// redeem route (`server::ops::budget_pause`) re-enters `run_cycle`/
-/// `run_journaled_cycle` directly rather than through `spawn_chat_turn`, so it
-/// has no other path to this — and used to skip it entirely, discarding the
-/// redeemed turn's `CycleReport` and leaving its answer never journaled.
+/// `asked_in` is the root the operator's message hung off, and `message_seq` is
+/// that message's own position.
+///
+/// * **Already in a thread** — the answer takes the same root. A follow-up
+///   typed inside a thread must not open a thread of its own, or N messages
+///   would mean N threads instead of N *topics*.
+/// * **Not in one** — the answer takes the message itself as its root, so the
+///   exchange becomes a thread rather than two flat lines. This is the change:
+///   before it, an answer to an unthreaded question was unparented, and the
+///   only threads that existed were ones an operator opened by hand.
+///
+/// Never `None`, and that is the point: **uniform**. The tempting version
+/// decides here — "thread it only if another question arrived while I was
+/// working" — which makes `parent` a function of race timing, and `parent` is
+/// permanent. Two operators doing the identical thing would get permanently
+/// different transcripts on microseconds, and the console renders a reply as it
+/// streams, before the backend could know. Whether the pair *reads* as a thread
+/// is re-decided on every render instead, by the console's `buildTimeline`.
+fn reply_thread(asked_in: Option<EventSeq>, message_seq: EventSeq) -> Option<EventSeq> {
+    Some(asked_in.unwrap_or(message_seq))
+}
+
 pub(crate) async fn journal_chat_replies(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -2743,6 +3785,19 @@ pub(crate) async fn journal_chat_replies(
     // made against a bubble the operator can still see names something every
     // other reader can resolve.
     for response in &mut report.responses {
+        // A response that already carries a durable id was journaled by its
+        // producer, not by this loop — a hive desk episode journals its own
+        // turns and closing report directly (`EpisodeDriver::report`) and
+        // hands the report's own sequence back on the bubble precisely so
+        // this generic journal-on-return path does not write it a second
+        // time under a different sequence. `OutboundMessage::message_id` is
+        // documented as "stamped by the chat route after journaling, not
+        // produced by a brain" for every other producer, which is exactly
+        // what makes its presence here a reliable "already durable" signal
+        // rather than something a brain sets for itself.
+        if response.message_id.is_some() {
+            continue;
+        }
         // Scanned host-side from the reply text — the console's picker never
         // touched this message. The author is passed so a teammate naming
         // itself in its own answer does not chip itself.
@@ -2765,6 +3820,7 @@ pub(crate) async fn journal_chat_replies(
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // Who this reply names. Rendered as chips and — unlike an
                     // operator message's — never consulted by dispatch, which
                     // is the mention-loop fuse.
@@ -2937,6 +3993,39 @@ struct ChatHistoryQuery {
 
 /// One desk-history message, as the console renders it. Mirrors `ChatMessage`
 /// in `frontend/src/lib/chat.ts`.
+/// Where a crossing referral came from, when another desk caused this message
+/// (tinyhivemind P15).
+///
+/// Mirrors `ReferredFromDto` in `frontend/src/api/types.ts`.
+///
+/// The labels are **captured with the row** rather than resolved when the
+/// transcript is read, for the reason [`SessionAuthor`] captures its own: a
+/// desk renamed later must not rewrite what the conversation said at the time.
+///
+/// [`SessionAuthor`]: tinyhivemind::session::SessionAuthor
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferredFromDto {
+    /// The desk that asked, by id — for the link, never for display.
+    desk_id: String,
+    /// The desk's display name as it stood when the referral was made.
+    desk_name: String,
+    /// The agent that asked, by id.
+    asker_id: String,
+    /// That agent's display label as it stood when the referral was made.
+    asker_label: String,
+    /// The asking message, so the chip links straight to it.
+    sequence: u64,
+    /// Which word the chip uses. `"asked"` on the outbound leg, `"answered"`
+    /// when the answer has come home.
+    ///
+    /// Sent as the word rather than a bool because the console renders it and
+    /// nothing else: a `returning: true` would have the render side translating
+    /// a host decision back into English, which is how it came to guess in the
+    /// first place.
+    direction: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatHistoryMessageDto {
@@ -2948,6 +4037,10 @@ struct ChatHistoryMessageDto {
     author: String,
     /// The message text.
     text: String,
+    /// Set only when another desk's referral caused this line. Absent on every
+    /// ordinary message, so the wire shape is unchanged for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referred_from: Option<ReferredFromDto>,
     /// When it was journaled, epoch millis.
     at_millis: f64,
     /// Whether it is the operator's own message.
@@ -3086,6 +4179,18 @@ impl From<ReactionView> for ChatReactionDto {
 impl From<MessageView> for ChatHistoryMessageDto {
     fn from(view: MessageView) -> Self {
         Self {
+            referred_from: view.referred_from.map(|origin| ReferredFromDto {
+                desk_id: origin.desk_id,
+                desk_name: origin.desk_name,
+                asker_id: origin.asker_id,
+                asker_label: origin.asker_label,
+                sequence: origin.sequence,
+                direction: if origin.returning {
+                    "answered"
+                } else {
+                    "asked"
+                },
+            }),
             id: view.id,
             channel: view.channel,
             author: view.author,
@@ -3145,21 +4250,50 @@ async fn resolve_desk(
     })
 }
 
-/// Resolves who is reading a desk's history, for the `mine` flag. Reuses
-/// [`chat_actor`]'s auth (session cookie or platform credential, tenant
-/// address-authorization, temporary-password gate) so a history read can
-/// never see more than a matching chat send could.
+/// Resolves who is reading a desk's history, for the `mine` flag, plus
+/// whether they may see an [`MessageView::admin_only`] row (issue #1781
+/// review, Codex P1). Reuses [`chat_actor`]'s auth (session cookie or platform
+/// credential, tenant address-authorization, temporary-password gate) for the
+/// `Viewer` itself, so a history read can never see more than a matching chat
+/// send could.
+///
+/// The admin check is a **second**, independent lookup
+/// ([`current_user`](crate::server::users::routes::current_user)) rather than
+/// widening [`Actor`] with a role: `Actor` is shared with the *send* path
+/// (`OperatorMessage::by`), where a role has no bearing on whether a
+/// signed-in human may post, so adding one there would be dead weight on every
+/// other caller. Safe to run after `chat_actor` already succeeded — this can
+/// only **narrow** what the viewer sees (gate an extra row), never widen
+/// their access, so it needs none of `chat_actor`'s own refusal gates
+/// (address authorization, temporary-password) repeated: those already ran
+/// for this exact request via `chat_actor`, and a `current_user` that somehow
+/// disagreed would only make `is_admin` `false`, the fail-safe direction.
 async fn history_viewer(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Viewer, crate::server::Rejection> {
+) -> Result<(Viewer, bool), crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
-    Ok(match actor {
+    let is_admin = match &actor {
+        // A signed-in human: only an active admin sees an admin-only row.
+        Some(actor) if actor.kind == ActorKind::User => {
+            crate::server::users::routes::current_user(headers, state, company, peer)
+                .await
+                .is_some_and(|principal| principal.role.may_administer())
+        }
+        // No person behind this credential — a platform/machine bearer, or
+        // (pre-attribution) nobody at all. `Viewer::Operator` already carries
+        // full, unrestricted access everywhere else this type is used; an
+        // admin-only row is not a narrower case than the rest of a company's
+        // history, which this same credential can already read in full.
+        _ => true,
+    };
+    let viewer = match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
         _ => Viewer::Operator,
-    })
+    };
+    Ok((viewer, is_admin))
 }
 
 /// Shared body for both scope forms of `GET .../chat/history`.
@@ -3171,14 +4305,22 @@ async fn chat_history_response(
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
-    let viewer = history_viewer(headers, state, company, peer).await?;
+    let (viewer, is_admin) = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
         .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
         .min(CHAT_HISTORY_PAGE_LIMIT);
-    let messages =
-        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit).await?;
+    let messages = history_for_desk(
+        &runtime,
+        &desk_id,
+        &desk_name,
+        &viewer,
+        query.before,
+        limit,
+        is_admin,
+    )
+    .await?;
     Ok(Json(
         messages
             .into_iter()
@@ -3245,13 +4387,13 @@ async fn attribution_audit_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
-    let _viewer = history_viewer(headers, state, company, peer).await?;
+    let (_viewer, is_admin) = history_viewer(headers, state, company, peer).await?;
     let record = runtime
         .store()
         .load(runtime.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
-    let audit = channel_attributed_replies(&runtime, &record).await?;
+    let audit = channel_attributed_replies(&runtime, &record, is_admin).await?;
     Ok(Json(AttributionAuditDto {
         replies: audit.replies,
         affected: audit.affected,
@@ -3349,21 +4491,52 @@ async fn react_to_message(
     // has never existed — none of which any reader could render, and all of
     // which would sit in the log forever claiming otherwise.
     let target = runtime.events().read_from(company, message_seq, 1).await?;
-    let is_message = target
-        .first()
-        .filter(|stored| stored.seq == message_seq)
-        .is_some_and(|stored| {
-            matches!(
-                stored.event,
-                CompanyEvent::OperatorMessage { .. } | CompanyEvent::AgentReply { .. }
-            )
-        });
+    let matched = target.first().filter(|stored| stored.seq == message_seq);
+    let is_message = matched.is_some_and(|stored| {
+        matches!(
+            stored.event,
+            CompanyEvent::OperatorMessage { .. } | CompanyEvent::AgentReply { .. }
+        )
+    });
     if !is_message {
         return Err(
             ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
                 .into_response()
                 .into(),
         );
+    }
+    // An owner-fallback report is admin-only exactly as it is on reload
+    // (`history_for_desk`) and over the live SSE feed (`project_event_for_viewer`,
+    // issue #1781 review, Codex P1) — a Member must not be able to react to a
+    // message they cannot read. Refused with the same 404 the missing-target
+    // branch above answers, not a 403: distinguishing "hidden" from "does not
+    // exist" would let a Member enumerate which sequence numbers hold an
+    // admin-only report by probing this endpoint, which is exactly the gap the
+    // sequence-id-based `seq` param opens (PR #1781 review).
+    let admin_only = matches!(
+        matched.map(|stored| &stored.event),
+        Some(CompanyEvent::AgentReply { agent_id, .. })
+            if agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+    );
+    if admin_only {
+        let is_admin = match &by {
+            Some(actor) if actor.kind == ActorKind::User => {
+                crate::server::users::routes::current_user(headers, state, company, peer)
+                    .await
+                    .is_some_and(|principal| principal.role.may_administer())
+            }
+            // No person behind this credential — a platform/machine bearer —
+            // already carries full, unrestricted access everywhere else this
+            // distinction is drawn (`history_viewer`, `ScopedCompany::is_admin`).
+            _ => true,
+        };
+        if !is_admin {
+            return Err(
+                ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
+                    .into_response()
+                    .into(),
+            );
+        }
     }
     runtime
         .events()
@@ -3405,6 +4578,81 @@ async fn react_to_message_single(
     let runtime = sole(&state)?;
     let id = runtime.id().clone();
     react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
+}
+
+/// The operator's thread-scoped review verdict on a settled `in_review`
+/// dispatch card. Mirrors `ChatReviewRequest` in `frontend/src/api/types.ts`.
+///
+/// This is **not** the native-tool approval gate (`resolveApproval`): that
+/// settles a parked tool call, while this settles the board card the origin
+/// thread is reviewing.
+#[cfg(feature = "openhuman")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReviewRequest {
+    /// The origin conversation — the desk/channel id — whose in-review
+    /// dispatch card this verdict settles.
+    chat_id: String,
+    /// The clicked pill's card id. A desk can have more than one card
+    /// `in_review` at once, so the verdict is bound to this specific card
+    /// rather than resolved by picking the desk's most-recently-updated one.
+    task_id: String,
+    /// `approve` finishes the card; `revise` re-runs it with `note`, on the
+    /// same path a chat reply of feedback takes.
+    decision: String,
+    /// The reviewer's note: recorded on the card, and the instruction the
+    /// re-run reads back on a `revise`.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// The card a review verdict left behind, so the console can reconcile its
+/// optimistic move. Mirrors `ChatReviewReceipt` in `frontend/src/api/types.ts`.
+#[cfg(feature = "openhuman")]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReviewReceipt {
+    /// The reviewed card's id.
+    task_id: String,
+    /// The column it landed in: `done` on approve, `in_progress` on revise —
+    /// or `in_review`, unchanged, on a revise with a blank note.
+    column: String,
+}
+
+/// `POST {scope}/chat/review` — settle the thread's in-review dispatch card
+/// per the operator's verdict.
+#[cfg(feature = "openhuman")]
+async fn review_card(
+    scope: ScopedCompany,
+    Json(body): Json<ChatReviewRequest>,
+) -> Result<Json<ChatReviewReceipt>, crate::server::Rejection> {
+    let decision = crate::harness::built_in::lifecycle::ReviewDecision::parse(&body.decision)
+        .ok_or_else(|| {
+            ApiError(crate::error::OpenCompanyError::InvalidRequest(format!(
+                "unknown review decision '{}'",
+                body.decision
+            )))
+        })?;
+    let _serialized = scope.runtime.task_writes.lock().await;
+    let card = scope
+        .runtime
+        .review_card_in_review(&body.task_id, &body.chat_id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| {
+            ApiError(crate::error::OpenCompanyError::NotFound(
+                "no card is awaiting review in this conversation".to_string(),
+            ))
+        })?;
+    let updated = scope
+        .runtime
+        .apply_review_decision(&card, decision, body.note.as_deref(), scope.actor.as_ref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(ChatReviewReceipt {
+        task_id: updated.id,
+        column: updated.column,
+    }))
 }
 
 /// `GET /api/v1/companies/{id}/approvals`.
@@ -3493,6 +4741,28 @@ struct ResolveApproval {
     /// live when it lapsed days earlier.
     #[serde(default)]
     expires_in_millis: Option<u64>,
+    /// Which of the four things the operator asked a parked **blocker** to do:
+    /// `retry`, `amend`, `skip` or `cancel`.
+    ///
+    /// It **narrows** the mandatory two-value `verdict` rather than replacing
+    /// it, the same shape [`amended_payload`](Self::amended_payload) uses: the
+    /// approve/deny it must be paired with is the one
+    /// [`BlockerVerdict::event_verdict`](crate::ports::blockers::BlockerVerdict::event_verdict)
+    /// lowers it onto, and a pair that disagrees is a 400. Absent leaves the
+    /// resolve exactly as it was.
+    ///
+    /// A `String` rather than the enum so an unrecognised token is an explicit
+    /// 400 naming the four it could have been, instead of a serde failure.
+    #[serde(default)]
+    blocker_verdict: Option<String>,
+    /// The words an `amend` re-enters the stopped step carrying.
+    ///
+    /// Mandatory and non-blank with `blocker_verdict: "amend"`, refused with
+    /// any other verdict. A blank amend is a 400 rather than a downgrade to a
+    /// retry: the step stopped for want of these words, so re-running it
+    /// without them repeats the failure the operator thought they had answered.
+    #[serde(default)]
+    blocker_answer: Option<String>,
 }
 
 /// The wire form of [`GrantScope`].
@@ -3565,6 +4835,93 @@ fn grant_scope(body: &ResolveApproval) -> Result<GrantScope, ApiError> {
                 expires_at_millis: crate::ports::now_millis().saturating_add(duration),
             })
         }
+    }
+}
+
+/// Validates the four-way blocker verdict a resolve carries, if any.
+///
+/// Every refusal here happens **before** the runtime is touched, so a bad
+/// request leaves the blocker parked and journals no verdict. What is refused:
+///
+/// * an unrecognised token — named, rather than a serde failure;
+/// * a `verdict`/`blocker_verdict` pair that disagree, judged by
+///   [`BlockerVerdict::event_verdict`];
+/// * `amend` with a blank or absent answer, and an answer sent with any other
+///   verdict;
+/// * `blocker_answer` with no `blocker_verdict` at all;
+/// * pairing with `amended_payload` — one edits a gated call's arguments, the
+///   other answers a question, and no approval is both;
+/// * pairing with `scope: "tool"` — a blocker is a question, and answering one
+///   grants no standing permission.
+///
+/// A build without the `openhuman` feature has no blocker resume to reach, so
+/// it refuses the field outright rather than accepting and ignoring it.
+fn blocker_verdict(body: &ResolveApproval) -> Result<Option<BlockerVerdict>, ApiError> {
+    let bad = |msg: String| ApiError(OpenCompanyError::InvalidRequest(msg));
+    let answer = body.blocker_answer.as_deref();
+    let Some(word) = body.blocker_verdict.as_deref() else {
+        if answer.is_some() {
+            return Err(bad(
+                "blocker_answer needs a blocker_verdict: words with no verdict do not say what \
+                 the stopped step should do"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    #[cfg(not(feature = "openhuman"))]
+    return Err(bad(format!(
+        "blocker_verdict {word:?} is not supported by this build: it has no blocker resume to \
+         answer"
+    )));
+    #[cfg(feature = "openhuman")]
+    {
+        let Some(verdict) = BlockerVerdict::from_wire(word) else {
+            return Err(bad(format!(
+                "unknown blocker_verdict {word:?}; expected \"retry\", \"amend\", \"skip\" or \
+                 \"cancel\""
+            )));
+        };
+        let owed = verdict.event_verdict();
+        if owed != body.verdict {
+            return Err(bad(format!(
+                "blocker_verdict {:?} is a {:?}, so it cannot accompany verdict {:?}",
+                verdict.as_str(),
+                owed,
+                body.verdict
+            )));
+        }
+        if verdict == BlockerVerdict::Amend {
+            if !answer.is_some_and(|words| !words.trim().is_empty()) {
+                return Err(bad(
+                    "blocker_verdict \"amend\" needs a non-empty blocker_answer: the step \
+                     stopped for want of an answer, so re-entering it without one repeats the \
+                     failure"
+                        .to_string(),
+                ));
+            }
+        } else if answer.is_some() {
+            return Err(bad(format!(
+                "blocker_answer only accompanies blocker_verdict \"amend\"; {:?} carries no \
+                 words back into the step",
+                verdict.as_str()
+            )));
+        }
+        if body.amended_payload.is_some() {
+            return Err(bad(
+                "blocker_verdict cannot accompany amended_payload: one answers a question, the \
+                 other edits a gated call's arguments"
+                    .to_string(),
+            ));
+        }
+        if body.scope == Some(ResolveScope::Tool) {
+            return Err(bad(
+                "blocker_verdict cannot accompany scope \"tool\": answering a blocker grants no \
+                 standing permission"
+                    .to_string(),
+            ));
+        }
+        Ok(Some(verdict))
     }
 }
 
@@ -3643,17 +5000,29 @@ async fn list_grants(scope: ScopedCompany) -> Json<Vec<StandingGrantDto>> {
 /// Takes effect on the **next** policy check; a call already admitted is not
 /// aborted. 404 when there is nothing to revoke — already revoked, or expired —
 /// rather than reporting success over a no-op.
+///
+/// Admin, matching `DELETE {scope}/tools/grants` on the neighbouring plane
+/// (issue #2169). Both objects are a permission an operator granted, and a
+/// grant one person made should not be undone by anyone who happens to be in
+/// the company: a standing permission is often the thing keeping an unattended
+/// desk working, so revoking it is a change to how the company runs rather than
+/// a tidy-up. Revoking fails in the safe direction, which is why this was easy
+/// to leave at member level and worth correcting anyway.
+///
+/// `GET {scope}/grants` stays readable by any member, deliberately, for the
+/// same consistency: `GET {scope}/tools/grants` is member-readable and
+/// discloses the same shape of fact.
 async fn revoke_grant(
-    scope: ScopedCompany,
+    scope: AdminScopedCompany,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<StatusCode, ApiError> {
     let gid = params
         .get("gid")
         .cloned()
         .ok_or_else(|| ApiError(OpenCompanyError::InvalidRequest("missing grant id".into())))?;
-    // The machine credential has no person behind it, the same distinction every
-    // other operator write draws.
-    let by = scope.actor.clone().unwrap_or_else(platform_actor);
+    // Always identified — `AdminScopedCompany::actor` covers the machine
+    // principal as well, so this write is never anonymous.
+    let by = scope.actor();
     let revoked = scope
         .runtime
         .revoke_standing_grant(&GrantId::new(gid.clone()), by)
@@ -3713,6 +5082,67 @@ struct ResolveReceiptDto {
     /// exclusive: two booleans can spell combinations that cannot happen, and
     /// every reader would have to know which ones are real.
     outcome: &'static str,
+    /// Every approval this one resolve settled, when it settled more than the
+    /// one addressed.
+    ///
+    /// A blocker answered here fans its verdict to its whole root-cause group,
+    /// exactly as answering it in a DM does, so the console has to drop the
+    /// siblings too rather than leave cards for questions the host has already
+    /// retired. Skipped when empty, which is every non-blocker resolve.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    settled_ids: Vec<String>,
+}
+
+/// Answers a parked blocker with the operator's four-way verdict, fanning it to
+/// the blocker's whole root-cause group and naming what it settled.
+///
+/// Reaches the same bank-arm-settle primitive a DM answer reaches, so a blocker
+/// answered on two surfaces cannot settle differently. A `blocker_verdict` on an
+/// approval that is not a parked blocker is a 400 here, not a resolve: it would
+/// otherwise silently fall back to the two-value path and lose the operator's
+/// verdict.
+#[cfg(feature = "openhuman")]
+async fn resolve_blocker(
+    runtime: &Arc<CompanyRuntime>,
+    id: &ApprovalId,
+    verdict: BlockerVerdict,
+    answer: &str,
+    actor: Actor,
+    settled_ids: &mut Vec<String>,
+) -> Result<(ResolveReceipt, JoinHandle<crate::Result<CycleReport>>), ApiError> {
+    let Some(group) = runtime.parked_blocker_group(id) else {
+        // Already settled — by another tab, a double-click, or this very
+        // request racing a sibling's group fan-out. Ordinary approvals return
+        // 200 in this race (issue #243); a blocker must too, or a decision
+        // that landed successfully reports as a failure.
+        if let Some(answer) = runtime.already_resolved_blocker_receipt(id) {
+            *settled_ids = Vec::new();
+            return Ok(answer);
+        }
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "approval {id} is not a parked blocker, so it has no blocker_verdict to answer"
+        ))));
+    };
+    *settled_ids = group.iter().map(ToString::to_string).collect();
+    Ok(runtime
+        .apply_blocker_reply_spawned(&group, id, verdict, answer, Some(&actor))
+        .await?)
+}
+
+/// The refusal a build with no blocker resume owes: `blocker_verdict` has
+/// already been rejected by [`blocker_verdict`], so nothing reaches here.
+#[cfg(not(feature = "openhuman"))]
+async fn resolve_blocker(
+    _runtime: &Arc<CompanyRuntime>,
+    _id: &ApprovalId,
+    _verdict: BlockerVerdict,
+    _answer: &str,
+    _actor: Actor,
+    _settled_ids: &mut Vec<String>,
+) -> Result<(ResolveReceipt, JoinHandle<crate::Result<CycleReport>>), ApiError> {
+    Err(ApiError(OpenCompanyError::InvalidRequest(
+        "blocker_verdict is not supported by this build".to_string(),
+    )))
 }
 
 async fn run_resolve(
@@ -3725,28 +5155,46 @@ async fn run_resolve(
 ) -> Result<Response, ApiError> {
     runtime.ensure_running().await?;
     // Issue #374: validated before the runtime is touched, so a refused scope
-    // leaves the approval parked with no verdict journaled.
+    // leaves the approval parked with no verdict journaled. The blocker verdict
+    // is validated on the same terms and for the same reason.
+    let blocker = blocker_verdict(&body)?;
     let scope = grant_scope(&body)?;
     let id = ApprovalId::new(approval_id);
+    // Every approval this resolve settled, when it settled more than the one
+    // addressed — a blocker fans to its root-cause group.
+    let mut settled_ids: Vec<String> = Vec::new();
     // The verdict is settled inline; only the follow-up cycle is on the handle.
     // So by the time this returns — in either mode — the decision is journaled
     // and any grant is minted.
-    let (receipt, follow_up) = match (body.verdict, body.amended_payload) {
-        (Verdict::Approve, Some(payload)) => {
-            runtime
-                .resolve_approval_amended_spawned(&id, payload, actor)
-                .await?
+    let (receipt, follow_up) = match blocker {
+        Some(verdict) => {
+            resolve_blocker(
+                &runtime,
+                &id,
+                verdict,
+                body.blocker_answer.as_deref().unwrap_or_default(),
+                actor,
+                &mut settled_ids,
+            )
+            .await?
         }
-        (Verdict::Deny, Some(_)) => {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(
-                "amended_payload cannot accompany a deny verdict".to_string(),
-            )));
-        }
-        (verdict, None) => {
-            runtime
-                .resolve_approval_spawned(&id, verdict, actor, scope)
-                .await?
-        }
+        None => match (body.verdict, body.amended_payload) {
+            (Verdict::Approve, Some(payload)) => {
+                runtime
+                    .resolve_approval_amended_spawned(&id, payload, actor)
+                    .await?
+            }
+            (Verdict::Deny, Some(_)) => {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(
+                    "amended_payload cannot accompany a deny verdict".to_string(),
+                )));
+            }
+            (verdict, None) => {
+                runtime
+                    .resolve_approval_spawned(&id, verdict, actor, scope)
+                    .await?
+            }
+        },
     };
 
     // Read once, here: the verdict is durable and the follow-up cycle — which is
@@ -3780,6 +5228,7 @@ async fn run_resolve(
             already_resolved: receipt.already_resolved(),
             still_awaiting,
             outcome,
+            settled_ids,
         })
         .into_response());
     }
@@ -3788,9 +5237,11 @@ async fn run_resolve(
     emit_cycle_webhooks(state, company, &report).await;
     Ok(Json(ChatResponse {
         message_id: None,
-        responses: report.responses,
+        responses: readable_responses(report.responses),
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
+        review_feedback_applied: None,
+        settled_ids: (!settled_ids.is_empty()).then_some(settled_ids),
         // A resolve runs a follow-up cycle, not an operator turn, so it opens no
         // turn row of its own.
         turn_id: None,
@@ -3798,20 +5249,28 @@ async fn run_resolve(
     .into_response())
 }
 
-/// `POST /api/v1/companies/{id}/approvals/{aid}`.
+/// The approval a resolve or an extend addresses, under either scope form.
+///
+/// Named rather than positional because the two forms carry different path
+/// tuples — `{id}` plus `{aid}`, or `{aid}` alone — and a named capture
+/// deserializes identically from both. The company is not read here:
+/// [`AdminScopedCompany`] has already resolved and authorized it.
+#[derive(Debug, Deserialize)]
+struct ApprovalPath {
+    aid: String,
+}
+
+/// `POST {scope}/approvals/{aid}` — decide a parked approval.
 async fn resolve_approval(
+    admin: AdminScopedCompany,
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-    Path((id, aid)): Path<(String, String)>,
+    Path(ApprovalPath { aid }): Path<ApprovalPath>,
     Json(body): Json<ResolveApproval>,
 ) -> Result<Response, crate::server::Rejection> {
-    let company = CompanyId::new(&id);
-    if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp.into());
-    }
-    let runtime = lookup(&state, &id)?;
+    let company = admin.id().clone();
     let actor = resolving_actor(auth);
-    run_resolve(&state, &company, runtime, aid, body, actor)
+    run_resolve(&state, &company, admin.runtime, aid, body, actor)
         .await
         .map_err(|error| IntoResponse::into_response(error).into())
 }
@@ -3833,27 +5292,6 @@ fn resolving_actor(auth: GqlAuth) -> Actor {
         },
         GqlAuth::Platform(_) => platform_actor(),
     }
-}
-
-/// `POST /api/v1/company/approvals/{aid}` (single-company alias).
-async fn resolve_approval_single(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path(aid): Path<String>,
-    Json(body): Json<ResolveApproval>,
-) -> Result<Response, crate::server::Rejection> {
-    let runtime = sole(&state)?;
-    let id = runtime.id().clone();
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp.into());
-    }
-    if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp.into());
-    }
-    let actor = resolving_actor(auth);
-    run_resolve(&state, &id, runtime, aid, body, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// The answer to an extend: the approval's new deadline, so the console can
@@ -3887,39 +5325,15 @@ async fn run_extend(
     .into_response())
 }
 
-/// `POST /api/v1/companies/{id}/approvals/{aid}/extend` (issue #1805).
+/// `POST {scope}/approvals/{aid}/extend` — push the default-deny deadline out
+/// (issue #1805).
 async fn extend_approval(
+    admin: AdminScopedCompany,
     CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path((id, aid)): Path<(String, String)>,
+    Path(ApprovalPath { aid }): Path<ApprovalPath>,
 ) -> Result<Response, crate::server::Rejection> {
-    let company = CompanyId::new(&id);
-    if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp.into());
-    }
-    let runtime = lookup(&state, &id)?;
     let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
-}
-
-/// `POST /api/v1/company/approvals/{aid}/extend` (single-company alias).
-async fn extend_approval_single(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path(aid): Path<String>,
-) -> Result<Response, crate::server::Rejection> {
-    let runtime = sole(&state)?;
-    let id = runtime.id().clone();
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp.into());
-    }
-    if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp.into());
-    }
-    let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
+    run_extend(admin.runtime, aid, actor)
         .await
         .map_err(|error| IntoResponse::into_response(error).into())
 }
@@ -3932,6 +5346,8 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::tasks::TaskTitle;
+    use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
     use crate::store::FsCompanyStore;
@@ -4003,6 +5419,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4104,6 +5521,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4332,6 +5750,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4441,6 +5860,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4482,6 +5902,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4498,13 +5919,26 @@ mode = "full"
 
     /// One chat request, optionally addressed to a thread.
     fn chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
+        chat_in_thread(text, chat, None)
+    }
+
+    /// The same send, typed inside a thread — `parent` is the root the console
+    /// sends when the operator answers in an open thread (#1890 B).
+    fn chat_in_thread(text: &str, chat: Option<&str>, parent: Option<u64>) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri("/api/v1/company/chat")
             .header("cookie", crate::server::test_support::fixed_cookie("acme"))
             .header("content-type", "application/json")
             .body(Body::from(
-                serde_json::json!({ "text": text, "chat": chat }).to_string(),
+                serde_json::json!({
+                    "text": text,
+                    "chat": chat,
+                    // A string, like every other message id on this API — the
+                    // field's own note says so, and a number is a 422.
+                    "parent": parent.map(|seq| seq.to_string()),
+                })
+                .to_string(),
             ))
             .unwrap()
     }
@@ -4664,7 +6098,7 @@ mode = "full"
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(
-            tasks[0].origin_chat_id.as_deref(),
+            tasks[0].origin_chat_id(),
             Some("dm:designer"),
             "the thread as the console addressed it"
         );
@@ -4679,9 +6113,97 @@ mode = "full"
             .iter()
             .find(|c| c.title == "Draft the investor update")
             .expect("the second card");
+        // No desk, therefore no conversation and no thread inside one. Before
+        // #1890 step 5 this card carried a thread root beside no desk — the
+        // drifted pair — and the root was inert: `relay_reply` posts back
+        // through the desk, so a root with nothing to post into named nothing.
+        // `TaskOrigin` cannot hold that state, so it is simply absent now.
+        //
+        // Restoring a real origin here means stamping the General desk the
+        // route already folds this message into, which is a behaviour change
+        // and not this one.
         assert_eq!(
-            unaddressed.origin_chat_id, None,
-            "an unaddressed message has no thread to answer in"
+            unaddressed.origin_chat_id(),
+            None,
+            "an unaddressed message has no conversation to answer in"
+        );
+        assert_eq!(
+            unaddressed.origin_parent(),
+            None,
+            "and therefore no thread inside one either"
+        );
+
+        // The addressed card, found by title rather than by index: the two are
+        // listed together from here on, and this assertion is about the one
+        // that has a desk.
+        let addressed = tasks
+            .iter()
+            .find(|c| c.origin_chat_id() == Some("dm:designer"))
+            .expect("the addressed card");
+        // Reversed once #1890 D landed alongside B, and the reversal is the
+        // point. B alone read the message's own `parent`, so a card raised from
+        // a channel-level question recorded no thread — right while a thread
+        // was only ever something an operator opened by hand.
+        //
+        // D changed what a thread is: an answer parents to the message that
+        // opened the exchange, so that question is a root. A card raised from
+        // it belongs to the thread it just started, and recording `None` here
+        // would put the settle marker in the channel while the answer to the
+        // same message sat in a thread — the split B exists to prevent.
+        assert!(
+            addressed.origin_parent().is_some(),
+            "a channel-level question is itself the thread its card was raised in",
+        );
+    }
+
+    /// Issue #1890 D part 1: every answer threads under the message that
+    /// opened the exchange.
+    ///
+    /// The two arms are the whole rule, and the second is the change: before
+    /// it, an answer to an unthreaded question was journaled unparented, so the
+    /// only threads that existed were ones an operator opened by hand.
+    #[test]
+    fn an_answer_threads_under_the_message_that_opened_the_exchange() {
+        let message = EventSeq::new(41);
+        // Not in a thread: the exchange becomes one, rooted at the question.
+        assert_eq!(reply_thread(None, message), Some(message));
+        // Already in one: the same root, so a follow-up does not open a thread
+        // of its own — N messages in a thread is one topic, not N.
+        let root = EventSeq::new(7);
+        assert_eq!(reply_thread(Some(root), message), Some(root));
+        // Never `None`: uniform is what keeps `parent` out of the hands of race
+        // timing, since `parent` is permanent and presentation is not.
+        assert!(reply_thread(None, message).is_some());
+        assert!(reply_thread(Some(root), message).is_some());
+    }
+
+    /// Issue #1890 B: the card remembers **which thread** inside that channel.
+    ///
+    /// The channel alone was never enough — a channel holds any number of live
+    /// threads, and a settle filed against the channel surfaces in none of
+    /// them. A message's own `parent` IS its root (a reply is parented to its
+    /// question's parent, never to the question), so the route reads it
+    /// straight off the send with no walk.
+    #[tokio::test]
+    async fn a_chat_card_remembers_the_thread_inside_the_channel() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_in_thread(CROSSED, Some("dm:designer"), Some(41)))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks[0].origin_chat_id(), Some("dm:designer"));
+        assert_eq!(
+            tasks[0].origin_parent(),
+            Some(crate::ports::types::EventSeq::new(41)),
+            "the root the operator was answering in",
         );
     }
 
@@ -4784,6 +6306,128 @@ mode = "full"
             tasks[0].title,
             crate::company::task_intent::to_title(text),
             "a bypassed card must be titled byte-for-byte as a tracked one"
+        );
+    }
+
+    /// A task store that lists cleanly but refuses every write — the board
+    /// persistence layer mid-outage, for CHAT-021.
+    struct FailingTaskUpsert;
+
+    #[async_trait::async_trait]
+    impl crate::ports::tasks::TaskStore for FailingTaskUpsert {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+        ) -> crate::Result<Vec<crate::ports::tasks::TaskRecord>> {
+            Ok(Vec::new())
+        }
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _task: &crate::ports::tasks::TaskRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "task store offline".to_string(),
+            ))
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// CHAT-021: a card-open failure must not vanish into a server log while
+    /// the operator sees an ordinary success. The chat turn itself still
+    /// returns 200 — it did nothing wrong — but a durable system note in the
+    /// same desk must say the card did not open, exactly as a turn that
+    /// aborts mid-answer already leaves a visible notice rather than silence.
+    #[tokio::test]
+    async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(home.clone());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home, manifest())
+            .with_id(id.clone())
+            .with_tasks(Arc::new(FailingTaskUpsert))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id.clone(), Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        // `deliverable: "workflow"` opens a card deterministically, whatever
+        // the lexical triage would have made of the words (see the test
+        // above) — the fixture does not need to be a message the classifier
+        // happens to card.
+        let body = format!(
+            r#"{{"text":{},"deliverable":"workflow"}}"#,
+            serde_json::json!("automate the weekly report")
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the chat turn itself did nothing wrong and must still succeed"
+        );
+
+        let events = runtime
+            .events()
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let notice = events.into_iter().find_map(|stored| match stored.event {
+            CompanyEvent::AgentReply { agent_id, text, .. }
+                if agent_id == crate::ports::SYSTEM_AUTHOR =>
+            {
+                Some(text)
+            }
+            _ => None,
+        });
+        assert!(
+            notice.is_some_and(|text| text.to_lowercase().contains("card")),
+            "a card-open failure must leave a visible system note in the channel, not just a \
+             server-side log line"
         );
     }
 
@@ -5016,6 +6660,7 @@ mode = "full"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -5023,6 +6668,8 @@ mode = "full"
             .unwrap();
 
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -5163,6 +6810,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -5225,6 +6873,220 @@ mode = "full"
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
         assert_eq!(desks[0]["overlayMembers"][0], "eng");
+    }
+
+    /// Issue #1781 review (Codex P2): an overlay desk whose own id is a
+    /// General spelling (`general` or `main`) must not appear in `GET
+    /// .../desks` — `POST .../desks` has refused those ids since issue #1743,
+    /// so the only way one exists is a company upgraded from before that
+    /// guard, and `CompanyRecord::resolve_desk_id` already excludes exactly
+    /// this desk from routing. Listing it anyway would let `buildChannels`
+    /// (frontend) treat it as the company-wide line and suppress the real
+    /// built-in `#general` — showing edit/delete controls and a membership
+    /// list that has nothing to do with where a message actually lands.
+    ///
+    /// Seeded directly on the stored record, not through `POST .../desks`:
+    /// that route's own guard means this shape can only be reached by data
+    /// that predates it, exactly the grandfathered case this proves.
+    #[tokio::test]
+    async fn list_desks_hides_an_overlay_desk_shadowing_general() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record.overlay_desks.push(OverlayDesk {
+            id: "general".to_string(),
+            name: "General".to_string(),
+            description: None,
+            members: vec!["ceo".to_string()],
+            responder: ResponderMode::Lead,
+            hive: Default::default(),
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".to_string(),
+            name: "Front office".to_string(),
+            description: None,
+            members: vec!["eng".to_string()],
+            responder: ResponderMode::Lead,
+            hive: Default::default(),
+        });
+        runtime.store().save(&record).await.unwrap();
+
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let desks = get_desks(&app, &cookie).await;
+        let ids: Vec<&str> = desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+
+        assert!(
+            !ids.contains(&"general"),
+            "an overlay desk at the reserved `general` id must not be listed: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"main"),
+            "an overlay desk at the reserved `main` id must not be listed: {ids:?}"
+        );
+        // The manifest desk and a non-shadowing overlay desk are unaffected —
+        // this narrows one id, it does not hide desks generally.
+        assert!(ids.contains(&"studio"), "unrelated desk dropped: {ids:?}");
+    }
+
+    /// Every desk mutation aimed at a bare General spelling — no legacy
+    /// overlay row at all — is refused with a reason, under **every** spelling
+    /// the host folds into the General conversation (issue #1743; restored PR
+    /// #1781 review, CodeRabbit P2).
+    ///
+    /// This is the `is_general_channel` guard originally added by `da98130c1`
+    /// and its own regression test; an unrelated refactor (`3cbdb7a5f`) deleted
+    /// the guard, the four call sites, and this test together, and only the
+    /// read-side projection filter (`list_desks`/`resolve_desk_id`) was ever
+    /// restored (`0c07873db`) — this proves the write side is closed again.
+    ///
+    /// The point of the assertion is the pair: a `409` **and** the sentence.
+    /// Before this guard, each of these was a bare `404`/`CompanyNotFound` —
+    /// "there is no such desk" — which is a different and wrong claim.
+    /// `#general` is not missing; it is reserved, and the caller needs to be
+    /// told which.
+    #[tokio::test]
+    async fn every_desk_mutation_aimed_at_a_bare_general_spelling_is_refused_with_a_reason() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for spelling in ["general", "General", "GENERAL", "main", "Main"] {
+            let cases: [(&str, String, &str); 4] = [
+                ("DELETE", format!("/api/v1/company/desks/{spelling}"), ""),
+                (
+                    "POST",
+                    format!("/api/v1/company/desks/{spelling}/members"),
+                    r#"{"agent_id":"eng"}"#,
+                ),
+                (
+                    "DELETE",
+                    format!("/api/v1/company/desks/{spelling}/members/ceo"),
+                    "",
+                ),
+                (
+                    "PUT",
+                    format!("/api/v1/company/desks/{spelling}/order"),
+                    r#"{"ordered_member_ids":["ceo"]}"#,
+                ),
+            ];
+            for (method, uri, body) in cases {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("cookie", &cookie)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::CONFLICT,
+                    "{method} {uri} must be refused, not answered 404"
+                );
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(
+                    text.contains("company-wide channel"),
+                    "{method} {uri} must say why: got {text}"
+                );
+            }
+        }
+    }
+
+    /// Sibling to [`list_desks_hides_an_overlay_desk_shadowing_general`]: the
+    /// same grandfathered overlay desk at the reserved `general` id — which
+    /// that test proves is hidden from `GET .../desks` and unroutable through
+    /// [`CompanyRecord::resolve_desk_id`] — must also be unreachable through
+    /// every desk *mutation* (issue #1781 review, CodeRabbit P2). Before this
+    /// guard was restored, `desk_exists("general")` was `true` for exactly this
+    /// desk (it really is in `overlay_desks`), so `add_desk_member`,
+    /// `remove_desk_member`, `set_desk_order`, and `delete_desk` — which
+    /// checked only `desk_exists` — would staff, reorder, or delete a desk no
+    /// read surface exposes at all.
+    ///
+    /// Seeded directly on the stored record, the same way the read-side sibling
+    /// test is: `POST .../desks` has refused this id since issue #1743, so the
+    /// only way this shape exists is data that predates that guard.
+    #[tokio::test]
+    async fn desk_mutations_refuse_a_grandfathered_overlay_desk_shadowing_general() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record.overlay_desks.push(OverlayDesk {
+            id: "general".to_string(),
+            name: "General".to_string(),
+            description: None,
+            members: vec!["ceo".to_string()],
+            responder: ResponderMode::Lead,
+            hive: Default::default(),
+        });
+        runtime.store().save(&record).await.unwrap();
+
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let cases: [(&str, &str, &str); 4] = [
+            ("DELETE", "/api/v1/company/desks/general", ""),
+            (
+                "POST",
+                "/api/v1/company/desks/general/members",
+                r#"{"agent_id":"eng"}"#,
+            ),
+            ("DELETE", "/api/v1/company/desks/general/members/ceo", ""),
+            (
+                "PUT",
+                "/api/v1/company/desks/general/order",
+                r#"{"ordered_member_ids":["ceo"]}"#,
+            ),
+        ];
+        for (method, uri, body) in cases {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{method} {uri} must be refused even though the desk really \
+                 exists in the overlay — desk_exists alone is not enough"
+            );
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("company-wide channel"),
+                "{method} {uri} must say why: got {text}"
+            );
+        }
     }
 
     /// `add_desk_member` must serialize its load-modify-save cycle against
@@ -5761,105 +7623,94 @@ mode = "full"
         assert_eq!(body["members"][1], "ceo");
 
         // The list now carries the manifest desk and the created overlay desk.
+        // The Operator feed is its own surface (issue #1757 rework) — it is
+        // fetched through `GET {scope}/operator-channel`, not injected here.
         let desks = get_desks(&app, &cookie).await;
         let arr = desks.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 2, "{arr:?}");
         assert_eq!(arr[0]["id"], "studio"); // manifest desk first
         assert_eq!(arr[1]["id"], "growth_desk");
         assert_eq!(arr[1]["overlayCreated"], true);
     }
 
-    /// Every desk mutation aimed at the built-in `#general` channel is refused
-    /// with a reason, under **every** spelling the host folds into the General
-    /// conversation (issue #1743).
-    ///
-    /// The point of the assertion is the pair: a `409` **and** the sentence.
-    /// Before this, each of these was a bare `404`/`CompanyNotFound` — "there
-    /// is no such desk" — which is a different and wrong claim. `#general` is
-    /// not missing; it is reserved, and the caller needs to be told which.
-    ///
-    /// There is no `PATCH …/desks/{id}` route on this host at all, so this is
-    /// the complete desk mutation surface: delete, staff, unstaff, reorder.
+    /// Issue #1835, both wire directions. A create that never mentions
+    /// `responder` — every existing caller, and the org chart today — answers
+    /// and lists with **no** `responder` key at all, so old consoles see the
+    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
+    /// answers and lists `"auto"`, and the mode survives the store round-trip
+    /// rather than collapsing back to a lead desk.
     #[tokio::test]
-    async fn every_desk_mutation_aimed_at_general_is_refused_with_a_reason() {
+    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
-        for spelling in ["general", "General", "GENERAL", "main", "Main"] {
-            let cases: [(&str, String, &str); 4] = [
-                ("DELETE", format!("/api/v1/company/desks/{spelling}"), ""),
-                (
-                    "POST",
-                    format!("/api/v1/company/desks/{spelling}/members"),
-                    r#"{"agent_id":"eng"}"#,
-                ),
-                (
-                    "DELETE",
-                    format!("/api/v1/company/desks/{spelling}/members/ceo"),
-                    "",
-                ),
-                (
-                    "PUT",
-                    format!("/api/v1/company/desks/{spelling}/order"),
-                    r#"{"ordered_member_ids":["ceo"]}"#,
-                ),
-            ];
-            for (method, uri, body) in cases {
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
                 let response = app
-                    .clone()
                     .oneshot(
                         Request::builder()
-                            .method(method)
-                            .uri(&uri)
+                            .method("POST")
+                            .uri("/api/v1/company/desks")
                             .header("cookie", &cookie)
                             .header("content-type", "application/json")
-                            .body(Body::from(body.to_string()))
+                            .body(Body::from(body))
                             .unwrap(),
                     )
                     .await
                     .unwrap();
-                assert_eq!(
-                    response.status(),
-                    StatusCode::CONFLICT,
-                    "{method} {uri} must be refused, not answered 404"
-                );
+                assert_eq!(response.status(), StatusCode::CREATED);
                 let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                let text = String::from_utf8_lossy(&bytes);
-                assert!(
-                    text.contains("company-wide channel"),
-                    "{method} {uri} must say why: got {text}"
-                );
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
             }
-        }
+        };
+
+        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
+        assert!(
+            lead.get("responder").is_none(),
+            "a mode never stated must not appear on the wire: {lead}"
+        );
+        let auto =
+            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
+        assert_eq!(auto["responder"], "auto", "{auto}");
+
+        // The list re-reads the store, so this is the round-trip half: the
+        // manifest desk and the defaulted create stay keyless, the channel
+        // keeps its mode.
+        let desks = get_desks(&app, &cookie).await;
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
+        assert!(
+            arr[1].get("responder").is_none(),
+            "defaulted create: {desks}"
+        );
+        assert_eq!(arr[2]["responder"], "auto", "{desks}");
     }
 
-    /// A desk create that would shadow the built-in channel is refused (409),
-    /// whichever spelling it asks for and whether the id is given explicitly or
-    /// derived from the name (issue #1743).
-    ///
-    /// Shadowing is not a cosmetic collision: a desk named `general` would take
-    /// over routing for the company-wide line, so a message meant for the
-    /// orchestrator would be answered by that desk's lead instead.
+    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
+    /// the selector would have no candidates and the first-member fallback no
+    /// first member, so its unmentioned messages would silently fall to the
+    /// orchestrator, contradicting the channel's own model. A **lead** desk
+    /// keeps its right to start empty and be staffed from the org chart.
+    /// Revert the guard in `create_desk` and the first assertion answers 201.
     #[tokio::test]
-    async fn a_desk_cannot_be_created_that_would_shadow_the_general_channel() {
+    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
-        for body in [
-            r#"{"name":"Anything","id":"general"}"#,
-            r#"{"name":"Anything","id":"main"}"#,
-            r#"{"name":"General"}"#,
-            r#"{"name":"Main"}"#,
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
                     Request::builder()
                         .method("POST")
                         .uri("/api/v1/company/desks")
@@ -5869,304 +7720,32 @@ mode = "full"
                         .unwrap(),
                 )
                 .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
-            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            assert!(
-                String::from_utf8_lossy(&bytes).contains("reserved"),
-                "body {body} must be told the id is reserved"
-            );
-        }
-
-        // Nothing was created: the desk list still holds only the manifest desk.
-        let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1);
-        assert_eq!(desks[0]["id"], "studio");
-    }
-
-    /// `#general` is **not** a desk, and `GET …/desks` says so by not listing it
-    /// (issue #1743).
-    ///
-    /// This is the guarantee that keeps every desk-shaped surface honest
-    /// without any of them needing a special case: the org chart, the assignee
-    /// picker and the desk counts all read this route, so a channel that is
-    /// absent here can never be offered a rename, a delete, a lead or a seat.
-    /// The console's own no-affordance requirement falls out of it rather than
-    /// being enforced by hiding buttons.
-    #[tokio::test]
-    async fn the_general_channel_is_not_a_desk_and_is_not_listed_as_one() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        let desks = get_desks(&app, &cookie).await;
-        for desk in desks.as_array().unwrap() {
-            let id = desk["id"].as_str().unwrap();
-            assert!(
-                !crate::server::chat_history::is_general_chat(Some(id)),
-                "the desk list must not carry the built-in channel, found {id}"
-            );
-        }
-    }
-
-    /// An overlay desk carrying an explicit, unreserved id but the reserved
-    /// **display name** shadows the channel just as thoroughly (issue #1743).
-    ///
-    /// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
-    /// `{"id": "ops", "name": "General"}` is selected when
-    /// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
-    /// `General` — and `@everyone` on the company-wide line then expands to
-    /// that desk's members instead of the roster. The id check alone missed it
-    /// because the id is only *derived* from the name when none is supplied.
-    #[tokio::test]
-    async fn a_desk_cannot_take_the_general_display_name_under_another_id() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        for body in [
-            r#"{"id":"ops","name":"General"}"#,
-            r#"{"id":"ops","name":"general"}"#,
-            r#"{"id":"ops","name":"Main"}"#,
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/v1/company/desks")
-                        .header("cookie", &cookie)
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
-        }
-
-        let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1, "nothing was created");
-    }
-
-    /// An overlay desk carrying a reserved **display name** under its own id is
-    /// still a desk, and is still projected (issue #1743).
-    ///
-    /// `resolve_desk_id` declines to match an overlay desk against a General
-    /// key at all, so `{id: "ops", name: "General"}` shadows nothing: `ops`
-    /// resolves it, its lead answers there, `delegate_to_desk` reaches it, and
-    /// every desk write to it is allowed. Hiding it would take a live desk and
-    /// its transcript out of Chat while the API went on routing to it — the
-    /// mirror image of the defect this projection exists to prevent, and a
-    /// worse one, because nothing would say where the conversation went.
-    ///
-    /// Creation still refuses that display name
-    /// ([`a_desk_cannot_take_the_general_display_name_under_another_id`]); this
-    /// is only about state already on disk.
-    #[tokio::test]
-    async fn an_overlay_desk_named_general_under_its_own_id_is_still_projected() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        {
-            let id = CompanyId::new("acme");
-            let runtime = state.registry().get(&id).unwrap();
-            let store = runtime.store();
-            let mut record = store.load(&id).await.unwrap().unwrap();
-            record.overlay_desks.push(crate::ports::types::OverlayDesk {
-                id: "ops".to_string(),
-                name: "General".to_string(),
-                description: None,
-                responder: Default::default(),
-                members: vec!["ceo".to_string()],
-            });
-            // The resolver is the reason this row is safe to project.
-            assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
-            assert_eq!(record.resolve_desk_id("General"), None);
-            assert_eq!(record.resolve_desk_id("main"), None);
-            store.save(&record).await.unwrap();
-        }
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        let desks = get_desks(&app, &cookie).await;
-        let ops = desks
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["id"] == "ops")
-            .unwrap_or_else(|| panic!("the desk must still be listed: {desks}"));
-        assert_eq!(ops["name"], "General");
-        assert_eq!(ops["overlayCreated"], true);
-
-        // And it takes desk writes under its own id, like any other desk.
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/company/desks/ops/members")
-                    .header("cookie", &cookie)
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"agent_id":"eng"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        // While the General *key* still names the channel, not this desk.
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/api/v1/company/desks/General")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-    }
-
-    /// An overlay desk persisted **before** the ids were reserved is still not
-    /// the built-in channel (issue #1743).
-    ///
-    /// `create_desk` accepted `general` and `main` until this issue, so this is
-    /// state an upgraded instance can be carrying. Guarding the immutability
-    /// checks on `desk_exists` would have exempted it — leaving the channel
-    /// this issue promises is permanent staffable, reorderable and deletable
-    /// after all, which is the whole claim rather than an edge of it.
-    #[tokio::test]
-    async fn a_pre_existing_overlay_desk_does_not_become_the_general_channel() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        // Persisted as an upgraded instance would be carrying it — through the
-        // store the handlers read, not through the create route, which now
-        // refuses this id.
-        {
-            let id = CompanyId::new("acme");
-            let runtime = state.registry().get(&id).unwrap();
-            let store = runtime.store();
-            let mut record = store.load(&id).await.unwrap().unwrap();
-            record.overlay_desks.push(crate::ports::types::OverlayDesk {
-                id: "general".to_string(),
-                name: "Legacy general".to_string(),
-                description: None,
-                responder: Default::default(),
-                members: vec!["ceo".to_string()],
-            });
-            store.save(&record).await.unwrap();
-        }
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        // Not projected, so no desk surface can offer it a control at all.
-        let desks = get_desks(&app, &cookie).await;
-        for desk in desks.as_array().unwrap() {
-            assert_ne!(
-                desk["id"], "general",
-                "a shadowing overlay desk must not be listed: {desks}"
-            );
-        }
-
-        // And every write aimed at it is refused with the channel's reason,
-        // not answered as if it were an ordinary desk.
-        for (method, uri, body) in [
-            (
-                "POST",
-                "/api/v1/company/desks/general/members",
-                Some(r#"{"agent_id":"eng"}"#),
-            ),
-            ("DELETE", "/api/v1/company/desks/general", None),
-        ] {
-            let mut req = Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("cookie", &cookie);
-            if body.is_some() {
-                req = req.header("content-type", "application/json");
+                .unwrap()
             }
-            let response = app
-                .clone()
-                .oneshot(req.body(body.map_or_else(Body::empty, Body::from)).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {uri}");
-        }
-    }
+        };
 
-    /// A company whose **blueprint** really declares a desk with one of those
-    /// ids keeps it, and keeps every write that has always worked on it
-    /// (issue #1743).
-    ///
-    /// The reservation replaces the "no such desk" answer and nothing else. A
-    /// guard that refused on the id alone would have taken a desk away from
-    /// every company that authored one, which is a migration, not a feature.
-    #[tokio::test]
-    async fn a_manifest_desk_named_general_is_left_exactly_as_it_was() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let manifest: CompanyManifest = toml::from_str(
-            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
-             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
-             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
-             [[group_chat]]\nid = \"general\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
-        )
-        .unwrap();
-        let state = state_with_manifest(&home, manifest).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            body.contains("at least one member"),
+            "the refusal names the reason, not a generic 400: {body}"
+        );
 
-        // It is listed as the desk it is.
-        let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1);
-        assert_eq!(desks[0]["id"], "general");
-
-        // Staffing it still works — the pre-#1743 behaviour, unchanged.
-        let add = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/company/desks/general/members")
-                    .header("cookie", &cookie)
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"agent_id":"eng"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(add.status(), StatusCode::NO_CONTENT);
-
-        // And deleting it is still refused as a *blueprint* desk, with the
-        // blueprint's reason rather than the reserved-channel one.
-        let delete = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/api/v1/company/desks/general")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(delete.status(), StatusCode::CONFLICT);
-        let bytes = to_bytes(delete.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8_lossy(&bytes).contains("blueprint"));
+        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
+        assert_eq!(
+            empty_lead.status(),
+            StatusCode::CREATED,
+            "an empty lead desk is still legal — it gains members from the org chart"
+        );
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
-    /// manifest desk is 409, and an unknown member is 400.
+    /// manifest desk is 409, an unknown member is 400, and — issue #1757 — an
+    /// id (explicit or name-derived) colliding with the reserved `operator`
+    /// system channel is 409 even though it is not a manifest or overlay desk
+    /// `desk_exists` would otherwise catch.
     #[tokio::test]
     async fn create_desk_validates_name_id_and_members() {
         let home_dir = home();
@@ -6182,6 +7761,30 @@ mode = "full"
                 r#"{"name":"Ghost desk","members":["ghost"]}"#,
                 StatusCode::BAD_REQUEST,
             ),
+            (
+                r#"{"name":"Operator","id":"operator"}"#,
+                StatusCode::CONFLICT,
+            ),
+            (r#"{"name":"operator"}"#, StatusCode::CONFLICT),
+            // PR #1781 review (CodeRabbit P2 follow-up to `316bc9229`): the id
+            // guard alone lets a display-name collision through — `{"id":
+            // "ops", "name": "Operator"}` never touches the reserved id, but
+            // `resolve_desk_id` would still fold a `?desk=Operator` selector
+            // onto this desk exactly as it would onto one literally named
+            // `operator`. Same shape for the collision-fallback display name.
+            (r#"{"name":"Operator","id":"ops"}"#, StatusCode::CONFLICT),
+            (
+                r#"{"name":"operator-feed","id":"ops2"}"#,
+                StatusCode::CONFLICT,
+            ),
+            // Issue #1743 / PR #1781 review: a desk claiming a General
+            // spelling — by id or by display name — would shadow the
+            // built-in `#general` channel exactly as an `operator`-id desk
+            // shadows the Operator feed.
+            (r#"{"name":"Ops","id":"general"}"#, StatusCode::CONFLICT),
+            (r#"{"name":"Ops","id":"main"}"#, StatusCode::CONFLICT),
+            (r#"{"name":"General"}"#, StatusCode::CONFLICT),
+            (r#"{"name":"Main"}"#, StatusCode::CONFLICT),
         ];
         for (body, want) in cases {
             let response = app
@@ -6256,8 +7859,11 @@ mode = "full"
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 
         let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1);
-        assert_eq!(desks[0]["id"], "studio");
+        // Only the manifest desk remains — the Operator feed is its own
+        // surface now (issue #1757 rework), not injected into this list.
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "{arr:?}");
+        assert_eq!(arr[0]["id"], "studio");
 
         // Deleting it again is a 404.
         let gone = app
@@ -6273,6 +7879,78 @@ mode = "full"
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Issue #1781 review (Codex P2): deleting a legacy overlay desk that was
+    /// holding `operator_feed_channel()` on the fallback address must not let
+    /// it revert to `OPERATOR_CHANNEL`.
+    ///
+    /// `desk_exists`/`resolve_desk_id` are live checks — with no tombstone,
+    /// removing the colliding desk makes them stop matching, so the divert
+    /// would silently flip back the moment `delete_desk` succeeds. Seeded
+    /// directly on the stored record rather than through `POST .../desks`
+    /// (as `list_desks_hides_an_overlay_desk_shadowing_general` does for its
+    /// own General case): `create_desk`'s own guard has refused the id and
+    /// name `operator` since `316bc9229`, so this shape can only be reached
+    /// by an overlay desk that predates it — exactly what this proves stays
+    /// safe to delete.
+    #[tokio::test]
+    async fn delete_desk_keeps_the_operator_feed_diverted_after_the_collision_is_gone() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record.overlay_desks.push(OverlayDesk {
+            id: "operator".to_string(),
+            name: "Legacy Ops".to_string(),
+            description: None,
+            members: vec![],
+            responder: ResponderMode::Lead,
+            hive: Default::default(),
+        });
+        runtime.store().save(&record).await.unwrap();
+
+        let reloaded = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "fixture must start in the collision state this test exercises"
+        );
+
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let delete = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/operator")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+        let after = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            !after.desk_exists(crate::runtime::channel::OPERATOR_CHANNEL),
+            "the colliding desk must actually be gone, or this is not \
+             exercising the live-check-flips-back failure mode at all"
+        );
+        assert_eq!(
+            after.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed address must stay on the fallback once the desk that \
+             caused the collision is deleted — flipping back to \
+             OPERATOR_CHANNEL would orphan every report already journaled \
+             under the fallback and let the deleted desk's own historical \
+             transcript (chat_id == \"operator\") resurface as system-feed \
+             content"
+        );
     }
 
     /// Add-member validation: an unknown desk is 404, an unknown teammate is
@@ -6534,8 +8212,11 @@ mode = "full"
 
     #[tokio::test]
     async fn desks_route_returns_the_company_desks() {
-        // The default test manifest defines no group chats, so the route answers
-        // 200 with an empty list (the console then falls back to its defaults).
+        // The default test manifest defines no group chats, so the route
+        // answers 200 with an empty list — the console falls back to its
+        // static default threads. The Operator feed is a separate surface
+        // (issue #1757 rework), fetched through `GET
+        // {scope}/operator-channel`, and no longer folded into this list.
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
@@ -6554,7 +8235,589 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value.as_array().unwrap().len(), 0);
+        let desks = value.as_array().unwrap();
+        assert!(desks.is_empty(), "{desks:?}");
+    }
+
+    async fn get_operator_channel(app: &axum::Router, cookie: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/operator-channel")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Issue #1757 rework: `GET {scope}/operator-channel` returns the
+    /// dedicated feed's identity — never folded into `list_desks` any more —
+    /// and `list_desks` carries zero operator logic: the real desks are all
+    /// it returns.
+    #[tokio::test]
+    async fn operator_channel_route_returns_the_feed_identity_and_is_absent_from_desks() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(channel["id"], "operator");
+        assert_eq!(channel["name"], "Operator");
+        assert!(
+            channel["description"]
+                .as_str()
+                .unwrap()
+                .contains("what happened"),
+            "{channel}"
+        );
+
+        let desks = get_desks(&app, &cookie).await;
+        assert!(
+            desks
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d["id"] != "operator"),
+            "list_desks must carry zero operator logic: {desks:?}"
+        );
+    }
+
+    /// Issue #1757 rework: the always-present Operator feed is its own
+    /// surface — `GET {scope}/operator-channel` names it, `list_desks` never
+    /// does — and posting to it is still refused (it is a read-only report
+    /// feed).
+    #[tokio::test]
+    async fn the_operator_channel_is_a_separate_surface_and_stays_read_only() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        let ids: Vec<&str> = desks.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["studio"], "list_desks carries only real desks");
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(channel["id"], "operator");
+        assert_eq!(channel["name"], "Operator");
+
+        // A send addressed to it is refused (read-only), never journaled.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi","chat":"operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_client_error(),
+            "posting to the operator channel must be refused, got {}",
+            response.status()
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(body.contains("read-only"), "{body}");
+    }
+
+    /// Issue #1781 review (CodeRabbit): `CompanyRuntime::ensure_desk_writable`
+    /// re-loads the record on every operator-channel send (to catch a
+    /// grandfathered desk/teammate colliding with the reserved id) and
+    /// propagates a real `store().load` failure with `?` rather than folding
+    /// it into "no real recipient". Collapsing it would misreport a store
+    /// outage as the ordinary read-only refusal — same 4xx, same message,
+    /// same "read-only" wording an operator would wrongly believe.
+    ///
+    /// Corrupting `company.toml` on disk after the app is built (rather than
+    /// mocking `CompanyStore`) exercises the real `FsCompanyStore::load`
+    /// error path — `Err(OpenCompanyError::Store("invalid company.toml: …"))`
+    /// — which has no `Store` arm in `ApiError::status` and therefore falls
+    /// to the catch-all `INTERNAL_SERVER_ERROR`. A collapsed-to-`false` read
+    /// would instead surface as `InvalidRequest` (400) with the read-only
+    /// wording, so the status code and body together distinguish the two.
+    #[tokio::test]
+    async fn a_failing_store_load_is_not_collapsed_into_the_read_only_refusal() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Corrupt the on-disk manifest so the next `store().load()` — the one
+        // `ensure_desk_writable` runs fresh on every send — fails instead of
+        // returning `Some(record)`.
+        let toml_path = crate::store::Bundle::new(&home, &CompanyId::new("acme")).company_toml();
+        tokio::fs::write(&toml_path, b"not valid toml [[[")
+            .await
+            .expect("corrupt company.toml");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi","chat":"operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a store load failure must propagate as itself, not the read-only 4xx"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(
+            !body.contains("read-only"),
+            "a store outage must not be misreported as the ordinary read-only refusal: {body}"
+        );
+    }
+
+    /// CodeRabbit review (PR #1781, P2): `operator_channel` used to fold a
+    /// `store().load()` failure into "no record" via `.ok().flatten()`, and
+    /// answer the default `operator` id anyway. For an upgraded company whose
+    /// grandfathered `operator` teammate requires the `operator-feed`
+    /// collision address, that silently mislabels the teammate's `operator`
+    /// transcript as the system feed while a transient outage lasts — and the
+    /// console would show it as healthy the whole time. This proves the fix:
+    /// a real load failure now propagates as an error instead of defaulting.
+    ///
+    /// Corrupts `company.toml` on disk after the app is built (rather than
+    /// mocking `CompanyStore`) to exercise the real `FsCompanyStore::load`
+    /// error path — same technique as
+    /// `a_failing_store_load_is_not_collapsed_into_the_read_only_refusal`
+    /// above.
+    #[tokio::test]
+    async fn operator_channel_propagates_a_store_load_failure_instead_of_defaulting() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Baseline: before any corruption, the route answers the default id.
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(channel["id"], "operator");
+
+        // Corrupt the on-disk manifest so the next `store().load()` fails
+        // instead of returning `Some(record)` or `None`.
+        let toml_path = crate::store::Bundle::new(&home, &CompanyId::new("acme")).company_toml();
+        tokio::fs::write(&toml_path, b"not valid toml [[[")
+            .await
+            .expect("corrupt company.toml");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/operator-channel")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a store load failure must propagate as itself, not the default operator id"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(
+            body["id"], "operator",
+            "a store outage must not be silently answered as the healthy default channel: {body}"
+        );
+    }
+
+    /// Issue #1757 migration: `operator` was not a reserved id before this
+    /// issue, and a stored manifest is never re-validated on load
+    /// (`CompanyManifest::from_stored_toml` skips validation on purpose, so
+    /// tightening a rule never strands an already-running company) — so a
+    /// company provisioned earlier can already have a real `[[group_chat]]`
+    /// using that id. Built directly with `toml::from_str` (bypassing
+    /// `into_validated`, the same way a stored manifest reaches
+    /// `CompanyRuntime` without going through it) to stand in for exactly
+    /// that: data that predates the guard. Without the carve-outs in
+    /// `list_desks` and `chat_and_emit`, this desk would be shadowed by a
+    /// synthetic, read-only duplicate under the same id the moment this
+    /// feature shipped, and every send to it would be refused. This proves
+    /// it is grandfathered instead: listed once, not flagged `system`, and
+    /// still writable.
+    #[tokio::test]
+    async fn a_manifest_desk_predating_the_reserved_operator_id_stays_writable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Ops Room\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        assert_eq!(desks.len(), 1, "no duplicate synthetic entry: {desks:?}");
+        assert_eq!(desks[0]["id"], "operator");
+        assert_eq!(
+            desks[0]["name"], "Ops Room",
+            "the real desk's own name, not the synthetic channel's: {desks:?}"
+        );
+        assert!(
+            desks[0].get("system").is_none(),
+            "grandfathered desk is a real desk (system defaults false and is \
+             omitted), not the system channel: {desks:?}"
+        );
+
+        // A send addressed to it must go through — this is the pre-existing
+        // desk's own line, not the (absent) synthetic system channel.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"ship the landing page","chat":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "a pre-existing desk that already owns the `operator` id must stay \
+             writable, got {}",
+            response.status()
+        );
+    }
+
+    /// The name-collision sibling of the id-collision test above (issue #1781
+    /// review, Codex P1 follow-up): a manifest desk grandfathered onto the
+    /// **display name** `Operator` (`{ id = "legacy_ops", name = "Operator" }`)
+    /// rather than the literal id. `resolve_desk_id` — what every *read*
+    /// already resolves a `?desk=` selector through — matches this desk by
+    /// name just as thoroughly as the id-collision desk above is matched by
+    /// id, but `ensure_desk_writable` used to check the *raw* selector string
+    /// against `OPERATOR_CHANNEL` before any such resolution ran, so a send
+    /// addressed to the desk's own supported alias (`chat: "Operator"`,
+    /// case-insensitive) was refused as the read-only system feed — reachable
+    /// by name for reads, refused by name for writes, the exact mismatch
+    /// `create_desk`'s reservation comment (above) warns a desk can never be
+    /// addressed consistently under. A send addressed to the desk's real id
+    /// (`legacy_ops`) already sailed through either way, which this also
+    /// covers as the negative control.
+    #[tokio::test]
+    async fn a_manifest_desk_grandfathered_onto_the_operator_name_stays_writable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"legacy_ops\"\nname = \"Operator\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // The desk's own real id still works — this was never broken.
+        let by_id = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by id","chat":"legacy_ops"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_id.status().is_success(),
+            "a send addressed to the grandfathered desk's real id must stay writable, got {}",
+            by_id.status()
+        );
+
+        // The desk's supported display-name alias must now work too.
+        let by_name = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by name","chat":"Operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_name.status().is_success(),
+            "a send addressed to the grandfathered desk's own case-insensitive \
+             `Operator` alias must resolve to the real desk, not the read-only \
+             system feed, got {}",
+            by_name.status()
+        );
+    }
+
+    /// The fallback-address sibling of the test above (issue #1781 review,
+    /// Codex P2 follow-up): a manifest desk grandfathered onto the display
+    /// name `operator-feed` — `OPERATOR_CHANNEL_COLLISION_FALLBACK` itself —
+    /// rather than `Operator`. No desk or teammate here claims the *primary*
+    /// `operator` id or name, so `operator_feed_channel()` stays on the
+    /// literal address and never diverts; the fallback is purely this desk's
+    /// own pre-#1757 display name. `ensure_desk_writable` used to refuse the
+    /// fallback constant unconditionally, without resolving it through
+    /// `resolve_desk_id` first the way the primary branch does — so a send
+    /// addressed to this desk's own supported case-insensitive alias
+    /// (`chat: "operator-feed"`) was refused as if it named the synthetic
+    /// read-only system desk, even though nothing here is actually diverted.
+    /// A send to the desk's real id (`ops`) already sailed through either
+    /// way, which this also covers as the negative control.
+    #[tokio::test]
+    async fn a_manifest_desk_grandfathered_onto_the_fallback_name_stays_writable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"operator-feed\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let record = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL,
+            "fixture must NOT be in the diverted state — this proves the \
+             fallback name is refused even with no primary collision at all, \
+             which the diverted case above does not exercise"
+        );
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // The desk's own real id still works — this was never broken.
+        let by_id = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by id","chat":"ops"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_id.status().is_success(),
+            "a send addressed to the grandfathered desk's real id must stay writable, got {}",
+            by_id.status()
+        );
+
+        // The desk's supported display-name alias must now work too.
+        let by_name = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by name","chat":"operator-feed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_name.status().is_success(),
+            "a send addressed to the grandfathered desk's own case-insensitive \
+             `operator-feed` alias must resolve to the real desk, not the \
+             read-only system feed, got {}",
+            by_name.status()
+        );
+    }
+
+    /// Issue #1757 migration, the other namespace: a **teammate**, not a desk,
+    /// already named `operator`. `ChatView` addresses a DM by the teammate's
+    /// bare id (issue #364), so a message meant for this person also arrives
+    /// here as `chat == "operator"` — the same shape as a send meant for the
+    /// system feed. `desk_exists` alone cannot tell them apart: it only walks
+    /// `group_chats` and `overlay_desks`, never the roster, so a company that
+    /// named a manifest agent "Operator" before this feature shipped would
+    /// find that teammate's DM permanently refused, with the console giving no
+    /// way to rename or migrate out of the collision (`RESERVED_AGENT_IDS` and
+    /// `mint_agent_id` only stop a *future* mint). `is_roster_agent` closes the
+    /// same gap `desk_exists` closes for desks.
+    #[tokio::test]
+    async fn a_manifest_agent_predating_the_reserved_operator_id_stays_dm_able() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // A DM addressed to the grandfathered teammate — by its bare id, the
+        // same address `ChatView` sends — must go through rather than be
+        // refused as a send to the read-only system channel.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"status update please","chat":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "a pre-existing teammate that already owns the `operator` id must \
+             stay DM-able, got {}",
+            response.status()
+        );
+    }
+
+    /// Issue #1757 rework, the read side of the grandfather case the test
+    /// above covers on the write side: a company whose roster names a
+    /// teammate `operator` (no desk of the same id) must have `GET
+    /// {scope}/operator-channel` answer at the disjoint collision-fallback
+    /// id, not the literal `operator` one — a direct post to the visible
+    /// read-only feed and the teammate's own DM must stay distinguishable
+    /// (`chat_id == "operator"` for the DM, the fallback id for the feed) —
+    /// and that fallback id must itself stay refused as read-only.
+    #[tokio::test]
+    async fn the_operator_channel_diverts_off_a_grandfathered_teammates_operator_line() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state.clone());
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(
+            channel["id"],
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed must not claim the literal `operator` id once a \
+             teammate already holds it: {channel:?}"
+        );
+
+        // list_desks carries no operator logic at all, so it is untouched by
+        // this collision either way — nothing to assert there but its
+        // absence of the teammate, which the DM test above already covers.
+
+        // The disjoint fallback id is unmintable and system-only: a direct post
+        // to it must stay refused exactly like the literal `operator` id is,
+        // even though nothing minted it as a desk.
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"text":"hello","chat":"{}"}}"#,
+                        crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the disjoint system-feed address must stay read-only"
+        );
+    }
+
+    /// PR #1781 review (CodeRabbit): the same divert as the test above, for
+    /// the *other* grandfather shape — a real **desk** already owning
+    /// `operator` (see `a_manifest_desk_predating_the_reserved_operator_id_stays_writable`
+    /// for the write side of this same fixture). Left undiverted, `GET
+    /// {scope}/operator-channel` and `GET {scope}/desks` would answer the
+    /// same id for two different things: the console appends the pinned
+    /// Operator row *after* the desk section (`operatorSection`,
+    /// `frontend/src/views/ChatView.tsx`), so `findChannel` — first-section-match
+    /// — would resolve the pinned row to the desk, and every workflow report
+    /// would journal onto the desk's own transcript instead of a
+    /// distinguishable feed.
+    #[tokio::test]
+    async fn the_operator_channel_diverts_off_a_grandfathered_desks_own_operator_line() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Ops Room\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        assert_eq!(desks.len(), 1);
+        assert_eq!(
+            desks[0]["id"], "operator",
+            "the desk itself must keep its own literal id: {desks:?}"
+        );
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(
+            channel["id"],
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the pinned Operator row must not claim the literal `operator` id \
+             once a desk already holds it — otherwise the console shows two \
+             rows sharing one id and `findChannel` always resolves the pinned \
+             row to the desk: {channel:?}"
+        );
     }
 
     /// Issue #65: the console's default thread addresses sends with
@@ -6574,6 +8837,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -6591,6 +8855,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -6649,6 +8914,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -6718,13 +8984,13 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-77".to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6733,6 +8999,8 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6747,6 +9015,7 @@ mode = "full"
                 .append(
                     runtime.id(),
                     CompanyEvent::AgentReply {
+                        audience: Vec::new(),
                         mentions: Vec::new(),
                         mention_depth: 0,
                         parent: None,
@@ -6842,6 +9111,7 @@ mode = "full"
                     .append(
                         runtime.id(),
                         CompanyEvent::AgentReply {
+                            audience: Vec::new(),
                             mentions: Vec::new(),
                             mention_depth: 0,
                             parent: None,
@@ -6893,6 +9163,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -7455,6 +9726,61 @@ mode = "full"
         );
     }
 
+    /// PR #1781 review: `history_for_desk` (reload) and `project_event_for_viewer`
+    /// (live SSE) both already hide an owner-fallback report from a non-admin —
+    /// this proves the reaction route agrees, rather than letting a Member
+    /// react to (and thereby confirm the existence and sequence position of) a
+    /// report they cannot read. Answered with the same 404 an unknown sequence
+    /// gets, not a 403, so probing this endpoint cannot distinguish "hidden"
+    /// from "never existed".
+    #[tokio::test]
+    async fn reactions_refuse_a_target_that_is_an_admin_only_report() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let report = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: "operator".into(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "no admin has a mailbox".into(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state);
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let admin_cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // A Member gets the same 404 an unknown message would.
+        assert_eq!(
+            post_reaction(
+                &app,
+                &member_cookie,
+                &report.value().to_string(),
+                "👍",
+                true
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+        // An admin may react to it normally.
+        assert_eq!(
+            post_reaction(&app, &admin_cookie, &report.value().to_string(), "👍", true).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
     /// Regression for the third acceptance item of #364, which the console's
     /// own scoping already satisfied but nothing pinned: a message posted in one
     /// channel must be absent from another, end to end through the route — not
@@ -7507,6 +9833,124 @@ mode = "full"
         assert!(
             general.iter().all(|m| m.get("reactions").is_none()),
             "a reaction crossed a channel boundary: {general:?}"
+        );
+    }
+
+    /// **Issue #2028 (finding 2, deadlock regression).** Answering a
+    /// task-backed blocker in a DM runs the whole path end to end: the route
+    /// reads and classifies the reply, settles the verdict, and waits on the
+    /// follow-up that re-dispatches the card — and that follow-up runs on a
+    /// spawned task which takes `task_writes` for its board edit.
+    ///
+    /// So the route must not still hold `task_writes` when it waits. It did,
+    /// having mirrored the guard from the review branch above it, and the two
+    /// together are a deadlock: the handler waits for a task that is waiting for
+    /// the handler's lock. Explicitly bounded rather than left to hang, so a
+    /// regression fails in seconds instead of taking a runner down for an hour.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_dm_answer_to_a_task_backed_blocker_completes() {
+        use crate::company::blocker_sender::BlockerSenderSignals;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = build_state_with_brain_and_manifest(
+            &home,
+            "running",
+            AppConfig::default(),
+            None,
+            roster_manifest(),
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        let mut card = crate::ports::tasks::TaskRecord {
+            id: "t-9".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
+            note: None,
+            column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+            priority: "medium".to_string(),
+            assignee: "backend_engineer".to_string(),
+            updated_at_millis: 1,
+            origin: None,
+            origin_message_seq: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        card.origin =
+            crate::ports::tasks::TaskOrigin::new(Some("dm:backend_engineer".to_string()), None);
+        runtime.tasks().upsert(runtime.id(), &card).await.unwrap();
+
+        runtime
+            .park_blocker(
+                &BlockerPayload {
+                    kind: BlockerKind::Infrastructure,
+                    source: BlockerSource::Provider,
+                    step: Some(BlockerStep::Task {
+                        task_id: "t-9".to_string(),
+                    }),
+                    reason: "the model id was rejected".to_string(),
+                    needed: "a model id this provider serves".to_string(),
+                    group_key: None,
+                },
+                "t-9",
+                BlockerSenderSignals {
+                    started_by: None,
+                    owner_desk: None,
+                    assignee: Some("backend_engineer".to_string()),
+                },
+            )
+            .await
+            .expect("parks the blocker into the teammate's DM");
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/companies/acme/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"chat":"dm:backend_engineer","text":"yes, go ahead and retry it"}"#,
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect(
+            "answering a task-backed blocker in a DM deadlocked: the route held the board \
+             lock while waiting on the follow-up that needs it",
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(
+            runtime.pending_approvals().is_empty(),
+            "the answered blocker is retired"
+        );
+        let moved = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|t| t.id == "t-9")
+            .expect("the card is still on the board");
+        assert_eq!(
+            moved.column,
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the DM answer re-dispatched the paused card"
         );
     }
 
@@ -7912,7 +10356,790 @@ mode = "full"
         );
     }
 
-    // -- Extend the deadline (issue #1805) ----------------------------------
+    /// The dotted kind the stalled brain parks once its follow-up turn gets
+    /// past the barrier. Parking journals durably (`record_parked`), so its
+    /// presence in `pending_approvals()` is proof the continuation reached the
+    /// end of the turn *and* wrote to disk — not merely that a task was alive.
+    const CONTINUATION_MARKER: &str = "continuation.marker";
+
+    /// A brain that parks one gated tool call per operator message and, on the
+    /// follow-up `ApprovalResolved` cycle, blocks mid-turn until the test
+    /// releases it — the shape of a slow agent turn behind a proxy.
+    struct StalledContinuationBrain {
+        /// Fires once the follow-up turn has begun. By this point the verdict
+        /// is journaled and the grant minted, so this is exactly the moment the
+        /// field report's connection died.
+        entered: Arc<tokio::sync::Notify>,
+        /// The test's permission for the turn to finish.
+        release: Arc<tokio::sync::Notify>,
+        /// The effect parked for the operator's sign-off. Whether it may be
+        /// granted a standing permission is a property of this effect, so the
+        /// scope tests supply their own rather than sharing one fixture.
+        parked: crate::ports::types::Effect,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for StalledContinuationBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            for event in &req.events {
+                match event {
+                    CompanyEvent::OperatorMessage { .. } => {
+                        host.park_effect(self.parked.clone()).await?;
+                    }
+                    CompanyEvent::ApprovalResolved { .. } => {
+                        self.entered.notify_one();
+                        self.release.notified().await;
+                        host.park_effect(crate::ports::types::Effect {
+                            kind: CONTINUATION_MARKER.into(),
+                            group: crate::ports::types::EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({}),
+                            agent: None,
+                            run_id: None,
+                        })
+                        .await?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "stalled continuation",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    fn chat_request(text: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/chat")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "text": text }).to_string()))
+            .unwrap()
+    }
+
+    /// A resolve against the single-company alias. `scope` lets the same body be
+    /// aimed at the `/companies/{id}` form, which must behave identically.
+    fn resolve_request_scoped(
+        scope: &str,
+        approval_id: &ApprovalId,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn resolve_request(approval_id: &ApprovalId, body: serde_json::Value) -> Request<Body> {
+        resolve_request_scoped("/api/v1/company", approval_id, body)
+    }
+
+    // -- A blocker answered from the Approvals page (issue #2028) -------------
+
+    /// Parks a workflow-node blocker: `TaskLink::Unlinked` with no
+    /// conversation, which is the shape a node blocker takes and the reason the
+    /// chat blocker path — which filters on the thread — can never reach one.
+    #[cfg(feature = "openhuman")]
+    async fn park_node_blocker(
+        runtime: &Arc<CompanyRuntime>,
+        id: &str,
+        group_key: Option<&str>,
+    ) -> ApprovalId {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Infrastructure,
+            source: BlockerSource::Provider,
+            step: Some(BlockerStep::Node {
+                run_id: "run-1".to_string(),
+                node_id: "draft".to_string(),
+            }),
+            reason: "the model id `gpt-nope` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: group_key.map(str::to_string),
+        };
+        let approval = ApprovalId::new(id);
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: Some("run-1".to_string()),
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        approval
+    }
+
+    /// Every `BlockerResolved` line the durable journal holds, in append order —
+    /// what the operator's answer actually banked, read off disk rather than off
+    /// the in-memory map the resume consumes.
+    #[cfg(feature = "openhuman")]
+    async fn banked_resolutions(
+        home: &std::path::Path,
+        company: &CompanyId,
+    ) -> Vec<serde_json::Value> {
+        let path = crate::store::paths::Bundle::new(home, company).journal_jsonl();
+        let raw = tokio::fs::read_to_string(path).await.unwrap_or_default();
+        raw.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["record"] == "BlockerResolved")
+            .collect()
+    }
+
+    /// A company with one parked workflow-node blocker, and the pieces a resolve
+    /// test needs to read back what its click banked.
+    #[cfg(feature = "openhuman")]
+    struct BlockedCompany {
+        app: axum::Router,
+        runtime: Arc<CompanyRuntime>,
+        home: std::path::PathBuf,
+        company: CompanyId,
+        approval_id: ApprovalId,
+    }
+
+    #[cfg(feature = "openhuman")]
+    async fn blocked_company(home: &std::path::Path) -> BlockedCompany {
+        let home = home.to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let approval_id = park_node_blocker(&runtime, "blocker-1", None).await;
+        BlockedCompany {
+            app,
+            runtime,
+            home,
+            company,
+            approval_id,
+        }
+    }
+
+    /// Posts a resolve and returns its status and parsed body.
+    #[cfg(feature = "openhuman")]
+    async fn post_resolve(
+        app: &axum::Router,
+        id: &ApprovalId,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(resolve_request(id, body))
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// Every refusal owes the same two things beyond its 400: the blocker is
+    /// still parked, and nothing was banked. A validation that answered 400
+    /// after journaling a verdict would have spent the operator's question.
+    #[cfg(feature = "openhuman")]
+    async fn assert_refused(body: serde_json::Value, expect_in_error: &str) {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(&c.app, &c.approval_id, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        let message = answer["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expect_in_error),
+            "the refusal must say why; got {message:?}"
+        );
+        assert!(
+            c.runtime
+                .pending_approvals()
+                .iter()
+                .any(|p| p.id == c.approval_id),
+            "a refused request must leave the blocker parked"
+        );
+        assert!(
+            banked_resolutions(&c.home, &c.company).await.is_empty(),
+            "a refused request must journal no verdict"
+        );
+    }
+
+    /// **Issue #2028 — the bug.** An Approvals click that says `skip` banks a
+    /// skip. Before the route arm existed the same request banked a `retry`,
+    /// because `verdict: approve` was the only thing the host read.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_skip_from_the_approvals_page_banks_a_skip() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1, "one answer, one banked resolution");
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "skip",
+            "the operator asked to skip the node, not to run it again"
+        );
+    }
+
+    /// The amend twin: the words the operator typed reach the banked resolution
+    /// verbatim, which is what the re-entered step reads.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_amend_from_the_approvals_page_carries_the_answer_verbatim() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "amend",
+                "blocker_answer": "use gpt-4o-mini instead",
+                "detach": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(banked[0]["resolution"]["verdict"], "amend");
+        assert_eq!(
+            banked[0]["resolution"]["answer"], "use gpt-4o-mini instead",
+            "the correction must reach the step, or the re-run repeats the failure"
+        );
+    }
+
+    /// A cancel still denies, and is still the only verdict that does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_cancel_from_the_approvals_page_banks_a_cancel() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "deny", "blocker_verdict": "cancel", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(banked[0]["resolution"]["verdict"], "cancel");
+    }
+
+    /// Answering one member of a root-cause group answers all of them — the
+    /// same fan-out a DM answer performs — and the receipt names every id it
+    /// settled so the console can drop the siblings' cards too.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_group_settles_together_and_the_receipt_names_every_member() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let first = park_node_blocker(&runtime, "grouped-1", Some("connection:slack")).await;
+        let second = park_node_blocker(&runtime, "grouped-2", Some("connection:slack")).await;
+
+        let (status, answer) = post_resolve(
+            &app,
+            &first,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(
+            answer["settledIds"],
+            serde_json::json!(["grouped-1", "grouped-2"]),
+            "the receipt must name the siblings the answer settled: {answer}"
+        );
+        assert!(
+            runtime.pending_approvals().is_empty(),
+            "one answer to a root-cause group retires every member of it"
+        );
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 2, "both members banked the same verdict");
+        for line in &banked {
+            assert_eq!(line["resolution"]["verdict"], "skip");
+        }
+        let _ = second;
+    }
+
+    /// An ordinary resolve is unchanged: no `settledIds` key at all, so a
+    /// console predating the field reads the same body it always did.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_ordinary_resolve_names_no_settled_ids() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "approve", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(
+            answer.get("settledIds").is_none(),
+            "a resolve that fanned to nothing must carry no list: {answer}"
+        );
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_disagreeing_verdict_pair_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "deny", "blocker_verdict": "skip" }),
+            "cannot accompany verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blank_amend_is_refused_rather_than_downgraded() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "amend",
+                "blocker_answer": "   \n\t ",
+            }),
+            "needs a non-empty blocker_answer",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_amend_with_no_answer_at_all_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "amend" }),
+            "needs a non-empty blocker_answer",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_answer_with_no_verdict_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_answer": "use gpt-4o-mini" }),
+            "blocker_answer needs a blocker_verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_answer_on_a_wordless_verdict_is_refused() {
+        for verdict in ["retry", "skip", "cancel"] {
+            let event = if verdict == "cancel" {
+                "deny"
+            } else {
+                "approve"
+            };
+            assert_refused(
+                serde_json::json!({
+                    "verdict": event,
+                    "blocker_verdict": verdict,
+                    "blocker_answer": "words this verdict cannot carry",
+                }),
+                "only accompanies blocker_verdict",
+            )
+            .await;
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_unknown_blocker_verdict_is_refused_by_name() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "ignore" }),
+            "unknown blocker_verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_with_an_amended_payload_is_refused() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "skip",
+                "amended_payload": { "text": "edited" },
+            }),
+            "cannot accompany amended_payload",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_with_a_tool_scope_is_refused() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "skip",
+                "scope": "tool",
+                "expires_in_millis": 3_600_000,
+            }),
+            "cannot accompany scope",
+        )
+        .await;
+    }
+
+    /// A `blocker_verdict` on an approval that is not a parked blocker is a 400,
+    /// not a quiet fall-through to the two-value path — which would lose the
+    /// operator's verdict without telling anyone.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_on_an_ordinary_approval_is_refused() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let ordinary = park_for_extend(&runtime, "ordinary-1", crate::ports::now_millis()).await;
+
+        let (status, answer) = post_resolve(
+            &app,
+            &ordinary,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is not a parked blocker"),
+            "{answer}"
+        );
+        assert!(
+            runtime.pending_approvals().iter().any(|p| p.id == ordinary),
+            "a refused request must leave the approval parked"
+        );
+        assert!(banked_resolutions(&home, &company).await.is_empty());
+    }
+
+    /// A blocker raised by `escalate_to_human` carries no
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep) — the tool holds
+    /// neither a card nor a node — so the resume falls back to the card the
+    /// approval is linked to, and answering re-dispatches it.
+    ///
+    /// The banked resolution is still stepless, and that assertion is
+    /// load-bearing rather than incidental: the fallback is read at resume
+    /// time, so the durable record keeps saying what the blocker actually
+    /// carried instead of being rewritten to claim a step it never had.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_agent_question_re_dispatches_the_card_its_approval_is_linked_to() {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-9".to_string(),
+                    title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "eng".to_string(),
+                    updated_at_millis: 1,
+                    origin: None,
+                    origin_message_seq: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Information,
+            source: BlockerSource::AgentQuestion,
+            step: None,
+            reason: "which of the two briefs is current?".to_string(),
+            needed: "an answer from you".to_string(),
+            group_key: None,
+        };
+        let approval = ApprovalId::new("question-1");
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: None,
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::from_task_id(Some("t-9")),
+                ApprovalConversation {
+                    thread: Some("dm:eng".to_string()),
+                    parent: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (status, answer) = post_resolve(
+            &app,
+            &approval,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(
+            answer["settledIds"],
+            serde_json::json!(["question-1"]),
+            "the non-detached body names what it settled too: {answer}"
+        );
+
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "skip",
+            "the operator's verdict is banked whatever the resume can do with it"
+        );
+        assert!(
+            banked[0]["resolution"].get("step").is_none(),
+            "the durable record keeps the stepless park the blocker carried: {}",
+            banked[0]
+        );
+        let card = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-9")
+            .expect("the card still exists");
+        assert_eq!(
+            card.column,
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the answer re-dispatches the linked card"
+        );
+    }
+
+    /// The link is followed only to a card the board still holds.
+    ///
+    /// A stepless question's approval carries a task link because a card was in
+    /// hand when it was asked, not because the card is the thing to re-enter.
+    /// When that card is gone — deleted, or never on this board — reading the
+    /// link as a card resume answers the operator with *that card is no longer
+    /// on the board*, which is a report about a card in place of the answer to
+    /// the question they just gave. The answer goes back into the conversation
+    /// instead, exactly as it does for a question that was never linked.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_agent_question_linked_to_a_card_the_board_lost_still_answers_the_question() {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Information,
+            source: BlockerSource::AgentQuestion,
+            step: None,
+            reason: "which of the two briefs is current?".to_string(),
+            needed: "an answer from you".to_string(),
+            group_key: None,
+        };
+        let approval = ApprovalId::new("question-2");
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: None,
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        // The link names a card that is not on the board, which is the whole
+        // case: nothing is seeded for `t-gone`.
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::from_task_id(Some("t-gone")),
+                ApprovalConversation {
+                    thread: Some("dm:eng".to_string()),
+                    parent: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (status, answer) = post_resolve(
+            &app,
+            &approval,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "retry" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "retry",
+            "the operator's answer is banked whatever the resume finds: {}",
+            banked[0]
+        );
+        let notes: Vec<String> = runtime
+            .events
+            .read_from(
+                runtime.id(),
+                crate::ports::types::EventSeq::new(0),
+                usize::MAX,
+            )
+            .await
+            .expect("read events")
+            .into_iter()
+            .filter_map(|stored| match stored.event {
+                crate::ports::types::CompanyEvent::AgentReply { chat_id, text, .. }
+                    if chat_id == "dm:eng" =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.contains("no longer on the board")),
+            "answering a question must not report on a card the asker never mentioned; \
+             posted: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note == "Got it — picking that back up now."),
+            "the answer must still reach the conversation it was asked in; posted: {notes:?}"
+        );
+    }
+
+    /// A build with no blocker resume refuses the field outright. Accepting and
+    /// ignoring it would answer `200` to a skip that silently became a retry —
+    /// the exact defect, reintroduced by a feature flag.
+    #[cfg(not(feature = "openhuman"))]
+    #[tokio::test]
+    async fn a_build_without_the_resume_refuses_a_blocker_verdict() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+
+        let response = app
+            .oneshot(resolve_request(
+                &ApprovalId::new("missing"),
+                serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not supported by this build"),
+            "{value}"
+        );
+    }
+
+    // -- Extend the deadline (issue #1805) -----------------------------------
 
     /// Parks one effect in BOTH the gate and the journal under a fixed id, at a
     /// controllable instant — the gate is what `extend_approval` asks whether an
@@ -8022,120 +11249,233 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The route is guarded by the same company auth as resolve: a member — an
-    /// authenticated user of the company — may extend a deadline, exactly as
-    /// they may resolve. Keeping a stalled run alive is not an admin-only lever.
+    /// APPR-004: extend must be able to win a race the sweep has not yet run —
+    /// an approval whose deadline has already passed but that is still
+    /// physically parked (nothing has swept it out of the gate) must still be
+    /// extendable, and the extension must genuinely move the deadline rather
+    /// than just answer as if it had.
+    ///
+    /// `resolve`'s own past-deadline check (`gate.rs`'s TTL math) and
+    /// `extend`'s (`ParkedApprovals::extend`, existence-only) are two
+    /// different tests over the same map — that gap is exactly the window
+    /// `/extend` exists to rescue something in, per issue #1805.
     #[tokio::test]
-    async fn a_member_may_extend_an_approval_deadline() {
+    async fn extending_beats_a_pending_sweep_on_an_already_past_deadline_approval() {
         let home_dir = home();
         let state = state_with_company(home_dir.path(), "running").await;
-        crate::server::test_support::seed_fixed_member(&state, "acme").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
 
-        let app = router(state);
-        let response = app
-            .oneshot(extend_request_with_cookie(
-                &id,
-                crate::server::test_support::member_cookie("acme"),
+        // Parked at the epoch: this host's TTL has long since passed, and
+        // nothing has swept either entry out of the gate yet.
+        let control = park_for_extend(&runtime, "appr-control", 1).await;
+        let target = park_for_extend(&runtime, "appr-target", 1).await;
+
+        let app = router(state.clone());
+
+        // The control proves the premise: resolving an untouched twin of the
+        // same stale park reports `expired`.
+        let resolved = app
+            .clone()
+            .oneshot(resolve_request(
+                &control,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
             ))
             .await
             .unwrap();
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let body = body_json(resolved).await;
+        assert_eq!(
+            body["outcome"], "expired",
+            "premise: a park this old is already past this host's TTL, got {body}"
+        );
+
+        // Extending the other twin, before anything else touches it, must
+        // still succeed — this is the whole reason `/extend` exists.
+        let extended = app.clone().oneshot(extend_request(&target)).await.unwrap();
+        assert_eq!(
+            extended.status(),
+            StatusCode::OK,
+            "extend must be able to rescue a park the sweep has not yet reclaimed"
+        );
+
+        // And now resolving it must NOT report `expired` — the deadline
+        // genuinely moved, not just the extend receipt's word for it.
+        let resolved = app
+            .oneshot(resolve_request(
+                &target,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let body = body_json(resolved).await;
+        assert_ne!(
+            body["outcome"], "expired",
+            "extend must genuinely push the deadline out, not just answer as if it did: {body}"
+        );
+    }
+
+    /// PLAT-014 (Member ⇒ approve): the sharpest of the auth-matrix's four
+    /// rows. A Member sees a money-bearing approval exists (issue #468's
+    /// "waiting on approval" indicator has to survive for them) but not what
+    /// it is about (issue #618) — and cannot act on it at all: both
+    /// `POST {scope}/approvals/{aid}` and `/extend` are `AdminScopedCompany`.
+    /// All three properties are asserted against the same parked approval, so
+    /// the redaction and the auth gate cannot silently disagree about which
+    /// one is doing the protecting.
+    #[tokio::test]
+    async fn a_member_cannot_read_or_act_on_a_money_bearing_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let approval = park_for_extend(&runtime, "appr-member", crate::ports::now_millis()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        // Sees it exists, but not what it costs.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/approvals")
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    /// The dotted kind the stalled brain parks once its follow-up turn gets
-    /// past the barrier. Parking journals durably (`record_parked`), so its
-    /// presence in `pending_approvals()` is proof the continuation reached the
-    /// end of the turn *and* wrote to disk — not merely that a task was alive.
-    const CONTINUATION_MARKER: &str = "continuation.marker";
-
-    /// A brain that parks one gated tool call per operator message and, on the
-    /// follow-up `ApprovalResolved` cycle, blocks mid-turn until the test
-    /// releases it — the shape of a slow agent turn behind a proxy.
-    struct StalledContinuationBrain {
-        /// Fires once the follow-up turn has begun. By this point the verdict
-        /// is journaled and the grant minted, so this is exactly the moment the
-        /// field report's connection died.
-        entered: Arc<tokio::sync::Notify>,
-        /// The test's permission for the turn to finish.
-        release: Arc<tokio::sync::Notify>,
-        /// The effect parked for the operator's sign-off. Whether it may be
-        /// granted a standing permission is a property of this effect, so the
-        /// scope tests supply their own rather than sharing one fixture.
-        parked: crate::ports::types::Effect,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::ports::brain::Brain for StalledContinuationBrain {
-        async fn run_cycle(
-            &self,
-            req: crate::ports::types::CycleRequest,
-            host: &dyn crate::ports::brain::CycleHost,
-        ) -> crate::Result<crate::ports::types::CycleResult> {
-            for event in &req.events {
-                match event {
-                    CompanyEvent::OperatorMessage { .. } => {
-                        host.park_effect(self.parked.clone()).await?;
-                    }
-                    CompanyEvent::ApprovalResolved { .. } => {
-                        self.entered.notify_one();
-                        self.release.notified().await;
-                        host.park_effect(crate::ports::types::Effect {
-                            kind: CONTINUATION_MARKER.into(),
-                            group: crate::ports::types::EffectGroup::Other,
-                            amount_usd: None,
-                            established_thread: false,
-                            first_time_counterparty: false,
-                            payload: serde_json::json!({}),
-                            agent: None,
-                            run_id: None,
-                        })
-                        .await?;
-                    }
-                    _ => {}
-                }
-            }
-            Ok(crate::ports::types::CycleResult {
-                channel_responses: Vec::new(),
-                new_traces: vec![crate::ports::types::CompressedTrace::now(
-                    &req.cycle_id,
-                    "stalled continuation",
-                )],
-                ledger_deltas: Vec::new(),
-                token_usage: crate::ports::types::TokenUsage::default(),
-            })
-        }
-    }
-
-    fn chat_request(text: &str) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/company/chat")
-            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::json!({ "text": text }).to_string()))
+        let body = body_json(response).await;
+        let listed = body
+            .as_array()
             .unwrap()
+            .iter()
+            .find(|a| a["id"] == approval.to_string())
+            .expect("the approval is visible to a member");
+        assert_eq!(
+            listed["contents_hidden"], true,
+            "a member must be told the contents were withheld: {listed}"
+        );
+        assert!(
+            listed["amount_usd"].is_null(),
+            "a member must not receive the dollar amount: {listed}"
+        );
+        assert!(
+            listed["payload"].is_null(),
+            "a member must not receive the payload either: {listed}"
+        );
+
+        // Cannot resolve it.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/company/approvals/{approval}"))
+                    .header("cookie", &member_cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "verdict": "approve" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a member must not be able to approve a parked effect"
+        );
+
+        // Cannot extend it either.
+        let response = app
+            .oneshot(extend_request_with_cookie(&approval, member_cookie))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a member must not be able to extend a parked effect's deadline"
+        );
     }
 
-    /// A resolve against the single-company alias. `scope` lets the same body be
-    /// aimed at the `/companies/{id}` form, which must behave identically.
-    fn resolve_request_scoped(
-        scope: &str,
-        approval_id: &ApprovalId,
-        body: serde_json::Value,
-    ) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri(format!("{scope}/approvals/{approval_id}"))
-            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    }
+    /// POL-011: `extend_approval` is one handler mounted under both scope
+    /// forms (`scoped("/approvals/{aid}/extend", ...)`), so the platform
+    /// `/companies/{id}/...` form must carry the exact same admin gate the
+    /// `/company/...` alias does — and must not become a side channel that
+    /// resolves against the wrong company merely because its id rode in the
+    /// path instead of the alias.
+    #[tokio::test]
+    async fn extend_on_the_scoped_route_form_enforces_admin_and_the_right_company() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let approval = park_for_extend(&runtime, "appr-scoped", crate::ports::now_millis()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let admin_cookie = crate::server::test_support::fixed_cookie("acme");
+        let app = router(state);
 
-    fn resolve_request(approval_id: &ApprovalId, body: serde_json::Value) -> Request<Body> {
-        resolve_request_scoped("/api/v1/company", approval_id, body)
+        // AUTH: a member is refused on the scoped form exactly as on the alias.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/companies/acme/approvals/{approval}/extend"
+                    ))
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // FAIL: addressing a *different* company id on the scoped form must
+        // 404 rather than reach into `acme`'s gate — the path segment is the
+        // only thing naming the company here, unlike the alias.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/companies/globex/approvals/{approval}/extend"
+                    ))
+                    .header("cookie", &admin_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "a company id that does not exist must not extend acme's approval"
+        );
+        assert!(
+            runtime.pending_approvals().iter().any(|a| a.id == approval),
+            "the approval must still be sitting under its real company, untouched"
+        );
+
+        // And the scoped form works for the right admin and the right company.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/companies/acme/approvals/{approval}/extend"
+                    ))
+                    .header("cookie", &admin_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// Whether the stalled brain's follow-up turn has journaled its marker yet.
@@ -9245,6 +12585,7 @@ mode = "full"
             &EventStreamItem::Gap { missed: 44 },
             &std::collections::HashMap::new(),
             &Viewer::Operator,
+            true,
         )
         .expect("a gap must reach the console");
         assert_eq!(
@@ -9257,6 +12598,7 @@ mode = "full"
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -9291,6 +12633,7 @@ mode = "full"
     fn projects_agent_reply_with_viewer_mention_metadata() {
         use crate::ports::types::{Mention, MentionTarget};
         let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: vec![
                 Mention {
                     target: MentionTarget::User { id: "u-1".into() },
@@ -9314,8 +12657,9 @@ mode = "full"
             steps: Vec::new(),
         });
         let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
-        let value = super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()))
-            .expect("agent_reply is an attention signal");
+        let value =
+            super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()), false)
+                .expect("agent_reply is an attention signal");
         assert_eq!(
             value["mentions"],
             serde_json::json!([
@@ -9324,9 +12668,64 @@ mode = "full"
             ])
         );
     }
+
+    /// Issue #1781 review, Codex P1: `history_for_desk` already hides an
+    /// owner-fallback report from a non-admin on reload; this proves the live
+    /// SSE projection agrees, rather than handing a non-admin console the full
+    /// admin-only text the instant it lands.
+    #[test]
+    fn drops_owner_fallback_report_from_a_non_admin_viewer() {
+        let event = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "operator".into(),
+            agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+            text: "no admin has a mailbox".into(),
+            steps: Vec::new(),
+        });
+
+        let non_admin = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::User("member-1".into()),
+            false,
+        );
+        assert!(
+            non_admin.is_none(),
+            "a non-admin viewer must not receive the admin-only report live: {non_admin:?}"
+        );
+
+        let admin = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::User("admin-1".into()),
+            true,
+        )
+        .expect("an admin viewer still receives the report live");
+        assert_eq!(
+            admin["agentId"],
+            crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+        );
+
+        // The Operator viewer (issue #66's original, unrestricted principal)
+        // must see it too — same as `project_event`'s `is_admin: true` default.
+        let operator = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("the operator viewer still receives the report live");
+        assert_eq!(operator["text"], "no admin has a mailbox");
+    }
+
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: Some(EventSeq::new(4)),
@@ -9506,6 +12905,7 @@ mode = "full"
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -9530,6 +12930,7 @@ mode = "full"
     #[test]
     fn projects_task_id_only_when_the_event_is_correlated() {
         let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -9576,6 +12977,7 @@ mode = "full"
             column: "in_review".into(),
             artifact_ids: Vec::new(),
             origin_chat_id: Some("engineering".into()),
+            origin_parent: None,
         }))
         .expect("desk_task_completed is an attention signal");
         assert_eq!(v["type"], serde_json::json!("desk_task_completed"));
@@ -9605,6 +13007,7 @@ mode = "full"
             column: "in_review".into(),
             artifact_ids: Vec::new(),
             origin_chat_id: Some("engineering".into()),
+            origin_parent: None,
         }))
         .expect("desk_task_completed is an attention signal");
         assert!(v.get("output").is_none(), "{v}");
@@ -9626,10 +13029,53 @@ mode = "full"
             column: "in_review".into(),
             artifact_ids: Vec::new(),
             origin_chat_id: None,
+            origin_parent: None,
         }))
         .expect("desk_task_completed is an attention signal");
         assert!(v.get("chatId").is_none(), "{v}");
         assert_eq!(v["column"], serde_json::json!("in_review"));
+    }
+
+    /// Issue #1890 B: the thread inside the channel, on exactly the terms
+    /// `chatId` rides on.
+    ///
+    /// Stringified, because the console keys threads by message id and a
+    /// message id is a string there — `chat/history` renders the same root the
+    /// same way, and the two must agree or the marker would render inline live
+    /// and jump into a thread on reload.
+    #[test]
+    fn desk_task_completed_projects_the_thread_its_card_was_raised_in() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
+            origin_parent: Some(crate::ports::types::EventSeq::new(41)),
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert_eq!(v["chatId"], serde_json::json!("engineering"));
+        assert_eq!(v["parentId"], serde_json::json!("41"));
+    }
+
+    /// A card raised straight into a channel omits `parentId` rather than
+    /// sending null — the same presence-check shape `chatId` takes, so the
+    /// console reads "channel level" without a null check.
+    #[test]
+    fn desk_task_completed_omits_the_parent_for_a_channel_level_card() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
+            origin_parent: None,
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert_eq!(v["chatId"], serde_json::json!("engineering"));
+        assert!(v.get("parentId").is_none(), "{v}");
     }
 
     #[test]
@@ -10001,6 +13447,7 @@ mode = "full"
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -10048,6 +13495,7 @@ mode = "full"
             run_id: "run-1".into(),
             scheduled: true,
             started_by: None,
+            resume_semantic: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(started["type"], "workflow_run_started");
@@ -10066,6 +13514,7 @@ mode = "full"
             run_id: "run-1".into(),
             scheduled: false,
             started_by: Some(crate::ports::types::StartedBy::Agent("ceo".into())),
+            resume_semantic: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(
@@ -10581,6 +14030,149 @@ mode = "full"
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// GRANT-012 (AUTH): `GET {scope}/grants` stays readable by any member —
+    /// the same consistency `GET {scope}/tools/grants` holds — but revoking one
+    /// is an admin action (issue #2169). A Member must see the list and be
+    /// refused the delete.
+    #[tokio::test]
+    async fn a_member_may_list_standing_grants_but_not_revoke_one() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        runtime
+            .grants
+            .grant_standing(crate::runtime::grants::StandingGrant {
+                id: crate::runtime::grants::GrantId::new("g-member"),
+                agent: "ops".into(),
+                workflow: None,
+                tool: "workspace_write".into(),
+                verdict: Verdict::Approve,
+                granted_by: Actor {
+                    kind: ActorKind::User,
+                    id: "user-7".into(),
+                },
+                approval_id: ApprovalId::new("appr-1"),
+                at_millis: 1_000,
+                expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+                scope: None,
+            });
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/grants")
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a member may read the standing-grants list"
+        );
+        let body = body_json(response).await;
+        assert_eq!(body[0]["id"], "g-member");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/grants/g-member")
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "revoking a standing grant is an admin action, matching the tools/grants plane"
+        );
+    }
+
+    /// GRANT-012 (FAIL): `revoke_standing` is a plain map removal with no
+    /// expiry check of its own — a grant past its deadline that nothing has
+    /// *swept* yet is still found and revoked normally (204), exactly as
+    /// `/extend` can still rescue a not-yet-swept approval. Only once
+    /// `sweep_standing` has actually removed it does revoke correctly answer
+    /// the "nothing to revoke" 404 the route's own doc promises — the same
+    /// distinction as an already-revoked id, never a 500.
+    #[tokio::test]
+    async fn revoking_a_grant_is_404_only_once_it_is_actually_swept() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let stale_grant = |id: &str| crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new(id),
+            agent: "ops".into(),
+            workflow: None,
+            tool: "workspace_write".into(),
+            verdict: Verdict::Approve,
+            granted_by: Actor {
+                kind: ActorKind::User,
+                id: "user-7".into(),
+            },
+            approval_id: ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            // Already in the past either way; only sweeping tells the two apart.
+            expires_at_millis: 1_001,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: None,
+        };
+        runtime.grants.grant_standing(stale_grant("g-unswept"));
+        runtime.grants.grant_standing(stale_grant("g-swept"));
+
+        let app = router(state.clone());
+        let delete = |id: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/v1/company/grants/{id}"))
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Past-deadline but not yet swept: still a normal, successful revoke.
+        let response = delete("g-unswept").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "an expired-but-unswept grant is still physically present, so revoking it is an \
+             ordinary success — exactly as extend can still rescue an unswept approval"
+        );
+
+        // Now actually sweep the other one out from under the route.
+        let swept = runtime.grants.sweep_standing(crate::ports::now_millis());
+        assert_eq!(swept.len(), 1, "premise: the grant was in fact swept");
+
+        let response = delete("g-swept").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "once actually swept, revoke must report the same 'nothing to revoke' answer an \
+             already-revoked id does"
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -11686,111 +15278,1275 @@ mode = "full"
         );
     }
 
-    /// Issue #1835, both wire directions. A create that never mentions
-    /// `responder` — every existing caller, and the org chart today — answers
-    /// and lists with **no** `responder` key at all, so old consoles see the
-    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
-    /// answers and lists `"auto"`, and the mode survives the store round-trip
-    /// rather than collapsing back to a lead desk.
+    /// Issue #1781 review (Codex P1): [`company_events`]'s periodic refresh
+    /// must re-derive admin access from the live user record, not keep
+    /// answering with whatever it was when the SSE stream opened. Proven
+    /// directly against [`refreshed_is_admin`] — the seam that refresh loop
+    /// calls on every tick — rather than the SSE handler itself, since the
+    /// handler's own timing (a real `EventSource`, a 60s interval) is not
+    /// what this bug is about.
     #[tokio::test]
-    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
+    async fn refreshed_is_admin_reflects_a_mid_stream_demotion() {
         let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
 
-        let post = |body: &'static str| {
-            let app = app.clone();
-            let cookie = cookie.clone();
-            async move {
-                let response = app
-                    .oneshot(
-                        Request::builder()
-                            .method("POST")
-                            .uri("/api/v1/company/desks")
-                            .header("cookie", &cookie)
-                            .header("content-type", "application/json")
-                            .body(Body::from(body))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(response.status(), StatusCode::CREATED);
-                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
-            }
+        let mut user = crate::ports::users::UserRecord {
+            id: "u1".to_string(),
+            email: "admin@acme.test".to_string(),
+            display_name: None,
+            avatar: None,
+            role: crate::ports::users::UserRole::Admin,
+            status: crate::ports::users::UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: crate::ports::now_millis(),
+            last_seen_at_millis: None,
+            updated_at_millis: crate::ports::now_millis(),
+        };
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+        let actor = Actor {
+            kind: ActorKind::User,
+            id: user.id.clone(),
         };
 
-        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
         assert!(
-            lead.get("responder").is_none(),
-            "a mode never stated must not appear on the wire: {lead}"
+            refreshed_is_admin(&runtime, Some(&actor), false).await,
+            "an active admin's record must resolve to admin, even starting from a stale `false`"
         );
-        let auto =
-            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
-        assert_eq!(auto["responder"], "auto", "{auto}");
 
-        // The list re-reads the store, so this is the round-trip half: the
-        // manifest desk and the defaulted create stay keyless, the channel
-        // keeps its mode.
-        let desks = get_desks(&app, &cookie).await;
-        let arr = desks.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
+        // The demotion itself: same shape `PATCH …/users/{id}` writes, and —
+        // critically — it does not touch sessions, so a connection opened
+        // before this write stays open exactly as it would in production.
+        user.role = crate::ports::users::UserRole::Member;
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+
         assert!(
-            arr[1].get("responder").is_none(),
-            "defaulted create: {desks}"
+            !refreshed_is_admin(&runtime, Some(&actor), true).await,
+            "a demoted user's live record must flip a stale `true` to `false` — this is \
+             exactly the check `company_events` failed to make before this fix, leaking the \
+             owner-fallback admin-only report to a demoted viewer for the rest of their stream"
         );
-        assert_eq!(arr[2]["responder"], "auto", "{desks}");
+
+        // Suspension revokes admin the same way, even if role were untouched.
+        user.role = crate::ports::users::UserRole::Admin;
+        user.status = crate::ports::users::UserStatus::Suspended;
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+
+        assert!(
+            !refreshed_is_admin(&runtime, Some(&actor), true).await,
+            "a suspended admin must not keep admin-only visibility either"
+        );
     }
 
-    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
-    /// the selector would have no candidates and the first-member fallback no
-    /// first member, so its unmentioned messages would silently fall to the
-    /// orchestrator, contradicting the channel's own model. A **lead** desk
-    /// keeps its right to start empty and be staffed from the org chart.
-    /// Revert the guard in `create_desk` and the first assertion answers 201.
+    /// Issue #1781 review, Codex P1 second follow-up: a human actor whose
+    /// current role cannot be confirmed — `Ok(None)` because the user record
+    /// has gone missing, folded in here with a genuine store error since both
+    /// hit the same match arm — must resolve to `false`, not `previous`.
+    ///
+    /// `previous: true` here stands in for exactly the dangerous case: a
+    /// cached "was admin" value from before whatever made this actor
+    /// unconfirmable, revalidated at the one call site
+    /// (`is_admin_for_item`) that gates the admin-only owner-fallback report
+    /// on this result directly. Before this fix, an actor deleted out from
+    /// under an open SSE stream — or a transient read failure landing at the
+    /// exact moment a report needed gating — fell back to `previous` and kept
+    /// leaking the report, silently, for as long as the failure (or the
+    /// missing record) persisted.
     #[tokio::test]
-    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
+    async fn refreshed_is_admin_fails_closed_when_the_user_record_cannot_be_found() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        // Never upserted — `get_user` answers `Ok(None)`, the "record has
+        // gone missing" half of the case this proves.
+        let actor = Actor {
+            kind: ActorKind::User,
+            id: "ghost".to_string(),
+        };
+
+        assert!(
+            !refreshed_is_admin(&runtime, Some(&actor), true).await,
+            "a human actor with no resolvable user record must read as not-admin \
+             even when the cached value being revalidated was `true` — trusting \
+             `previous` here is exactly the fail-open gap this fix closes"
+        );
+    }
+
+    /// Issue #1781 review, Codex P1 follow-up: even with the periodic refresh
+    /// the test above covers, `company_events` still only re-checked on its
+    /// own `LABEL_REFRESH_EVERY` (60s) tick — a demotion landing right after
+    /// one tick left an open SSE stream projecting an owner-fallback report
+    /// under a stale cached `true` for up to another 60s. `is_admin_for_item`
+    /// is the fix: it revalidates fresh for that one content class instead of
+    /// trusting `cached`, no matter how long ago the last periodic tick was —
+    /// proven here by feeding it a `cached: true` that is already wrong the
+    /// instant this call happens, with no `sleep` at all.
+    ///
+    /// The second half is the other side of the same fix: an *ordinary* event
+    /// must keep using `cached` untouched, or every SSE item would pay a
+    /// store read regardless of content — the whole reason the fix is scoped
+    /// to the owner-fallback content class rather than revalidating every
+    /// item.
+    #[tokio::test]
+    async fn is_admin_for_item_revalidates_only_the_owner_fallback_report() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut user = crate::ports::users::UserRecord {
+            id: "u1".to_string(),
+            email: "admin@acme.test".to_string(),
+            display_name: None,
+            avatar: None,
+            role: crate::ports::users::UserRole::Admin,
+            status: crate::ports::users::UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: crate::ports::now_millis(),
+            last_seen_at_millis: None,
+            updated_at_millis: crate::ports::now_millis(),
+        };
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+        let actor = Actor {
+            kind: ActorKind::User,
+            id: user.id.clone(),
+        };
+
+        // The demotion: no wait, no periodic tick — the very next item must
+        // already see it for the gated content class.
+        user.role = crate::ports::users::UserRole::Member;
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+
+        let owner_fallback_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "operator".into(),
+            agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+            text: "no admin has a mailbox".into(),
+            steps: Vec::new(),
+        }));
+        assert!(
+            !super::is_admin_for_item(&owner_fallback_item, &runtime, Some(&actor), true).await,
+            "an owner-fallback report must revalidate fresh and see the demotion \
+             immediately — a stale cached `true` must never leak this content, \
+             regardless of when the last periodic refresh ran"
+        );
+
+        let ordinary_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "ordinary reply".into(),
+            steps: Vec::new(),
+        }));
+        assert!(
+            super::is_admin_for_item(&ordinary_item, &runtime, Some(&actor), true).await,
+            "an ordinary event must keep using the cached snapshot untouched — \
+             revalidating every item, not just the gated content class, would \
+             add a store read to the hot path for no reason"
+        );
+    }
+
+    /// The machine principal has no user record to look up — `actor: None` —
+    /// and [`ScopedCompany::is_admin`]'s own doc says it is unrestricted by
+    /// construction, so the refresh must leave it alone rather than treating
+    /// a missing actor as "look up nothing, therefore not admin".
+    #[tokio::test]
+    async fn refreshed_is_admin_leaves_the_machine_principal_unchanged() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        assert!(refreshed_is_admin(&runtime, None, true).await);
+        assert!(!refreshed_is_admin(&runtime, None, false).await);
+    }
+
+    /// Two cards can be `in_review` on the same desk at once. Approving the
+    /// pill the operator actually clicked must move that card and leave the
+    /// other alone — resolving the desk's most-recently-updated card instead
+    /// (Codex #3903031183) moves the wrong one whenever the older pill is
+    /// clicked after a newer card has settled.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_settles_the_clicked_task_not_the_desks_latest() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        for (task_id, updated_at_millis) in [("t-old", 1u64), ("t-new", 2u64)] {
+            runtime
+                .tasks()
+                .upsert(
+                    runtime.id(),
+                    &crate::ports::tasks::TaskRecord {
+                        id: task_id.to_string(),
+                        title: TaskTitle::authored("Ship it"),
+                        note: None,
+                        column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                        priority: "medium".to_string(),
+                        assignee: "ceo".to_string(),
+                        updated_at_millis,
+                        origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                        parent_task_id: None,
+                        output: None,
+                        plan: None,
+                        planning_attempts: Vec::new(),
+                        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                        workflow_proposal: None,
+                        origin_run_id: None,
+                        origin_workflow_id: None,
+                        origin_message_seq: None,
+                        bounced: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let receipt = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-old".to_string(),
+                decision: "approve".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect("the clicked card is settled")
+        .0;
+        assert_eq!(receipt.task_id, "t-old");
+        assert_eq!(receipt.column, crate::ports::tasks::COLUMN_DONE);
+
+        let cards = runtime.tasks().list(runtime.id()).await.unwrap();
+        let old = cards.iter().find(|t| t.id == "t-old").unwrap();
+        let new = cards.iter().find(|t| t.id == "t-new").unwrap();
+        assert_eq!(
+            old.column,
+            crate::ports::tasks::COLUMN_DONE,
+            "the clicked pill's card must settle"
+        );
+        assert_eq!(
+            new.column,
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "the desk's newer card must be untouched by a verdict on the older pill"
+        );
+    }
+
+    /// A `task_id` naming a card outside the reviewed desk (or one that has
+    /// already left `in_review`) must not resolve to some other card in the
+    /// conversation — the request is rejected rather than silently falling
+    /// back to "whatever is in review here".
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_rejects_a_task_id_not_in_review_on_this_desk() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-review".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let err = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "does-not-exist".to_string(),
+                decision: "approve".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect_err("an unknown task id must not fall back to the desk's own card");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// `apply_review_decision`'s `Revise` arm through the HTTP handler: the
+    /// card re-enters `in_progress` with the operator's note appended, rather
+    /// than settling to `done` the way `Approve` does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_revise_re_enters_in_progress_with_the_note() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: Some("[writer] first draft".to_string()),
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let receipt = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-1".to_string(),
+                decision: "revise".to_string(),
+                note: Some("tighten the intro".to_string()),
+            }),
+        )
+        .await
+        .expect("revise applies")
+        .0;
+        assert_eq!(receipt.task_id, "t-1");
+        assert_eq!(receipt.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        let note = after.note.expect("note");
+        assert!(note.contains("tighten the intro"), "{note}");
+    }
+
+    /// A thread reply intercepted as review feedback re-dispatches its card
+    /// instead of answering with `responses` here. Codex #3903907771:
+    /// `ChatView.send` reads an empty `responses` as "the turn produced
+    /// nothing" and renders a synthetic "(no reply)" bubble underneath the
+    /// operator's own feedback, even though the card was re-dispatched and
+    /// will answer through its later relay. `reviewFeedbackApplied` is what
+    /// tells the console this empty `responses` is expected.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn thread_reply_review_feedback_marks_the_response_not_empty_handed() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::DeskTaskCompleted {
+                    task_id: "t-1".to_string(),
+                    desk: "ceo".to_string(),
+                    output: "done".to_string(),
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    artifact_ids: Vec::new(),
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                },
+            )
+            .await
+            .unwrap();
+        let relay_seq = runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    chat_id: "strategy".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "Here is the draft.".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        let message = ChatMessage {
+            text: "needs another pass".to_string(),
+            chat: Some("strategy".to_string()),
+            parent: Some(relay_seq.value().to_string()),
+            deliverable: None,
+            detach: false,
+            mentions: None,
+            attachments: Vec::new(),
+        };
+
+        let outcome = chat_and_emit(&state, &id, runtime.clone(), message, None)
+            .await
+            .expect("review feedback applies");
+        let ChatOk::Settled(body) = outcome else {
+            panic!("a synchronous review-feedback intercept must not detach");
+        };
+        assert!(body.responses.is_empty());
+        assert_eq!(
+            body.review_feedback_applied,
+            Some(true),
+            "an empty `responses` here must be marked expected, not read as \
+             a silent turn"
+        );
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        assert_eq!(
+            after.column,
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the reply still re-dispatches the card"
+        );
+    }
+
+    /// An unrecognized `decision` string rejects with `InvalidRequest` (400)
+    /// rather than falling through to either verdict.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_rejects_an_unknown_decision() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let err = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-1".to_string(),
+                decision: "yeet".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect_err("an unknown decision string must not settle the card");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// `POST {scope}/chat/review` end to end through the real router: proves
+    /// the route is actually mounted by [`with_review_routes`] (not just that
+    /// the handler function works when called directly) and that the wire
+    /// body deserializes and settles the card via HTTP.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn chat_review_route_is_mounted_and_settles_via_http() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
 
-        let post = |body: &'static str| {
-            let app = app.clone();
-            let cookie = cookie.clone();
-            async move {
-                app.oneshot(
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat/review")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "chatId": "strategy",
+                            "taskId": "t-1",
+                            "decision": "approve",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["taskId"], "t-1");
+        assert_eq!(value["column"], "done");
+    }
+
+    /// No card is `in_review` on the desk at all — as opposed to a `taskId`
+    /// naming the wrong card, covered above — must also 404, through the same
+    /// HTTP path the console calls.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn chat_review_route_404s_when_no_card_is_in_review() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat/review")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "chatId": "strategy",
+                            "taskId": "t-1",
+                            "decision": "approve",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "openhuman")]
+    fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::TaskRecord {
+        crate::ports::tasks::TaskRecord {
+            id: id.to_string(),
+            title: TaskTitle::authored("Ship it"),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin: crate::ports::TaskOrigin::new(Some(chat_id.to_string()), None),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        }
+    }
+
+    /// Two review verdicts racing the same `in_review` card (PR #1981 review
+    /// finding, Codex P1) must not both resolve it before either applies —
+    /// same `task_writes`-serialized load-modify-save shape
+    /// `add_desk_member_serializes_against_the_company_write_lock` proves
+    /// above, applied to `review_card`.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_serializes_against_the_task_writes_lock() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &card_in_review("t-1", "strategy"))
+            .await
+            .unwrap();
+
+        let guard = runtime.task_writes.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            let scope = ScopedCompany {
+                runtime: runtime_for_task,
+                actor: None,
+                may_read_contents: true,
+                is_admin: true,
+            };
+            review_card(
+                scope,
+                Json(ChatReviewRequest {
+                    chat_id: "strategy".to_string(),
+                    task_id: "t-1".to_string(),
+                    decision: "approve".to_string(),
+                    note: None,
+                }),
+            )
+            .await
+        });
+
+        let raced_ahead = tokio::time::timeout(Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "review_card resolved and applied a verdict while task_writes was \
+             held elsewhere — it is not serializing against concurrent board \
+             writers"
+        );
+
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("review_card never resumed after task_writes was released")
+            .expect("review_card task panicked");
+        assert!(result.is_ok());
+    }
+
+    /// The revalidation half of the same finding: a review reply parked on
+    /// `task_writes` while a second verdict already settled the card must see
+    /// the now-current column once it resumes, not the stale `in_review`
+    /// snapshot it would have clone from before it blocked — so it 404s
+    /// instead of silently re-applying on top of the settled card.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_404s_when_the_card_left_review_while_the_reply_was_in_flight() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &card_in_review("t-1", "strategy"))
+            .await
+            .unwrap();
+
+        let guard = runtime.task_writes.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            let scope = ScopedCompany {
+                runtime: runtime_for_task,
+                actor: None,
+                may_read_contents: true,
+                is_admin: true,
+            };
+            review_card(
+                scope,
+                Json(ChatReviewRequest {
+                    chat_id: "strategy".to_string(),
+                    task_id: "t-1".to_string(),
+                    decision: "approve".to_string(),
+                    note: None,
+                }),
+            )
+            .await
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(200), &mut task).await;
+
+        let card = runtime
+            .review_card_in_review("t-1", "strategy")
+            .await
+            .expect("task store lookup")
+            .expect("card is still in_review before the lock is released");
+        runtime
+            .apply_review_decision(
+                &card,
+                crate::harness::built_in::lifecycle::ReviewDecision::Revise,
+                Some("send it back"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("review_card never resumed after task_writes was released")
+            .expect("review_card task panicked");
+        assert!(
+            result.is_err(),
+            "a review reply that had already resolved the card must not \
+             silently re-apply its verdict once the card is no longer \
+             in_review"
+        );
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        assert_eq!(after.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
+        let note = after.note.expect("note");
+        assert!(note.contains("send it back"), "{note}");
+    }
+
+    // -- Approval authority: deciding for the company, not addressing it -----
+
+    /// Both address forms. Every ops route is registered under two, and this
+    /// pair had already drifted apart: only the alias carried the
+    /// temporary-password refusal, so every assertion below runs against both.
+    const APPROVAL_SCOPES: [&str; 2] = ["/api/v1/companies/acme", "/api/v1/company"];
+
+    fn resolve_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let builder = Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}"))
+            .header("content-type", "application/json");
+        let builder = match cookie {
+            Some(cookie) => builder.header("cookie", cookie),
+            None => builder,
+        };
+        builder
+            .body(Body::from(
+                serde_json::json!({ "verdict": "deny" }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    fn extend_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let builder = Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}/extend"));
+        let builder = match cookie {
+            Some(cookie) => builder.header("cookie", cookie),
+            None => builder,
+        };
+        builder.body(Body::empty()).unwrap()
+    }
+
+    /// The sharpest case in this file. `may_read_approval_contents` already
+    /// refuses a member the payload and the amount an approval carries, so
+    /// before this guard a member could approve a payment they were forbidden
+    /// to look at.
+    ///
+    /// The approval id is deliberately one that does not exist: authority is
+    /// settled before the approval is resolved, so the answer must be `403` and
+    /// not the `404` a permitted caller would get.
+    #[tokio::test]
+    async fn a_member_may_not_resolve_an_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            let denied = app
+                .clone()
+                .oneshot(resolve_as(scope, "appr-nobody-parked", Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "{scope} let a member decide an approval"
+            );
+        }
+    }
+
+    /// Extending is the deadline's other side: an approval nobody decides
+    /// default-denies when its window runs out, so being able to push that
+    /// window out indefinitely is a decision about the effect, made for the
+    /// company. It is held to the same authority as deciding it outright.
+    #[tokio::test]
+    async fn a_member_may_not_extend_an_approval_deadline() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
+        let cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            let denied = app
+                .clone()
+                .oneshot(extend_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "{scope} let a member extend an approval deadline"
+            );
+        }
+    }
+
+    /// The other half of the guard: refusing a member must not also refuse the
+    /// admin the routes exist for, under either address form.
+    #[tokio::test]
+    async fn an_admin_may_still_resolve_an_approval() {
+        for scope in APPROVAL_SCOPES {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+            let id = park_for_extend(&runtime, "appr-admin-resolve", 1_000).await;
+            let cookie = crate::server::test_support::fixed_cookie("acme");
+            let app = router(state);
+
+            let allowed = app
+                .oneshot(resolve_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                allowed.status(),
+                StatusCode::OK,
+                "{scope} refused an admin the decision"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_admin_may_still_extend_an_approval_deadline() {
+        for scope in APPROVAL_SCOPES {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+            let id = park_for_extend(&runtime, "appr-admin-ext", 1_000).await;
+            let cookie = crate::server::test_support::fixed_cookie("acme");
+            let app = router(state);
+
+            let allowed = app
+                .oneshot(extend_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                allowed.status(),
+                StatusCode::OK,
+                "{scope} refused an admin the extension"
+            );
+        }
+    }
+
+    /// No credential at all is `401`, not `403` — the authority guard must not
+    /// turn an anonymous request into a role decision.
+    #[tokio::test]
+    async fn an_unauthenticated_caller_cannot_decide_or_extend_an_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            for request in [
+                resolve_as(scope, "appr-anon", None),
+                extend_as(scope, "appr-anon", None),
+            ] {
+                let uri = request.uri().to_string();
+                let denied = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    denied.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{uri} answered an anonymous caller with {}",
+                    denied.status()
+                );
+            }
+        }
+    }
+
+    /// The second defect these routes carried: the temporary-password boundary
+    /// lived only on the single-company alias, so an admin who had never set a
+    /// password could decide and extend every approval through the `{id}` form.
+    ///
+    /// An admin is the right principal to prove it with — the role check passes,
+    /// so a refusal here can only be the password boundary.
+    #[tokio::test]
+    async fn an_admin_on_a_temporary_password_may_not_decide_or_extend() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let cookie = crate::server::test_support::seed_temp_password_admin(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = park_for_extend(&runtime, "appr-temp-pass", 1_000).await;
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            for request in [
+                resolve_as(scope, id.as_ref(), Some(&cookie)),
+                extend_as(scope, id.as_ref(), Some(&cookie)),
+            ] {
+                let uri = request.uri().to_string();
+                let denied = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    denied.status(),
+                    StatusCode::FORBIDDEN,
+                    "{uri} served an admin who has not set a password"
+                );
+                assert_eq!(
+                    body_json(denied).await["code"],
+                    "password_change_required",
+                    "{uri} refused for the wrong reason"
+                );
+            }
+        }
+    }
+
+    // -- Deciding an approval: which states admit it, and what a failure costs --
+
+    /// STATE. `run_resolve` asks `ensure_running` before it touches the gate,
+    /// and the ordering is the guarantee: a company that has stopped accepting
+    /// work must refuse the decision *and leave the approval parked*, so the
+    /// operator still has a card to decide once it is running again.
+    ///
+    /// A refusal that consumed the park would be worse than no refusal at all —
+    /// the effect would be neither approved nor decidable.
+    #[tokio::test]
+    async fn resolving_on_a_paused_company_is_refused_and_leaves_the_approval_parked() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let approval = park_for_extend(&runtime, "appr-paused", crate::ports::now_millis()).await;
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let app = router(state);
+
+        let lifecycle = |verb: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/companies/acme/{verb}"))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let paused = app.clone().oneshot(lifecycle("pause")).await.unwrap();
+        assert_eq!(paused.status(), StatusCode::OK, "the company is now paused");
+
+        for verdict in ["approve", "deny"] {
+            let refused = app
+                .clone()
+                .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri("/api/v1/company/desks")
+                        .uri(format!("/api/v1/company/approvals/{approval}"))
                         .header("cookie", &cookie)
                         .header("content-type", "application/json")
-                        .body(Body::from(body))
+                        .body(Body::from(
+                            serde_json::json!({ "verdict": verdict }).to_string(),
+                        ))
                         .unwrap(),
                 )
                 .await
-                .unwrap()
-            }
-        };
+                .unwrap();
+            assert_eq!(
+                refused.status(),
+                StatusCode::CONFLICT,
+                "a paused company answered a {verdict} instead of refusing it"
+            );
+        }
 
-        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
-        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
-        let body = String::from_utf8_lossy(&bytes).to_string();
         assert!(
-            body.contains("at least one member"),
-            "the refusal names the reason, not a generic 400: {body}"
+            runtime.pending_approvals().iter().any(|p| p.id == approval),
+            "the refusal must leave the approval decidable, not spend it"
+        );
+        assert_eq!(
+            runtime.grants.live_count(),
+            0,
+            "and it must mint nothing on the way out"
         );
 
-        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
+        let resumed = app.clone().oneshot(lifecycle("resume")).await.unwrap();
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let allowed = app
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
         assert_eq!(
-            empty_lead.status(),
-            StatusCode::CREATED,
-            "an empty lead desk is still legal — it gains members from the org chart"
+            allowed.status(),
+            StatusCode::OK,
+            "the same decision lands once the company is running again"
+        );
+    }
+
+    /// CONC. Two operators on the same card — or one on a double click — reach
+    /// this route at the same time. The approval may settle once and buy one
+    /// permission; the loser must be told it was already decided rather than
+    /// minting a second grant against the same effect.
+    ///
+    /// Distinct from [`a_second_resolve_reports_already_resolved_and_mints_nothing`],
+    /// which sends its second request only after the first has fully settled:
+    /// that one passes even if the parked-set take is a non-atomic
+    /// check-then-remove, because there is no window for the two to overlap in.
+    /// These two are in flight together.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_simultaneous_resolves_settle_once_and_mint_one_permission() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+        c.release.notify_one();
+
+        let approve = || {
+            resolve_request(
+                &c.approval_id,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            )
+        };
+        // Spawned onto a multi-threaded runtime, so these genuinely overlap
+        // rather than being polled to completion one at a time. Eight rather
+        // than two because the window a lost take opens is narrow: one pair can
+        // miss it by scheduling luck, and a race this test cannot lose is worth
+        // more than a tidier number.
+        let racers: Vec<_> = (0..8)
+            .map(|_| tokio::spawn(c.app.clone().oneshot(approve())))
+            .collect();
+
+        let mut settled = Vec::new();
+        for racer in racers {
+            let response = racer
+                .await
+                .expect("the request task did not panic")
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body_json(response).await;
+            settled.push(
+                body["alreadyResolved"]
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("a receipt says whether it settled: {body}")),
+            );
+        }
+        assert_eq!(
+            settled.iter().filter(|already| !**already).count(),
+            1,
+            "exactly one simultaneous resolve may settle the approval, got {settled:?}"
+        );
+
+        assert!(await_continuation(&c.runtime).await);
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "simultaneous approves must not buy more than one permission"
+        );
+    }
+
+    /// FAIL. On the synchronous shape the operator waits for the follow-up
+    /// cycle, so a cycle that falls over is theirs to hear about: the request
+    /// answers an error rather than a success over nothing.
+    ///
+    /// And the verdict is durable regardless — it is settled inline, before the
+    /// cycle is ever spawned. The pairing is the point. An error that also lost
+    /// the decision would leave the operator re-approving something already
+    /// approved; an error swallowed into a `200` would leave them believing work
+    /// resumed that never did.
+    #[tokio::test]
+    async fn a_synchronous_resolve_reports_a_failed_follow_up_and_keeps_the_verdict() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 1, Some("sales"), true).await;
+        let approval = c.approvals[0].clone();
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a continuation that fell over must reach the operator waiting on it"
+        );
+
+        assert!(
+            !c.runtime
+                .pending_approvals()
+                .iter()
+                .any(|p| p.id == approval),
+            "the verdict is settled before the cycle runs, so a failed cycle cannot un-decide it"
+        );
+        assert_eq!(c.runtime.grants.live_count(), 1);
+
+        let again = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(again).await["alreadyResolved"],
+            true,
+            "re-deciding after the failure must say it was already decided"
+        );
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "and must not buy a second permission"
         );
     }
 }

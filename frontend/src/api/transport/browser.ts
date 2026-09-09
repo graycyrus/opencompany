@@ -17,6 +17,9 @@ import type {
 } from "./types";
 
 export class BrowserTransport implements Transport {
+  /** `fetch` cancels the socket, so the host sees the disconnect and stops. */
+  readonly cancelsInFlight = true;
+
   async request(req: TransportRequest): Promise<TransportResponse> {
     const res = await fetch(req.url, {
       method: req.method,
@@ -33,6 +36,10 @@ export class BrowserTransport implements Transport {
       // `TransportRequest.keepalive`. `undefined` for every other call, which
       // `fetch` treats as `false`.
       keepalive: req.keepalive,
+      // The request deadline the client attaches, so a host that accepts the
+      // connection and never answers cancels the socket instead of hanging
+      // this promise forever. `undefined` for a call with no bound.
+      signal: req.signal,
     });
 
     // Read the body here rather than handing the caller a live `Response`: the

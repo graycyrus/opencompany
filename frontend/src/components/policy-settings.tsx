@@ -5,11 +5,14 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getPolicy,
+  isPolicyStatus,
+  NOT_A_POLICY,
   type PolicyStatus,
   resetPolicy,
   setPolicy,
 } from "@/api/policy";
 import { listWorkflowToolSlugs } from "@/api/workflows";
+import { AdminOnlyNotice } from "@/components/admin-only-notice";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,7 +34,13 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+// The title row's readers, so a policy written HERE reaches the pill without
+// waiting for its 30s poll. Not a cycle: `use-autonomy` imports only
+// `@/api/policy` and `@/lib/visible-poll`.
+import { applyAutonomy } from "@/hooks/use-autonomy";
+import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
 
 /**
  * Tools worth naming as an *example* of something to always ask about, most
@@ -91,6 +100,63 @@ export function widensAutonomy(
   const fromIndex = tiers.findIndex((tier) => tier.value === from);
   const toIndex = tiers.findIndex((tier) => tier.value === to);
   return fromIndex !== -1 && toIndex > fromIndex;
+}
+
+/**
+ * The words the widening confirmation is made of, exported because there are
+ * now **two** ways to reach the same decision.
+ *
+ * The tier is also changeable from the window's title row (`AutonomyPill`), and
+ * a second confirmation written there would be a second set of words free to
+ * drift from these — one dialog saying "Give teammates more autonomy?" and
+ * another saying something else about the identical act. The comparison itself
+ * is already shared ([`widensAutonomy`]); this shares the sentence that explains
+ * it, so the two entry points cannot disagree about what is being agreed to.
+ *
+ * Literals and a function rather than a shared component: this page reaches the
+ * same dialog from three different decisions (a tier, a spend-cap raise, a
+ * reset) and only the tier one is shared, so a component would have to carry
+ * all three.
+ */
+export const AUTONOMY_CONFIRM_TITLE = "Give teammates more autonomy?";
+
+/** The cancel label. It names the outcome, not the gesture: nothing changes. */
+export const AUTONOMY_CONFIRM_CANCEL = "Keep current setting";
+
+/** The confirm label for a tier widening. */
+export const AUTONOMY_CONFIRM_ACTION = "Give more autonomy";
+
+/**
+ * The standing note under a tier widening.
+ *
+ * A function of the host's own `policyHitlEnabled`, not a fixed sentence: every
+ * deployed build reports it `false` today, so `false` is also the fallback for
+ * a host predating the field (`PolicyStatus.policyHitlEnabled`) — but the
+ * console states that as what the gate reports, not as a fact it is entitled to
+ * assume, so the sentence changes the day a gate does. An operator agreeing to
+ * a wider tier is entitled to read what still stops an agent under it,
+ * wherever they can agree to it.
+ */
+export function autonomyPromptsNote(policyHitlEnabled: boolean): string {
+  return policyHitlEnabled
+    ? "The always-ask list and the spend cap still apply under the new tier."
+    : "Approval prompts remain explicit through request_approval.";
+}
+
+/**
+ * What changes, in the host's own words on both sides of the move.
+ *
+ * Both descriptions are the host's (`TIER_TEXT`, `src/server/ops/policy.rs`),
+ * never a paraphrase — that prose is server-side precisely so it tracks the gate
+ * it describes. `current` is optional because a console running against a newer
+ * host can be sitting on a mode it has no text for; the sentence then names only
+ * what the operator is moving *to*, which is the half that still matters.
+ */
+export function tierWideningExplanation(
+  current: string | undefined,
+  next: PolicyStatus["tiers"][number],
+): string {
+  return `Instead of: ${current ?? ""} With ${next.label}: ${next.description} They will use the ${next.label} setting on their next turn.`;
 }
 
 /** Whether replacing the current spend cap with the manifest cap loosens it. */
@@ -202,6 +268,18 @@ export function gatedBy(list: string[], target: string): boolean {
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Whether this viewer may change the policy.
+   *
+   * Both writes behind this card call `require_admin`, so `false` renders the
+   * tiers and the deadline as a statement of what the company's policy IS,
+   * with nothing on the card that offers to change it.
+   *
+   * Required, and deliberately not defaulted, for the reason `GrantNamespace`
+   * gives: a caller that has not worked out the viewer's role must not get an
+   * enabled control by omission.
+   */
+  canManage: boolean;
 }
 
 /**
@@ -227,7 +305,7 @@ interface Props {
  *   edits, but editing `[policy]` in `company.toml` clears it. An operator who
  *   cannot see that would be surprised by a redeploy.
  */
-export function PolicySettings({ client, company }: Props) {
+export function PolicySettings({ client, company, canManage }: Props) {
   const [status, setStatus] = useState<PolicyStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -321,6 +399,11 @@ export function PolicySettings({ client, company }: Props) {
       setDraftDeadline("");
       try {
         const next = await getPolicy(client, company);
+        // A body that is not a policy is a load FAILURE, not a policy. Left
+        // unchecked it reaches `next.alwaysApprove.join(...)` two lines down,
+        // and a throw there unmounts the console — there is no error boundary.
+        // The `catch` below already knows how to say so.
+        if (!isPolicyStatus(next)) throw new Error(NOT_A_POLICY);
         // A response for a company this `load` no longer describes must not
         // overwrite the current company's state: when the scope changes mid-
         // flight, the effect's cleanup flips `live` for the stale request, so
@@ -406,14 +489,40 @@ export function PolicySettings({ client, company }: Props) {
    * `takesEffect` overrides the host's generic timing line for a save whose
    * effect does not wait for the next turn — the deadline, whose new TTL the
    * live gate enforces immediately.
+   *
+   * **Returns whether the write actually landed.** It is not a formality: a
+   * body this rejects is a FAILED write, and its callers hand that answer to
+   * confirmation dialogs which close on success and stay open for a retry on
+   * failure. Returning nothing let `saveTier`, `reset` and `commitSpendCap`
+   * report `true` after showing an error, so a tier escalation, a loosening
+   * reset or a spend-cap raise that the host answered with rubbish closed its
+   * dialog as though the operator's change had been made — a *widening* the
+   * console then claimed had happened and had not.
    */
   const apply = (
     next: PolicyStatus,
     message: string,
     resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
     takesEffect?: string,
-  ) => {
+  ): boolean => {
+    // Every write path funnels through here, so this is the one place the
+    // settings page has to fence: a PUT or DELETE that answers 200 with
+    // something that is not a policy must not be put on screen. Reported the
+    // way a failed save is, and the previously loaded policy stands.
+    if (!isPolicyStatus(next)) {
+      toast.error(NOT_A_POLICY);
+      return false;
+    }
     setStatus(next);
+    // The title row reads the same policy through `useAutonomy`, on a 30s
+    // poll, and it is mounted on every view including this one. Without this
+    // hand-off a change made HERE left the pill an inch above the card stating
+    // the previous tier for up to half a minute — and in the direction that
+    // matters most, a widening looks like the restrictive tier is still in
+    // force. Same value, same scope, same fence: this is the host's own
+    // response, already checked by `isPolicyStatus` above, so the row is
+    // handed a value the host returned rather than an optimistic guess.
+    applyAutonomy(client, company, next);
     const { alwaysAsk = true, spendCap = true, deadline = true } = resync;
     if (alwaysAsk) {
       setDraftAlways(next.alwaysApprove.join(", "));
@@ -427,6 +536,7 @@ export function PolicySettings({ client, company }: Props) {
       setDraftDeadline((next.approvalTtlHours ?? 24).toString());
     }
     toast.success(message, { description: takesEffect ?? next.takesEffect });
+    return true;
   };
 
   const saveTier = async (mode: string) => {
@@ -444,12 +554,15 @@ export function PolicySettings({ client, company }: Props) {
       // current company's state — the read path's `live` guard, applied to the
       // write path.
       if (!isCurrentScope({ client, company })) return false;
-      apply(next, "Autonomy tier updated", {
+      // `return apply(...)`, not `apply(...); return true`. A rejected body is
+      // a failed write, and the confirmation dialog behind a tier escalation
+      // has to stay open for the retry rather than close on a change that did
+      // not happen.
+      return apply(next, "Autonomy tier updated", {
         alwaysAsk: !dirty,
         spendCap: false,
         deadline: false,
       });
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not change the tier.",
@@ -488,6 +601,11 @@ export function PolicySettings({ client, company }: Props) {
   // backend's own matcher (`SHELL` for the `shell` tool, `invoice` for a
   // `invoice.send` kind), so a fence the gate accepts is never called a mistake
   // outright.
+  // Read from the host's own report, not assumed: every deployed build reports
+  // `false` today, so a host predating the field falls back to the same value
+  // every real deployment already has — see `PolicyStatus.policyHitlEnabled`.
+  const policyHitlEnabled = status?.policyHitlEnabled ?? false;
+
   const knownTools = status?.knownTools ?? null;
   const gateableSet = knownTools ?? (wiredToolsLoaded ? wiredTools : null);
   const unmatchedWiredTools = gateableSet
@@ -591,7 +709,9 @@ export function PolicySettings({ client, company }: Props) {
       // A reset for a company this card no longer shows must not overwrite the
       // current company's state.
       if (!isCurrentScope({ client, company })) return false;
-      apply(
+      // Propagated for the same reason `saveTier` propagates it: a loosening
+      // reset is confirmed, and a rejected body must keep that confirmation up.
+      return apply(
         next,
         "Reverted to the manifest's policy",
         undefined,
@@ -611,7 +731,6 @@ export function PolicySettings({ client, company }: Props) {
           ? "takes effect immediately — parked approvals are re-checked against the manifest deadline"
           : undefined,
       );
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not reset the policy.",
@@ -686,14 +805,16 @@ export function PolicySettings({ client, company }: Props) {
       // A save for a company this card no longer shows must not overwrite the
       // current company's state.
       if (!isCurrentScope({ client, company })) return false;
-      apply(
+      // Propagated: a cap RAISE is confirmed, and a rejected body must keep
+      // that confirmation up rather than close it on a widening that did not
+      // land.
+      return apply(
         next,
         "Spend cap updated",
         // An unsaved always-ask edit and a half-typed deadline are the
         // operator's; the PUT only touched the cap.
         { alwaysAsk: !dirty, deadline: false },
       );
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not save the spend cap.",
@@ -851,10 +972,35 @@ export function PolicySettings({ client, company }: Props) {
           </div>
         ) : (
           <>
-            <div className="rounded-md border border-status-blocked/30 bg-status-blocked-soft p-3 text-xs text-muted-foreground">
-              Policy-based approval prompts are disabled. Teammates ask through{" "}
-              <code>request_approval</code>; read-only mode and the emergency stop still
-              hard-deny applicable calls.
+            {!canManage && (
+              <AdminOnlyNotice
+                testId="policy-read-only"
+                title="Only an admin can change this company's approval policy"
+              >
+                The tier decides how much every teammate here may do without asking
+                first, so it is the company&rsquo;s to set rather than any one
+                member&rsquo;s. You can see which tier is in force.
+              </AdminOnlyNotice>
+            )}
+            <div
+              data-testid="policy-hitl-status"
+              className="rounded-md border border-status-blocked/30 bg-status-blocked-soft p-3 text-xs text-muted-foreground"
+            >
+              {policyHitlEnabled ? (
+                <>
+                  Policy-based approval prompts are active. The selected tier, the
+                  always-ask list below and the spend cap can each raise an approval
+                  card.
+                </>
+              ) : (
+                <>
+                  Policy-based approval prompts are disabled. Teammates ask through{" "}
+                  <code>request_approval</code>; the paid-media tools stage their own
+                  approval and an authored workflow can add its own{" "}
+                  <code>requires_approval</code> gate. Read-only mode and the emergency
+                  stop still hard-deny applicable calls.
+                </>
+              )}
             </div>
             <div
               className="space-y-2"
@@ -876,7 +1022,7 @@ export function PolicySettings({ client, company }: Props) {
                       tierButtons.current[index] = el;
                     }}
                     type="button"
-                    disabled={saving}
+                    disabled={saving || !canManage}
                     onClick={() => chooseTier(tier)}
                     role="radio"
                     aria-checked={active}
@@ -914,10 +1060,13 @@ export function PolicySettings({ client, company }: Props) {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="spend-cap">Spend approval threshold (inactive)</Label>
+              <Label htmlFor="spend-cap">
+                Spend approval threshold{!policyHitlEnabled && " (inactive)"}
+              </Label>
               <p className="text-xs text-muted-foreground">
-                Stored for a future policy-HITL mode. It does not create approval
-                prompts while policy HITL is disabled.
+                {policyHitlEnabled
+                  ? "Spends strictly under this amount are auto-approved; everything else parks for approval."
+                  : "Stored for a future policy-HITL mode. It does not create approval prompts while policy HITL is disabled."}
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <Input
@@ -927,7 +1076,7 @@ export function PolicySettings({ client, company }: Props) {
                   step="0.01"
                   inputMode="decimal"
                   value={draftSpend}
-                  disabled
+                  disabled={saving || !canManage || !policyHitlEnabled}
                   placeholder="No cap"
                   onChange={(event) => setDraftSpend(event.target.value)}
                   className="max-w-40"
@@ -937,7 +1086,7 @@ export function PolicySettings({ client, company }: Props) {
                   size="sm"
                   type="button"
                   variant={noSpendCap ? "secondary" : "outline"}
-                  disabled
+                  disabled={saving || !canManage || !policyHitlEnabled}
                   onClick={() => {
                     setNoSpendCap((current) => !current);
                     if (noSpendCap) setDraftSpend("");
@@ -945,7 +1094,11 @@ export function PolicySettings({ client, company }: Props) {
                 >
                   {noSpendCap ? "No cap" : "Set no cap"}
                 </Button>
-                <Button size="sm" disabled onClick={() => void saveSpendCap()}>
+                <Button
+                  size="sm"
+                  disabled={saving || !canManage || !policyHitlEnabled}
+                  onClick={() => void saveSpendCap()}
+                >
                   Save cap
                 </Button>
               </div>
@@ -964,19 +1117,23 @@ export function PolicySettings({ client, company }: Props) {
                   step="1"
                   inputMode="numeric"
                   value={draftDeadline}
-                  disabled={saving}
+                  disabled={saving || !canManage}
                   className="max-w-32"
                   onChange={(event) => setDraftDeadline(event.target.value)}
                 />
                 <span className="text-sm text-muted-foreground">hours</span>
-                <Button size="sm" disabled={saving} onClick={() => void saveDeadline()}>
-                  Save deadline
-                </Button>
+                {canManage && (
+                  <Button size="sm" disabled={saving} onClick={() => void saveDeadline()}>
+                    Save deadline
+                  </Button>
+                )}
               </div>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="always-approve">Always ask first (inactive)</Label>
+              <Label htmlFor="always-approve">
+                Always ask first{!policyHitlEnabled && " (inactive)"}
+              </Label>
               {/* Issue #1226: what an entry IS, said here rather than left to
                   the placeholder. `payment.send, filing.submit,
                   external.publish` used to be the only worked example this
@@ -993,13 +1150,26 @@ export function PolicySettings({ client, company }: Props) {
                   what `always_approve::matches` implements and nothing in the
                   console said it. */}
               <p className="text-xs text-muted-foreground">
-                Stored for a future policy-HITL mode. These entries do not create
-                prompts now; teammates use <code>request_approval</code> explicitly.
+                {policyHitlEnabled ? (
+                  <>
+                    Every entry here wins over the selected tier, Full included, and
+                    raises an approval card before the matching tool runs.
+                  </>
+                ) : (
+                  <>
+                    Stored for a future policy-HITL mode. These entries do not create
+                    prompts now; teammates use <code>request_approval</code> explicitly.
+                  </>
+                )}
               </p>
               <Input
                 id="always-approve"
+                // The settings pane is full width (#2131), and a bare comma
+                // list stretched to 1400px puts the label and the caret a
+                // head-turn apart. Capped where every other settings field is.
+                className={SETTINGS_FIELD_COLUMN}
                 value={draftAlways}
-                disabled
+                disabled={saving || !canManage || !policyHitlEnabled}
                 list={wiredTools.length > 0 ? "always-approve-tools" : undefined}
                 placeholder={alwaysAskPlaceholder(wiredTools)}
                 onChange={(event) => {
@@ -1025,7 +1195,7 @@ export function PolicySettings({ client, company }: Props) {
               {dirty && (
                 <Button
                   size="sm"
-                  disabled
+                  disabled={saving || !policyHitlEnabled}
                   onClick={() => void saveAlways()}
                 >
                   Save list
@@ -1041,16 +1211,18 @@ export function PolicySettings({ client, company }: Props) {
                   <code>[policy]</code> in <code>company.toml</code> clears it —
                   version control wins when it speaks.
                 </p>
-                <Button
-                  ref={resetButtonRef}
-                  size="sm"
-                  variant="outline"
-                  disabled={saving}
-                  onClick={() => requestReset()}
-                >
-                  <RotateCcw className="mr-1 h-3 w-3" />
-                  Use the manifest's policy
-                </Button>
+                {canManage && (
+                  <Button
+                    ref={resetButtonRef}
+                    size="sm"
+                    variant="outline"
+                    disabled={saving}
+                    onClick={() => requestReset()}
+                  >
+                    <RotateCcw className="mr-1 h-3 w-3" />
+                    Use the manifest&apos;s policy
+                  </Button>
+                )}
               </div>
             )}
             <AlertDialog
@@ -1102,16 +1274,14 @@ export function PolicySettings({ client, company }: Props) {
                 }}
               >
                 <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    Give teammates more autonomy?
-                  </AlertDialogTitle>
+                  <AlertDialogTitle>{AUTONOMY_CONFIRM_TITLE}</AlertDialogTitle>
                   <AlertDialogDescription>
                     {pendingCapRaise !== null ? (
                       <>
                         {status.autoApproveUnderUsd === null
                           ? "Today every spend asks first."
-                          : `Today spend under $${status.autoApproveUnderUsd} asks nothing.`}{" "}
-                        {`Raising the cap to ${pendingCapRaise} lets qualifying spends under the new cap pass without asking; the daily budget still stops spending after its limit.`}
+                          : `Today spend under ${usd(status.autoApproveUnderUsd)} asks nothing.`}{" "}
+                        {`Raising the cap to ${usd(pendingCapRaise)} lets qualifying spends under the new cap pass without asking; the daily budget still stops spending after its limit.`}
                       </>
                     ) : resetAwaitingConfirmation ? (
                       <>
@@ -1154,32 +1324,27 @@ export function PolicySettings({ client, company }: Props) {
                           </>
                         )}
                       </>
-                    ) : (
-                      <>
-                        Instead of:{" "}
-                        {
-                          status.tiers.find(
-                            (tier) => tier.value === status.mode,
-                          )?.description
-                        }{" "}
-                        With {tierAwaitingConfirmation?.label}:{" "}
-                        {tierAwaitingConfirmation?.description} They will use
-                        the {tierAwaitingConfirmation?.label} setting on their
-                        next turn.
-                      </>
-                    )}
+                    ) : tierAwaitingConfirmation ? (
+                      tierWideningExplanation(
+                        status.tiers.find((tier) => tier.value === status.mode)
+                          ?.description,
+                        tierAwaitingConfirmation,
+                      )
+                    ) : null}
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
                     {pendingCapRaise !== null
-                      ? "This threshold remains inactive while policy HITL is disabled."
+                      ? policyHitlEnabled
+                        ? "Raising the cap lets qualifying spends pass without asking; the daily budget still stops spending after its limit."
+                        : "This threshold remains inactive while policy HITL is disabled."
                       : resetAwaitingConfirmation
-                        ? "Reset restores the stored policy fields; approval prompts remain explicit."
-                        : "Approval prompts remain explicit through request_approval."}
+                        ? `Reset restores the stored policy fields. ${autonomyPromptsNote(policyHitlEnabled)}`
+                        : autonomyPromptsNote(policyHitlEnabled)}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel disabled={saving}>
-                    Keep current setting
+                    {AUTONOMY_CONFIRM_CANCEL}
                   </AlertDialogCancel>
                   <AlertDialogAction
                     data-testid="policy-tier-confirm"
@@ -1208,10 +1373,10 @@ export function PolicySettings({ client, company }: Props) {
                     }}
                   >
                     {pendingCapRaise !== null
-                      ? `Raise cap to $${pendingCapRaise}`
+                      ? `Raise cap to ${usd(pendingCapRaise)}`
                       : resetAwaitingConfirmation
                         ? "Revert and give more autonomy"
-                        : "Give more autonomy"}
+                        : AUTONOMY_CONFIRM_ACTION}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>

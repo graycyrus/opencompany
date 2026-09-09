@@ -18,6 +18,9 @@ Supporting docs:
   - [ports-effects.md](ports-effects.md) — `ToolProvider`, `AgentEconomy`,
     `ApprovalGate`
   - [ports-console.md](ports-console.md) — the WS3 console-surface stores
+    - [ports-console-workspace.md](ports-console-workspace.md) — `WorkspaceStore`,
+      the Obsidian-style note tree, its binary half, folder claims, and the
+      system workspace roots
   - [ports-runs.md](ports-runs.md) — `RunStore`: one attempt at a task, its
     trace, and who writes it
   - [journal.md](journal.md) — `JournalStore`: the runtime journal's durable
@@ -34,6 +37,10 @@ Supporting docs:
     applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
+  - [memory-engine-cortex.md](memory-engine-cortex.md) — the hosted-Cortex
+    design record for #1936, with its measurements split into
+    [memory-engine-cortex-evidence.md](memory-engine-cortex-evidence.md),
+    which also carries the cross-scope bypass that settled the topology
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
     and two processes wanting the same directory
   - [offline.md](offline.md) — running with no network at all: the documented
@@ -41,7 +48,17 @@ Supporting docs:
     and the CI lane that executes the claim inside a network namespace
   - [analytics.md](analytics.md) — what the product reports about its own use:
     hosted tenants only, an opaque id, shape-and-outcome payloads that cannot
-    structurally carry content, and how to turn it off
+    structurally carry content, a collector the operator self-hosts, and how to
+    turn it off, with the HTTP contract and the transport's own failure
+    behaviour split into [analytics-wire.md](analytics-wire.md)
+  - [crash-reporting.md](crash-reporting.md) — errors and panics sent to a
+    Sentry project the **operator** owns: the two DSNs, what a report carries,
+    the credential scrubber that runs in every build (not only in a reporting
+    one), and the two ways to prove it is working
+  - [tracing.md](tracing.md) — the timeline half: the performance-tracing
+    sample rates and what a rate costs in Sentry quota, the console-to-host
+    distributed trace, why a transaction is scrubbed at the transport rather
+    than in a `before_send`, and why Session Replay is evaluated and declined
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
@@ -49,6 +66,11 @@ Supporting docs:
     `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the
     interrupted-run sweep, and operator stop/cancel semantics (issues
     #371/#382/#383/#398)
+  - [events-settle-marker.md](events-settle-marker.md) — the card-linked
+    marker a settled dispatch leaves in the conversation that raised it: the
+    captured origin (channel and, since #1890, thread), why `None` means no
+    conversation rather than the General desk, and the identity dedupe that
+    keeps the live line and its rehydrated twin one line (issues #377/#1890)
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge

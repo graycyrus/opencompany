@@ -1,3 +1,5 @@
+import { channelForThread } from "@/views/chat/model";
+
 /**
  * The drain half of app-shell's deferred transcript re-read (issue #1701).
  *
@@ -16,6 +18,30 @@
  */
 
 /**
+ * A parked re-read: the desk to ask the host about, plus the identities its
+ * cleanup is filed under.
+ *
+ * The queue used to hold bare desk ids, which was the same string as everything
+ * else back when the open-turn maps were keyed per channel. Since #2042 they are
+ * keyed per thread, so a replay that carried only the desk defaulted its
+ * cleanup key to the desk and cleared whatever lived there — and on the cold
+ * load this queue exists for, that can be a live unthreaded send's own live
+ * steps and receipt, armed before its `openTurns` row landed. The replay would
+ * erase the UI of a turn that is still running (Codex review on #2044).
+ *
+ * So both identities are parked, and `turnId` with them: the guard the replay
+ * runs must exclude the turn that settled exactly as the first pass did.
+ */
+export type PendingReRead = {
+  /** The host desk — what `chat/history` is addressed by. */
+  desk: string;
+  /** The open-turn state key — what the per-turn cleanup is filed under. */
+  stateKey: string;
+  /** The turn that settled, excluded from the "is anything still open?" guard. */
+  turnId?: string;
+};
+
+/**
  * Replay every parked thread whose channel is now known.
  *
  * Iterates a **snapshot** of `pending` so the `reRead` call — which may fold and
@@ -25,15 +51,23 @@
  * channel is still unknown stay parked for a later drain. The folds `reRead`
  * performs are idempotent (both stores drop already-known message ids), so a
  * deferred replay adds nothing a live frame already delivered.
+ *
+ * Checked through `channelForThread`, not a bare `channelMap[threadId]` index
+ * (issue #1781 review, Codex P2): a settled turn can park under any casing
+ * the host accepted for the General line (`MAIN`, `General`, …), and the map
+ * only ever holds the four canonical spellings. A bare index on an
+ * uncanonical id never matches, even once the map is fully populated, so
+ * that thread would stay parked — and its transcript stale — forever, not
+ * just until the next drain.
  */
 export function drainReReadQueue(
-  pending: Set<string>,
+  pending: Map<string, PendingReRead>,
   channelMap: Record<string, string>,
-  reRead: (threadId: string) => void,
+  reRead: (desk: string, settledTurnId?: string, stateKey?: string) => void,
 ): void {
-  for (const threadId of [...pending]) {
-    if (!channelMap[threadId]) continue;
-    pending.delete(threadId);
-    reRead(threadId);
+  for (const [id, parked] of [...pending]) {
+    if (!channelForThread(channelMap, parked.desk)) continue;
+    pending.delete(id);
+    reRead(parked.desk, parked.turnId, parked.stateKey);
   }
 }

@@ -16,10 +16,10 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tinyagents::harness::model::{ChatModel, ModelProfile, ModelResponse};
-use tinyagents::harness::tool::ToolCall;
-use tinyagents::harness::usage::Usage;
-use tinyagents::{Result as TaResult, TinyAgentsError};
+use tinyinference::model::{ChatModel, ModelProfile, ModelResponse};
+use tinyinference::tool::ToolCall;
+use tinyinference::usage::Usage;
+use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::agent::copilot_persona;
 use super::tools::{
@@ -29,6 +29,7 @@ use super::tools::{
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::openhuman::tools::traits::Tool;
@@ -117,7 +118,7 @@ impl ChatModel<()> for ScriptedModel {
             runtime.tasks().upsert(runtime.id(), &card).await.unwrap();
         }
         if self.fail {
-            return Err(TinyAgentsError::Model("the brain is down".to_string()));
+            return Err(InferenceError::Model("the brain is down".to_string()));
         }
         let reply = self.replies[index.min(self.replies.len() - 1)].clone();
         Ok(ModelResponse::assistant(reply))
@@ -673,6 +674,27 @@ fn the_host_assigns_a_safe_unique_id() {
     assert_eq!(safe_workflow_id("!!!", "!!!", &existing), "workflow");
 }
 
+/// `check_workflow` mints its candidate id against `existing_ids`, a snapshot
+/// taken once at copilot-session start (HT-120) — it never inserts the id it
+/// just minted. Two concurrent sessions courtesy-checking the same name
+/// against that same unmutated snapshot therefore mint the SAME id and both
+/// report it clean; only the real `create_workflow` write, serialized under
+/// `company_write_lock`, catches the collision — for the loser, as a rejected
+/// write after a check that said "fine".
+#[test]
+fn two_sessions_sharing_a_stale_snapshot_mint_colliding_ids() {
+    let existing = HashSet::new(); // neither session's own id is in here yet
+    let session_a = safe_workflow_id("Weekly Digest!", "card", &existing);
+    let session_b = safe_workflow_id("Weekly Digest!", "card", &existing);
+    assert_eq!(
+        session_a, session_b,
+        "two check passes against the same stale snapshot must not silently \
+         diverge — they collide, which is exactly the gap: only the locked \
+         write path (company_write_lock in workflow_create.rs) can tell them \
+         apart"
+    );
+}
+
 /// A large plan is bounded before it reaches the prompt: the step and
 /// prerequisite counts are capped and each step's free text is truncated, so an
 /// oversized plan can't run up the input tokens the pass meters (issue #580).
@@ -799,8 +821,9 @@ async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc
         .expect("runtime");
     assert_eq!(
         runtime.deliverable_channel_ids(),
-        vec!["engineering".to_string()],
-        "the fixture must have exactly one delivery channel, or these tests prove nothing"
+        vec!["operator".to_string(), "engineering".to_string()],
+        "the fixture must have the operator channel plus exactly one desk channel, or these \
+         tests prove nothing"
     );
     runtime.set_builder(Arc::new(WorkflowBuilder::new(model, "chat-v1")));
     (home, Arc::new(runtime))
@@ -829,6 +852,8 @@ pub(crate) fn agent_deps(
     model: Arc<dyn HarnessModel>,
 ) -> crate::harness::HarnessDeps {
     crate::harness::HarnessDeps {
+        emergency_gate: None,
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: model,
@@ -915,13 +940,13 @@ async fn runtime_with_agent(
 fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
-        title: "Automate the weekly digest".to_string(),
+        title: TaskTitle::authored("Automate the weekly digest"),
         note: Some("It should go out every Monday morning.".to_string()),
         column: COLUMN_IN_PROGRESS.to_string(),
         priority: "medium".to_string(),
         assignee: "maya".to_string(),
         updated_at_millis: 7,
-        origin_chat_id: None,
+        origin: None,
         parent_task_id: None,
         output: None,
         plan,
@@ -930,6 +955,8 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
+        bounced: None,
     }
 }
 
@@ -1318,6 +1345,102 @@ async fn an_out_of_vocabulary_kind_settles_to_todo() {
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
 }
 
+/// Issue #1865 (CodeRabbit review, PR #1883): `settle_to_todo` is the builder's
+/// only failure exit, and it must carry the same bounce chip every other
+/// failed-dispatch-back-to-To-do path does — `advance::advance_settled_card`
+/// and `run_task`'s rich settle both compute it. Reuses the out-of-vocabulary
+/// scenario above, which already drives a real `settle_to_todo` call, and
+/// checks the one field that test does not: without the fix, `settle_to_todo`
+/// never touched `bounced`, so a card that had never bounced before (dispatch
+/// already cleared it) came back from a genuine builder failure still reading
+/// `bounced: None` — indistinguishable from a card that had never failed.
+#[tokio::test]
+async fn a_builder_failure_settling_to_todo_sets_the_bounce_chip() {
+    let reply = r#"{"automatable":true,"summary":"call a url","workflow":{"name":"Reach out",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"call","kind":"http_request","name":"Call",
+                  "config":{"url":"http://attacker.example/x","method":"GET"}}],
+        "edges":[{"from":"start","to":"call"}]}}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-bounce", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-bounce").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-bounce".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-bounce").await;
+    assert_eq!(after.column, COLUMN_TODO);
+    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
+    let bounced = after
+        .bounced
+        .expect("a builder pass that failed and landed the card on To-do must set the bounce chip");
+    assert!(
+        bounced.contains("http_request"),
+        "the bounce reason carries the same failure text as the card note: {bounced}"
+    );
+}
+
+/// Issue #1865 (CodeRabbit review, PR #1883): a builder failure landing on
+/// To-do must file the same `dispatch_failed` notification every other
+/// bounced-dispatch path does — `CompanyRuntime::abandon_run`, the cycle's
+/// terminality backstop, and the boot reaper's card sweep, all via
+/// `advance::notify_dispatch_failed`. Unlike those crash-recovery paths, and
+/// unlike `brain.rs`'s `refuse_dispatch` (which can relay a reply into the
+/// card's origin chat), `settle_to_todo` has no other operator-facing signal
+/// off the board — before this fix, a builder-pass failure was the one
+/// bounced-dispatch path the notification feed never badged.
+///
+/// Reuses the same out-of-vocabulary-domain scenario as the sibling bounce-chip
+/// test above, which already drives a real `settle_to_todo` call, and checks
+/// the notification store instead of the card.
+#[tokio::test]
+async fn a_builder_failure_settling_to_todo_files_a_dispatch_failed_notification() {
+    let reply = r#"{"automatable":true,"summary":"call a url","workflow":{"name":"Reach out",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"call","kind":"http_request","name":"Call",
+                  "config":{"url":"http://attacker.example/x","method":"GET"}}],
+        "edges":[{"from":"start","to":"call"}]}}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-notify", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-notify").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-notify".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-notify").await;
+    assert_eq!(after.column, COLUMN_TODO);
+
+    let notifications = runtime
+        .notifications()
+        .list(runtime.id(), "owner")
+        .await
+        .unwrap();
+    assert!(
+        notifications
+            .iter()
+            .any(|n| n.notification.kind == "dispatch_failed"
+                && n.notification.subject.id == "t-notify"),
+        "a builder pass that failed and bounced its card must file a \
+         dispatch_failed notification, got {notifications:?}"
+    );
+}
+
 /// **The #1191 regression, at the builder.** The model routes the report to a
 /// channel this runtime cannot deliver to — the shape the QA pass found, where
 /// the builder appended `-desk` to a desk's display name.
@@ -1380,11 +1503,17 @@ async fn the_card_prompt_grounds_the_wired_channels() {
     let evidence = gather_evidence(&runtime, &card("t-ground", None))
         .await
         .expect("evidence");
-    assert_eq!(evidence.wired_channels, vec!["engineering".to_string()]);
+    // Since issue #1757 the always-present Operator channel is a durable delivery
+    // target too, so it grounds alongside the desk channel.
+    assert_eq!(
+        evidence.wired_channels,
+        vec!["operator".to_string(), "engineering".to_string()]
+    );
 
     let prompt = evidence_prompt(&evidence);
     assert!(prompt.contains("## Channels"), "{prompt}");
     assert!(prompt.contains("`engineering`"), "{prompt}");
+    assert!(prompt.contains("`operator`"), "{prompt}");
     assert!(
         prompt.contains("copied exactly"),
         "the section must say the id is copied, not paraphrased: {prompt}"
@@ -1401,22 +1530,34 @@ async fn the_description_prompt_grounds_the_wired_channels() {
     let prompt = description_evidence_prompt(&evidence, &[], &[], "post the weekly digest");
     assert!(prompt.contains("## Channels"), "{prompt}");
     assert!(prompt.contains("`engineering`"), "{prompt}");
+    assert!(prompt.contains("`operator`"), "{prompt}");
 }
 
-/// A company with no desk and no provider channel says so in its own words,
-/// matching how the roster and tool sections state an empty set — a silent
-/// section would read as "anything goes".
+/// A company with no desk and no provider channel still has the always-present
+/// Operator channel (issue #1757), so the Channels section grounds on it rather
+/// than the empty-set fallback — every company can deliver *somewhere* now.
 #[tokio::test]
-async fn an_empty_channel_set_renders_the_honest_fallback() {
+async fn a_company_with_no_desks_still_grounds_on_the_operator_channel() {
     let (_home, runtime) = runtime_with(ScriptedModel::replying(VALID_GRAPH)).await;
     let evidence = gather_evidence(&runtime, &card("t-empty", None))
         .await
         .expect("evidence");
-    assert!(evidence.wired_channels.is_empty());
+    assert_eq!(evidence.wired_channels, vec!["operator".to_string()]);
 
     let prompt = evidence_prompt(&evidence);
     assert!(prompt.contains("## Channels"), "{prompt}");
-    assert!(prompt.contains("no channels are wired"), "{prompt}");
+    assert!(prompt.contains("`operator`"), "{prompt}");
+}
+
+/// The empty-set fallback message still renders for a truly channel-less set —
+/// unreachable from a live runtime now (every company has `operator`), but the
+/// pure section renderer must still speak honestly when handed nothing.
+#[test]
+fn an_empty_channel_slice_renders_the_honest_fallback() {
+    let mut out = String::new();
+    super::render_channel_section(&mut out, &[]);
+    assert!(out.contains("## Channels"), "{out}");
+    assert!(out.contains("no channels are wired"), "{out}");
 }
 
 /// The model does not get a vote on approval gating: whatever `requires_approval`

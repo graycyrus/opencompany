@@ -228,6 +228,7 @@ impl Fixture {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         Self {
             company,
@@ -654,6 +655,64 @@ async fn a_seed_backed_workflow_reads_uneditable_and_refuses_both_writes() {
         err_text(&deleted).contains("defined by a file in the company source tree"),
         "{}",
         err_text(&deleted)
+    );
+}
+
+const SEED_WITH_POSTCONDITION_TOML: &str = r#"
+id = "seeded-pc"
+name = "Seeded worker flow"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "worker"
+kind = "agent"
+name = "Worker"
+agent = "assistant"
+[node.postcondition]
+require = "non_empty"
+[[edge]]
+from = "start"
+to = "worker"
+"#;
+
+/// Codex review on #1937 (issue #1866, thread 3) — the RED-on-old proof.
+/// `seed_draft` rebuilds a [`crate::company::RawNode`] per node from the
+/// parsed [`crate::company::WorkflowFile`] for the seed read path — every
+/// other run-policy field (`on_error`, `retry`, `requires_approval`,
+/// `repeatable`, `destination`) is carried through `.clone()`, so a seed
+/// node's declared `postcondition` must be too, or two things go wrong at
+/// once: the runtime still enforces a gate the agent is never told about,
+/// and `project_workflow_spec`'s `unexpressible` residue — the ONLY place
+/// `read_workflow` surfaces a run-policy field the agent-facing spec can't
+/// carry — silently omits it. On the code as it stood before this fix, the
+/// second assertion below fails: `seed_draft` zeroed `postcondition` before
+/// `project_workflow_spec` ever ran, so `unexpressible` was empty and the
+/// whole "per-node run policy" sentence never appeared.
+#[tokio::test]
+async fn a_seed_backed_postcondition_is_named_in_the_read_projection() {
+    let fx = Fixture::new();
+    fx.write_seed("seeded-pc", SEED_WITH_POSTCONDITION_TOML);
+
+    let read = ReadWorkflowTool::new(fx.admin())
+        .execute(json!({ "id": "seeded-pc" }))
+        .await
+        .unwrap();
+    let payload = data(&read);
+    assert_eq!(payload["editable"], json!(false));
+
+    // The agent-facing spec has no `postcondition` field at all (same as
+    // `on_error`/`retry`) — it can only ever be named in the `unexpressible`
+    // prose the markdown reply carries. Match the exact phrase
+    // `unexpressible_summary` renders (`node \`worker\` (postcondition)`),
+    // not a bare substring — the workflow's own name must not collide.
+    let markdown = read.output_for_llm(true);
+    assert!(
+        markdown.contains("node `worker` (postcondition)"),
+        "a seed-defined postcondition must be named in the read reply's \
+         per-node run policy summary, or the agent is told a stricter gate \
+         does not exist when the runtime still enforces one: {markdown}"
     );
 }
 
@@ -1325,6 +1384,7 @@ async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
     let store: Arc<dyn CompanyStore> = Arc::new(FailsAfterFirstLoadStore::seeded(record));
     let admin = WorkflowAdmin::new(company, None, store, None, None);
@@ -1343,4 +1403,67 @@ async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
         "{}",
         err_text(&result)
     );
+}
+
+/// A graph well under [`GRAPH_RENDER_BUDGET_BYTES`] renders pretty-printed —
+/// the cheap, common case.
+#[test]
+fn render_graph_pretty_prints_a_small_graph() {
+    let spec = json!({"nodes": [{"id": "n1"}], "edges": []});
+    let rendered = render_graph(&spec);
+    assert!(rendered.starts_with("```json\n"));
+    assert!(rendered.contains("\"nodes\""));
+    assert!(rendered.contains('\n'), "pretty output must be multi-line");
+}
+
+/// A graph over the pretty-printed budget but under the compact one falls
+/// back to compact JSON rather than refusing.
+#[test]
+fn render_graph_falls_back_to_compact_before_refusing() {
+    // Many short keys: pretty-printing's per-field newline/indent overhead
+    // pushes this over budget while the compact form (no whitespace) stays
+    // under it.
+    let mut nodes = Vec::new();
+    for i in 0..(GRAPH_RENDER_BUDGET_BYTES / 20) {
+        nodes.push(json!({"id": format!("n{i}")}));
+    }
+    let spec = json!({ "nodes": nodes });
+    let pretty_len = serde_json::to_string_pretty(&spec).unwrap().len();
+    let compact_len = spec.to_string().len();
+    assert!(
+        pretty_len > GRAPH_RENDER_BUDGET_BYTES,
+        "fixture must actually exceed the pretty budget: {pretty_len}"
+    );
+    assert!(
+        compact_len <= GRAPH_RENDER_BUDGET_BYTES,
+        "fixture must fit compact for this test to prove the fallback: {compact_len}"
+    );
+
+    let rendered = render_graph(&spec);
+    assert!(rendered.starts_with("```json\n"));
+    assert!(
+        !rendered.contains("  "),
+        "the compact fallback must carry no pretty-printer indentation"
+    );
+}
+
+/// Past both budgets, `render_graph` refuses rather than quoting a
+/// half-truncated fence the agent would hand back as an "edit".
+#[test]
+fn render_graph_refuses_a_graph_that_exceeds_both_budgets() {
+    let huge_id = "n".repeat(GRAPH_RENDER_BUDGET_BYTES + 1_000);
+    let spec = json!({ "nodes": [{"id": huge_id}] });
+    let compact_len = spec.to_string().len();
+    assert!(
+        compact_len > GRAPH_RENDER_BUDGET_BYTES,
+        "fixture must exceed even the compact budget: {compact_len}"
+    );
+
+    let rendered = render_graph(&spec);
+    assert!(
+        !rendered.starts_with("```json"),
+        "an over-budget graph must not be quoted at all: {rendered}"
+    );
+    assert!(rendered.contains("too large"));
+    assert!(rendered.contains("console"));
 }

@@ -24,16 +24,20 @@
 
 use axum::Json;
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
+
+use axum::extract::State;
 
 use crate::AppState;
 use crate::company::company_key::{key_configured, resolve, store_key};
 use crate::company::credentials::CredentialSource;
 use crate::company::runtime::CompanyRuntime;
+use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyEvent;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
+use crate::server::users::token::OsTokens;
 
 /// The reminder attached to every mutating response.
 ///
@@ -73,6 +77,8 @@ const DEGRADED: &str = "No credential is set for this company and this instance 
 /// Builds the company-credential route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/credential", get(get_status).put(set_key))
+        .merge(scoped("/credential/link/start", post(start_link)))
+        .merge(scoped("/credential/link/finish", post(finish_link)))
 }
 
 /// The company's credential status as the console renders it. **Never** carries
@@ -90,6 +96,14 @@ struct CredentialStatusDto {
     /// The consequence of setting this key, stated plainly, or the degraded
     /// state when nothing can be presented at all.
     notice: String,
+    /// Whether this host can complete a one-click key grant against the hub.
+    ///
+    /// Reported alongside the status so the console can decide whether to offer
+    /// the button without a second request. `false` on every host with no hub
+    /// wired, which is where the paste field remains the only way in — so the
+    /// console renders exactly what it renders today rather than a button that
+    /// would 404.
+    hub_link: bool,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -121,7 +135,10 @@ struct SetKey {
 /// company *has*, the Composio one reports what a Composio call *presents*.
 /// Claiming parity between them would be wrong in exactly the case where the
 /// distinction matters.
-async fn effective_status(runtime: &CompanyRuntime) -> Result<CredentialStatusDto, ApiError> {
+async fn effective_status(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+) -> Result<CredentialStatusDto, ApiError> {
     let secrets = runtime.secrets();
     let configured = key_configured(runtime.id(), secrets.as_ref())
         .await
@@ -143,18 +160,25 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CredentialStatusDt
         } else {
             CONSEQUENCE.to_string()
         },
+        hub_link: state.hub_identity().is_some(),
     })
 }
 
 /// `GET …/credential` — whether this company has its own key, and which identity
 /// its brokered calls present.
-async fn get_status(company: ScopedCompany) -> Result<Json<CredentialStatusDto>, ApiError> {
-    Ok(Json(effective_status(company.runtime.as_ref()).await?))
+async fn get_status(
+    State(state): State<AppState>,
+    company: ScopedCompany,
+) -> Result<Json<CredentialStatusDto>, ApiError> {
+    Ok(Json(
+        effective_status(&state, company.runtime.as_ref()).await?,
+    ))
 }
 
 /// `PUT …/credential` — set / rotate / clear the company's write-only TinyHumans
 /// credential. **Admin-only** — see the module docs.
 async fn set_key(
+    State(state): State<AppState>,
     company: AdminScopedCompany,
     Json(body): Json<SetKey>,
 ) -> Result<Json<MutationResponse>, ApiError> {
@@ -184,7 +208,144 @@ async fn set_key(
     };
     journal(&company, change).await?;
     Ok(Json(MutationResponse {
-        status: effective_status(runtime).await?,
+        status: effective_status(&state, runtime).await?,
+        note: SWITCH_NOTE.to_string(),
+    }))
+}
+
+/// The name the minted key carries in the person's TinyHumans account.
+///
+/// Names the company, so someone looking at a list of keys can tell which
+/// instance each belongs to and revoke one without guessing.
+fn key_name(company: &CompanyRuntime) -> String {
+    format!("OpenCompany — {}", company.id())
+}
+
+/// What the console navigates to, and nothing else.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartLinkResponse {
+    /// The hub URL to send the browser to, challenge already attached.
+    authorize_url: String,
+}
+
+/// Finish body: the handle we minted, and the code the hub sent back.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinishLink {
+    state: String,
+    code: String,
+}
+
+/// `POST …/credential/link/start` — begin a one-click key grant.
+///
+/// **Admin-only**, the same authority [`set_key`] needs and for the same reason:
+/// what comes back is the company's identity and its wallet. That the key is
+/// minted rather than pasted changes who types it, not what it does.
+async fn start_link(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+) -> Result<Json<StartLinkResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    // No exchange means nothing could redeem the code that came back, so the
+    // flow cannot complete. Refusing here rather than at `finish` is the
+    // difference between a console that never offers the button and one that
+    // sends an admin through Google to fail on return.
+    if state.hub_identity().is_none() {
+        return Err(ApiError(OpenCompanyError::NotFound(
+            "this host is not part of a TinyHumans ecosystem".to_string(),
+        )));
+    }
+
+    let started = state.hub_links().start(&OsTokens, runtime.id().as_ref());
+
+    // Where the hub returns to. `key=link` is this console's own marker, kept
+    // distinct from the `key=auth` the hub appends on a sign-in so the two
+    // return legs can never be mistaken for each other in `App.tsx`.
+    let origin = state.config().host_base_url();
+    let callback_url = format!(
+        "{}/?company={}&key=link&state={}",
+        origin.trim_end_matches('/'),
+        runtime.id(),
+        started.state,
+    );
+
+    Ok(Json(StartLinkResponse {
+        authorize_url: crate::server::hub_identity::key_grant_url(
+            &state.config().api_url,
+            &callback_url,
+            &started.challenge,
+            &key_name(runtime),
+        ),
+    }))
+}
+
+/// `POST …/credential/link/finish` — redeem the code and store what comes back.
+///
+/// One key lands in **two** places: `tinyhumans/key`, the company's identity for
+/// everything the platform brokers, and `inference/key` on the `managed`
+/// provider, so the same grant that connects the company also gives its agents
+/// something to think with. That is the whole point of the flow — an admin who
+/// had to run it twice, once per page, would be back to two errands.
+async fn finish_link(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+    Json(body): Json<FinishLink>,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+
+    let Some(exchange) = state.hub_identity().cloned() else {
+        return Err(ApiError(OpenCompanyError::NotFound(
+            "this host is not part of a TinyHumans ecosystem".to_string(),
+        )));
+    };
+
+    // Single-use, and bound to the company it was started for. An expired or
+    // replayed handle is indistinguishable from one that never existed, which
+    // is the right amount to say: the remedy is the same either way.
+    let Some(link) = state.hub_links().take(&body.state, runtime.id().as_ref()) else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "that connection attempt has expired — start it again".to_string(),
+        )));
+    };
+
+    let key = exchange
+        .redeem_key_grant(&body.code, &link.verifier)
+        .await
+        .map_err(ApiError)?;
+
+    // Stored before anything else can fail. The hub emits the plaintext exactly
+    // once and cannot reissue it, so a key dropped here is a key nobody can
+    // recover — the person would have to run the whole flow again, and the one
+    // they just minted would linger in their account doing nothing.
+    store_key(runtime.id(), runtime.secrets().as_ref(), &key)
+        .await
+        .map_err(ApiError)?;
+    crate::company::inference::store_key(runtime.id(), runtime.secrets().as_ref(), &key)
+        .await
+        .map_err(ApiError)?;
+    // The key alone does not arm inference: with no runtime declaration the
+    // status route reports the platform default and `keyConfigured: false`, so
+    // an operator would see a company that is connected but still cannot think.
+    // Declaring `managed` is what makes the stored key the one its turns are
+    // billed to — the same provider the Inference page's TinyHumans option sets.
+    crate::company::inference::save_runtime_config(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &crate::company::inference::RuntimeInference {
+            provider: "managed".to_string(),
+            base_url: None,
+            models: Default::default(),
+        },
+    )
+    .await
+    .map_err(ApiError)?;
+
+    super::composio::evict_catalog_cache(runtime);
+    journal(&company, "company_key_set").await?;
+
+    Ok(Json(MutationResponse {
+        status: effective_status(&state, runtime).await?,
         note: SWITCH_NOTE.to_string(),
     }))
 }

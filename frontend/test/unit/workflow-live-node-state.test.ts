@@ -153,6 +153,16 @@ describe("statesFromRun reads the started bracket", () => {
     const { startedNodes: _dropped, ...old } = RUNNING_ROW;
     expect(statesFromRun(old)).toEqual({ collect: "ok" });
   });
+
+  it("keeps a benign halt neutral instead of painting it as an error", () => {
+    expect(
+      statesFromRun({
+        ...RUNNING_ROW,
+        running: false,
+        nodes: [{ nodeId: "collect", status: "declined", elapsedMs: 12 }],
+      }),
+    ).toEqual({ collect: "declined" });
+  });
 });
 
 // ── The seed's guard ─────────────────────────────────────────────────────────
@@ -207,6 +217,11 @@ function fakeClient(): OpenCompanyClient {
       return GRAPH;
     },
     post: async () => ({}),
+    // Issue #1845: the week-1 nudge banner polls this on mount; an empty
+    // feed keeps it a no-op for every test in this file, which is not about
+    // the nudge.
+    notifications: async () => ({ notifications: [], unread: 0 }),
+    markNotificationsRead: async () => ({ unread: 0 }),
   } as unknown as OpenCompanyClient;
 }
 

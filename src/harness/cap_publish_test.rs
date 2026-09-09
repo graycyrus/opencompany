@@ -5,7 +5,7 @@
 //! Two features already exist and, before this, never met:
 //!
 //! - Part 1 (#926) taught the chat path to say "I paused" —
-//!   `ITERATION_CAP_PAUSE_NOTICE`, proven end to end in
+//!   `iteration_cap_pause_notice`, proven end to end in
 //!   [`cap_turn_test`](crate::harness::cap_turn_test).
 //! - #244 taught the **task-dispatch** path (`run_task`) to scan the agent's
 //!   sandbox for files it wrote and never published, and to ask about them in
@@ -286,6 +286,7 @@ fn record() -> CompanyRecord {
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     }
 }
 
@@ -296,6 +297,8 @@ fn record() -> CompanyRecord {
 fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        emergency_gate: None,
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {

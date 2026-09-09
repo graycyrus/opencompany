@@ -41,6 +41,7 @@ pub mod approval_tool;
 /// that append fails. Pairs with the host-owned, per-agent sink
 /// [`toolbelt::shell_audit`] resolves. See [`audit`].
 pub mod audit;
+pub mod blockers;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
@@ -54,6 +55,12 @@ pub mod composio;
 /// live tools are behind `composio`, which CI never *runs*) — see
 /// [`composio_catalog`].
 pub mod composio_catalog;
+/// The BYOK half of the Composio surface: a company's **own** Composio account,
+/// reached directly at `backend.composio.dev` instead of through the
+/// OpenHuman-managed proxy. Mirrors OpenHuman's `backend` / `direct` split. See
+/// [`composio_direct`].
+#[cfg(feature = "composio")]
+pub mod composio_direct;
 /// End-to-end proof that #410's narrowable, self-describing Composio listing is
 /// reachable from a real turn on two large toolkits — the harness, the grant
 /// gate, the approval policy and the Composio client are all real; only the
@@ -88,7 +95,25 @@ pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod memory_tools;
+/// Recovering a tool call that a model on the **native** transport wrote into
+/// its message body as prose instead of emitting it through the structured
+/// channel. Validated against the tools the turn itself offered — the marker a
+/// shared parser cannot use — and applied in the provider, which is the last
+/// point on this turn path where a text-shaped call can still become a real
+/// one. See [`native_salvage`].
+pub mod native_salvage;
+/// End-to-end proof that a tool call a model wrote as **text** is executed by a
+/// real turn: the harness, the grant gates, the approval policy, the dispatch
+/// and the meter are all real, and the recovered call's synthesized id is shown
+/// to keep its cycle paired all the way back into the model's context. Only the
+/// model's output and the search backend are scripted. Test-only.
+#[cfg(test)]
+mod native_salvage_turn_test;
 pub mod orchestrator;
+/// Issue #6014: task-aware extraction of an oversized tool result — one
+/// bounded model call that keeps what answers the turn, in place of a byte cut
+/// that keeps whatever happened to come first. See [`payload_extract`].
+pub mod payload_extract;
 /// Chargebee billing tools (issue #788), wired per company from its own
 /// SecretStore. Always compiled so the credential resolution and the fail-closed
 /// decision are testable at default features; only the tools are gated.
@@ -114,6 +139,7 @@ pub mod publish;
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
 mod publish_turn_test;
+pub mod run_origin;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
@@ -136,6 +162,7 @@ pub mod selector;
 pub mod skills;
 pub mod steer;
 pub mod steps;
+pub mod title;
 pub mod tool_dispatcher;
 pub mod toolbelt;
 pub mod triage;
@@ -208,8 +235,16 @@ use crate::runtime::builder::agent_scoped_grants;
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
 pub struct HarnessDeps {
+    /// The company's emergency-stop flag, consulted by every agent's
+    /// [`ApprovalPolicy`](crate::harness::built_in::policy::ApprovalPolicy) so a
+    /// harness tool dispatched under `full` autonomy — which reaches no other
+    /// gate — still refuses a consequential call once the switch is pulled.
+    ///
+    /// `None` at every non-harness construction site and every test that has no
+    /// company gate to ask, which keeps them admitting exactly as before.
+    pub emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
     /// The inference model shared across a company's agents. A [`HarnessModel`]
-    /// is a tinyagents [`ChatModel<()>`](tinyagents::harness::model::ChatModel)
+    /// is a tinyinference [`ChatModel<()>`](tinyinference::model::ChatModel)
     /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
     /// `Arc<dyn ChatModel<()>>` at the openhuman `AgentBuilder::chat_model` seam.
     pub provider: Arc<dyn HarnessModel>,
@@ -271,6 +306,9 @@ pub struct HarnessDeps {
     /// the whole roster addresses the configured workload (e.g. `chat-v1`).
     /// `None` keeps each agent's tier-derived default.
     pub model_override: Option<String>,
+    /// The company's durable notification store, used by workflow tools to
+    /// announce failures and other unhealthy outcomes.
+    pub notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
     /// The company's task board, so a [`TaskDispatched`] cycle can load the
     /// dispatched card and write its result back. `None` off the task path (the
     /// chat brain leaves the board untouched).
@@ -669,6 +707,130 @@ fn agent_budget_exhausted_notice(agent_id: &str, cap_usd: f64) -> String {
     )
 }
 
+/// Why a spend gate could not read the spend it exists to bound.
+///
+/// The two cases are not the same fault and must not be reported as one. A
+/// meter that errors is transient — the next read may succeed, and nothing
+/// about the deployment is wrong. A host with no meter at all can never
+/// enforce a declared cap: the cap and the deployment contradict each other
+/// until an operator changes one of them, and no amount of retrying resolves
+/// it. Both refuse the priced operation; they differ in what the operator is
+/// told to do about it.
+enum SpendReadFault {
+    NoMeter,
+    QueryFailed(OpenCompanyError),
+}
+
+/// Reads the usage samples a spend gate needs, resolving the two ways that
+/// read comes back empty-handed into [`SpendReadFault`].
+///
+/// Every spend gate goes through this one seam, so "can this cap be enforced
+/// right now" cannot answer differently for the total ceiling, a teammate's
+/// daily cap, and the predicate the optional model calls consult.
+async fn read_spend_for_gate(
+    meter: Option<&dyn UsageMeter>,
+    company: &CompanyId,
+    since_millis: u64,
+) -> std::result::Result<Vec<crate::ports::UsageSample>, SpendReadFault> {
+    let Some(meter) = meter else {
+        return Err(SpendReadFault::NoMeter);
+    };
+    meter
+        .query(company, since_millis)
+        .await
+        .map_err(SpendReadFault::QueryFailed)
+}
+
+/// The shape every pre-dispatch spend refusal returns: the reply IS the
+/// notice, and none of the in-turn signals apply because no turn ran — no
+/// iteration cap was reached, no in-turn spend brake armed, and no provider
+/// reported the account out of credits.
+///
+/// `abnormal_stop` IS set: this is a terminal, non-resumable stop with no
+/// checkpoint to continue from, same as an ACP refusal/cancellation. Workflow
+/// and card dispatch already fail the attempt on `abnormal_stop`; leaving it
+/// `None` here let a pre-dispatch refusal settle those attempts `Succeeded`
+/// and bind the refusal notice downstream as if it were the node's answer.
+fn spend_gate_refusal(reply: String, cause: SpendGateCause) -> TurnOutcome {
+    TurnOutcome {
+        reply,
+        steps: Vec::new(),
+        hit_iteration_cap: false,
+        abnormal_stop: Some(cause.abnormal_stop().to_string()),
+        halted_for_spend: None,
+        budget_paused: None,
+    }
+}
+
+/// Why a pre-dispatch spend gate refused.
+///
+/// The two read differently to whoever is looking: an unreadable meter is a
+/// host fault to go and fix, an exhausted cap is a healthy meter reporting a
+/// real ceiling, and waiting for the reset or raising the cap is the move.
+/// Reporting both as the former sends operators to troubleshoot a meter that
+/// is working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpendGateCause {
+    Unmeasurable,
+    Exhausted,
+}
+
+impl SpendGateCause {
+    fn abnormal_stop(self) -> &'static str {
+        match self {
+            Self::Unmeasurable => {
+                "[stopped: dispatch refused, spend could not be measured against a declared cap]"
+            }
+            Self::Exhausted => "[stopped: dispatch refused, a declared spend cap is exhausted]",
+        }
+    }
+}
+
+/// The operator-facing refusal when the company's declared token ceiling
+/// cannot be measured.
+///
+/// Names the fault and the operator's move, because the alternative — running
+/// the turn and warning into a log — leaves the console rendering a ceiling
+/// that has quietly stopped applying, which is a worse state than a refusal
+/// somebody can see and act on.
+fn unmeasurable_ceiling_notice(fault: &SpendReadFault) -> String {
+    match fault {
+        SpendReadFault::NoMeter => "This company declares a token budget for the period, but \
+             this host has no usage meter to measure spend against it — dispatch is paused \
+             rather than run against a ceiling that cannot be enforced. Configure a usage \
+             meter, or remove the budget."
+            .to_string(),
+        SpendReadFault::QueryFailed(_) => "Spend against this company's token budget could not \
+             be read, so dispatch is paused rather than run against a ceiling that cannot be \
+             checked. It resumes as soon as the usage meter reads again."
+            .to_string(),
+    }
+}
+
+/// The per-teammate twin of [`unmeasurable_ceiling_notice`]. Names the cap it
+/// could not check and says the rest of the company is unaffected — this gate
+/// is scoped to the desk that declared a bound.
+fn unmeasurable_agent_budget_notice(
+    agent_id: &str,
+    cap_usd: f64,
+    fault: &SpendReadFault,
+) -> String {
+    match fault {
+        SpendReadFault::NoMeter => format!(
+            "{agent_id} declares a daily spend cap of ${cap_usd:.2}, but this host has no usage \
+             meter to measure spend against it — dispatch to this teammate is paused rather than \
+             run against a cap that cannot be enforced. Configure a usage meter, or remove the \
+             cap. Other teammates are unaffected."
+        ),
+        SpendReadFault::QueryFailed(_) => format!(
+            "{agent_id}'s spend against its ${cap_usd:.2} daily cap could not be read, so \
+             dispatch to this teammate is paused rather than run against a cap that cannot be \
+             checked. It resumes as soon as the usage meter reads again. Other teammates are \
+             unaffected."
+        ),
+    }
+}
+
 /// The coarse pre-task proximity warning threshold (issue #1846): 90% of the
 /// applicable ceiling. Deliberately a fixed constant rather than a manifest
 /// setting — an operator-configurable threshold needs a new `[plan]` field,
@@ -923,6 +1085,18 @@ impl CompanyAgent {
     /// what the model actually consumed (a burnt empty attempt still costs
     /// tokens).
     ///
+    /// # Why the usage is beside the `Result`, not inside it
+    ///
+    /// A failing turn is not a free turn. A wall-clock ceiling fires *because*
+    /// the agent did ten minutes of real work, and the tokens it read back are
+    /// as owed as a success's. Returning `Result<(TurnOutcome, Vec<TurnUsage>)>`
+    /// made "the turn failed" and "there is nothing to meter" the same value, so
+    /// a `?` anywhere downstream silently dropped the spend from the attempt
+    /// row, from the ledger and from the usage meter alike — the console then
+    /// reported ten minutes of model work as `0 tok / $0.000`. The tuple is the
+    /// fix that the compiler enforces: a caller must handle the usage before it
+    /// can even look at the outcome.
+    ///
     /// The usage is read from each just-completed turn via openhuman's public
     /// [`Agent::last_turn_usage`](oh::agent::Agent::last_turn_usage) accessor
     /// while the agent lock is still held. An offline provider that reports no
@@ -939,9 +1113,16 @@ impl CompanyAgent {
     /// [`steps::fold_steps`](crate::harness::steps::fold_steps). The sink is
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
-    pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None, None, None, None)
-            .await
+    pub async fn run(&self, message: &str) -> (crate::Result<TurnOutcome>, Vec<TurnUsage>) {
+        self.run_with_steer(
+            message,
+            None,
+            None,
+            None,
+            None,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
+        .await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -974,16 +1155,26 @@ impl CompanyAgent {
         stream: Option<crate::turn_stream::TurnStreamCtx>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
         chat_seed: Option<chat_seed::ChatSeedRequest>,
-        // The thread this turn belongs to (#1890), carried in its own right
-        // rather than read off `chat_seed`. The binding must not depend on an
-        // optional dependency: `chat_seed` is `None` whenever no `EventLog` is
-        // wired, so reading the root from it made two different threads of one
-        // channel compare equal on such a host — no clear, no re-seed, and the
-        // leak this whole change exists to close, reopened in exactly the
-        // configuration that cannot re-seed its way out of it (coderabbit
-        // review finding).
-        thread_root: Option<EventSeq>,
-    ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
+        // The conversation this turn belongs to (#1890), carried in its own
+        // right rather than read off `chat_seed` or off `stream`.
+        //
+        // **Neither half may be inferred.** The root cannot come from
+        // `chat_seed`: that is `None` whenever no `EventLog` is wired, so
+        // reading it there made two threads of one channel compare equal on
+        // such a host — no clear, no re-seed, and the leak this epic exists to
+        // close, reopened in exactly the configuration that cannot re-seed its
+        // way out of it (coderabbit review on #1896). And the channel cannot
+        // come from `stream`, which is what #1890 I fixes: a turn that has a
+        // conversation but publishes no live frames — an approval's re-issued
+        // call — was indistinguishable from a turn that has none, so it ran
+        // against whatever history was last loaded and then answered into a
+        // thread it had never been bound to.
+        //
+        // One [`ChatTarget`] rather than two loose `Option`s, for the reason
+        // that type documents: a mis-paired channel and root compiles and then
+        // answers into the wrong conversation.
+        chat: crate::runtime::delegation::ChatTarget<'_>,
+    ) -> (crate::Result<TurnOutcome>, Vec<TurnUsage>) {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
         //
@@ -1001,10 +1192,37 @@ impl CompanyAgent {
         // nothing (a dispatched task card carries no operator chat to bind to),
         // and also `None` for a workflow agent node (issue #1702) — it routes by
         // run/node, not a chat thread, so there is nothing to bind history to.
-        let turn_chat_id: Option<String> = stream.as_ref().and_then(|ctx| match &ctx.route {
-            crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
-            crate::turn_stream::LiveRoute::Workflow { .. } => None,
-        });
+        // Issue #1890 I: the live route when there is one, the caller's `chat`
+        // otherwise.
+        //
+        // Streaming is about where transient frames are published; identity is
+        // about which conversation's history this turn may see. Deriving the
+        // second from the first made every *unstreamed* turn identity-less —
+        // which is the bug, since an approval's re-issued call streams nothing
+        // and still belongs to the conversation it was raised in.
+        //
+        // **The stream still wins when present**, and that is not laziness: the
+        // turn-stream route has already folded an unaddressed message onto
+        // `DEFAULT_DESK` (`mod.rs`'s chat route), so reading `chat.chat_id`
+        // there would hand back `None` and unbind a turn that today binds to
+        // General — the exact behaviour
+        // `an_unaddressed_message_still_binds_to_its_thread` exists to pin, and
+        // which #1896's review already established is correct rather than a
+        // gap. So this is a strict extension: nothing that streams changes.
+        //
+        // Residue, stated rather than discovered: an approval raised in an
+        // *unaddressed* message still has `origin_thread: None`, so its
+        // re-issued call binds to nothing exactly as before. Closing that means
+        // teaching `ChatTarget` to tell "unaddressed" from "no conversation at
+        // all", which is a wider change than this one.
+        let turn_chat_id: Option<String> = stream
+            .as_ref()
+            .and_then(|ctx| match &ctx.route {
+                crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
+                crate::turn_stream::LiveRoute::Workflow { .. } => None,
+            })
+            .or_else(|| chat.chat_id.map(str::to_string));
+        let thread_root = chat.thread_root;
         // The company this turn's chat seed (if any) projects from — same
         // "captured before `stream` moves" reasoning as `turn_chat_id` above.
         // Only meaningful alongside `turn_chat_id`, so `None` for exactly the
@@ -1043,6 +1261,11 @@ impl CompanyAgent {
                             frame.with_workflow(run_id.clone(), node_id.clone())
                         }
                     };
+                    // Which *query* inside that thread, so a console holding two
+                    // in-flight turns on one thread keeps their rows apart.
+                    // Absent on a turn answering no journaled message, where the
+                    // console falls back to keying by thread alone.
+                    let frame = frame.with_message_seq(ctx.message_seq);
                     crate::turn_stream::publish(&ctx.company, frame);
                     seq += 1;
                 }
@@ -1108,7 +1331,14 @@ impl CompanyAgent {
                 // was — no turn can observe a `switched` verdict this projection
                 // doesn't match.
                 let seed = match (&chat_seed, turn_company.as_ref()) {
-                    (Some(request), Some(company)) => request.build(company, incoming).await,
+                    // `self.agent_id` is the viewer the seed is attributed
+                    // against (issue #1956): this agent's own prior replies stay
+                    // assistant turns, and every teammate's — plus the runtime's
+                    // own notices — arrive as labelled user turns instead of
+                    // collapsing into its first person.
+                    (Some(request), Some(company)) => {
+                        request.build(company, incoming, &self.agent_id).await
+                    }
                     _ => Vec::new(),
                 };
                 tracing::debug!(
@@ -1257,11 +1487,51 @@ impl CompanyAgent {
         // `Box::pin` at the task-local scope boundary (the nested-scope
         // stack-overflow trap). The turn body owns the retry classification and
         // reports every attempt's usage.
-        let (reply, usages): (crate::Result<String>, Vec<TurnUsage>) =
+        let (reply, mut usages): (crate::Result<String>, Vec<TurnUsage>) =
             oh::agent::stop_hooks::with_stop_hooks(
                 hooks,
                 Box::pin(async {
                     let mut usages: Vec<TurnUsage> = Vec::new();
+                    // CodeRabbit review (PR #2053): `agent` is the ONE `Agent`
+                    // this pool reuses for every chat of this `(company,
+                    // agent_id)` pair (see `CompanyAgent::agent`'s doc), and
+                    // openhuman's `last_turn_usage_totals` is set only when a
+                    // turn finalizes normally — an attempt that ends in
+                    // `EmptyProviderResponse` returns before that write, so
+                    // `read_turn_usage` reads back whatever the PREVIOUS
+                    // finalized turn left there, not this attempt's (zero) own.
+                    // Left unguarded, that stale figure would ride home in
+                    // `usages` as if this attempt had spent it — for the
+                    // one-shot retry that is the previous ATTEMPT's total
+                    // double-counted; across two separate calls to this method
+                    // on the same reused agent, it is an unrelated PAST TURN's
+                    // total billed a second time onto a turn that made no
+                    // metered call at all.
+                    //
+                    // Codex review (PR #2053): an earlier version of this fix
+                    // compared each read against the value seen before the
+                    // attempt and treated an unchanged read as zero — which
+                    // wrongly zeroed a genuinely NEW finalized total on the
+                    // rare turn whose real spend happened to numerically equal
+                    // the immediately preceding one. `agent.turn()`'s own
+                    // `Result` already says, unambiguously, whether THIS
+                    // attempt finalized: `Ok` only ever returns non-empty text
+                    // (a blank `Ok` is retried inside openhuman's own loop
+                    // before it can reach here — see the `Empty` arm below),
+                    // and finalizing `last_turn_usage_totals` is part of what
+                    // makes a turn return `Ok` at all. So trust `read_turn_usage`
+                    // outright on `Ok`, regardless of its value, and never trust
+                    // it on `Err` (no comparison needed there either — an
+                    // `Err` never finalizes, so any read after one is
+                    // necessarily either `None`'s zero or a stale carry-over,
+                    // and either way is not this attempt's own). The fix does
+                    // not reset the field itself — openhuman does not expose a
+                    // way to from here (`take_last_turn_usage_totals` is
+                    // `pub(crate)` to that crate) — it reads the outcome
+                    // instead. See `last_observed_turn_cost` just below for the
+                    // fallback that still recovers a genuinely spent-and-failed
+                    // attempt's tokens from its own progress-stream segment.
+                    //
                     // Issue #1680: timed PER ATTEMPT, not across the retry. Each
                     // `agent.turn` opens a fresh harness run with a fresh
                     // wall-clock budget, so a duration spanning both attempts
@@ -1272,7 +1542,12 @@ impl CompanyAgent {
                     let started = std::time::Instant::now();
                     let first = agent.turn(message).await;
                     let first_elapsed = started.elapsed();
-                    usages.push(read_turn_usage(&agent));
+                    let first_finalized = first.is_ok();
+                    usages.push(if first_finalized {
+                        read_turn_usage(&agent)
+                    } else {
+                        TurnUsage::default()
+                    });
                     let reply: crate::Result<String> = match self
                         .classify_turn(first, first_elapsed)
                     {
@@ -1406,7 +1681,18 @@ impl CompanyAgent {
                                 let retry_started = std::time::Instant::now();
                                 let second = agent.turn(message).await;
                                 let second_elapsed = retry_started.elapsed();
-                                usages.push(read_turn_usage(&agent));
+                                // Same outcome-trusts-the-read rule as the first
+                                // attempt above: only `Ok` means openhuman
+                                // actually finalized a fresh total for THIS
+                                // attempt, so only `Ok` earns trusting
+                                // `read_turn_usage` — regardless of what value
+                                // it reads back.
+                                let second_finalized = second.is_ok();
+                                usages.push(if second_finalized {
+                                    read_turn_usage(&agent)
+                                } else {
+                                    TurnUsage::default()
+                                });
                                 match self.classify_turn(second, second_elapsed) {
                                     AttemptOutcome::Reply(reply) => Ok(reply),
                                     AttemptOutcome::Empty => Ok(crate::harness::mcp_probe::scrub(
@@ -1455,6 +1741,62 @@ impl CompanyAgent {
         let hit_iteration_cap = agent.last_turn_hit_cap();
         drop(agent);
         let events = collector.await.unwrap_or_default();
+        // A hard-failed ATTEMPT's spend, recovered from the progress stream —
+        // per attempt, not only when every attempt reported nothing.
+        //
+        // `read_turn_usage` above reads openhuman's `last_turn_usage_totals`,
+        // and `run_single` sets that only AFTER its own `let outcome = outcome?`
+        // — so an attempt that ended in an error publishes nothing at all, and
+        // `read_turn_usage` pushed a zero for it. That is precisely backwards
+        // for the attempts worth accounting for: a wall-clock ceiling fires
+        // *because* the agent did ten minutes of real work, and the run a
+        // founder most needs the cost of was the one reported as free.
+        //
+        // The live tally openhuman publishes as it goes — `TurnCostUpdated`,
+        // cumulative across ONE `agent.turn`, emitted after each provider
+        // response that carried a usage block — survives the error, because
+        // those frames were already sent down this shared channel before the
+        // attempt failed.
+        //
+        // Codex review (PR #2053): the original gate only fired when EVERY
+        // attempt was zero, which recovers at most one attempt — a metered
+        // first attempt that empties, followed by a retry that succeeds and
+        // publishes its OWN authoritative (small) total, left `usages` as
+        // `[zero, retry_total]`. That is not all-zero, so the first attempt's
+        // already-published spend was silently dropped rather than merely
+        // under-reported. Segmenting `events` on `TurnStarted` — emitted
+        // exactly once at the top of each `agent.turn()` call
+        // (`core_turn.rs`), never for a delegated sub-agent's turn, which
+        // uses `SubagentIterationStarted`/`SubagentToolCallStarted` instead —
+        // gives each attempt its own contiguous slice of the stream, so each
+        // zeroed attempt recovers its OWN tally independently.
+        //
+        // **A lower bound, stated rather than discovered.** `TurnCostUpdated`
+        // is suppressed for child scopes (openhuman's `observability`: a
+        // sub-agent's spend reaches the parent's `last_turn_usage_totals`
+        // instead), so an attempt that had delegated under-reports the
+        // delegates. Understating an attempt is a far smaller wrong than
+        // reporting it as free, and this seam cannot see more than the stream
+        // carries.
+        if usages.iter().any(TurnUsage::is_zero) {
+            let segments = attempt_event_segments(&events, usages.len());
+            for (usage, segment) in usages.iter_mut().zip(segments) {
+                if !usage.is_zero() {
+                    continue;
+                }
+                if let Some(observed) = last_observed_turn_cost(segment) {
+                    tracing::info!(
+                        agent = %self.agent_id,
+                        input_tokens = observed.input_tokens,
+                        output_tokens = observed.output_tokens,
+                        cost_usd = observed.cost_usd,
+                        "[turn] an attempt published no totals; metering the spend observed on \
+                         its own progress-stream segment"
+                    );
+                    *usage = observed;
+                }
+            }
+        }
         // The cap openhuman was actually enforcing, for the trace only. Taken
         // from the last `IterationStarted` rather than from config, so the log
         // reports the number the turn ran under instead of the one this crate
@@ -1521,20 +1863,21 @@ impl CompanyAgent {
         }
         let steps = steps::fold_steps(events);
 
-        let reply = reply?;
-        Ok((
-            TurnOutcome {
-                reply,
-                steps,
-                hit_iteration_cap,
-                // This is the built_in harness, not the ACP fold — the only
-                // path that produces an abnormal stop (PR #1880 review).
-                abnormal_stop: None,
-                halted_for_spend,
-                budget_paused,
-            },
-            usages,
-        ))
+        // The usage is returned BESIDE the result, never inside it (issue
+        // B-120). `reply?` here would have discarded `usages` on every hard
+        // failure — a wall-clock ceiling, a provider fault, an auth error —
+        // and those attempts had already burned every token they read back.
+        let outcome = reply.map(|reply| TurnOutcome {
+            reply,
+            steps,
+            hit_iteration_cap,
+            // This is the built_in harness, not the ACP fold — the only
+            // path that produces an abnormal stop (PR #1880 review).
+            abnormal_stop: None,
+            halted_for_spend,
+            budget_paused,
+        });
+        (outcome, usages)
     }
 
     /// This turn's in-turn spend ceiling, in USD — the value that
@@ -1668,6 +2011,147 @@ fn read_turn_usage(agent: &Agent) -> TurnUsage {
         .unwrap_or_default()
 }
 
+/// The last cumulative cost tally openhuman published on a turn's progress
+/// stream, or `None` when the turn made no metered model call.
+///
+/// [`TurnCostUpdated`](oh::agent::progress::AgentProgress::TurnCostUpdated) is
+/// cumulative across one `agent.turn`, so the **last** frame is the whole
+/// attempt's spend and earlier ones must never be summed with it.
+///
+/// This is the only figure a hard-failed attempt leaves behind — see the call
+/// site in [`CompanyAgent::run_with_steer`] for why `read_turn_usage` reads back
+/// nothing for one.
+fn last_observed_turn_cost(events: &[oh::agent::progress::AgentProgress]) -> Option<TurnUsage> {
+    events.iter().rev().find_map(|event| match event {
+        oh::agent::progress::AgentProgress::TurnCostUpdated {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            total_usd,
+            ..
+        } => Some(TurnUsage {
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+            cached_input_tokens: *cached_input_tokens,
+            cost_usd: *total_usd,
+        }),
+        _ => None,
+    })
+}
+
+/// Splits a turn's flat progress-event stream into one contiguous slice per
+/// attempt, so [`last_observed_turn_cost`] can read a zeroed attempt's own
+/// tally back without crediting it with a DIFFERENT attempt's spend (Codex
+/// review, PR #2053).
+///
+/// [`AgentProgress::TurnStarted`](oh::agent::progress::AgentProgress::TurnStarted)
+/// is emitted exactly once at the very top of every `agent.turn()` call
+/// (`core_turn.rs`, "about to enter the iteration loop") and never for a
+/// delegated sub-agent's turn — those use `SubagentIterationStarted`/
+/// `SubagentToolCallStarted` instead — so each attempt owns exactly one
+/// contiguous run of events starting at its own `TurnStarted` and ending
+/// where the next attempt's begins, or at the stream's end for the last.
+///
+/// `attempts` is `usages.len()` — the number of `agent.turn()` calls the
+/// wrapper actually made (one, or two across the one-shot retry). Always
+/// returns exactly that many slices; an attempt whose `TurnStarted` never
+/// reached this stream (openhuman's collector drops nothing observed in
+/// practice, but the channel is not literally unbounded) gets an empty one,
+/// which is the same "nothing to recover" outcome as before this fix.
+fn attempt_event_segments(
+    events: &[oh::agent::progress::AgentProgress],
+    attempts: usize,
+) -> Vec<&[oh::agent::progress::AgentProgress]> {
+    let starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, event)| {
+            matches!(event, oh::agent::progress::AgentProgress::TurnStarted).then_some(i)
+        })
+        .collect();
+    (0..attempts)
+        .map(|i| match starts.get(i) {
+            Some(&start) => {
+                let end = starts.get(i + 1).copied().unwrap_or(events.len());
+                &events[start..end]
+            }
+            None => &events[0..0],
+        })
+        .collect()
+}
+
+/// Writes every attempt's spend of a **finished** turn to the ledger and the
+/// usage meter, whether that turn succeeded or failed.
+///
+/// The one place `record_turn_cost` is called from the pool, so the two turn
+/// paths cannot disagree about when a turn is metered. Both call it *before*
+/// they unwrap the turn's own result — see
+/// [`turn_result_after_metering`] for why that ordering is the fix and not an
+/// accident of layout.
+async fn meter_turn_costs(
+    turn_costs: &[TurnUsage],
+    agent_id: &str,
+    company: &CompanyId,
+    deps: &HarnessDeps,
+    run_id: Option<&str>,
+) -> crate::Result<()> {
+    // Attribute cost to the provider and model this turn actually resolved to.
+    // With a per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
+    // a console BYOK switch changes the slug between turns, so read both live
+    // rather than trusting the static `deps.provider_slug` baked at build. The
+    // model is folded onto the closed vocabulary at the provider so no
+    // operator-authored model name reaches the meter (issue #1749).
+    let provider_slug = deps.provider.telemetry_provider_id();
+    let model_slug = deps.provider.telemetry_model();
+    for turn_cost in turn_costs {
+        record_turn_cost(
+            turn_cost,
+            agent_id,
+            &provider_slug,
+            model_slug,
+            company,
+            deps.store.as_ref(),
+            deps.meter.as_deref(),
+            run_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Resolves a metered turn into the one error that should propagate.
+///
+/// A turn's own failure outranks a metering failure. The turn is the thing the
+/// operator asked for and its error is the one that explains what they see; a
+/// ledger write that also failed is a second, quieter problem, and letting it
+/// replace the first would report "could not append to the ledger" for a run
+/// that actually hit its wall-clock ceiling.
+///
+/// The reverse case is not symmetric: when the turn *succeeded*, a metering
+/// failure is the only failure there is, and it still propagates — losing a
+/// ledger entry silently is the class of bug this whole path exists to close.
+fn turn_result_after_metering(
+    outcome: crate::Result<TurnOutcome>,
+    metered: crate::Result<()>,
+    company: &CompanyId,
+    agent_id: &str,
+) -> crate::Result<TurnOutcome> {
+    match outcome {
+        Err(turn_error) => {
+            if let Err(meter_error) = metered {
+                tracing::warn!(
+                    company = %company,
+                    agent = %agent_id,
+                    error = %meter_error,
+                    "[cost] could not meter a failed turn's spend; reporting the turn's own error"
+                );
+            }
+            Err(turn_error)
+        }
+        Ok(outcome) => metered.map(|()| outcome),
+    }
+}
+
 /// Whether a turn error is the transient empty-response class openhuman raises
 /// instead of a silent blank reply. Matched on the error chain's message
 /// (`turn` returns `anyhow::Result`, so the typed `AgentError` is erased):
@@ -1700,7 +2184,7 @@ const WALL_CLOCK_CEILING_LEAVES: [&str; 2] = [
 ///
 /// **Whole phrases, not the words `wall-clock budget`.** A provider's response
 /// body reaches this chain verbatim — `provider.rs` raises
-/// `TinyAgentsError::Model(format!("hosted inference returned {status}: {text}"))`
+/// `InferenceError::Model(format!("hosted inference returned {status}: {text}"))`
 /// — so a hosted or BYOK endpoint that says anything about a wall-clock budget
 /// of its own would otherwise be reported as this ceiling, complete with a
 /// measured duration of a second or two and an instruction to raise
@@ -2056,16 +2540,20 @@ impl Default for HarnessPool {
 enum LiveStream<'a> {
     Off,
     On {
-        chat_id: Option<&'a str>,
-        /// The thread within `chat_id` this turn belongs to (#1890), `None`
-        /// for the channel itself.
+        /// Where this turn's transient frames are published — and **only**
+        /// that, since issue #1890 I.
         ///
-        /// Rides here rather than as a seventh positional argument because
-        /// this variant is already the turn's *chat identity* and not only its
-        /// stream key — `chat_id` is what the history seed is scoped by, and
-        /// the thread is the other half of that scope. Nothing about live
-        /// streaming reads it.
-        thread_root: Option<EventSeq>,
+        /// The thread used to ride here too, on the argument that this variant
+        /// "is already the turn's chat identity and not only its stream key".
+        /// That conflation is what I removes: identity now travels on the
+        /// `ChatTarget` the caller passes, so a turn can have a conversation
+        /// and stream nothing — which an approval's re-issued call does, and
+        /// which this enum could not express.
+        ///
+        /// The history seed (issue #1840) reads that same `ChatTarget`, for the
+        /// same reason: whether a turn is seeded is a fact about the
+        /// conversation it is in, not about whether anything is watching it.
+        chat_id: Option<&'a str>,
     },
     /// A workflow agent node (issue #1702): it streams live like `On`, but its
     /// frames route by the workflow run + node rather than a chat thread — the
@@ -2395,7 +2883,12 @@ impl HarnessPool {
         // The company's own search provider is set from that same settings
         // surface and goes stale the same way, so it rides the same axis: a key
         // pasted in the console must reach the next turn, not the next restart.
-        let tenant_search_config = self.resolve_tenant_search(company, deps).await;
+        // Gated on the same effective grant `grants_fp` above hashes over — the
+        // live override folded onto `company`'s base — so a console grant this
+        // pass has not hot-rebuilt into `company` still unlocks the backend.
+        let tenant_search_config = self
+            .resolve_tenant_search(company, deps, overlay.tool_grants.as_ref())
+            .await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
@@ -2876,6 +3369,13 @@ impl HarnessPool {
     /// wearing a different credential. A company that never opted into web
     /// search does not get a store read per turn for a setting it cannot use.
     ///
+    /// The grant check reads the effective allow-list — `company`'s base folded
+    /// with `overlay_tool_grants` — not `company.manifest.tools.allow` alone.
+    /// `company` can be a stale snapshot the live override has not yet been
+    /// folded into; checking only its raw field would resolve no backend for a
+    /// grant the roster's own effective-allow-list read already honours,
+    /// leaving native evidence claim `search` while no tool gets wired.
+    ///
     /// A transient read error keeps the last known connection with a warning,
     /// like `hosting`: degrading to `None` would silently move the company's
     /// searches back onto the platform's metered account — a bill moving between
@@ -2884,8 +3384,13 @@ impl HarnessPool {
         &self,
         company: &CompanyRecord,
         deps: &HarnessDeps,
+        overlay_tool_grants: Option<&crate::ports::types::ToolGrantsOverride>,
     ) -> Option<search_byo::TenantSearch> {
-        if !crate::company::grants_search_explicit(&company.manifest.tools.allow) {
+        let effective_allow = crate::ports::types::effective_tool_allow(
+            &company.manifest.tools.allow,
+            overlay_tool_grants,
+        );
+        if !crate::company::grants_search_explicit(&effective_allow) {
             return None;
         }
         let Some(secrets) = &deps.secrets else {
@@ -3211,8 +3716,8 @@ impl HarnessPool {
             None,
             LiveStream::On {
                 chat_id: chat.chat_id,
-                thread_root: chat.thread_root,
             },
+            chat,
             None,
         )
         .await
@@ -3242,6 +3747,9 @@ impl HarnessPool {
             deps,
             None,
             LiveStream::Off,
+            // A dispatched card's own turn answers no conversation: its steps
+            // go to the card's note, and nothing binds to a thread.
+            crate::runtime::delegation::ChatTarget::default(),
             run_sink,
         )
         .await
@@ -3278,6 +3786,9 @@ impl HarnessPool {
                 run_id: workflow_run_id,
                 node_id,
             },
+            // Routed by run and node, not by a conversation — there is none to
+            // bind history to (issue #1702).
+            crate::runtime::delegation::ChatTarget::default(),
             run_sink,
         )
         .await
@@ -3313,8 +3824,8 @@ impl HarnessPool {
             Some(control),
             LiveStream::On {
                 chat_id: chat.chat_id,
-                thread_root: chat.thread_root,
             },
+            chat,
             run_sink,
         )
         .await
@@ -3325,6 +3836,26 @@ impl HarnessPool {
     /// bubble. Its transient turn frames must not reach the live console
     /// timeline (they'd misattribute to a chat thread), so this path publishes
     /// nothing while still honouring the operator steer control (#125 review).
+    ///
+    /// # It still has a conversation, when its caller does (issue #1890 I)
+    ///
+    /// `chat` is separate from the (absent) stream, and that separation is the
+    /// whole of what I fixes. An approval's re-issued call comes through here:
+    /// it publishes no frames, but it *was* raised in a conversation, and the
+    /// grant has recorded which one since #435. With identity read off the
+    /// stream, that call was indistinguishable from a dispatched card's turn —
+    /// so it ran against whatever history happened to be loaded and then
+    /// answered into the thread it had never been bound to.
+    ///
+    /// A dispatched card's turn passes [`ChatTarget::default()`] and keeps
+    /// exactly the behaviour it had: no binding, and — deliberately — no clear
+    /// either, since one background task can span several turns that depend on
+    /// what accumulated between them.
+    // One over the limit, and the one that pushed it there is the whole point
+    // of #1890 I: the conversation must be sayable independently of the stream.
+    // Bundling the rest into a struct to get back under would hide six
+    // parameters that every sibling entry point on this type spells out.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_steered_background(
         &self,
         company: &CompanyId,
@@ -3332,6 +3863,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         control: &SteerControl,
+        chat: crate::runtime::delegation::ChatTarget<'_>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         self.run_inner(
@@ -3341,6 +3873,7 @@ impl HarnessPool {
             deps,
             Some(control),
             LiveStream::Off,
+            chat,
             run_sink,
         )
         .await
@@ -3357,12 +3890,17 @@ impl HarnessPool {
     /// One predicate, so "is the ceiling spent" cannot answer differently for
     /// the gate and for the turn it gates.
     ///
-    /// **Answers `false` wherever the ceiling cannot be evaluated** — no plan,
-    /// no total budget, no meter, or a failed spend query — which is exactly
-    /// what `total_ceiling_refusal` does with the same cases: it declines to
-    /// hard-refuse and defers to the per-namespace fail-closed roster. A gate
-    /// that instead blocked on an unreadable meter would take routing down on
-    /// a metering hiccup.
+    /// **Answers `false` only when no ceiling is declared** — no plan, or a
+    /// plan with no `total_budget`. A company that declared no bound has
+    /// nothing to enforce, so these optional model calls run freely.
+    ///
+    /// When a ceiling IS declared but the spend behind it cannot be read, this
+    /// answers `true`, matching what `total_ceiling_refusal` does with the
+    /// same cases: a declared cap is binding, and a priced call made against a
+    /// bound nobody can measure is spending real money outside it. The callers
+    /// this gates are all optional extras — a card title, a sufficiency judge,
+    /// a responder-selection pass — each of which already has a deterministic
+    /// answer to fall back on, so declining them costs a nicety, not the work.
     pub(crate) async fn total_ceiling_spent(company: &CompanyId, deps: &HarnessDeps) -> bool {
         let Some(plan) = deps.plan.as_ref() else {
             return false;
@@ -3370,13 +3908,10 @@ impl HarnessPool {
         if plan.total_budget.is_none() {
             return false;
         }
-        let Some(meter) = deps.meter.as_deref() else {
-            return false;
-        };
         let since = plan.period.period_start_millis(crate::ports::now_millis());
-        match meter.query(company, since).await {
+        match read_spend_for_gate(deps.meter.as_deref(), company, since).await {
             Ok(samples) => plan.total_exhausted(capability_budget::tokens_in(&samples)),
-            Err(_) => false,
+            Err(_) => true,
         }
     }
 
@@ -3394,90 +3929,67 @@ impl HarnessPool {
     ) -> Option<TurnOutcome> {
         let plan = deps.plan.as_ref()?;
         plan.total_budget?;
-        match deps.meter.as_deref() {
-            Some(meter) => {
-                let since = plan.period.period_start_millis(crate::ports::now_millis());
-                match meter.query(company, since).await {
-                    Ok(samples) => {
-                        let spent = capability_budget::tokens_in(&samples);
-                        // Issue #1846: the coarse pre-task proximity warning,
-                        // read BESIDE the exhaustion check above — same query,
-                        // same samples, no second meter read. Fail-open by
-                        // construction: this whole arm only runs when the read
-                        // already succeeded, and it makes no per-task cost
-                        // claim, only "you are near the period ceiling".
-                        // Published, never returned — a warning is
-                        // non-blocking, so the turn keeps dispatching normally
-                        // whether or not a console happens to be listening.
-                        if let Some(cap) = plan.total_budget
-                            && !plan.total_exhausted(spent)
-                            && is_approaching_budget_ceiling(spent, cap)
-                        {
-                            tracing::info!(
-                                company = %company,
-                                spent,
-                                cap,
-                                "[capability-budget] approaching the total token ceiling; publishing a non-blocking proximity warning"
-                            );
-                            crate::turn_stream::publish(
-                                company,
-                                crate::turn_stream::BudgetProximityFrame {
-                                    kind: "budget_proximity",
-                                    agent_id: None,
-                                    message: budget_proximity_message(),
-                                    at_millis: crate::ports::now_millis(),
-                                },
-                            );
-                        }
-                        if plan.total_exhausted(spent) {
-                            tracing::info!(
-                                company = %company,
-                                agent = agent_id,
-                                spent,
-                                "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
-                            );
-                            return Some(TurnOutcome {
-                                reply: TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
-                                steps: Vec::new(),
-                                // No model call ran, so no cap was reached
-                                // (issue #926). A refusal is not a pause.
-                                hit_iteration_cap: false,
-                                // This pre-turn refusal is its own, older
-                                // signal (the reply text itself names the
-                                // cap) — not the PR #1880 `abnormal_stop`,
-                                // which is scoped to the ACP fold's
-                                // refusal/cancelled/unrecognized stops.
-                                abnormal_stop: None,
-                                // And no in-turn hook fired, because no turn
-                                // ran (issue #1032). The reply already IS the
-                                // budget notice; labelling this as a halt too
-                                // would tell the operator the same thing twice.
-                                halted_for_spend: None,
-                                // Issue #1846: this is OpenCompany's own
-                                // plan-level token ceiling refusing dispatch —
-                                // a company policy, not the provider account
-                                // being out of money. No model call ran, so
-                                // `classify_turn` never saw a wire error to
-                                // classify.
-                                budget_paused: None,
-                            });
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            company = %company,
-                            %error,
-                            "[capability-budget] total-ceiling spend query failed; not hard-refusing — deferring to the per-namespace fail-closed roster"
-                        );
-                    }
+        let since = plan.period.period_start_millis(crate::ports::now_millis());
+        let samples = match read_spend_for_gate(deps.meter.as_deref(), company, since).await {
+            Ok(samples) => samples,
+            Err(fault) => {
+                match &fault {
+                    SpendReadFault::NoMeter => tracing::error!(
+                        company = %company,
+                        agent = agent_id,
+                        "[capability-budget] a total token ceiling is declared but this host has no usage meter; refusing dispatch (no model call) until a meter is configured or the ceiling is removed"
+                    ),
+                    SpendReadFault::QueryFailed(error) => tracing::error!(
+                        company = %company,
+                        agent = agent_id,
+                        %error,
+                        "[capability-budget] total-ceiling spend query failed; refusing dispatch (no model call) rather than spending against a ceiling that cannot be checked"
+                    ),
                 }
+                return Some(spend_gate_refusal(
+                    unmeasurable_ceiling_notice(&fault),
+                    SpendGateCause::Unmeasurable,
+                ));
             }
-            None => {
-                tracing::warn!(
-                    company = %company,
-                    "[capability-budget] no usage meter; cannot enforce the total token ceiling — deferring to the per-namespace fail-closed roster"
-                );
-            }
+        };
+
+        let spent = capability_budget::tokens_in(&samples);
+        // Issue #1846: the coarse pre-task proximity warning, read BESIDE the
+        // exhaustion check below — same query, same samples, no second meter
+        // read. Published, never returned: a warning is non-blocking, so the
+        // turn keeps dispatching normally whether or not a console is
+        // listening.
+        if let Some(cap) = plan.total_budget
+            && !plan.total_exhausted(spent)
+            && is_approaching_budget_ceiling(spent, cap)
+        {
+            tracing::info!(
+                company = %company,
+                spent,
+                cap,
+                "[capability-budget] approaching the total token ceiling; publishing a non-blocking proximity warning"
+            );
+            crate::turn_stream::publish(
+                company,
+                crate::turn_stream::BudgetProximityFrame {
+                    kind: "budget_proximity",
+                    agent_id: None,
+                    message: budget_proximity_message(),
+                    at_millis: crate::ports::now_millis(),
+                },
+            );
+        }
+        if plan.total_exhausted(spent) {
+            tracing::info!(
+                company = %company,
+                agent = agent_id,
+                spent,
+                "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
+            );
+            return Some(spend_gate_refusal(
+                TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
+                SpendGateCause::Exhausted,
+            ));
         }
         None
     }
@@ -3537,6 +4049,12 @@ impl HarnessPool {
                     .map(str::to_string)
                     .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
             },
+            // A copilot turn is addressed by `chat_id` alone — this entry point
+            // takes no `ChatTarget` — so its frames key by thread, as every
+            // frame did before `messageSeq` existed. A copilot thread runs one
+            // turn at a time, so there is nothing here for the finer key to
+            // separate.
+            message_seq: None,
         });
 
         // The message goes to the model AS SENT. This is the retrieve→inject
@@ -3545,26 +4063,21 @@ impl HarnessPool {
         // reason (issue #1840): a confined turn is intentionally context-free, so
         // it carries none of the desk's recent history.
         let (outcome, turn_costs) = agent
-            .run_with_steer(message, None, stream_ctx, None, None, None)
-            .await?;
-
-        let provider_slug = deps.provider.telemetry_provider_id();
-        let model_slug = deps.provider.telemetry_model();
-        for turn_cost in &turn_costs {
-            record_turn_cost(
-                turn_cost,
-                confine::CONFINED_AGENT_ID,
-                &provider_slug,
-                model_slug,
-                company,
-                deps.store.as_ref(),
-                deps.meter.as_deref(),
+            .run_with_steer(
+                message,
                 None,
+                stream_ctx,
+                None,
+                None,
+                crate::runtime::delegation::ChatTarget::default(),
             )
-            .await?;
-        }
+            .await;
 
-        Ok(outcome)
+        // Metered before the outcome is unwrapped: a copilot turn that failed
+        // still consumed whatever it consumed before it failed.
+        let metered =
+            meter_turn_costs(&turn_costs, confine::CONFINED_AGENT_ID, company, deps, None).await;
+        turn_result_after_metering(outcome, metered, company, confine::CONFINED_AGENT_ID)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3576,6 +4089,11 @@ impl HarnessPool {
         deps: &HarnessDeps,
         steer: Option<&SteerControl>,
         live: LiveStream<'_>,
+        // Which conversation this turn belongs to, independent of whether it
+        // streams (#1890 I). For a live chat turn it is the same pair `live`
+        // carries; for an approval's re-issued call it is the conversation the
+        // approval was raised in, with no stream at all.
+        chat: crate::runtime::delegation::ChatTarget<'_>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         let agent = {
@@ -3654,14 +4172,14 @@ impl HarnessPool {
         // inject and the memory writeback — so a refused turn costs nothing and
         // leaves no fabricated outcome in the memory store.
         //
-        // Fail-closed tradeoff (issue #188): the hard refusal fires ONLY when
-        // spend is actually readable. With no meter, or a meter whose query
-        // errors, we do NOT brick the tenant on a transient read failure — we
-        // fall through to run the turn, which the per-namespace fail-closed path
-        // in `resolve_filter`/`ensure` has already stripped of every exec tool.
-        // A `warn!` records the deferral. Refusing every turn on a flaky meter
-        // read would be a strictly worse failure mode than letting an
-        // intrinsic-tools-only turn through.
+        // One rule, applied at every spend gate: a declared cap is BINDING, and
+        // a gate that cannot read the spend it bounds refuses the priced
+        // operation rather than admitting it. Dispatch is unconditionally
+        // priced — it is about to call a model — so admitting one against an
+        // unreadable ceiling spends real money outside a bound nobody can
+        // observe, and the console goes on rendering that ceiling as if it
+        // still applied. A refusal an operator can see and act on is a better
+        // state than a cap that silently stopped existing.
         if let Some(refusal) = Self::total_ceiling_refusal(company, agent_id, deps).await {
             return Ok(refusal);
         }
@@ -3683,91 +4201,71 @@ impl HarnessPool {
         // fabricated outcome in the store. The reply names the teammate, the cap
         // and the reset — never a bare failure.
         //
-        // FAIL-OPEN, mirroring #188's documented tradeoff: with no meter, or a
-        // meter whose query errors, we warn and run the turn. Bricking a
-        // company's cognition on a flaky read would be a strictly worse failure
-        // mode than one day of overspend, and there is no operator recourse at
-        // turn level (unlike the policy arm, whose park a human can approve —
-        // which is why THAT layer fails closed and this one does not).
+        // Scoped to the desk that declared a bound: an uncapped colleague is
+        // never gated by a meter fault, so an unreadable meter costs the company
+        // its capped teammates, not its cognition.
         if let Some(cap) = agent.budget_usd_daily {
-            match deps.meter.as_deref() {
-                Some(meter) => {
-                    let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
-                    match meter.query(company, since).await {
-                        Ok(samples) => {
-                            let spent = crate::metering::usd_spent_by_agent(&samples, agent_id);
-                            // Issue #1846: same coarse proximity warning as the
-                            // total-ceiling read above, beside this per-agent
-                            // read, reusing the SAME `samples` — no second
-                            // query. Non-blocking; only fires when this
-                            // teammate is not already refused below.
-                            if spent < cap && is_approaching_budget_ceiling_f64(spent, cap) {
-                                tracing::info!(
-                                    company = %company,
-                                    agent = agent_id,
-                                    spent,
-                                    cap,
-                                    "[agent-budget] approaching the daily spend cap; publishing a non-blocking proximity warning"
-                                );
-                                crate::turn_stream::publish(
-                                    company,
-                                    crate::turn_stream::BudgetProximityFrame {
-                                        kind: "budget_proximity",
-                                        agent_id: Some(agent_id.to_string()),
-                                        message: budget_proximity_message_usd(agent_id),
-                                        at_millis: crate::ports::now_millis(),
-                                    },
-                                );
-                            }
-                            if spent >= cap {
-                                tracing::info!(
-                                    company = %company,
-                                    agent = agent_id,
-                                    spent,
-                                    cap,
-                                    "[agent-budget] daily spend cap reached; refusing dispatch (no model call) until 00:00 UTC"
-                                );
-                                return Ok(TurnOutcome {
-                                    reply: agent_budget_exhausted_notice(agent_id, cap),
-                                    steps: Vec::new(),
-                                    // No model call ran, so no cap was reached
-                                    // (issue #926). A refusal is not a pause.
-                                    hit_iteration_cap: false,
-                                    // Same reasoning as the total-ceiling
-                                    // refusal above: this is its own signal,
-                                    // not the PR #1880 ACP-only field.
-                                    abnormal_stop: None,
-                                    // Same teammate cap, refused BEFORE the
-                                    // turn (issue #1032). The in-turn brake
-                                    // never armed, and the reply above already
-                                    // names the cap it refused against.
-                                    halted_for_spend: None,
-                                    // Issue #1846: same reasoning as the total
-                                    // ceiling refusal above — this is the
-                                    // teammate's manifest cap, not the provider
-                                    // account being out of credits, and no
-                                    // model call ran to classify.
-                                    budget_paused: None,
-                                });
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                company = %company,
-                                agent = agent_id,
-                                %error,
-                                "[agent-budget] daily-spend query failed; running the turn rather than bricking this teammate"
-                            );
-                        }
+            let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
+            let samples = match read_spend_for_gate(deps.meter.as_deref(), company, since).await {
+                Ok(samples) => samples,
+                Err(fault) => {
+                    match &fault {
+                        SpendReadFault::NoMeter => tracing::error!(
+                            company = %company,
+                            agent = agent_id,
+                            cap,
+                            "[agent-budget] a daily spend cap is declared but this host has no usage meter; refusing dispatch to this teammate (no model call) until a meter is configured or the cap is removed"
+                        ),
+                        SpendReadFault::QueryFailed(error) => tracing::error!(
+                            company = %company,
+                            agent = agent_id,
+                            cap,
+                            %error,
+                            "[agent-budget] daily-spend query failed; refusing dispatch to this teammate (no model call) rather than spending against a cap that cannot be checked"
+                        ),
                     }
+                    return Ok(spend_gate_refusal(
+                        unmeasurable_agent_budget_notice(agent_id, cap, &fault),
+                        SpendGateCause::Unmeasurable,
+                    ));
                 }
-                None => {
-                    tracing::warn!(
-                        company = %company,
-                        agent = agent_id,
-                        "[agent-budget] no usage meter; the per-agent daily spend cap cannot be enforced on this host"
-                    );
-                }
+            };
+
+            let spent = crate::metering::usd_spent_by_agent(&samples, agent_id);
+            // Issue #1846: same coarse proximity warning as the total-ceiling
+            // read above, reusing the SAME `samples` — no second query.
+            // Non-blocking; only fires when this teammate is not already
+            // refused below.
+            if spent < cap && is_approaching_budget_ceiling_f64(spent, cap) {
+                tracing::info!(
+                    company = %company,
+                    agent = agent_id,
+                    spent,
+                    cap,
+                    "[agent-budget] approaching the daily spend cap; publishing a non-blocking proximity warning"
+                );
+                crate::turn_stream::publish(
+                    company,
+                    crate::turn_stream::BudgetProximityFrame {
+                        kind: "budget_proximity",
+                        agent_id: Some(agent_id.to_string()),
+                        message: budget_proximity_message_usd(agent_id),
+                        at_millis: crate::ports::now_millis(),
+                    },
+                );
+            }
+            if spent >= cap {
+                tracing::info!(
+                    company = %company,
+                    agent = agent_id,
+                    spent,
+                    cap,
+                    "[agent-budget] daily spend cap reached; refusing dispatch (no model call) until 00:00 UTC"
+                );
+                return Ok(spend_gate_refusal(
+                    agent_budget_exhausted_notice(agent_id, cap),
+                    SpendGateCause::Exhausted,
+                ));
             }
         }
 
@@ -3781,9 +4279,27 @@ impl HarnessPool {
         let augmented = if crate::runtime::delegation::is_chat_only_turn() {
             message.to_string()
         } else {
+            // **Retrieved on the operator's own words, injected into the
+            // composed message** (#1890 review). `message` may already carry
+            // this turn's in-memory briefings — open work, the settled-work
+            // digest, the thread index, attachment markers — and those are for
+            // the model to read, not for the store to search on. Retrieving on
+            // them made the query drift toward whatever the briefings happened
+            // to name: the settled digest is a list of finished card titles, so
+            // a conversation that had just closed some work recalled *that*
+            // work rather than what the operator was asking about, and grew
+            // more biased with every card that finished.
+            //
+            // `operator_words` is the existing seam for this — the same cut the
+            // triage decision takes, and for the same reason its docs give: the
+            // annotations are not something anybody typed.
             let hits = deps
                 .context
-                .search(company, message, memory_loop::RETRIEVE_TOP_K)
+                .search(
+                    company,
+                    crate::runtime::delegation::operator_words(message),
+                    memory_loop::RETRIEVE_TOP_K,
+                )
                 .await?;
             memory_loop::inject(message, &hits)
         };
@@ -3807,7 +4323,13 @@ impl HarnessPool {
         // recent history; a background task or workflow node carries no chat
         // thread to bind history to (issue #1840).
         let seed_chat: Option<Option<&str>> = match &live {
-            LiveStream::On { chat_id, .. } => Some(*chat_id),
+            // Whether to seed is `chat.history_seed`, not a field of this
+            // variant: since #1890 I the stream carries only the stream key,
+            // and the seed is a fact about the conversation. False for a
+            // hive-mind episode turn, which arrives carrying its own
+            // attributed, visibility-filtered transcript — see
+            // [`ChatTarget::history_seed`](crate::runtime::delegation::ChatTarget::history_seed).
+            LiveStream::On { chat_id, .. } if chat.history_seed => Some(*chat_id),
             _ => None,
         };
         let stream_ctx = match live {
@@ -3825,6 +4347,13 @@ impl HarnessPool {
                         .map(str::to_string)
                         .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
                 },
+                // The operator message this turn answers, read off the
+                // `ChatTarget` the caller already passes. Nothing new is
+                // threaded through the runtime to get it here — and pointedly
+                // NOT used to decide *whether* to stream, which is the
+                // conflation #1890 I removed and the revert of aa2787e9a
+                // re-established. `LiveStream` still decides that alone.
+                message_seq: chat.message_seq.map(|seq| seq.value()),
             }),
             // A workflow agent node (issue #1702): streams live, but keyed on
             // the workflow run + node so its frames land on the console's
@@ -3836,6 +4365,8 @@ impl HarnessPool {
                     run_id: run_id.to_string(),
                     node_id: node_id.to_string(),
                 },
+                // A workflow node answers a graph, not a message.
+                message_seq: None,
             }),
             LiveStream::Off => None,
         };
@@ -3860,29 +4391,102 @@ impl HarnessPool {
                 raw_message: message.to_string(),
                 events: events.clone(),
                 store: deps.store.clone(),
-                thread_root: match &live {
-                    LiveStream::On { thread_root, .. } => *thread_root,
-                    _ => None,
-                },
+                reader: agent_id.to_string(),
+                thread_root: chat.thread_root,
+                current_message_seq: chat.message_seq,
             }),
             _ => None,
         };
-        let (outcome, turn_costs) = deps
-            .approval_requests
-            .turn_scoped(agent.run_with_steer(
-                &augmented,
-                steer,
-                stream_ctx,
-                run_sink.clone(),
-                chat_seed_request,
-                // From `live`, not from the seed request: the binding must hold
-                // on a host with no event log wired too (#1890).
-                match &live {
-                    LiveStream::On { thread_root, .. } => *thread_root,
-                    LiveStream::Workflow { .. } | LiveStream::Off => None,
-                },
-            ))
-            .await?;
+        // Issue #1890 F: the conversation this turn answers, ambient for the
+        // duration of it, so `read_thread` can scope itself to the channel the
+        // turn is actually in. Set here rather than on the tool because a belt
+        // is built once per agent while a conversation changes every message.
+        //
+        // From the caller's `chat` since #1890 I, which is what the note F
+        // shipped with said would happen when the two met: identity no longer
+        // rides on the stream, so an approval's re-issued call — unstreamed,
+        // but raised in a conversation — can read that conversation's threads
+        // like any other turn.
+        // Route first, caller second — the same order `turn_chat_id` resolves
+        // in one frame down, and for the same reason: the live route has
+        // already folded an unaddressed message onto `DEFAULT_DESK`, so reading
+        // `chat.chat_id` alone yields `None` there, which `read_thread` treats
+        // as a refusal. A turn on the General desk could then not read its own
+        // channel's threads (coderabbit on #1972).
+        let turn_chat = stream_ctx
+            .as_ref()
+            .and_then(|ctx| match &ctx.route {
+                crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
+                crate::turn_stream::LiveRoute::Workflow { .. } => None,
+            })
+            .or_else(|| chat.chat_id.map(str::to_string));
+        // Issue #6014: what this turn is for, in scope for its whole duration, so
+        // an oversized tool result can be extracted against the task instead of
+        // cut on a byte boundary. `operator_words` for the reason its own docs
+        // give — `message` here is the composed text and carries the cycle's
+        // briefings, which are not what anybody asked for.
+        let (outcome, turn_costs) = crate::runtime::delegation::with_task_hint(
+            crate::runtime::delegation::operator_words(message).to_string(),
+            crate::runtime::delegation::with_turn_conversation(
+                turn_chat,
+                deps.approval_requests.turn_scoped(agent.run_with_steer(
+                    &augmented,
+                    steer,
+                    stream_ctx,
+                    run_sink.clone(),
+                    chat_seed_request,
+                    // The caller's own, not read off `live` (#1890 I). A turn can
+                    // have a conversation and stream nothing.
+                    chat,
+                )),
+            ),
+        )
+        .await;
+        // Issue B-120: bank what the turn spent BEFORE its result is unwrapped.
+        //
+        // Both consumers of `turn_costs` used to sit below a `?` on this very
+        // await, so a turn that ended in a hard error — a wall-clock ceiling
+        // above all, which fires precisely *because* the agent worked for ten
+        // minutes — reached neither of them. The attempt row settled with a
+        // default `TokenUsage`, the ledger got no `inference.spend` entry, and
+        // the meter got no `UsageSample`: the console reported the most
+        // expensive runs a founder owns as free, and the company-wide total
+        // agreed with it, because the spend had never been recorded anywhere.
+        //
+        // First consumer: the attempt row's own total (issue #242). Per turn,
+        // not once at the end, so a redirect re-run and a delegate's turn both
+        // count — an attempt's cost is what the attempt spent. This is a second
+        // *reader* of `turn_costs`, not a second writer: the ledger and the
+        // usage meter below stay the only places money is recorded.
+        if let Some(sink) = run_sink.as_ref() {
+            for turn_cost in &turn_costs {
+                sink.add_usage(turn_cost);
+            }
+        }
+        // Second consumer: the ledger and the usage meter. Issue #242 also
+        // attributes the sample to the attempt this turn ran under, so "what did
+        // this run cost?" is answerable from the meter as well as from the row.
+        let metered = meter_turn_costs(
+            &turn_costs,
+            agent_id,
+            company,
+            deps,
+            run_sink.as_ref().map(|s| s.run_id()),
+        )
+        .await;
+        // Issue #1846, Codex review (PR #2053): the budget-pause park/retire
+        // side effects below read the turn's OWN outcome, and must run before
+        // `turn_result_after_metering`'s `?` — a ledger write that fails is a
+        // problem with the METER, not with what this turn actually did, and
+        // must not also swallow a genuine pause marker (the operator's only
+        // "add credits and resend" path) or a genuine retirement of a stale
+        // one (leaving a stale CTA that could later re-dispatch a
+        // potentially non-idempotent request a second time). `meter_turn_costs`
+        // itself still runs first and unconditionally, exactly as
+        // `meter_turn_costs`'s own doc requires — this only reorders reading
+        // `outcome` for these two side effects ahead of the point that
+        // `outcome` might get replaced by a metering error.
+        //
         // Issue #1846: park a durable re-issue marker the moment a pause is
         // seen, mirroring the grant-reissue precedent (`crate::runtime::grants`)
         // — mint on the event that needs a later redemption, not on whatever
@@ -3890,157 +4494,134 @@ impl HarnessPool {
         // parked: the operator's own words are what gets re-sent, and
         // retrieve→inject re-runs fresh against whatever memory looks like at
         // redeem time rather than replaying a stale injection.
-        if let Some(pause) = &outcome.budget_paused {
-            let chat_id = match live {
-                LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
-                LiveStream::Workflow { .. } | LiveStream::Off => None,
-            };
-            // Issue #1846 review (Codex #3869193112): whether an operator
-            // was ever addressing this turn AT ALL, not just whether they
-            // named a specific desk — see `BudgetPauseMarker::background`'s
-            // doc for why this is a different question from `chat_id`
-            // above, which is `None` for BOTH an unaddressed interactive
-            // message and a background turn alike.
-            let is_background = matches!(live, LiveStream::Workflow { .. } | LiveStream::Off);
-            // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
-            // the ambient parent/deliverable/mentions the cycle was started
-            // with, so a redeem replays the operator's ORIGINAL
-            // thread/intent/audience instead of the empty defaults
-            // `redeem_budget_pause` used to fall back to.
-            let redeem_context = crate::runtime::grants::current_redeem_context();
-            // Issue #1846 review (Codex #3866418891): `message` here is
-            // whatever this turn actually ran with — for an operator-message
-            // turn that is `composed`, already carrying `with_attachment_refs`
-            // markers baked into the text, which would double up with
-            // `redeem_context.attachments` below once `redeem_budget_pause`
-            // recomposes them fresh. The ambient context's own RAW text (set
-            // once, from the ORIGINAL `OperatorMessage`, before any composing
-            // happened) is preferred whenever one is in scope; falling back to
-            // the local `message` only for a cycle with no `OperatorMessage`
-            // at all (a workflow node's own background turn), which has no
-            // raw/composed split — and no attachments — to begin with.
-            let park_message = redeem_context
-                .text
-                .clone()
-                .unwrap_or_else(|| message.to_string());
-            let pauses = crate::runtime::grants::budget_pauses_for(company);
-            let marker = if is_background {
-                pauses.park_background(
-                    pause.agent.clone(),
-                    chat_id,
-                    park_message,
-                    pause.summary.clone(),
-                    crate::ports::now_millis(),
-                    redeem_context,
+        if let Ok(turn_outcome) = &outcome {
+            if let Some(pause) = &turn_outcome.budget_paused {
+                let chat_id = match live {
+                    LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
+                    LiveStream::Workflow { .. } | LiveStream::Off => None,
+                };
+                // Issue #1846 review (Codex #3869193112): whether an operator
+                // was ever addressing this turn AT ALL, not just whether they
+                // named a specific desk — see `BudgetPauseMarker::background`'s
+                // doc for why this is a different question from `chat_id`
+                // above, which is `None` for BOTH an unaddressed interactive
+                // message and a background turn alike.
+                let is_background = matches!(live, LiveStream::Workflow { .. } | LiveStream::Off);
+                // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+                // the ambient parent/deliverable/mentions the cycle was started
+                // with, so a redeem replays the operator's ORIGINAL
+                // thread/intent/audience instead of the empty defaults
+                // `redeem_budget_pause` used to fall back to.
+                let redeem_context = crate::runtime::grants::current_redeem_context();
+                // Issue #1846 review (Codex #3866418891): `message` here is
+                // whatever this turn actually ran with — for an operator-message
+                // turn that is `composed`, already carrying `with_attachment_refs`
+                // markers baked into the text, which would double up with
+                // `redeem_context.attachments` below once `redeem_budget_pause`
+                // recomposes them fresh. The ambient context's own RAW text (set
+                // once, from the ORIGINAL `OperatorMessage`, before any composing
+                // happened) is preferred whenever one is in scope; falling back to
+                // the local `message` only for a cycle with no `OperatorMessage`
+                // at all (a workflow node's own background turn), which has no
+                // raw/composed split — and no attachments — to begin with.
+                let park_message = redeem_context.text.clone().unwrap_or_else(|| {
+                    // Issue #1890 E: the operator's own words, which is what this
+                    // fallback has always claimed to hold. `message` here is the
+                    // composed turn text, so it carries whatever the cycle appended
+                    // — the open-work briefing, the settled-work one, the thread
+                    // index — and parking that bakes a machine briefing into the
+                    // request a redeem re-sends. It was already reachable through
+                    // the #176 briefing whenever the agent had open cards; the
+                    // thread index made it reachable on an ordinary channel, which
+                    // is how `redeem_replays_the_markers_attachments` caught it.
+                    crate::runtime::delegation::operator_words(message).to_string()
+                });
+                let pauses = crate::runtime::grants::budget_pauses_for(company);
+                let marker = if is_background {
+                    pauses.park_background(
+                        pause.agent.clone(),
+                        chat_id,
+                        park_message,
+                        pause.summary.clone(),
+                        crate::ports::now_millis(),
+                        redeem_context,
+                    )
+                } else {
+                    pauses.park(
+                        pause.agent.clone(),
+                        chat_id,
+                        park_message,
+                        pause.summary.clone(),
+                        crate::ports::now_millis(),
+                        redeem_context,
+                    )
+                };
+                tracing::info!(
+                    company = %company,
+                    agent = %pause.agent,
+                    marker_id = %marker.id,
+                    "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
+                );
+            } else if let Some(stale) = {
+                // Issue #1846 review (Codex #3869792503, tightened by
+                // #3869968949): match on the SAME saved-request CONTEXT
+                // `park_message`/`park`/`park_background` above parks a marker
+                // under — text, chat thread, parent, deliverable, mentions AND
+                // attachments — not an unconditional `redeem` and not text
+                // alone. An unrelated turn for this agent (an automatic
+                // background task, a second chat message about something else
+                // entirely, or even a coincidentally-identical-text request in a
+                // DIFFERENT thread) succeeding first must not silently drop the
+                // marker for a DIFFERENT, still-unretried original request. A
+                // resend, by construction, runs with the SAME context the
+                // marker parked; an unrelated success does not.
+                let candidate_chat_id = match live {
+                    LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
+                    LiveStream::Workflow { .. } | LiveStream::Off => None,
+                };
+                let candidate_redeem = crate::runtime::grants::current_redeem_context();
+                let candidate_message = candidate_redeem.text.clone().unwrap_or_else(|| {
+                    // Stripped on exactly the terms the park above is, or the
+                    // retire-match would compare a briefing-laden candidate against
+                    // a clean parked marker and never retire it (#1890 E).
+                    crate::runtime::delegation::operator_words(message).to_string()
+                });
+                crate::runtime::grants::budget_pauses_for(company).retire_if_message_matches(
+                    agent_id,
+                    &candidate_message,
+                    candidate_chat_id.as_deref(),
+                    &candidate_redeem,
                 )
-            } else {
-                pauses.park(
-                    pause.agent.clone(),
-                    chat_id,
-                    park_message,
-                    pause.summary.clone(),
-                    crate::ports::now_millis(),
-                    redeem_context,
-                )
-            };
-            tracing::info!(
-                company = %company,
-                agent = %pause.agent,
-                marker_id = %marker.id,
-                "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
-            );
-        } else if let Some(stale) = {
-            // Issue #1846 review (Codex #3869792503, tightened by
-            // #3869968949): match on the SAME saved-request CONTEXT
-            // `park_message`/`park`/`park_background` above parks a marker
-            // under — text, chat thread, parent, deliverable, mentions AND
-            // attachments — not an unconditional `redeem` and not text
-            // alone. An unrelated turn for this agent (an automatic
-            // background task, a second chat message about something else
-            // entirely, or even a coincidentally-identical-text request in a
-            // DIFFERENT thread) succeeding first must not silently drop the
-            // marker for a DIFFERENT, still-unretried original request. A
-            // resend, by construction, runs with the SAME context the
-            // marker parked; an unrelated success does not.
-            let candidate_chat_id = match live {
-                LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
-                LiveStream::Workflow { .. } | LiveStream::Off => None,
-            };
-            let candidate_redeem = crate::runtime::grants::current_redeem_context();
-            let candidate_message = candidate_redeem
-                .text
-                .clone()
-                .unwrap_or_else(|| message.to_string());
-            crate::runtime::grants::budget_pauses_for(company).retire_if_message_matches(
-                agent_id,
-                &candidate_message,
-                candidate_chat_id.as_deref(),
-                &candidate_redeem,
-            )
-        } {
-            // Issue #1846 review (Codex #3868962381): this turn just
-            // completed WITHOUT pausing, which is proof the account that
-            // blocked the LAST turn now has budget again — whether the
-            // operator got there by clicking "Add credits & resend" (which
-            // already took the marker itself, so this finds nothing) or, as
-            // the notice's own copy also invites, by manually adding credits
-            // and resending the message from the composer, bypassing the
-            // CTA/redeem route entirely. Only the second path used to leave
-            // the marker parked: nothing but a click on THIS specific CTA
-            // ever consumed it, so a manual resend left a stale marker and
-            // its stale CTA sitting on the old notice indefinitely. Clicking
-            // it later would silently re-dispatch the OLD message a second
-            // time — a duplicate, and for a non-idempotent request, a
-            // duplicate side effect the operator never asked for.
-            //
-            // `retire_if_message_matches`, not a peek-then-drop: single
-            // atomic check-and-take, same as every other consumer of this
-            // set, so a concurrent CTA click racing this retire cannot
-            // double-consume the same marker.
-            tracing::info!(
-                company = %company,
-                agent = %agent_id,
-                marker_id = %stale.id,
-                "[budget-pause] retired a stale re-issue marker; this agent's turn succeeded \
-                 without it, so the pause it named is already resolved"
-            );
-        }
-        // Issue #242: fold this turn's spend into the attempt it belongs to.
-        // Per turn, not once at the end, so a redirect re-run and a delegate's
-        // turn both count — an attempt's cost is what the attempt spent. This is
-        // a second *reader* of `turn_costs`, not a second writer: the ledger and
-        // the usage meter below stay the only places money is recorded.
-        if let Some(sink) = run_sink.as_ref() {
-            for turn_cost in &turn_costs {
-                sink.add_usage(turn_cost);
+            } {
+                // Issue #1846 review (Codex #3868962381): this turn just
+                // completed WITHOUT pausing, which is proof the account that
+                // blocked the LAST turn now has budget again — whether the
+                // operator got there by clicking "Add credits & resend" (which
+                // already took the marker itself, so this finds nothing) or, as
+                // the notice's own copy also invites, by manually adding credits
+                // and resending the message from the composer, bypassing the
+                // CTA/redeem route entirely. Only the second path used to leave
+                // the marker parked: nothing but a click on THIS specific CTA
+                // ever consumed it, so a manual resend left a stale marker and
+                // its stale CTA sitting on the old notice indefinitely. Clicking
+                // it later would silently re-dispatch the OLD message a second
+                // time — a duplicate, and for a non-idempotent request, a
+                // duplicate side effect the operator never asked for.
+                //
+                // `retire_if_message_matches`, not a peek-then-drop: single
+                // atomic check-and-take, same as every other consumer of this
+                // set, so a concurrent CTA click racing this retire cannot
+                // double-consume the same marker.
+                tracing::info!(
+                    company = %company,
+                    agent = %agent_id,
+                    marker_id = %stale.id,
+                    "[budget-pause] retired a stale re-issue marker; this agent's turn succeeded \
+                     without it, so the pause it named is already resolved"
+                );
             }
         }
-        // Attribute cost to the provider this turn actually resolved to. With a
-        // per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
-        // a console BYOK switch changes the slug between turns, so read it live
-        // rather than trusting the static `deps.provider_slug` baked at build.
-        let provider_slug = deps.provider.telemetry_provider_id();
-        // And to the model it actually resolved to, read live for the same
-        // reason and folded onto the closed vocabulary at the provider so no
-        // operator-authored model name reaches the meter (issue #1749).
-        let model_slug = deps.provider.telemetry_model();
-        for turn_cost in &turn_costs {
-            record_turn_cost(
-                turn_cost,
-                agent_id,
-                &provider_slug,
-                model_slug,
-                company,
-                deps.store.as_ref(),
-                deps.meter.as_deref(),
-                // Issue #242: attribute the sample to the attempt this turn ran
-                // under, so "what did this run cost?" is answerable from the
-                // meter as well as from the run row.
-                run_sink.as_ref().map(|s| s.run_id()),
-            )
-            .await?;
-        }
-
+        let outcome = turn_result_after_metering(outcome, metered, company, agent_id)?;
         // Store: persist the outcome (original task + reply) so it compounds
         // into later turns. Without this the harness never writes memory back.
         // SECURITY: the reply **text only** — the scrubbed `outcome.steps` never
@@ -4776,6 +5357,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the per-server read-only MCP declaration, so a
             // server-declared read-only bridge call does not park under `auto`.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -4877,6 +5461,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the same per-server read-only MCP declaration the
             // manifest agents get — an overlay teammate calls the same servers.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -5008,13 +5595,15 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
-        ledgers: None,
-        ledger_registry: Default::default(),
+        emergency_gate: None,
         provider: Arc::new(provider::MockProvider::default()),
         provider_slug: "mock".to_string(),
         serves: None,
         context: runtime.context.clone(),
         store: runtime.store.clone(),
+        notifications: Some(runtime.notifications().clone()),
+        ledgers: None,
+        ledger_registry: Default::default(),
         meter,
         workspace_root: std::env::temp_dir(),
         mcp_home: None,
@@ -5069,7 +5658,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
-    use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
+    use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
     use crate::company::CompanyManifest;
     use crate::harness::provider::MockProvider;
@@ -5714,6 +6303,32 @@ mod tests {
         }
     }
 
+    /// `CompanyStore` whose `append_ledger` always fails — the "ledger write
+    /// that also failed" `turn_result_after_metering`'s own doc names, and
+    /// the fixture `a_metering_failure_does_not_swallow_a_budget_pause_marker`
+    /// needs to force `meter_turn_costs` into its `Err` arm on a turn that
+    /// otherwise succeeded (Codex review, PR #2053).
+    #[derive(Default)]
+    struct FailingLedgerStore;
+
+    #[async_trait]
+    impl CompanyStore for FailingLedgerStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(None)
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Err(OpenCompanyError::Harness(
+                "scripted ledger outage".to_string(),
+            ))
+        }
+    }
+
     /// Records usage samples so a zero-usage turn can be asserted inert.
     #[derive(Default)]
     struct RecordingMeter {
@@ -5805,6 +6420,7 @@ description = "Builds the product."
             template_provenance: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -5821,6 +6437,8 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                emergency_gate: None,
+                notifications: None,
                 ledgers: None,
                 ledger_registry: Default::default(),
                 provider: Arc::new(MockProvider::new("mock: ")),
@@ -6037,6 +6655,8 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -6428,6 +7048,64 @@ description = "Builds the product."
             .await
             .unwrap();
         assert_eq!(stored.len(), 2, "the second turn stores its outcome too");
+    }
+
+    /// Recall is driven by **what the operator typed**, not by the briefings
+    /// this turn folded onto it.
+    ///
+    /// The composed message can carry the open-work briefing, the settled-work
+    /// digest, the thread index or attachment markers. Those are for the model
+    /// to read; searching on them makes the query something nobody asked. Under
+    /// this store's substring matching that costs the recall outright — any
+    /// briefing at all and nothing matches — and under a vector store it drifts
+    /// instead, toward whatever the briefing happens to name. The settled digest
+    /// is a list of finished card titles, so a conversation that had just closed
+    /// some work pulled *that* work in, and the bias grew with every card that
+    /// finished.
+    ///
+    /// Found by the `orchestration-simulation` E2E, which went red the moment
+    /// two cards settled in the conversation it drives (#1890 review).
+    #[tokio::test]
+    async fn recall_searches_the_operators_words_not_the_briefings() {
+        let fx = fixture();
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+        // Turn one stores an outcome whose body carries "alpha".
+        pool.run(
+            &rec.id,
+            "ceo",
+            "alpha task",
+            &fx.deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
+        .await
+        .expect("first turn");
+
+        // Turn two asks the same thing, with a briefing folded on — the shape
+        // every turn takes once a card has settled in the conversation.
+        let briefed = format!(
+            "alpha{} has finished — this is where each card landed:\n- something else\n]",
+            crate::runtime::cycle::SETTLED_WORK_ANNOTATION
+        );
+        let second = pool
+            .run(
+                &rec.id,
+                "ceo",
+                &briefed,
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("second turn")
+            .reply;
+
+        assert!(
+            second.contains("Relevant prior work"),
+            "the operator asked about alpha, so alpha is recalled — the briefing \
+             appended after their words must not change what is searched for: {second:?}"
+        );
     }
 
     /// A pool serving one named harness builds only the agents bound to it.
@@ -6966,6 +7644,58 @@ description = "Builds the product."
         assert!(fx.meter.samples.lock().unwrap().is_empty());
     }
 
+    /// B-120, the half that made a founder's console disagree with their bill:
+    /// a turn that ends in an error is still written to the ledger and the usage
+    /// meter.
+    ///
+    /// Both writes used to sit below a `?` on the turn — so a wall-clock ceiling
+    /// or a provider fault produced no `inference.spend` entry and no
+    /// `UsageSample` at all. The spend was not merely mis-displayed on the run:
+    /// it was never recorded anywhere, which is why the company-wide Observatory
+    /// total agreed that ten minutes of model work had been free.
+    #[tokio::test]
+    async fn a_failed_turn_is_still_written_to_the_ledger_and_the_meter() {
+        let mut fx = fixture();
+        fx.deps.provider = Arc::new(
+            ScriptedProvider::new(vec![Ok(String::new())])
+                .reporting_usage(tinyinference::Usage {
+                    input_tokens: 1_200,
+                    output_tokens: 340,
+                    total_tokens: 1_540,
+                    ..Default::default()
+                })
+                .failing_when_exhausted(),
+        );
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+        let outcome = pool
+            .run(
+                &rec.id,
+                "ceo",
+                "do ten minutes of work",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await;
+
+        assert!(outcome.is_err(), "the scripted provider stays down");
+        let samples = fx.meter.samples.lock().unwrap().clone();
+        assert_eq!(
+            samples.len(),
+            1,
+            "the failed turn's tokens must reach the usage meter: {samples:?}"
+        );
+        assert_eq!(samples[0].input_tokens, 1_200);
+        assert_eq!(samples[0].output_tokens, 340);
+        assert_eq!(
+            fx.store.ledger.lock().unwrap().len(),
+            1,
+            "and its spend must reach the ledger, or the console and the bill disagree"
+        );
+    }
+
     // --- Empty-response turn wrapper ----------------------------------------
 
     /// A model that plays back a scripted sequence of outcomes, one per
@@ -6976,6 +7706,21 @@ description = "Builds the product."
     struct ScriptedProvider {
         script: StdMutex<std::collections::VecDeque<Result<String, String>>>,
         calls: std::sync::atomic::AtomicUsize,
+        /// Usage stamped on every scripted `Ok` response, when the case needs a
+        /// provider that reports any (`None` — the default — mirrors
+        /// `MockProvider`, whose replies carry none at all). Only a response
+        /// carrying usage makes openhuman publish the live
+        /// `TurnCostUpdated` tally the metering path depends on.
+        usage: Option<tinyinference::Usage>,
+        /// What an exhausted script answers: the default `"exhausted"` reply,
+        /// or a permanent error.
+        ///
+        /// A case that needs the turn to *fail* has to script a provider that
+        /// stays failed, because openhuman retries a provider error inside its
+        /// own loop — a finite run of `Err` entries is simply consumed and the
+        /// turn then succeeds on the fallback reply, which is how this
+        /// scripting seam quietly turned a failure case into a passing one.
+        fail_when_exhausted: bool,
     }
 
     impl ScriptedProvider {
@@ -6983,7 +7728,21 @@ description = "Builds the product."
             Self {
                 script: StdMutex::new(outcomes.into_iter().collect()),
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                usage: None,
+                fail_when_exhausted: false,
             }
+        }
+
+        /// Report `usage` on every scripted `Ok` response.
+        fn reporting_usage(mut self, usage: tinyinference::Usage) -> Self {
+            self.usage = Some(usage);
+            self
+        }
+
+        /// Fail every call past the end of the script, permanently.
+        fn failing_when_exhausted(mut self) -> Self {
+            self.fail_when_exhausted = true;
+            self
         }
     }
 
@@ -6993,12 +7752,20 @@ description = "Builds the product."
             &self,
             _state: &(),
             _request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let with_usage = |reply: &str| {
+                let mut response = ModelResponse::assistant(reply);
+                response.usage = self.usage;
+                response
+            };
             match self.script.lock().unwrap().pop_front() {
-                Some(Ok(reply)) => Ok(ModelResponse::assistant(reply)),
-                Some(Err(err)) => Err(tinyagents::TinyAgentsError::Model(err)),
-                None => Ok(ModelResponse::assistant("exhausted")),
+                Some(Ok(reply)) => Ok(with_usage(&reply)),
+                Some(Err(err)) => Err(tinyinference::Error::Model(err)),
+                None if self.fail_when_exhausted => Err(tinyinference::Error::Model(
+                    "scripted provider is permanently down".to_string(),
+                )),
+                None => Ok(with_usage("exhausted")),
             }
         }
     }
@@ -7012,11 +7779,19 @@ description = "Builds the product."
     /// Build a single [`CompanyAgent`] over a scripted provider so the wrapper can
     /// be exercised directly (its retry logic is the unit under test).
     fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
+        scripted_agent_over(ScriptedProvider::new(outcomes))
+    }
+
+    /// As [`scripted_agent`], over an already-configured provider — the seam a
+    /// case that needs the provider to *report usage* builds through.
+    fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
-            provider: Arc::new(ScriptedProvider::new(outcomes)),
+            provider: Arc::new(provider),
             provider_slug: "scripted".to_string(),
             serves: None,
             context: Arc::new(MockContext::default()),
@@ -7078,13 +7853,272 @@ description = "Builds the product."
     #[tokio::test]
     async fn turn_wrapper_retries_empty_then_recovers() {
         let (agent, _deps) = scripted_agent(vec![Ok(String::new()), Ok("recovered".into())]);
-        let (outcome, usages) = agent.run("hi").await.expect("wrapper recovers");
+        let (outcome, usages) = agent.run("hi").await;
+        let outcome = outcome.expect("wrapper recovers");
         assert!(
             outcome.reply.contains("recovered"),
             "got {:?}",
             outcome.reply
         );
         assert_eq!(usages.len(), 2, "both attempts' usage is returned");
+    }
+
+    /// B-120: a turn that ends in a **hard error** still reports what it spent.
+    ///
+    /// The failure this pins is the one a founder saw as `0 tok / $0.000` on a
+    /// ten-minute run: openhuman sets `last_turn_usage_totals` only after its
+    /// own `?`, so `read_turn_usage` reads back nothing for an attempt that
+    /// errored, and the usage then rode home on an `Ok` the caller never got.
+    ///
+    /// The script burns a real, usage-reporting model call and then fails:
+    /// attempt 1 answers with usage but no text (openhuman raises
+    /// `EmptyProviderResponse`, so it publishes no totals), and the one-shot
+    /// retry hits a hard provider error. Both attempts therefore report zero of
+    /// their own, and the only surviving figure is the live `TurnCostUpdated`
+    /// tally — which is exactly what has to reach the caller *beside* the
+    /// `Err`, because that is what the attempt row, the ledger and the usage
+    /// meter are all built from.
+    #[tokio::test]
+    async fn a_hard_failed_turn_still_reports_the_tokens_it_burned() {
+        let (agent, _deps) = scripted_agent_over(
+            ScriptedProvider::new(vec![Ok(String::new())])
+                .reporting_usage(tinyinference::Usage {
+                    input_tokens: 1_200,
+                    output_tokens: 340,
+                    total_tokens: 1_540,
+                    ..Default::default()
+                })
+                .failing_when_exhausted(),
+        );
+
+        let (outcome, usages) = agent.run("do ten minutes of work").await;
+
+        assert!(
+            outcome.is_err(),
+            "the provider is permanently down past the first call; the turn must fail: {:?}",
+            outcome.as_ref().map(|o| o.reply.clone())
+        );
+        let tokens: u64 = usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            tokens, 1_540,
+            "a failed turn must carry home the tokens its own model call burned, \
+             not report itself as free: {usages:?}"
+        );
+    }
+
+    /// CodeRabbit review (PR #2053): a turn that fails WITHOUT spending
+    /// anything must not inherit an earlier, unrelated turn's totals off the
+    /// **reused** `Agent` — the same "0 tok / $0.000" bug B-120 fixes, in the
+    /// opposite direction: a turn that spent nothing must not be billed for
+    /// what a PAST turn on this same agent already spent and was already
+    /// billed for.
+    ///
+    /// `CompanyAgent` reuses one `Agent` for every chat of a `(company,
+    /// agent_id)` pair, and openhuman finalizes `last_turn_usage_totals` only
+    /// on a turn that completes normally — an attempt that ends in
+    /// `EmptyProviderResponse` never touches it, so a naive read after such an
+    /// attempt reads back whatever the LAST *successful* turn on this agent
+    /// left there, not this attempt's own (zero) spend. Left unguarded, that
+    /// stale figure — already billed once when the first turn settled — would
+    /// be billed a second time on a completely different, later turn that
+    /// made no metered call at all.
+    ///
+    /// Turn 1 succeeds in one attempt and spends 1,540 tokens for real — the
+    /// exact figure `last_turn_usage_totals` is left holding. Turn 2, on the
+    /// SAME agent, scripts an immediate blank (`EmptyProviderResponse`) and
+    /// then a hard failure on the one-shot retry once the script is exhausted
+    /// — the identical shape `a_hard_failed_turn_still_reports_the_tokens_it_burned`
+    /// already pins, just as the SECOND top-level call on this agent rather
+    /// than the first. Because this provider carries usage on every scripted
+    /// reply, turn 2's own first attempt genuinely burns another 1,540 tokens
+    /// before dying, which the live `TurnCostUpdated` tally still recovers
+    /// (`last_observed_turn_cost`) — so the correct total is 1,540 exactly,
+    /// not 3,080 (turn 1's stale total, read back and double-counted across
+    /// turn 2's own two attempts on top of what turn 2 itself burned).
+    #[tokio::test]
+    async fn a_turn_that_burns_nothing_does_not_inherit_a_past_turns_stale_total() {
+        let (agent, _deps) = scripted_agent_over(
+            ScriptedProvider::new(vec![
+                Ok("turn one finished cleanly".to_string()),
+                Ok(String::new()),
+            ])
+            .reporting_usage(tinyinference::Usage {
+                input_tokens: 1_200,
+                output_tokens: 340,
+                total_tokens: 1_540,
+                ..Default::default()
+            })
+            .failing_when_exhausted(),
+        );
+
+        // Turn one: a real, one-attempt success. Leaves
+        // `last_turn_usage_totals` holding 1,540 tokens.
+        let (outcome, usages) = agent.run("turn one").await;
+        outcome.expect("turn one is a clean, successful reply");
+        assert_eq!(
+            usages
+                .iter()
+                .map(|u| u.input_tokens + u.output_tokens)
+                .sum::<u64>(),
+            1_540,
+            "turn one's own real spend"
+        );
+
+        // Turn two, same agent: attempt 1 consumes the scripted blank
+        // (EmptyProviderResponse), the retry then finds the script exhausted
+        // and hits the permanent failure — both attempts error, neither
+        // finalizes `last_turn_usage_totals`, and without the fix both reads
+        // would instead return turn one's already-billed 1,540 a second AND
+        // third time.
+        let (second_outcome, second_usages) = agent.run("turn two").await;
+        assert!(
+            second_outcome.is_err(),
+            "turn two's provider is permanently down past its first call: {:?}",
+            second_outcome.as_ref().map(|o| o.reply.clone())
+        );
+        let second_tokens: u64 = second_usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            second_tokens, 1_540,
+            "turn two must report its OWN spend — one metered call, recovered via the live \
+             progress-stream tally since its own attempt also errors before finalizing totals \
+             — never turn one's already-billed total read back a second and third time: \
+             {second_usages:?}"
+        );
+    }
+
+    /// Codex review (PR #2053): the original recovery gate only fired when
+    /// EVERY attempt in `usages` reported zero, so it could recover at most
+    /// one attempt's spend. A metered first attempt that empties, followed by
+    /// a retry that succeeds and publishes its OWN authoritative total, left
+    /// `usages` as `[zero, retry_total]` — not all-zero — so the first
+    /// attempt's already-published `TurnCostUpdated` spend was silently
+    /// dropped rather than merely under-reported.
+    ///
+    /// Both scripted replies carry the SAME usage (1,000 tokens each, via the
+    /// one shared `.reporting_usage(...)` every `ScriptedProvider` reply
+    /// gets), so the only way the total comes out to 2,000 rather than 1,000
+    /// is if the first attempt's spend — recovered from its OWN segment of
+    /// the progress stream, per `attempt_event_segments` — survives instead
+    /// of being discarded the moment the retry's real total makes `usages`
+    /// not-all-zero.
+    #[tokio::test]
+    async fn a_metered_empty_attempt_is_still_recovered_when_the_retry_succeeds() {
+        let (agent, _deps) = scripted_agent_over(
+            ScriptedProvider::new(vec![Ok(String::new()), Ok("recovered".to_string())])
+                .reporting_usage(tinyinference::Usage {
+                    input_tokens: 800,
+                    output_tokens: 200,
+                    total_tokens: 1_000,
+                    ..Default::default()
+                }),
+        );
+
+        let (outcome, usages) = agent.run("hi").await;
+        let outcome = outcome.expect("the retry recovers a real reply");
+        assert!(
+            outcome.reply.contains("recovered"),
+            "got {:?}",
+            outcome.reply
+        );
+        assert_eq!(usages.len(), 2, "both attempts' usage is returned");
+
+        let tokens: u64 = usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            tokens, 2_000,
+            "both attempts genuinely burned 1,000 tokens each — the first attempt's spend must \
+             not be dropped just because the retry went on to publish its own (also real) \
+             total: {usages:?}"
+        );
+    }
+
+    /// Codex review (PR #2053): an earlier version of the reused-agent fix
+    /// above compared each `read_turn_usage` against the value seen before
+    /// that attempt, and zeroed a read that came back unchanged — which is
+    /// wrong for a genuinely NEW finalized total that happens to numerically
+    /// equal the immediately preceding one. Two separate, single-attempt,
+    /// fully successful calls on the SAME agent, both scripted with the exact
+    /// same usage, must each report their own real spend in full — neither
+    /// one is a retry, neither one errors, and a coincidental value match is
+    /// not evidence that the second call spent nothing.
+    #[tokio::test]
+    async fn a_second_successful_turn_is_trusted_even_when_its_total_matches_the_first() {
+        let (agent, _deps) = scripted_agent_over(
+            ScriptedProvider::new(vec![Ok("turn one".to_string()), Ok("turn two".to_string())])
+                .reporting_usage(tinyinference::Usage {
+                    input_tokens: 500,
+                    output_tokens: 100,
+                    total_tokens: 600,
+                    ..Default::default()
+                }),
+        );
+
+        let (first_outcome, first_usages) = agent.run("turn one").await;
+        first_outcome.expect("turn one succeeds in a single attempt");
+        let first_tokens: u64 = first_usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            first_tokens, 600,
+            "turn one's own real spend: {first_usages:?}"
+        );
+
+        let (second_outcome, second_usages) = agent.run("turn two").await;
+        second_outcome.expect("turn two also succeeds in a single attempt");
+        let second_tokens: u64 = second_usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            second_tokens, 600,
+            "turn two's finalized total happens to equal turn one's — that coincidence must \
+             not zero it out: {second_usages:?}"
+        );
+    }
+
+    /// The tally is **cumulative**, so the last frame is the whole attempt's
+    /// spend — summing the frames would multiply it, and taking the first would
+    /// report only the opening call of a fifty-step run.
+    #[test]
+    fn the_observed_turn_cost_is_the_last_tally_not_the_first_or_the_sum() {
+        let frame = |iteration: u32, input: u64, output: u64, usd: f64| {
+            oh::agent::progress::AgentProgress::TurnCostUpdated {
+                model: "scripted".to_string(),
+                iteration,
+                input_tokens: input,
+                output_tokens: output,
+                cached_input_tokens: 0,
+                total_usd: usd,
+            }
+        };
+        let events = vec![
+            frame(1, 100, 10, 0.001),
+            oh::agent::progress::AgentProgress::TextDelta {
+                delta: "thinking".to_string(),
+                iteration: 2,
+            },
+            frame(2, 900, 250, 0.019),
+        ];
+
+        let observed = last_observed_turn_cost(&events).expect("a tally was published");
+
+        assert_eq!(observed.input_tokens, 900);
+        assert_eq!(observed.output_tokens, 250);
+        assert!((observed.cost_usd - 0.019).abs() < f64::EPSILON);
+        assert_eq!(
+            last_observed_turn_cost(&[]),
+            None,
+            "a turn that made no metered model call has no tally to report"
+        );
     }
 
     /// Issue #111 retry-guard edge: when a steer already pends and the first
@@ -7099,13 +8133,48 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None, None, None, None)
-            .await
-            .expect("runs");
+            .run_with_steer(
+                "hi",
+                Some(&control),
+                None,
+                None,
+                None,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await;
+        let _outcome = _outcome.expect("runs");
         assert_eq!(
             usages.len(),
             1,
             "a steered empty turn does NOT retry — exactly one attempt"
+        );
+    }
+
+    /// The empty-retry guard above proves steer does not silently *restart*
+    /// work. This proves the other half: a steer requested before a turn whose
+    /// first attempt already produced a real reply must not discard it. Only
+    /// the *next* iteration is where `SteerStopHook` is meant to intervene —
+    /// nothing here may drop output the model already returned.
+    #[tokio::test]
+    async fn a_steer_pending_before_a_successful_attempt_does_not_drop_its_reply() {
+        let (agent, _deps) = scripted_agent(vec![Ok("here is the answer".into())]);
+        let control = SteerControl::new();
+        control.request(SteerAction::Cancel);
+        let (outcome, usages) = agent
+            .run_with_steer(
+                "hi",
+                Some(&control),
+                None,
+                None,
+                None,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await;
+        let outcome = outcome.expect("runs");
+        assert_eq!(usages.len(), 1, "one attempt, and it already succeeded");
+        assert_eq!(
+            outcome.reply, "here is the answer",
+            "a pending steer must not discard a reply the model already produced"
         );
     }
 
@@ -7121,7 +8190,8 @@ description = "Builds the product."
     #[tokio::test]
     async fn turn_wrapper_empty_twice_is_graceful() {
         let (agent, _deps) = scripted_agent(vec![Ok(String::new()), Ok(String::new())]);
-        let (outcome, usages) = agent.run("hi").await.expect("graceful, not an Err");
+        let (outcome, usages) = agent.run("hi").await;
+        let outcome = outcome.expect("graceful, not an Err");
         assert!(
             outcome
                 .reply
@@ -7227,7 +8297,7 @@ description = "Builds the product."
     }
 
     /// A provider's response body reaches this chain verbatim — `provider.rs`
-    /// raises `TinyAgentsError::Model("hosted inference returned {status}: {text}")`
+    /// raises `InferenceError::Model("hosted inference returned {status}: {text}")`
     /// — so an endpoint with a wall-clock budget of its own must not be read as
     /// OpenHuman's per-turn ceiling. That misdiagnosis is worse than the plain
     /// wrapper: it would report the second the request took as if it were a
@@ -7550,6 +8620,8 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Scripted 10 deep, not once: whether the vendored harness retries
@@ -7659,6 +8731,148 @@ description = "Builds the product."
         assert_eq!(marker.summary, pause.summary);
     }
 
+    /// Codex review (PR #2053) — **the regression.** A ledger write is a
+    /// separate concern from what the turn itself did, and a failure in it
+    /// must not also swallow the OTHER outcome-side-effect this same code
+    /// block performs: retiring a stale re-issue marker once an agent's turn
+    /// succeeds again, proving the account that blocked it now has budget.
+    /// Before this fix, `turn_result_after_metering`'s `?` ran BEFORE this
+    /// retire logic, so a ledger write that failed for an UNRELATED reason
+    /// left the stale marker — and its stale "Add credits & resend" CTA —
+    /// parked indefinitely, able to later re-dispatch the OLD message a
+    /// second time.
+    ///
+    /// Same fixture as `a_successful_turn_retires_a_stale_reissue_marker_for_the_same_agent`
+    /// — a stale marker parked directly, then one ordinary successful `run`
+    /// for the same agent in the same thread — except this provider's reply
+    /// carries real usage, so `turn_costs` is nonzero and `meter_turn_costs`
+    /// actually attempts (and, against `FailingLedgerStore`, fails) a ledger
+    /// write. Reverting the reordering in `run_inner` makes the final `peek`
+    /// below find the marker still parked instead of `None`.
+    #[tokio::test]
+    async fn a_metering_failure_does_not_swallow_a_stale_marker_retirement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-meter-fail-retire-regress");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
+            ledgers: None,
+            ledger_registry: Default::default(),
+            // A single, ordinary, non-blank reply — the same shape
+            // `a_successful_turn_retires_a_stale_reissue_marker_for_the_same_agent`
+            // scripts, just with usage attached so this turn's spend is
+            // nonzero and `meter_turn_costs` has something to write.
+            provider: Arc::new(
+                ScriptedProvider::new(vec![Ok("Here's today's standup summary.".to_string()); 4])
+                    .reporting_usage(tinyinference::Usage {
+                        input_tokens: 800,
+                        output_tokens: 200,
+                        total_tokens: 1_000,
+                        ..Default::default()
+                    }),
+            ),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(FailingLedgerStore),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        // Park the stale marker directly — standing in for an earlier turn
+        // that genuinely paused, exactly as the sibling retire test does.
+        crate::runtime::grants::budget_pauses_for(&company).park(
+            "ceo",
+            Some("general".to_string()),
+            "Please summarize today's standup notes.",
+            "Paused — ceo's turn ran out of inference budget/credits.",
+            crate::ports::now_millis(),
+            crate::runtime::grants::RedeemContext::default(),
+        );
+        assert!(
+            crate::runtime::grants::budget_pauses_for(&company)
+                .peek("ceo")
+                .is_some(),
+            "the stale marker must be parked before the run this test exercises"
+        );
+
+        let result = pool
+            .run(
+                &company,
+                "ceo",
+                "Please summarize today's standup notes.",
+                &deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "the turn itself succeeded, so the ledger failure is the only failure there is, \
+             and it still propagates — turn_result_after_metering's own documented contract: \
+             {result:?}"
+        );
+
+        // The retirement must have happened regardless — read off the turn's
+        // OWN outcome, before the metering error ever had a chance to short
+        // circuit it.
+        assert!(
+            crate::runtime::grants::budget_pauses_for(&company)
+                .peek("ceo")
+                .is_none(),
+            "the stale marker must be retired even though the ledger write for THIS turn \
+             failed — the ledger is a separate concern from what the turn itself did, and \
+             leaving it parked would let its stale CTA re-dispatch the old message again"
+        );
+    }
+
     /// Issue #1846 review (Codex #3869193105) — **the regression.** A
     /// BYO/custom-provider budget error can carry a credential-bearing URL
     /// (the account's own endpoint, with an API key riding in the query
@@ -7689,6 +8903,8 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -7821,6 +9037,8 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Always succeeds — the "operator manually added credits and
@@ -7963,6 +9181,8 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Succeeds against a request B's text — deliberately DIFFERENT
@@ -8082,6 +9302,8 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -8192,6 +9414,8 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -8332,6 +9556,8 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![Ok(
@@ -8462,6 +9688,8 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8958,6 +10186,8 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -9379,6 +10609,7 @@ description = "Sets direction."
             template_provenance: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -9410,6 +10641,8 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -9572,6 +10805,8 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            emergency_gate: None,
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -9807,22 +11042,96 @@ description = "Sets direction."
         );
     }
 
-    /// Fail-closed tradeoff (issue #188): with a total ceiling configured but no
-    /// meter to read spend from, the hard refusal does NOT fire — a transient
-    /// unreadable-spend condition must not brick every turn. The turn runs (the
-    /// per-namespace fail-closed roster already handles exec-tool stripping).
+    /// A declared total ceiling that cannot be read refuses dispatch (both
+    /// arms), rather than admitting a priced turn against a bound nobody can
+    /// measure. The two unreadable cases are distinct faults and say so: an
+    /// absent meter can never enforce the cap on this host, an erroring meter
+    /// is a transient read that clears on the next one.
     #[tokio::test]
-    async fn run_does_not_refuse_when_spend_is_unreadable() {
+    async fn run_refuses_when_a_declared_total_ceiling_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let context = Arc::new(MockContext::default());
-        // A zero ceiling would refuse from the first token IF spend were readable;
-        // with no meter wired the gate must defer, not brick.
-        let plan = crate::harness::capability_budget::CapabilityPlan {
+        // A generous ceiling: a readable meter would admit this turn, so the
+        // refusal below can only come from the spend read failing.
+        let plan = || crate::harness::capability_budget::CapabilityPlan {
             period: crate::harness::capability_budget::BudgetPeriod::Daily,
             budgets: std::collections::BTreeMap::new(),
-            total_budget: Some(0),
+            total_budget: Some(1_000_000),
         };
-        let deps = deps_with_plan(dir.path(), context.clone(), None, Some(plan));
+        let rec = record();
+
+        // No meter wired: the cap is declared on a host that can never measure
+        // it — a deployment fault, not a transient one.
+        let no_meter = deps_with_plan(dir.path(), context.clone(), None, Some(plan()));
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &no_meter).await.expect("ensure");
+        let reply = pool
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &no_meter,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert!(
+            !reply.contains("hello-marker"),
+            "no model call may run against an unmeasurable ceiling: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_ceiling_notice(&SpendReadFault::NoMeter),
+            "an absent meter is reported as the deployment fault it is, and the reply says what \
+             the operator has to change"
+        );
+        let no_meter_reply = reply;
+
+        // A meter that errors: the same refusal, a different fault.
+        let failing = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(Arc::new(FailingMeter) as Arc<dyn UsageMeter>),
+            Some(plan()),
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &failing).await.expect("ensure");
+        let reply = pool
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &failing,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert!(
+            !reply.contains("hello-marker"),
+            "no model call may run against an unreadable ceiling: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_ceiling_notice(&SpendReadFault::QueryFailed(OpenCompanyError::Store(
+                "meter unavailable".into()
+            ))),
+            "a failed read is reported as transient, not as a misconfigured host"
+        );
+        assert_ne!(
+            reply, no_meter_reply,
+            "the two faults are not the same fault and must not read as one"
+        );
+    }
+
+    /// A company that declares NO total ceiling is untouched by the rule above:
+    /// nothing to enforce means nothing to fail closed on, meter or no meter.
+    #[tokio::test]
+    async fn a_company_with_no_declared_ceiling_runs_without_a_meter() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let deps = deps_with_plan(dir.path(), context.clone(), None, None);
         let pool = HarnessPool::new();
         let rec = record();
         pool.ensure(&rec, &deps).await.expect("ensure");
@@ -9836,16 +11145,29 @@ description = "Sets direction."
                 crate::runtime::delegation::ChatTarget::default(),
             )
             .await
-            .expect("no meter must not brick the turn")
+            .expect("an unbounded company keeps running")
             .reply;
         assert!(
             reply.contains("hello-marker"),
-            "an unreadable ceiling defers to running the turn: {reply:?}"
+            "no declared cap means no gate: {reply:?}"
         );
-        assert_ne!(
-            reply, TOTAL_BUDGET_EXHAUSTED_NOTICE,
-            "the hard refusal must not fire without a spend read"
+    }
+
+    /// `spend_gate_refusal` must set `abnormal_stop`: `HarnessAgentRunner`
+    /// (`workflows::caps`) and hive's `terminal_budget_error` both key off it
+    /// to keep a pre-dispatch refusal from settling a workflow/card attempt or
+    /// a hive turn `Succeeded` and binding the refusal notice downstream as if
+    /// it were the node's or the teammate's real answer.
+    #[test]
+    fn spend_gate_refusal_carries_an_abnormal_stop() {
+        let outcome = spend_gate_refusal("refused".to_string(), SpendGateCause::Unmeasurable);
+        assert!(
+            outcome.abnormal_stop.is_some(),
+            "a pre-dispatch refusal must not read like a clean finish downstream"
         );
+        assert!(!outcome.hit_iteration_cap);
+        assert!(outcome.halted_for_spend.is_none());
+        assert!(outcome.budget_paused.is_none());
     }
 
     // --- The per-agent daily spend cap at dispatch (issue #304) --------------
@@ -9904,6 +11226,23 @@ description = "Builds the product."
     /// inference and inference never reaches a `ToolPolicy`. Gating only priced
     /// tool calls would leave a capped teammate free to burn its budget many
     /// times over on model turns alone.
+    #[test]
+    fn an_exhausted_cap_and_an_unreadable_meter_do_not_read_alike() {
+        let exhausted = spend_gate_refusal("refused".to_string(), SpendGateCause::Exhausted);
+        let unmeasurable = spend_gate_refusal("refused".to_string(), SpendGateCause::Unmeasurable);
+        assert_ne!(
+            exhausted.abnormal_stop, unmeasurable.abnormal_stop,
+            "an exhausted cap sent to the meter-fault reason points the operator at a meter that works"
+        );
+        assert!(
+            exhausted
+                .abnormal_stop
+                .as_deref()
+                .is_some_and(|stop| stop.contains("exhausted")),
+            "the exhausted reason must name the cap, not the measurement"
+        );
+    }
+
     #[tokio::test]
     async fn run_refuses_dispatch_for_a_teammate_over_its_daily_cap() {
         let dir = tempfile::tempdir().unwrap();
@@ -9988,6 +11327,93 @@ description = "Builds the product."
             ok.contains("hello-marker"),
             "one teammate's exhausted budget must not stop the company: {ok:?}"
         );
+    }
+
+    /// A company whose `treasurer` carries a `budget_usd_daily` of exactly
+    /// `0.0` — the value `validate_cap` in `server::ops::team` accepts as a
+    /// non-negative, finite number with no special-case.
+    fn zero_capped_record() -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "treasurer"
+role = "Treasurer"
+description = "Handles spend."
+budget_usd_daily = 0.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// a cap of exactly `0.0` passes validation as "non-negative and
+    /// finite" and then permanently refuses every dispatch, because `spent >=
+    /// cap` holds even at zero spend on the very first turn — before the
+    /// teammate has ever run once. Setting `0.0` bricks the teammate; it does
+    /// not uncap it, and nothing here says so.
+    #[tokio::test]
+    async fn a_zero_daily_cap_refuses_the_teammates_very_first_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = zero_capped_record();
+
+        // No spend has ever been recorded for this teammate — a fresh day, a
+        // fresh company, or a cap just set to `0.0` from the console.
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let refused = pool
+            .run(
+                &rec.id,
+                "treasurer",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("treasurer", 0.0),
+            "the very first dispatch is refused, though this teammate has spent nothing yet"
+        );
+        assert!(!refused.contains("should-not-echo"));
+
+        // The cap is per-teammate: the uncapped engineer is untouched.
+        let ok = pool
+            .run(
+                &rec.id,
+                "engineer",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(ok.contains("hello-marker"), "{ok:?}");
     }
 
     // --- Console tool grants, live (issue #1796) -----------------------------
@@ -10078,6 +11504,64 @@ description = "Builds the product."
             pool.grants_fingerprint_of(&rec.id).await,
             Some(before),
             "withdrawing the grant must move the fingerprint back"
+        );
+    }
+
+    /// **The search-backend counterpart of the proof above.** `grants_fp`
+    /// (and the roster's own effective-allow-list read) already tolerate a
+    /// stale `company` snapshot, because both fold the live override onto
+    /// `company`'s base. `resolve_tenant_search` must do the same: a company
+    /// snapshot that predates a console `search` grant must still resolve the
+    /// backend once the live override is passed in, or the roster ends up
+    /// crediting a capability no tool was ever wired for.
+    #[tokio::test]
+    async fn resolve_tenant_search_honours_a_console_grant_a_stale_company_misses() {
+        use crate::ports::types::{Actor, ActorKind, ToolGrantsOverride};
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+
+        // The stale snapshot: no explicit `search` grant in its own
+        // `[tools].allow`, exactly what a caller holding a boot-time
+        // `CompanyRecord` still has after an admin grants `search` from the
+        // console without a hot rebuild. `*` covers files/shell/code/web but
+        // deliberately not `search` — the same base the grant-fingerprint
+        // test above uses.
+        let mut rec = record();
+        rec.manifest.tools.allow = vec!["*".to_string()];
+        assert!(
+            !crate::company::grants_search_explicit(&rec.manifest.tools.allow),
+            "the fixture must start without an explicit search grant"
+        );
+
+        let mut deps = deps_with_plan(dir.path(), context.clone(), None, None);
+        // No secret store wired: the fallback path returns the last known
+        // connection, standing in for a company whose provider is already on
+        // file.
+        deps.secrets = None;
+        deps.tenant_search = Some(search_byo::TenantSearch::for_test(
+            "brave",
+            Some("test-key"),
+            None,
+        ));
+
+        let overlay_tool_grants = ToolGrantsOverride {
+            added: vec!["search".to_string()],
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-admin".to_string(),
+            },
+            at_millis: crate::ports::now_millis(),
+        };
+
+        let pool = HarnessPool::new();
+        let resolved = pool
+            .resolve_tenant_search(&rec, &deps, Some(&overlay_tool_grants))
+            .await;
+        assert!(
+            resolved.is_some(),
+            "a console grant the live overlay carries must resolve the search \
+             backend even when the `company` snapshot passed in predates it"
         );
     }
 
@@ -10655,16 +12139,16 @@ description = "Builds the product."
         );
     }
 
-    /// Fail-open pin, mirroring #188's documented tradeoff exactly: with a cap
-    /// set but spend unreadable, the turn RUNS.
+    /// A declared `budget_usd_daily` that cannot be read refuses dispatch to
+    /// that teammate — the same rule as the total ceiling, at the layer that
+    /// carries the money.
     ///
-    /// A `$0` cap would refuse from the first cent if spend were readable, so a
-    /// meter that errors is the only reason this turn can proceed. Bricking a
-    /// teammate's cognition on a flaky read is a strictly worse failure mode
-    /// than one day of overspend — and unlike the policy arm's park, a turn-level
-    /// refusal offers the operator nothing to approve.
+    /// The cap here is a generous `$50`, so a readable meter would admit both
+    /// turns below; the refusals can only come from the spend read failing.
+    /// The uncapped colleague keeps working either way: the rule bites the
+    /// scope that declared a bound, not the company.
     #[tokio::test]
-    async fn run_does_not_refuse_a_capped_teammate_when_spend_is_unreadable() {
+    async fn run_refuses_a_capped_teammate_when_spend_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let context = Arc::new(MockContext::default());
         let manifest: CompanyManifest = toml::from_str(
@@ -10679,7 +12163,12 @@ mode = "full"
 id = "ceo"
 role = "Chief Executive"
 description = "Sets direction."
-budget_usd_daily = 0.0
+budget_usd_daily = 50.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
 "#,
         )
         .expect("valid manifest");
@@ -10688,32 +12177,61 @@ budget_usd_daily = 0.0
             ..record()
         };
 
-        let deps = deps_with_plan(
+        // A meter that errors: a transient read fault.
+        let failing = deps_with_plan(
             dir.path(),
             context.clone(),
             Some(Arc::new(FailingMeter) as Arc<dyn UsageMeter>),
             None,
         );
         let pool = HarnessPool::new();
-        pool.ensure(&rec, &deps).await.expect("ensure");
-
+        pool.ensure(&rec, &failing).await.expect("ensure");
         let reply = pool
             .run(
                 &rec.id,
                 "ceo",
                 "hello-marker",
-                &deps,
+                &failing,
                 crate::runtime::delegation::ChatTarget::default(),
             )
             .await
-            .expect("an unreadable budget must not brick the teammate")
+            .expect("a refusal is a benign outcome, not a hard error")
             .reply;
         assert!(
-            reply.contains("hello-marker"),
-            "an unreadable cap defers to running the turn: {reply:?}"
+            !reply.contains("hello-marker"),
+            "no model call may run against an unreadable cap: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_agent_budget_notice(
+                "ceo",
+                50.0,
+                &SpendReadFault::QueryFailed(OpenCompanyError::Store("meter unavailable".into()))
+            ),
+            "the refusal names the teammate, its cap, and that the read may clear"
+        );
+        let failed_read_reply = reply;
+
+        // The uncapped colleague declared no bound, so there is nothing to fail
+        // closed on and it keeps working through the same broken meter.
+        let ok = pool
+            .run(
+                &rec.id,
+                "engineer",
+                "hello-marker",
+                &failing,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(
+            ok.contains("hello-marker"),
+            "an uncapped teammate is not gated by a broken meter: {ok:?}"
         );
 
-        // ...and with no meter at all, the same deferral.
+        // No meter at all: the cap is permanently unenforceable on this host —
+        // a deployment fault rather than a transient read.
         let no_meter = deps_with_plan(dir.path(), context.clone(), None, None);
         let pool = HarnessPool::new();
         pool.ensure(&rec, &no_meter).await.expect("ensure");
@@ -10726,9 +12244,22 @@ budget_usd_daily = 0.0
                 crate::runtime::delegation::ChatTarget::default(),
             )
             .await
-            .expect("no meter must not brick the teammate")
+            .expect("a refusal is a benign outcome, not a hard error")
             .reply;
-        assert!(reply.contains("hello-marker"), "no meter defers: {reply:?}");
+        assert!(
+            !reply.contains("hello-marker"),
+            "no model call may run against an unmeasurable cap: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_agent_budget_notice("ceo", 50.0, &SpendReadFault::NoMeter),
+            "an absent meter is reported as the deployment fault it is, and the reply says what \
+             the operator has to change"
+        );
+        assert_ne!(
+            reply, failed_read_reply,
+            "the two faults are not the same fault and must not read as one"
+        );
     }
 
     /// The cap is the UTC calendar day: yesterday's $9 does not refuse today's
@@ -11254,7 +12785,7 @@ budget_usd_daily = 0.0
         use std::sync::Mutex as StdMutex;
 
         use futures::stream::{self, BoxStream};
-        use tinyagents::harness::model::{ModelRequest, ModelResponse};
+        use tinyinference::model::{ModelRequest, ModelResponse};
 
         use crate::ports::events::EventStreamItem;
         use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
@@ -11305,6 +12836,7 @@ budget_usd_daily = 0.0
             }
             fn reply(&self, chat_id: &str, text: &str) {
                 self.push(CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     chat_id: chat_id.to_string(),
                     agent_id: "ceo".to_string(),
                     text: text.to_string(),
@@ -11379,7 +12911,7 @@ budget_usd_daily = 0.0
                 &self,
                 _state: &(),
                 request: ModelRequest,
-            ) -> tinyagents::Result<ModelResponse> {
+            ) -> tinyinference::Result<ModelResponse> {
                 let joined = request
                     .messages
                     .iter()
@@ -11675,6 +13207,40 @@ budget_usd_daily = 0.0
 
         /// An UNADDRESSED threaded message still binds to its thread.
         ///
+        /// Issue #1890 I: an **unstreamed** turn still binds when its caller
+        /// names a conversation.
+        ///
+        /// The approval re-dispatch is the case. It runs through
+        /// `run_steered_background` — no live stream, because a re-issued call
+        /// shows no chat bubble — and before this its identity was read off
+        /// that absent stream, so it bound to nothing: it ran against whatever
+        /// history the agent happened to be holding and then published its
+        /// answer into the origin thread regardless.
+        ///
+        /// A dispatched card's turn is the other side of the same rule and must
+        /// keep binding to nothing, since it answers the board rather than a
+        /// conversation.
+        #[test]
+        fn identity_and_streaming_are_separate_questions() {
+            use crate::runtime::delegation::ChatTarget;
+
+            // What the approval re-dispatch now passes: the conversation the
+            // grant recorded, with no stream at all.
+            let reissued = ChatTarget::in_thread(Some("growth"), Some(EventSeq::new(41)));
+            assert_eq!(reissued.chat_id, Some("growth"));
+            assert_eq!(reissued.thread_root, Some(EventSeq::new(41)));
+
+            // What a dispatched card's turn passes — unchanged behaviour.
+            let card = ChatTarget::default();
+            assert_eq!(card.chat_id, None);
+            assert_eq!(card.thread_root, None);
+
+            // The two are distinguishable, which is the whole of the fix: before
+            // it, both arrived at the binding as "no stream, therefore no
+            // conversation".
+            assert_ne!(reissued, card);
+        }
+
         /// A codex review on #1896 read `run_with_steer`'s `if let Some(incoming)
         /// = turn_chat_id` guard and concluded that a client sending `parent`
         /// without `chat` loses its root, so sibling threads on the default desk
@@ -11817,6 +13383,112 @@ budget_usd_daily = 0.0
                 log.reads(),
                 reads_after_first,
                 "a second turn in the same thread is not a switch"
+            );
+        }
+
+        /// A journal that can be made to fail, so a test can break the seed's
+        /// one dependency after a binding has already been established.
+        struct BreakingLog {
+            inner: Arc<InMemoryLog>,
+            failing: std::sync::atomic::AtomicBool,
+        }
+
+        impl BreakingLog {
+            fn break_now(&self) {
+                self.failing
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        #[async_trait]
+        impl EventLog for BreakingLog {
+            async fn append(&self, id: &CompanyId, event: CompanyEvent) -> crate::Result<EventSeq> {
+                self.inner.append(id, event).await
+            }
+            async fn read_from(
+                &self,
+                id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "the journal is unreadable".into(),
+                    ));
+                }
+                self.inner.read_from(id, seq, limit).await
+            }
+            fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
+                self.inner.subscribe(id)
+            }
+        }
+
+        /// The clear-and-reseed runs under the agent and binding locks, so it
+        /// cannot interleave — but it still depends on the journal, and the
+        /// journal can fail. When it does, the switch has already cleared the
+        /// outgoing desk's history and has nothing to put in its place.
+        ///
+        /// The invariant that must survive that is the one the switch exists
+        /// for: a turn on `beta` never sees `alpha`. Starting blind is the
+        /// correct answer to an unreadable journal; falling back to the
+        /// transcript autoload — which on a switch points at the OUTGOING
+        /// thread — would answer beta's question out of alpha's conversation.
+        #[tokio::test]
+        async fn a_seed_that_cannot_be_built_starts_blind_rather_than_leaking_the_bound_desk() {
+            let (mut fx, log, seen) = recording_fixture();
+            let breaking = Arc::new(BreakingLog {
+                inner: log.clone(),
+                failing: std::sync::atomic::AtomicBool::new(false),
+            });
+            fx.deps.events = Some(breaking.clone());
+            let rec = record();
+            log.operator("alpha", "ALPHA_USER_MARKER");
+            log.reply("alpha", "ALPHA_AGENT_MARKER");
+            log.operator("beta", "BETA_USER_MARKER");
+            log.reply("beta", "BETA_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hello alpha",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("alpha")),
+            )
+            .await
+            .expect("alpha chat turn");
+
+            let bound_to_alpha = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                bound_to_alpha.contains("ALPHA_USER_MARKER"),
+                "the fixture must actually bind to alpha first, or this proves nothing: \
+                 {bound_to_alpha:?}"
+            );
+
+            breaking.break_now();
+            let before = seen.lock().unwrap().len();
+
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hello beta",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("beta")),
+            )
+            .await
+            .expect("a switch whose seed cannot be built must still answer");
+
+            let after: Vec<String> = seen.lock().unwrap()[before..].to_vec();
+            let last = after.last().expect("the beta turn made a model call");
+            assert!(
+                !last.contains("ALPHA_USER_MARKER") && !last.contains("ALPHA_AGENT_MARKER"),
+                "an unreadable journal let the previously-bound desk's history into an \
+                 unrelated turn: {last:?}"
+            );
+            assert!(
+                last.contains("hello beta"),
+                "the turn still has to answer the message it was given: {last:?}"
             );
         }
     }

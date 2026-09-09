@@ -23,6 +23,8 @@ POST   /api/v1/companies/{id}/chat/upload      multipart file → attachment ref
 GET    /api/v1/companies/{id}/chat/history     one desk's transcript (?desk=<thread>)
 POST   /api/v1/companies/{id}/chat/messages/{seq}/reactions
                                                { "emoji": "👍", "on": true } → 204
+POST   /api/v1/companies/{id}/chat/review      { "chatId", "taskId", "decision": "approve"|"revise",
+                                               "note"? } → ChatReviewReceipt (openhuman feature only)
 GET    /api/v1/companies/{id}/desks            the company's desks (group chats)
 POST   /api/v1/companies/{id}/desks            create an operator-overlay desk
 DELETE .../desks/{deskId}                      delete an operator-created desk
@@ -34,7 +36,15 @@ GET    /api/v1/companies/{id}/approvals        pending approvals
 GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
 PUT    /api/v1/companies/{id}/notifications  mark notifications read (`{ "ids": [...] }`; empty body or null ids marks all)
 POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
-                                               "detach": false }
+                                               "detach": false,
+                                               // a parked blocker only: which of the four
+                                               // things the stopped step should do. Narrows
+                                               // `verdict` (retry/amend/skip approve, cancel
+                                               // denies) — a pair that disagrees is a 400.
+                                               // `blocker_answer` is mandatory and non-blank
+                                               // with "amend", refused with the rest.
+                                               "blocker_verdict": "retry"|"amend"|"skip"|"cancel",
+                                               "blocker_answer": "…" }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
 GET    /api/v1/companies/{id}/feedback         past reports (no operator words)
 GET    /api/v1/companies/{id}/feedback/board   the shared board, one page
@@ -62,8 +72,10 @@ PUT    /api/v1/companies/{id}/desks/{desk}/order           reorder (hierarchy)
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
 with no `{id}`.
 
-`GET …/notifications` returns only unread `mention` notifications addressed to the
-signed-in human, newest first. Each row includes its subject, title, creation
+`GET …/notifications` returns every unread notification addressed to the
+signed-in human, newest first — not just `mention`: `dispatch_failed`,
+`approval_expired`, and `workflow_run_*` rows are the same durable, user-facing
+feed and are not filtered by kind. Each row includes its subject, title, creation
  time, and optional chat context; `unread` is the returned count. Machine
 credentials, which have no person identity, receive `401`. `PUT` accepts an
 optional `ids` array and returns the remaining unread count. An omitted or null
@@ -235,8 +247,13 @@ under a name disambiguated from the upload's own id rather than surfacing the
 `/chat`'s `attachments` field is **node ids only**. The host re-resolves each
 id against the sending company's own workspace tree and takes the name / mime
 / size from the store — never the client's claim — the same discipline a
-`parent` thread reference gets; an id that resolves to no binary node in this
-company is a `400`, on the same terms a bad `parent` is. Server-side, the host
+`parent` thread reference gets. **Any file in the tree may be attached**,
+however it was written (issue #2029): an upload through `…/chat/upload`, a
+text upload the workspace route stored as a note, a seeded note, one an agent
+wrote. A prose note's `mime` is guessed from the stored name and its `size` is
+the body's byte length, both read at resolve time. An id naming a folder, or
+naming nothing in this company, is a `400`, on the same terms a bad `parent`
+is. Server-side, the host
 also extracts each attachment's text where the format and size allow it (PDF,
 DOCX, PPTX, XLSX, plain text — the same `ingest::extract` pipeline
 `POST …/memory/ingest` runs; see [memory.md](../company-brain/memory.md)) and
@@ -244,6 +261,39 @@ carries it in the journaled event, capped, so a brain that later reads the
 message off the wire has the attachment's actual words rather than only a
 node id it has no tool to resolve. An image or a scan with no text layer
 carries no extracted text; the reference alone still rides the wire.
+
+### Thread review verdicts (issue #1852)
+
+```text
+POST   …/chat/review      { "chatId", "taskId", "decision": "approve"|"revise", "note"? }
+                          → ChatReviewReceipt { "taskId", "column": "done"|"in_progress"|"in_review" }
+```
+
+Settles the `in_review` dispatch card a chat thread is reviewing — the board
+card the thread's settle pill announced, **not** the native-tool approval gate
+`POST …/approvals/{aid}` settles. `chatId` is the origin conversation (the
+desk/channel id); `taskId` is the specific card the operator clicked, because a
+desk can hold more than one card `in_review` at once — the verdict is bound to
+that card rather than resolved by picking the desk's most recently updated one.
+`approve` finishes the card; `revise` re-runs it, carrying `note` back to the
+re-run as the reviewer's instruction, on the same path a thread reply of
+feedback already takes.
+
+`column` on the receipt is `done` on approve, `in_progress` on revise — or
+`in_review`, unchanged, on a revise whose `note` was blank. An empty note is
+nothing to re-run on, so the host leaves the card where it was rather than
+dispatching an identical attempt a second time; the console reconciles its
+optimistic move against whichever of the three comes back.
+
+Gated behind the `openhuman` feature (`with_review_routes`): the harness that
+dispatches cards in the first place is what settles them, so a build without
+it never mounts `/chat/review` at all — the request 404s at the router, not
+through the JSON error envelope below. Errors on a build that does carry the
+route: an unrecognized `decision` string is `400 invalid_request`; a `taskId`
+that names no card `in_review` on that desk — a wrong id, or no card in review
+at all — is `404 not_found`. The verdict itself is serialized against the same
+company-wide task-write lock every other card mutation takes, so two verdicts
+racing the same card cannot both resolve it.
 
 ### Running and stopping a workflow (issue #383)
 
@@ -377,6 +427,25 @@ accepted inbound; it is outbound-only ([config.md](config.md)).
 JSON error envelope `{ "error": string, "code": string }` with stable `code`
 values; 4xx for caller mistakes, 402 reserved for x402 challenges, 409 for
 lifecycle-state conflicts (e.g. chatting with an archived company).
+
+`409` is the most overloaded status here, so **the `code` carries the meaning,
+not the status**. Three of its codes are permanent states rather than failures,
+and a caller that retries them retries forever:
+
+| `code` | Means | What clears it |
+|---|---|---|
+| `not_in_build` | the binary was compiled without this surface | a different build |
+| `not_configured` | the surface is here; this company has not set it up | an operator setting it, elsewhere |
+| `restart_required` | saved config the running runtime booted without | restarting the company |
+
+Everything else on `409` — `conflict`, `lifecycle_conflict` — is an ordinary
+conflict a caller clears by retrying or by sending something else. Clients must
+branch on `code` and never infer permanence from the status: the console's
+`classifyLoadFailure` does exactly this, and read `409` as transient across the
+board until it did (issue #2081).
+
+`not_in_build` is `501` on the finance routes and `409` elsewhere. The status
+differs; the code does not, which is why the code is the thing to read.
 
 ## Platform webhooks (Phase 5)
 

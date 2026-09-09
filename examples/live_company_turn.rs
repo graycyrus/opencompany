@@ -102,11 +102,13 @@ async fn main() -> anyhow::Result<()> {
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
 
     let dir = tempfile::tempdir()?;
     let meter = Arc::new(CapturingMeter::default());
     let deps = HarnessDeps {
+        emergency_gate: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(cfg)),
@@ -124,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         audit_root: dir.path().to_path_buf(),
         model_override,
         tasks: None,
+        notifications: None,
         skills: None,
         skills_source_dir: None,
         skills_registry: std::sync::Arc::from([]),

@@ -9,6 +9,7 @@ use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
@@ -95,6 +96,7 @@ async fn state_with_builder(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -383,7 +385,7 @@ async fn policy_field_reports_the_selectable_tiers_and_when_a_change_takes_effec
     assert_eq!(readonly["label"], "Read-only", "{value}");
     assert_eq!(
         readonly["description"],
-        "The agents can look at things but change nothing and spend nothing.",
+        "The agents can look at things but change nothing, contact nobody, and use no connected account. Billed tool calls are refused too — but the agents still think, and the company is billed for that.",
         "{value}"
     );
 
@@ -496,6 +498,7 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -774,6 +777,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: None,
@@ -791,6 +795,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: None,
@@ -841,6 +846,7 @@ async fn chat_history_clamps_an_oversized_page_request() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -889,13 +895,13 @@ async fn chat_history_projects_the_card_a_reply_opened() {
             runtime.id(),
             &crate::ports::tasks::TaskRecord {
                 id: "t-77".to_string(),
-                title: "Draft the launch note".to_string(),
+                title: TaskTitle::authored("Draft the launch note"),
                 note: None,
                 column: crate::ports::tasks::COLUMN_TODO.to_string(),
                 priority: "medium".to_string(),
                 assignee: String::new(),
                 updated_at_millis: 1,
-                origin_chat_id: None,
+                origin: None,
                 parent_task_id: None,
                 output: None,
                 plan: None,
@@ -904,6 +910,8 @@ async fn chat_history_projects_the_card_a_reply_opened() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
+                bounced: None,
             },
         )
         .await
@@ -918,6 +926,7 @@ async fn chat_history_projects_the_card_a_reply_opened() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -975,6 +984,7 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: None,
@@ -992,6 +1002,7 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: Some(root),
@@ -1201,13 +1212,13 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
             runtime.id(),
             &TaskRecord {
                 id: "t1".into(),
-                title: "Launch".into(),
+                title: TaskTitle::authored("Launch"),
                 note: None,
                 column: "todo".into(),
                 priority: "high".into(),
                 assignee: "maya".into(),
                 updated_at_millis: 1_700_000_000_000,
-                origin_chat_id: None,
+                origin: None,
                 parent_task_id: None,
                 output: None,
                 plan: None,
@@ -1216,6 +1227,8 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
+                bounced: None,
             },
         )
         .await
@@ -1532,6 +1545,7 @@ async fn skills_and_workflows_resolve_from_source_dir() {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1613,6 +1627,7 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1735,6 +1750,7 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1836,6 +1852,7 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1938,6 +1955,7 @@ async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2016,6 +2034,7 @@ async fn graphql_hides_a_company_disabled_global_workflow() {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();

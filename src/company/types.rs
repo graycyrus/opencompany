@@ -196,6 +196,38 @@ pub fn grants_composio_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "composio" || grant.starts_with("composio."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the `mcp_registry`
+/// namespace — the operator-installed MCP registry surface
+/// (`mcp_registry_list_tools` / `mcp_registry_tool_call`).
+///
+/// This is distinct from the per-server `mcp:<name>` bridge
+/// ([`crate::runtime::tools::grants_cover_server`]): the bridge reaches only
+/// the servers a company declared in its manifest/`mcp.json` and an agent was
+/// scoped to by name, while the registry pair reaches **any** server the
+/// company has installed and connected through the console, addressed at call
+/// time by a bare `server_id` argument the tool itself accepts.
+///
+/// Like [`grants_composio_explicit`], the catch-all `*` does **not** grant it:
+/// `mcp_registry_tool_call` invokes an arbitrary tool on any connected server
+/// with no per-server scoping — the same "reaches a third party, moves a real
+/// side effect" shape as Composio, just against whichever servers happen to be
+/// installed rather than a fixed toolkit list. `mcp_registry_list_tools` (a
+/// read-only schema listing over the same registry) rides the SAME grant as
+/// the mutating tool rather than a split one of its own: every existing
+/// third-party-reaching family already bundles its read-only discovery tools
+/// under the single grant that covers the mutating ones (`composio_list_tools`
+/// sits behind the same `composio` grant as `composio_execute`), and splitting
+/// here would only recreate that shape with no sibling precedent for it.
+/// Matches the bare `mcp_registry` grant or any `mcp_registry.*` sub-grant.
+/// Lives here (always compiled) so both the feature-gated harness wiring
+/// (`build::build_agent`) and the manifest-narrowing gate
+/// (`runtime::builder::allow_covers`) key off one source of truth.
+pub fn grants_mcp_registry_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "mcp_registry" || grant.starts_with("mcp_registry."))
+}
+
 /// Whether a tool-grant list **explicitly** grants the `chargebee` billing
 /// namespace (issue #788).
 ///
@@ -313,6 +345,37 @@ pub fn grants_search_explicit(grants: &[String]) -> bool {
     grants
         .iter()
         .any(|grant| grant == "search" || grant.starts_with("search."))
+}
+
+/// The [`GATEABLE_NAMESPACES`] a built-in tool can serve directly — the shared
+/// native-capability vocabulary both native-first routing levers key off.
+///
+/// It is `GATEABLE_NAMESPACES` minus `composio` (the third-party connection
+/// path, never a built-in tool) and minus `web` (the raw-HTTP family the
+/// Composio deflection guardrail governs). A future native tool flows into both
+/// levers by its [`namespace_of`](crate::harness::toolbelt::namespace_of) arm
+/// landing in this set; nothing here is a literal capability name.
+pub fn native_capability_namespaces() -> Vec<&'static str> {
+    GATEABLE_NAMESPACES
+        .iter()
+        .copied()
+        .filter(|ns| *ns != "composio" && *ns != "web")
+        .collect()
+}
+
+/// Whether a grant list confers the native namespace `ns`, mirroring the
+/// harness wiring gate: the real-money `search`/`media` families through their
+/// explicit grant helpers (the catch-all `*` never confers them), and every
+/// other namespace through the ordinary namespace rule a bare `*` satisfies.
+pub fn grants_confer_native(grants: &[String], ns: &str) -> bool {
+    use crate::runtime::tools::{NAMESPACE_SEPARATORS, extends_on_boundary};
+    match ns {
+        "search" => grants_search_explicit(grants),
+        "media" => grants_media_explicit(grants),
+        _ => grants
+            .iter()
+            .any(|grant| grant == "*" || extends_on_boundary(grant, ns, NAMESPACE_SEPARATORS)),
+    }
 }
 
 /// Whether a tool-grant list confers the **publishing** capability (issue #244)
@@ -979,6 +1042,18 @@ pub struct GroupChat {
     /// [`agent_scoped_grants`](crate::runtime::builder::agent_scoped_grants).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Whether this desk answers as a **room** rather than through one
+    /// responder, and how far it may go doing so (`[[group_chat]].hive`).
+    ///
+    /// Every key is optional and every default is derived from the desk's own
+    /// membership, so an omitted section is not a no-op the way `tools` is: a
+    /// desk that grew to two members starts deliberating, which is the point.
+    /// A desk that should keep answering through its lead says
+    /// `hive = { enabled = false }`, and a desk of one is unaffected either way
+    /// — there is nobody to deliberate with. See
+    /// [`crate::hivemind`] and `docs/spec/runtime/hivemind.md`.
+    #[serde(default)]
+    pub hive: crate::hivemind::HiveConfig,
 }
 
 /// A `[[connection]]` entry — an integration to prioritize wiring. This is
@@ -1735,6 +1810,41 @@ pub struct Schedule {
 mod test {
     use super::*;
 
+    /// The shared native vocabulary is exactly `GATEABLE_NAMESPACES` minus the
+    /// third-party connection path (`composio`) and the raw-HTTP family the S2
+    /// deflection governs (`web`).
+    #[test]
+    fn native_capability_vocabulary_is_gateable_minus_composio_and_web() {
+        let native: std::collections::HashSet<&str> =
+            native_capability_namespaces().into_iter().collect();
+        let expected: std::collections::HashSet<&str> = GATEABLE_NAMESPACES
+            .iter()
+            .copied()
+            .filter(|ns| *ns != "composio" && *ns != "web")
+            .collect();
+        assert_eq!(native, expected);
+        assert!(!native.contains("composio"));
+        assert!(!native.contains("web"));
+    }
+
+    /// `grants_confer_native` mirrors the harness wiring gate: the real-money
+    /// `search`/`media` families need their explicit grant (a bare `*` confers
+    /// neither), and every other native namespace rides the ordinary rule a `*`
+    /// satisfies.
+    #[test]
+    fn grants_confer_native_mirrors_the_wiring_gate() {
+        assert!(grants_confer_native(&["search".into()], "search"));
+        assert!(!grants_confer_native(&["*".into()], "search"));
+        assert!(!grants_confer_native(&["composio".into()], "search"));
+
+        assert!(grants_confer_native(&["media".into()], "media"));
+        assert!(!grants_confer_native(&["*".into()], "media"));
+
+        assert!(grants_confer_native(&["*".into()], "shell"));
+        assert!(grants_confer_native(&["shell".into()], "shell"));
+        assert!(!grants_confer_native(&["search".into()], "shell"));
+    }
+
     /// **T10 (issue #971).** A manifest that never mentions
     /// `approval_ttl_hours` parses to `None` and serializes without the key —
     /// byte-identical to a build that predates the field.
@@ -1828,6 +1938,34 @@ mod test {
         assert!(!grants_composio_explicit(&[]));
         // A substring match must not count as the composio namespace.
         assert!(!grants_composio_explicit(&["composiotools".into()]));
+    }
+
+    /// The operator-installed `mcp_registry` surface is granted ONLY by an
+    /// explicit `mcp_registry` / `mcp_registry.*` grant — never by the
+    /// catch-all `*`. `mcp_registry_tool_call` invokes an arbitrary tool on any
+    /// server the company has installed and connected, with no per-server
+    /// scoping, so a broadly-permissioned company must still opt into it by
+    /// name.
+    #[test]
+    fn mcp_registry_grant_requires_explicit_namespace_not_wildcard() {
+        assert!(grants_mcp_registry_explicit(&["mcp_registry".into()]));
+        assert!(grants_mcp_registry_explicit(
+            &["mcp_registry.notion".into()]
+        ));
+        assert!(grants_mcp_registry_explicit(&[
+            "web.*".into(),
+            "mcp_registry".into()
+        ]));
+        // The catch-all `*` must NOT grant the registry surface.
+        assert!(!grants_mcp_registry_explicit(&["*".into()]));
+        assert!(!grants_mcp_registry_explicit(&["web.*".into()]));
+        assert!(!grants_mcp_registry_explicit(&[]));
+        // The per-server bridge namespace (`mcp:<name>`) is a different grant
+        // and must not be mistaken for it.
+        assert!(!grants_mcp_registry_explicit(&["mcp:notion".into()]));
+        assert!(!grants_mcp_registry_explicit(&["mcp:*".into()]));
+        // A substring match must not count as the registry namespace.
+        assert!(!grants_mcp_registry_explicit(&["mcp_registryextra".into()]));
     }
 
     /// The `[tools.composio]` sub-section parses its toolkit allowlist and an

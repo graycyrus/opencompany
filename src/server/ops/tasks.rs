@@ -27,7 +27,7 @@ use crate::ports::tasks::{
     COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction, TaskOutputSource,
     TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion, is_board_column,
 };
-use crate::ports::types::CompanyEvent;
+use crate::ports::types::{CompanyEvent, EventSeq};
 use crate::ports::{generate_id, now_millis};
 use crate::runtime::assignee;
 use crate::server::error::ApiError;
@@ -124,6 +124,12 @@ pub(crate) struct TaskCard {
     /// shape is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) origin_chat_id: Option<String>,
+    /// The message within `originChatId` the raising turn replied to, when
+    /// the card was opened from inside a thread rather than the channel's own
+    /// timeline. Omitted for a channel-level origin, and for every card
+    /// without an `originChatId` at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) origin_parent: Option<EventSeq>,
     /// What the card's latest successful attempt produced (issue #339) — the
     /// link that turns a finished card into something the operator can open.
     ///
@@ -182,13 +188,26 @@ pub(crate) struct TaskCard {
     /// lockstep with `originRunId`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) origin_workflow_id: Option<String>,
+    /// Why a failed or cancelled run returned this card to `todo` (issue
+    /// #1865) — the chip that tells a bounced card apart from a fresh one
+    /// without opening it. Omitted for every card that has never bounced,
+    /// which is every card the board rendered before this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bounced: Option<String>,
 }
 
 impl From<TaskRecord> for TaskCard {
     fn from(t: TaskRecord) -> Self {
+        // Taken out first: the DTO keeps the desk flat, and the literal below
+        // moves the record apart field by field, so the origin cannot be read
+        // through a borrow partway down it.
+        let (origin_chat_id, origin_parent) = match t.origin {
+            Some(origin) => (Some(origin.origin_chat_id), origin.origin_parent),
+            None => (None, None),
+        };
         Self {
             id: t.id,
-            title: t.title,
+            title: t.title.to_string(),
             note: t.note,
             column: crate::ledger::board::phase_of(&t.column).to_string(),
             stage: stage_of(&t.column),
@@ -197,14 +216,72 @@ impl From<TaskRecord> for TaskCard {
             updated_at: t.updated_at_millis,
             cost: None,
             parent_task_id: t.parent_task_id,
-            origin_chat_id: t.origin_chat_id,
+            origin_chat_id,
+            origin_parent,
             output: t.output,
             plan: t.plan,
             deliverable: t.deliverable,
             workflow_proposal: t.workflow_proposal,
             origin_run_id: t.origin_run_id,
             origin_workflow_id: t.origin_workflow_id,
+            bounced: t.bounced,
         }
+    }
+}
+
+#[cfg(test)]
+mod task_card_origin_test {
+    use super::*;
+    use crate::ports::tasks::TaskOrigin;
+    use crate::ports::tasks::TaskTitle;
+
+    fn plain_record() -> TaskRecord {
+        TaskRecord {
+            id: "t-1".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
+            note: None,
+            column: "todo".to_string(),
+            priority: "medium".to_string(),
+            assignee: "maya".to_string(),
+            updated_at_millis: 7,
+            origin: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        }
+    }
+
+    #[test]
+    fn a_card_raised_inside_a_thread_carries_its_thread_root_onto_the_card() {
+        let mut record = plain_record();
+        record.origin = TaskOrigin::new(Some("engineering".to_string()), Some(EventSeq::new(41)));
+        let card = TaskCard::from(record);
+        assert_eq!(card.origin_chat_id.as_deref(), Some("engineering"));
+        assert_eq!(card.origin_parent, Some(EventSeq::new(41)));
+
+        let json = serde_json::to_string(&card).expect("serializes");
+        assert!(json.contains(r#""originChatId":"engineering""#), "{json}");
+        assert!(json.contains(r#""originParent":41"#), "{json}");
+    }
+
+    /// A card raised straight into a channel carries no thread root, and the
+    /// field stays absent on the wire rather than serializing `null`.
+    #[test]
+    fn a_channel_level_origin_carries_no_thread_root() {
+        let mut record = plain_record();
+        record.origin = TaskOrigin::new(Some("engineering".to_string()), None);
+        let card = TaskCard::from(record);
+        assert_eq!(card.origin_parent, None);
+
+        let json = serde_json::to_string(&card).expect("serializes");
+        assert!(!json.contains("originParent"), "{json}");
     }
 }
 
@@ -212,7 +289,20 @@ impl From<TaskRecord> for TaskCard {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTask {
-    title: String,
+    /// The card's headline, when a person typed one.
+    ///
+    /// Optional since semantic titling. The board's `+` dialog and the prompt
+    /// box both send one and it is taken verbatim — a name a person chose is
+    /// authoritative and is never re-worded. The transcript's "Add to board"
+    /// action sends **no** title and only the message as `note`, and the host
+    /// names the card from it; that action used to shorten the message in the
+    /// browser, which is how a card ended up titled with the first eighty
+    /// characters of somebody's chat.
+    ///
+    /// Absent with no `note` to name the card from is a `400` — a card has to
+    /// be called something.
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     note: Option<String>,
     #[serde(default)]
@@ -227,8 +317,8 @@ struct CreateTask {
     parent_task_id: Option<String>,
     /// The chat thread this card is being opened from (issue #246).
     ///
-    /// Set by the transcript's "Add to board" action, which is the one creation
-    /// entry point that *has* an originating conversation; the board's `+`
+    /// Set on the card a turn raises out of a conversation, which is the one
+    /// creation path that *has* an originating conversation; the board's `+`
     /// button omits it. Absent is the previous behaviour and stays the default,
     /// so no existing caller changes.
     #[serde(default)]
@@ -433,6 +523,30 @@ async fn create_task(
     company: ScopedCompany,
     Json(body): Json<CreateTask>,
 ) -> Result<Json<TaskCard>, ApiError> {
+    // Named BEFORE the lock. Naming reads nothing off the board and writes
+    // nothing to it, and it can spend the titling pass's whole deadline on a
+    // model — inside the critical section that would queue every concurrent
+    // patch, delete, review and create for this company behind it, and a burst
+    // of creates would serialise those delays cumulatively (codex on #2055).
+    let title = match body.title.as_deref().map(str::trim) {
+        Some(title) if !title.is_empty() => crate::ports::tasks::TaskTitle::authored(title),
+        _ => {
+            let source = body.note.as_deref().map(str::trim).unwrap_or_default();
+            if source.is_empty() {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(
+                    "a task needs a title, or a note to name it from".to_string(),
+                )));
+            }
+            crate::ports::tasks::mint_task_title(source, None, company.runtime.titler()).await
+        }
+    };
+    // A headline that normalises away leaves a card with nothing on its face, so
+    // it is refused here rather than persisted blank.
+    if title.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "that title has no name in it".to_string(),
+        )));
+    }
     // Read → validate → write is one critical section. Two concurrent requests
     // that each read the board before either has written would both validate
     // against a snapshot missing the other's edge, and could persist a lineage
@@ -459,7 +573,7 @@ async fn create_task(
     let assignee = resolve_assignee(&company, body.assignee.unwrap_or_default()).await?;
     let record = TaskRecord {
         id: generate_id(),
-        title: body.title,
+        title,
         note: body.note,
         column,
         priority: body.priority.unwrap_or_else(|| "medium".to_string()),
@@ -472,10 +586,22 @@ async fn create_task(
         // for anything the REST surface created. A blank string is normalised
         // away so an empty form field cannot persist as a thread id that
         // matches nothing.
-        origin_chat_id: body
-            .origin_chat_id
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty()),
+        origin: crate::ports::TaskOrigin::new(
+            body.origin_chat_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty()),
+            // Issue #1890 B: no thread, and a **known gap** rather than a
+            // claim. The create body carries a channel and no thread, so "Add
+            // to board" on a message inside a thread files a card that names
+            // the channel around it. That is exactly what this route did
+            // before B, so nothing regresses — but a reader must not take this
+            // for the positive "raised at channel level" a stamped `None`
+            // means on every path that does stamp. Closing it needs a body
+            // field and a console change (the transcript holds a rendered
+            // message id, not an `EventSeq`), which belongs with the renderer
+            // work in the epic's D.
+            None,
+        ),
         parent_task_id: body.parent_task_id,
         // Nothing has run yet, so there is no deliverable to point at
         // (issue #339). The first successful settle stamps it.
@@ -495,6 +621,8 @@ async fn create_task(
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
+        bounced: None,
     };
     company.runtime.upsert_task(&record).await?;
     Ok(Json(record.into()))
@@ -520,7 +648,13 @@ async fn patch_task(
         .cloned()
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("task {task_id}")))?;
     if let Some(title) = body.title {
-        record.title = title;
+        let renamed = crate::ports::tasks::TaskTitle::authored(&title);
+        if renamed.is_empty() {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "that title has no name in it".to_string(),
+            )));
+        }
+        record.title = renamed;
     }
     if let Some(note) = body.note {
         record.note = Some(note);
@@ -550,8 +684,15 @@ async fn patch_task(
         record.deliverable = deliverable;
     }
     record.updated_at_millis = now_millis();
-    company.runtime.upsert_task(&record).await?;
-    Ok(Json(record.into()))
+    // `upsert_task` can persist a record that differs from `record`: leaving
+    // `todo` for any other column clears a stale `bounced` chip (issue #1865),
+    // and that clear happens on the clone it writes, not on this local
+    // `record`. Serializing its return value rather than `record` itself is
+    // what keeps this response in sync with the row that was actually stored
+    // (Codex review, PR #1883) — a client such as `TaskEditDialog` reconciles
+    // its board state straight from this body.
+    let stored = company.runtime.upsert_task(&record).await?;
+    Ok(Json(stored.into()))
 }
 
 /// `DELETE …/tasks/{task_id}` — remove a card from the board.
@@ -1006,7 +1147,7 @@ impl LineageRef {
     fn from_task(t: &TaskRecord, cost: Option<CostDisplay>) -> Self {
         Self {
             id: t.id.clone(),
-            title: t.title.clone(),
+            title: t.title.to_string(),
             column: crate::ledger::board::phase_of(&t.column).to_string(),
             cost,
         }
@@ -2685,6 +2826,7 @@ mod steer_redirect_test {
     use super::*;
     use crate::company::CompanyManifest;
     use crate::company::steer::InflightKind;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::types::{CompanyId, CompanyRecord, EventSeq};
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
@@ -2728,6 +2870,7 @@ mod steer_redirect_test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -2785,13 +2928,13 @@ mod steer_redirect_test {
                 &company,
                 &crate::ports::tasks::TaskRecord {
                     id: id.to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -2800,6 +2943,8 @@ mod steer_redirect_test {
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
                 },
             )
             .await
@@ -2957,6 +3102,159 @@ mod steer_redirect_test {
             journaled_redirect(&state).await.as_deref(),
             Some(exact.as_str()),
             "an at-limit instruction reaches the run whole — no cut, no marker"
+        );
+    }
+}
+
+/// `PATCH …/tasks/{task_id}` must hand back the row it actually persisted.
+///
+/// `upsert_task` clears a stale `bounced` chip on a clone when a card leaves
+/// `todo` any way other than a re-dispatch or a re-plan (issue #1865), and
+/// that clear used to be invisible to `patch_task`'s own response: the
+/// handler serialized its local `record` — built before the upsert — instead
+/// of what `upsert_task` returned. A client such as `TaskEditDialog` that
+/// reconciles its board state straight from the PATCH body would keep
+/// showing a bounce reason for a card whose stored row had already cleared
+/// it (Codex review, PR #1883).
+#[cfg(test)]
+mod patch_clears_bounced_test {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use crate::company::CompanyManifest;
+    use crate::ports::types::{CompanyId, CompanyRecord};
+    use crate::runtime::RuntimeBuilder;
+    use crate::server::router;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, AppState};
+
+    fn manifest() -> CompanyManifest {
+        toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .unwrap()
+    }
+
+    async fn state(home: &std::path::Path) -> AppState {
+        use crate::ports::CompanyStore;
+        let id = CompanyId::new("acme");
+        FsCompanyStore::new(home.to_path_buf())
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// Writes a bounced To-do card straight through the store, bypassing
+    /// `upsert_task`'s dispatch/plan edges — the seed only needs the row to
+    /// exist with a `bounced` chip already on it, not to fire either trigger.
+    async fn seed_bounced_card(state: &AppState, id: &str) {
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        runtime
+            .tasks()
+            .upsert(
+                &company,
+                &crate::ports::tasks::TaskRecord {
+                    id: id.to_string(),
+                    title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_TODO.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: 1,
+                    origin: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: Some("a previous run's dispatch failed".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn patch_column(state: &AppState, id: &str, column: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/v1/company/tasks/{id}"))
+            .header("content-type", "application/json")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::from(json!({"column": column}).to_string()))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn patching_a_bounced_card_straight_to_done_returns_the_cleared_state() {
+        let home = tempfile::tempdir().unwrap();
+        let state = state(home.path()).await;
+        seed_bounced_card(&state, "card-1").await;
+
+        let (status, body) = patch_column(&state, "card-1", "done").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.get("bounced").is_none(),
+            "the PATCH response still carries the stale bounce chip: {body}"
+        );
+
+        // The response is not just accidentally right while the persisted row
+        // stays wrong — the store must agree too.
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let stored = runtime
+            .tasks()
+            .list(&company)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "card-1")
+            .unwrap();
+        assert!(
+            stored.bounced.is_none(),
+            "the stored row should also have cleared the chip"
         );
     }
 }

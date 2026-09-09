@@ -179,6 +179,14 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
     // origin is captured per-request in a closure instead — cheap, and it keeps
     // this to two small pieces rather than a middleware stack the codebase
     // otherwise has none of.
+    // A Sentry transaction per served request, and continuation of a
+    // `sentry-trace` header the console sent — so a failed action in the
+    // browser and the request that served it are one trace. A no-op unless the
+    // operator asked for a sample rate, and absent entirely from a build
+    // without the `crash-reporting` feature; see
+    // `docs/spec/runtime/crash-reporting.md`.
+    let router = crate::observability::instrument_http(router);
+
     let cors = state.cors().clone();
     if !cors.is_enabled() {
         return router;
@@ -892,6 +900,32 @@ mod tests {
         assert!(body.get("display_name").is_none());
     }
 
+    /// **P1 review finding (Codex) on PR #2038.** A console offering the
+    /// four-way blocker answer to a host predating it sends `blocker_verdict`,
+    /// that host ignores the unknown field and resolves from the lowered
+    /// two-way verdict alone — a skip becomes a retry, an amend re-runs
+    /// without the operator's words — while the console reports the four-way
+    /// result it believes it asked for. A console can only decline to send
+    /// what a host cannot carry out if the host says which it is, and this
+    /// capability is that statement.
+    ///
+    /// Feature-gated because the answer is: `blocker_verdict` handling lives
+    /// behind `openhuman`, and a build without it refuses the field outright
+    /// (`operator::blocker_verdict`). Advertising it unconditionally would
+    /// promise a resume this build has no code for.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn spec_advertises_the_four_way_blocker_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        let body = spec_body(state).await;
+        let caps = body["capabilities"].as_array().expect("capabilities");
+        assert!(
+            caps.iter().any(|c| c == "blocker-verdict"),
+            "a build that answers blocker_verdict must advertise it — otherwise a console              cannot tell it apart from one that will silently lower a skip to a retry: {caps:?}"
+        );
+    }
+
     #[tokio::test]
     async fn spec_names_the_build_commit_beside_the_version() {
         // `version` has read `0.1.0` for thousands of commits, so it alone
@@ -948,6 +982,131 @@ mod tests {
             "the home path must not appear in /spec: {rendered}"
         );
         assert!(!rendered.contains("mongodb://"), "no connection strings");
+    }
+
+    /// Every string `/spec` serves must be a build fact. The previous test
+    /// pins the home path, but it builds its state from `AppConfig::default()`,
+    /// where every configurable path is `None` — so it asserts against fields
+    /// nothing populated. This one configures them.
+    #[tokio::test]
+    async fn spec_never_leaks_a_configured_host_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sentinel-openhuman-checkout");
+        let state = AppState::new(AppConfig {
+            openhuman_root: Some(root.clone()),
+            ..AppConfig::default()
+        })
+        .with_home(dir.path().to_path_buf());
+
+        let body = spec_body(state).await;
+        // The replacement contract, not just the absence: without this the test
+        // also passes on a host that dropped the field altogether, or that
+        // reports `false` while a checkout is configured.
+        assert_eq!(body["openhuman_configured"].as_bool(), Some(true));
+
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("sentinel-openhuman-checkout"),
+            "a configured checkout path must not appear in /spec: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&dir.path().display().to_string()),
+            "the home path must not appear in /spec: {rendered}"
+        );
+
+        let unset =
+            spec_body(AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf()))
+                .await;
+        assert_eq!(unset["openhuman_configured"].as_bool(), Some(false));
+    }
+
+    /// Catches the *next* such field rather than this one: whatever `/spec`
+    /// grows, no value it serves may be an absolute filesystem path. The
+    /// fixture above can only assert about fields whoever wrote it knew to
+    /// populate; this holds for fields that do not exist yet.
+    #[tokio::test]
+    async fn spec_serves_no_absolute_path_in_any_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig {
+            openhuman_root: Some(dir.path().join("checkout")),
+            instance_name: Some("prod-eu".to_string()),
+            ..AppConfig::default()
+        })
+        .with_home(dir.path().to_path_buf());
+
+        let mut offenders = Vec::new();
+        collect_absolute_paths(&spec_body(state).await, String::new(), &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "/spec serves deployment paths at {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn absolute_paths_are_recognised_on_both_platforms() {
+        for path in [
+            "/Users/someone/checkout",
+            "/data",
+            r"C:\checkout",
+            r"c:/checkout",
+            r"\\server\share",
+        ] {
+            assert!(is_absolute_path(path), "`{path}` is an absolute path");
+        }
+        for text in [
+            "vendor/openhuman",
+            "https://api.tinyhumans.ai",
+            "fs",
+            "prod-eu",
+            "",
+            "C:",
+            "Cx\\checkout",
+        ] {
+            assert!(!is_absolute_path(text), "`{text}` is not an absolute path");
+        }
+    }
+
+    /// Whether a string reads as an absolute filesystem path.
+    ///
+    /// Windows shapes as well as POSIX: this host builds for Windows, and a
+    /// guard that only knows `/` would pass while `/spec` served `C:\checkout`.
+    fn is_absolute_path(text: &str) -> bool {
+        if text.starts_with('/') || text.starts_with(r"\\") {
+            return true;
+        }
+        let mut chars = text.chars();
+        matches!(
+            (chars.next(), chars.next(), chars.next()),
+            (Some(drive), Some(':'), Some('\\' | '/')) if drive.is_ascii_alphabetic()
+        )
+    }
+
+    /// Walks a JSON value and records the location of every string that reads
+    /// as an absolute filesystem path.
+    fn collect_absolute_paths(value: &serde_json::Value, at: String, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                if is_absolute_path(text) {
+                    out.push(format!("{at} = {text}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    collect_absolute_paths(item, format!("{at}[{index}]"), out);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, field) in fields {
+                    let at = if at.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{at}.{key}")
+                    };
+                    collect_absolute_paths(field, at, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     #[tokio::test]

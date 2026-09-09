@@ -146,8 +146,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     await openWorkflow(page, secondName);
     await expect(page).toHaveURL(new RegExp(`#/workflows/${secondId}$`));
 
-    await page.getByRole("button", { name: "Workspace" }).click();
-    await page.getByRole("button", { name: "Workflows" }).click();
+    // Room and Flows: two section rows, both reachable in one click from
+    // anywhere. Workspace is a child under Company now, so stepping away
+    // through it would take two clicks and test the sidebar rather than the
+    // remembered workflow this spec is about.
+    await page.getByRole("button", { name: "Room", exact: true }).click();
+    await page.getByRole("button", { name: "Flows", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(secondName);
 
     await page.goto(`/#/workflows/${firstId}`);
@@ -156,8 +160,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     // is the flake, not the console.
     await expect(openWorkflowName(page)).toHaveText(firstName, { timeout: 30_000 });
 
-    await page.getByRole("button", { name: "Workspace" }).click();
-    await page.getByRole("button", { name: "Workflows" }).click();
+    // Room and Flows: two section rows, both reachable in one click from
+    // anywhere. Workspace is a child under Company now, so stepping away
+    // through it would take two clicks and test the sidebar rather than the
+    // remembered workflow this spec is about.
+    await page.getByRole("button", { name: "Room", exact: true }).click();
+    await page.getByRole("button", { name: "Flows", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(firstName);
   } finally {
     await deleteWorkflow(request, firstId);
@@ -165,7 +173,20 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
   }
 });
 
-test("a company switch does not reuse the previous company's workflow route (#864)", async ({
+// Skipped, not deleted: #864 is still a real guarantee and this is still the
+// spec for it. What is gone is any way to *reach* the switch.
+// `src/product-scope.ts` sets `COMPANY_SWITCHING_HIDDEN`, which makes
+// `showCompanies` false in `host-switcher.tsx`; with `HOSTS_HIDDEN` alongside it
+// the trigger has nothing to open and falls to its nameplate branch. So
+// `getByTestId("host-switcher").click()` opens no menu and the "Other" item this
+// drives never exists — the 60s timeout it failed with, not a routing regression.
+//
+// Driving the switch another way would assert a path no operator can take.
+// Skipped at the declaration rather than on the flag because `test/e2e` cannot
+// import `@/product-scope`: this project supplies no `@/*` alias, deliberately
+// (see `tsconfig.e2e.json`). When company switching comes back, clear the flag
+// and drop this `.skip`.
+test.skip("a company switch does not reuse the previous company's workflow route (#864)", async ({
   page,
 }) => {
   await mockCompanySwitchApi(page);
@@ -176,11 +197,13 @@ test("a company switch does not reuse the previous company's workflow route (#86
     timeout: 30_000,
   });
 
-  // Companies live in the host switcher's own menu now — the sidebar footer's
-  // "Switch company" row moved in there with the lifecycle line, leaving the
-  // footer to the profile alone. The trigger is named by its nameplate (the
-  // company and its state), so it is addressed by its test id rather than by a
-  // label it deliberately does not carry.
+  // Companies live in the host switcher's own menu — the sidebar footer's
+  // "Switch company" row moved in there with the lifecycle line, and the
+  // switcher itself has since left the sidebar altogether for the window's
+  // title row (`window-title-bar.tsx`), taking the profile control with it. The
+  // trigger is named by its nameplate (the company and its state), so it is
+  // addressed by its test id rather than by a label it deliberately does not
+  // carry.
   await page.getByTestId("host-switcher").click();
   await page.getByRole("menuitem", { name: "Other", exact: true }).click();
   // Issue #1110 sharpened what this test proves. It used to assert the switch

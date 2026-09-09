@@ -19,6 +19,8 @@ export interface Thread {
   /** Short blurb shown under the name when the thread has no messages yet. */
   blurb: string;
   messages: ChatMessage[];
+  /** Whether the composer for this thread is disabled. */
+  readOnly?: boolean;
 }
 
 /** Avatar tones rotated across desk threads. */

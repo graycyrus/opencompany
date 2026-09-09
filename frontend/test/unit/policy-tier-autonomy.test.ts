@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { PolicyStatus } from "@/api/policy";
+import { NOT_A_POLICY } from "@/api/policy";
 import { widensAutonomy, widensSpendCap, gatedBy } from "@/components/policy-settings";
 
 const toasts = vi.hoisted(() => ({
@@ -27,7 +28,8 @@ const TIERS = [
   {
     value: "readonly",
     label: "Read-only",
-    description: "The agents can look at things but change nothing and spend nothing.",
+    description:
+      "The agents can look at things but change nothing, contact nobody, and use no connected account. Billed tool calls are refused too — but the agents still think, and the company is billed for that.",
   },
   {
     value: "supervised",
@@ -109,7 +111,7 @@ afterEach(async () => {
 
 async function mount(client: OpenCompanyClient) {
   await act(async () => {
-    root.render(createElement(PolicySettings, { client, company: "acme" }));
+    root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
     await Promise.resolve();
   });
 }
@@ -289,7 +291,7 @@ describe("changing the autonomy tier", () => {
     // choice was reviewed against "acme"'s policy and must not apply to the
     // new one.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
@@ -312,7 +314,7 @@ describe("changing the autonomy tier", () => {
 
     // The scope moves to another company while the PUT is in flight.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 
@@ -619,6 +621,50 @@ describe("changing the spend cap", () => {
   });
 });
 
+describe("the operator's role", () => {
+  it("disables every tier control for a member and states why", async () => {
+    const { client, put } = makeClient(status("supervised"));
+    await act(async () => {
+      root.render(
+        createElement(PolicySettings, { client, company: "acme", canManage: false }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain(
+      "Only an admin can change this company's approval policy",
+    );
+
+    const full = container.querySelector<HTMLButtonElement>(
+      "[data-testid=policy-tier-full]",
+    )!;
+    expect(full.disabled).toBe(true);
+
+    await act(async () => {
+      full.click();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("withholds the manifest-reset control from a member even when overridden", async () => {
+    const { client, del } = makeClient(overridden("readonly", "full"));
+    await act(async () => {
+      root.render(
+        createElement(PolicySettings, { client, company: "acme", canManage: false }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      [...container.querySelectorAll("button")].some((button) =>
+        button.textContent?.includes("manifest's policy"),
+      ),
+    ).toBe(false);
+    expect(del).not.toHaveBeenCalled();
+  });
+});
+
 describe("loading the policy", () => {
   it("clears the previous company's policy when a company-switch read fails", async () => {
     const { client } = makeClient(status("supervised"));
@@ -636,7 +682,7 @@ describe("loading the policy", () => {
       },
     } as unknown as OpenCompanyClient;
     await act(async () => {
-      root.render(createElement(PolicySettings, { client: failing, company: "other" }));
+      root.render(createElement(PolicySettings, { client: failing, company: "other", canManage: true }));
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -662,12 +708,12 @@ describe("loading the policy", () => {
     } as unknown as OpenCompanyClient;
 
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
       await Promise.resolve();
     });
     // Move to another company while "acme"'s read is still in flight.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 
@@ -711,7 +757,7 @@ describe("loading the policy", () => {
     } as unknown as OpenCompanyClient;
 
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
       await Promise.resolve();
     });
     await act(async () => {
@@ -724,7 +770,7 @@ describe("loading the policy", () => {
 
     // The operator switches companies while the save is still pending.
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 
@@ -768,7 +814,7 @@ describe("loading the policy", () => {
     } as unknown as OpenCompanyClient;
 
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -781,7 +827,7 @@ describe("loading the policy", () => {
         .click();
     });
     await act(async () => {
-      root.render(createElement(PolicySettings, { client, company: "other" }));
+      root.render(createElement(PolicySettings, { client, company: "other", canManage: true }));
       await Promise.resolve();
     });
 
@@ -807,5 +853,118 @@ describe("loading the policy", () => {
     expect(
       container.querySelector<HTMLElement>("[data-testid=policy-tier-readonly]")?.getAttribute("aria-checked"),
     ).toBe("false");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A 200 the console cannot read is a FAILED write, all the way up.
+// ---------------------------------------------------------------------------
+
+/**
+ * `apply` has fenced a malformed body since the crash fix — it shows the error
+ * and refuses to put the value on screen. What it did not do was **say so to
+ * its caller**: it returned `undefined`, and `saveTier`, `reset` and
+ * `commitSpendCap` each went on to `return true` regardless.
+ *
+ * Their confirmation handlers close on `true`. So a tier escalation, a
+ * loosening reset or a spend-cap raise that the host answered with rubbish
+ * dismissed its dialog exactly as a successful one does — and the dialog it
+ * dismissed is the gate in front of *widening* what the agents may do. The
+ * operator is told, by the dialog going away, that the thing they just agreed
+ * to has happened. It has not.
+ *
+ * These drive both confirmations that are reachable in this build. The
+ * spend-cap raise shares the same `apply` return and is unreachable here for an
+ * unrelated reason: the field is disabled while policy HITL is off
+ * (`src/runtime/builder.rs`), which the suite above already pins.
+ */
+describe("a write the console cannot read back", () => {
+  /** A body that is not a policy, answered with a 200 by both write routes. */
+  const notAPolicy = [] as unknown as PolicyStatus;
+
+  it("keeps the escalation confirmation up rather than closing it as done", async () => {
+    const put = vi.fn(async () => notAPolicy);
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async (path: string) =>
+        path.endsWith("/policy") ? status("supervised") : { slugs: [], unwired: [] },
+      put,
+      del: vi.fn(),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).not.toBeNull();
+
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!.click();
+      await Promise.resolve();
+    });
+
+    expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { mode: "full" });
+    expect(toasts.error).toHaveBeenCalledWith(NOT_A_POLICY);
+    // The dialog is still there, so the operator can retry or back out —
+    // rather than having been shown a dismissal that reads as success.
+    expect(
+      document.querySelector("[data-testid=policy-tier-confirm]"),
+      "the confirmation stays open for the retry",
+    ).not.toBeNull();
+    // And the card still states the tier actually in force.
+    expect(
+      container.querySelector("[data-testid=policy-tier-supervised]")
+        ?.getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  it("keeps the loosening-reset confirmation up for the same reason", async () => {
+    const del = vi.fn(async () => notAPolicy);
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: async (path: string) =>
+        path.endsWith("/policy")
+          ? overridden("readonly", "full")
+          : { slugs: [], unwired: [] },
+      put: vi.fn(),
+      del,
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((b) => b.textContent?.includes("manifest's policy"))!
+        .click();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).not.toBeNull();
+
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!.click();
+      await Promise.resolve();
+    });
+
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+    expect(toasts.error).toHaveBeenCalledWith(NOT_A_POLICY);
+    expect(
+      document.querySelector("[data-testid=policy-tier-confirm]"),
+      "the confirmation stays open for the retry",
+    ).not.toBeNull();
+  });
+
+  it("still closes the confirmation when the write actually lands", async () => {
+    // The discriminating half. Without it every assertion above would pass
+    // against a dialog that had simply stopped closing at all.
+    const { client } = makeClient(status("supervised"));
+    await mount(client);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
+    });
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!.click();
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
 });

@@ -51,7 +51,29 @@ function stubClient(replies: InferenceStatus[], mutation?: InferenceStatus) {
   return {
     scopeFor: (company: string | null) =>
       company ? `/api/v1/companies/${company}` : "/api/v1/company",
-    get: async (path: string) => (path.endsWith("/inference/models") ? [] : read()),
+    // The catalog route answers with an object naming the endpoint that was
+    // read, not a bare array (`InferenceModelCatalog`). These tests assert
+    // nothing about the picker, so the stub answers the host's *unreadable
+    // catalog* reply — a 200 carrying `error`, with no `tierVocabulary`,
+    // because "we could not ask" is not the same fact as `"unknown"`.
+    //
+    // Deliberately not `{models: [], tierVocabulary: "unknown"}`: the host
+    // cannot produce that pairing. `list_models` only sets a vocabulary in its
+    // success arm, and `catalog_models` treats an empty catalog as a failure,
+    // so an empty list always arrives with `error` set and no vocabulary. A
+    // double that answered a shape the host cannot emit would let these tests
+    // pass on behaviour nothing real can reach.
+    get: async (path: string) =>
+      path.endsWith("/inference/models")
+        ? {
+            baseUrl: "https://openrouter.ai/api/v1",
+            models: [],
+            tierDefaults: {},
+            error:
+              "Could not list models from https://openrouter.ai/api/v1: connection refused. " +
+              "Enter model ids directly.",
+          }
+        : read(),
     put: async () => ({ status: settled(), note: "" }),
     del: async () => ({ status: settled(), note: "" }),
     post: async () => ({ status: settled(), note: "" }),
@@ -144,13 +166,19 @@ describe("the Provider select shows the provider the host holds (issue #1737)", 
 
   it("rehydrates after a save rather than snapping back to the default", async () => {
     // The reported sequence: save under one provider, and the select goes on
-    // reading "Managed (TinyHumans)" while the header reads the saved one.
+    // reading the initializer's value while the header reads the saved one.
+    //
+    // Was staged from `managed`, which this console no longer offers as a route
+    // — its select row is the disabled "Not configured" stand-in and Save is
+    // withheld there, so the save under test could not fire. The defect was
+    // never about which two providers: it was the select not re-reading the
+    // host, which two offered providers exercise exactly as well.
     const client = stubClient(
-      [status({ provider: "managed" }), status({ provider: "openrouter" })],
+      [status({ provider: "openai_compatible" }), status({ provider: "openrouter" })],
       status({ provider: "openrouter" }),
     );
     await mount(client);
-    expect(providerSelect()).toBe("Managed (TinyHumans)");
+    expect(providerSelect()).toBe("Custom (OpenAI-compatible)");
 
     await act(async () => {
       (testId("inference-save") as HTMLButtonElement).click();
@@ -161,11 +189,15 @@ describe("the Provider select shows the provider the host holds (issue #1737)", 
   });
 
   it("names the key that belongs in the field, for the provider it is stored against", async () => {
-    // The managed brain is OpenRouter with the platform paying, so a key set
-    // here is sent to OpenRouter. This line asked for a TinyHumans key — true
-    // when `managed` was a provider of its own, and never updated when it
-    // stopped being one. It is what the reported 401 actually was.
-    await mount(stubClient([status({ provider: "managed" })]));
+    // This line asked for a TinyHumans key — true when `managed` was a provider
+    // of its own, and never updated when it stopped being one. It is what the
+    // reported 401 actually was.
+    //
+    // Asserted against OpenRouter rather than `managed`: the key field is
+    // withheld entirely for a route this console does not offer, so the note
+    // has no rendering there to check. What the test is for — the note naming
+    // the key of the provider it is stored against — is unchanged.
+    await mount(stubClient([status({ provider: "openrouter" })]));
     expect(testId("inference-key-note")?.textContent).toContain("an OpenRouter key");
   });
 });

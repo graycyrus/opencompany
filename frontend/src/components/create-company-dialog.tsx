@@ -32,6 +32,7 @@ import {
   describeProvisionError,
   explicitIdProblem,
   resetReplacementId,
+  walletAddressProblem,
   wasAlreadyArchived,
   wasAmbiguousProvisionOutcome,
   wasArchiveOutcomeAmbiguous,
@@ -48,6 +49,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { COMPANY_SWITCHING_HIDDEN } from "@/product-scope";
 import {
   Select,
   SelectContent,
@@ -80,9 +82,35 @@ const POLICY_MODES: { value: string; label: string }[] = [
 export const CREATE_UNAVAILABLE_NOTE =
   "Creating a company needs a platform credential, which a person signed in here doesn't hold.";
 
-/** Whether this client can reach the provisioning + archive routes at all. */
+/**
+ * Whether this client can reach the provisioning + archive routes at all.
+ *
+ * A fact about the caller, not about the product: it answers "may this
+ * principal create a company", and the dialog's own preflight and submit read
+ * it for exactly that. It must stay free of product scope — a scope flag that
+ * reached in here would make the shipped dialog inert while its tests went on
+ * passing against logic nothing could run.
+ */
 export function canCreateCompanies(client: OpenCompanyClient): boolean {
   return client.carriesPlatformBearer;
+}
+
+/**
+ * Whether a company-creation entry point should render.
+ *
+ * The presentation half, asked once where every trigger already asks: creation
+ * is reachable from the switcher's "New company", the picker's own button, the
+ * picker's per-card Reset, the no-company screen, and Settings' "Reset / Start
+ * clean" — which archives and re-provisions through this same dialog. Gating
+ * them one at a time is how four stayed live after the first was hidden.
+ *
+ * Separate from {@link canCreateCompanies} on purpose. "Do we offer this in
+ * this product configuration" and "may this caller do it" are different
+ * questions, and answering both with one predicate is what turned a hidden
+ * button into a disabled code path.
+ */
+export function offersCompanyCreation(client: OpenCompanyClient): boolean {
+  return !COMPANY_SWITCHING_HIDDEN && canCreateCompanies(client);
 }
 
 interface Props {
@@ -122,6 +150,26 @@ export function CreateCompanyDialog({
 }: Props) {
   const [name, setName] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
+  const [wallet, setWallet] = useState("");
+  // The host's sign-in mode, from the provisioning preflight. Defaults to
+  // "email" — the mode a console-built manifest lands in when no host override
+  // forces otherwise — and is upgraded to "wallet"/"none" once the preflight
+  // resolves.
+  const [authMode, setAuthMode] = useState<"wallet" | "email" | "none">("email");
+  // The preflight could not be read, so the mode is unknown. Submit refuses
+  // before the destructive archive leg rather than archiving blind.
+  const [preflightFailed, setPreflightFailed] = useState(false);
+  // The preflight is still in flight — `authMode` above is still on its
+  // "email" default, not a confirmed answer. Starts `true` so the very first
+  // render (before either `useEffect` below has run) already treats the mode
+  // as unconfirmed, not "email". Without this, a wallet-mode host with a
+  // slow preflight left the name field pre-filled and the submit button
+  // enabled while `authMode` still read its email default and
+  // `preflightFailed` was still false — an operator who typed an email and
+  // submitted before the promise settled archived the existing company and
+  // only then learned, from the provisioning response, that this host never
+  // took an email at all (codex review on #1943, PR comment 3894416362).
+  const [preflightPending, setPreflightPending] = useState(true);
   const [policyMode, setPolicyMode] = useState(DEFAULT_POLICY_MODE);
   const [explicitId, setExplicitId] = useState("");
   const [advanced, setAdvanced] = useState(false);
@@ -180,6 +228,11 @@ export function CreateCompanyDialog({
     if (!request) return;
     setName(request.kind === "reset" ? request.name : "");
     setAdminEmail("");
+    setWallet("");
+    setAuthMode("email");
+    setPreflightFailed(false);
+    // Re-armed on every open, gated the same way the fetch effect below is.
+    setPreflightPending(client.carriesPlatformBearer);
     setPolicyMode(DEFAULT_POLICY_MODE);
     // Reset pre-seeds a fresh id rather than leaving this blank: the name
     // field above is pre-filled with the archived company's own name, and an
@@ -201,7 +254,35 @@ export function CreateCompanyDialog({
     setArchiveMaybe(false);
     setCreateMaybe(false);
     setIdTouched(false);
-  }, [request]);
+  }, [request, client]);
+
+  // Read the host's sign-in mode on open, so the form asks for a wallet address
+  // on a wallet-mode host and an admin email otherwise — and so a wallet-mode
+  // refusal is caught in `submit` BEFORE the reset's archive leg, not after it.
+  // Gated on the raw bearer, not `canCreateCompanies`: whether this client can
+  // reach the preflight route is independent of whether the product currently
+  // offers company creation at all.
+  useEffect(() => {
+    if (!request || !client.carriesPlatformBearer) return;
+    let cancelled = false;
+    client
+      .provisioningInfo()
+      .then((info) => {
+        if (!cancelled) {
+          setAuthMode(info.auth_mode);
+          setPreflightPending(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPreflightFailed(true);
+          setPreflightPending(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [request, client]);
 
   if (!request) return null;
 
@@ -231,10 +312,45 @@ export function CreateCompanyDialog({
     // reset that is destructive: the usable old company is archived before
     // its now-inaccessible replacement exists (codex review on #1828, PR
     // comment 3864885200).
-    const emailProblem = adminEmailProblem(adminEmail, true);
-    if (emailProblem) {
-      setError(emailProblem);
+    // The preflight hasn't settled yet, so `authMode` is still on its "email"
+    // default rather than a confirmed answer — the button is disabled for
+    // this too (see the JSX below), but `submit` is reachable directly from a
+    // still-in-flight click handler, and this is the check that actually
+    // stops the destructive archive leg from racing the preflight promise.
+    if (preflightPending) {
+      setError(
+        "Still checking this host's sign-in mode — try again in a moment.",
+      );
       return;
+    }
+
+    // A preflight we could not read leaves the host's sign-in mode unknown, so
+    // refuse before archiving rather than committing the destructive leg and
+    // discovering the mode only when provisioning is refused.
+    if (preflightFailed) {
+      setError(
+        "Couldn't check this host's sign-in mode, so nothing was changed. Try again.",
+      );
+      return;
+    }
+
+    // The required identity is mode-dependent, and — like the id checks below —
+    // is validated BEFORE the destructive archive leg on a reset. A wallet-mode
+    // host needs a wallet address; every other mode with a sign-in needs an
+    // admin email. Discovering a bad or missing identity only after the archive
+    // ran is the exact half-state this ordering exists to prevent.
+    if (authMode === "wallet") {
+      const problem = walletAddressProblem(wallet);
+      if (problem) {
+        setError(problem);
+        return;
+      }
+    } else if (authMode !== "none") {
+      const emailProblem = adminEmailProblem(adminEmail, true);
+      if (emailProblem) {
+        setError(emailProblem);
+        return;
+      }
     }
 
     // Derive the id this submission will actually send, up front — before
@@ -491,7 +607,9 @@ export function CreateCompanyDialog({
     try {
       const manifest_toml = buildManifestToml({
         name: trimmedName,
-        adminEmail: adminEmail.trim() || undefined,
+        adminEmail:
+          authMode === "wallet" ? undefined : adminEmail.trim() || undefined,
+        wallets: authMode === "wallet" ? [wallet.trim()] : undefined,
         // Omitted at the default so the host records its own `auto`, rather
         // than pinning the tier in the manifest text.
         policyMode: policyMode !== DEFAULT_POLICY_MODE ? policyMode : undefined,
@@ -626,22 +744,40 @@ export function CreateCompanyDialog({
           />
         </div>
 
-        <div className="grid gap-1.5">
-          <Label htmlFor="create-company-admin">Admin email</Label>
-          <Input
-            id="create-company-admin"
-            type="email"
-            value={adminEmail}
-            onChange={(e) => setAdminEmail(e.target.value)}
-            placeholder="who can sign in as an admin"
-            disabled={busy}
-          />
-          <p className="text-2xs text-muted-foreground">
-            Required — a company provisioned with no admin here has nobody
-            eligible to sign in unless this host has its own bootstrap admin
-            configured.
-          </p>
-        </div>
+        {authMode === "wallet" ? (
+          <div className="grid gap-1.5">
+            <Label htmlFor="create-company-wallet">Admin wallet</Label>
+            <Input
+              id="create-company-wallet"
+              value={wallet}
+              onChange={(e) => setWallet(e.target.value)}
+              placeholder="base58 wallet address that can sign in as an admin"
+              disabled={busy}
+              className="font-mono text-xs"
+            />
+            <p className="text-2xs text-muted-foreground">
+              Required — this host signs users in with wallets, so a company
+              provisioned with no admin wallet has nobody eligible to sign in.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-1.5">
+            <Label htmlFor="create-company-admin">Admin email</Label>
+            <Input
+              id="create-company-admin"
+              type="email"
+              value={adminEmail}
+              onChange={(e) => setAdminEmail(e.target.value)}
+              placeholder="who can sign in as an admin"
+              disabled={busy}
+            />
+            <p className="text-2xs text-muted-foreground">
+              Required — a company provisioned with no admin here has nobody
+              eligible to sign in unless this host has its own bootstrap admin
+              configured.
+            </p>
+          </div>
+        )}
 
         <div className="grid gap-1.5">
           <button
@@ -713,7 +849,7 @@ export function CreateCompanyDialog({
               isReset ? "destructive" : name.trim() ? "default" : "secondary"
             }
             onClick={() => void submit()}
-            disabled={busy || !name.trim()}
+            disabled={busy || !name.trim() || preflightPending}
           >
             {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
             {submitLabel}

@@ -76,6 +76,20 @@ pub use crate::ports::tasks::{
 /// result the assignee produced.
 pub const OPERATOR_ATTRIBUTION: &str = "operator";
 
+/// The note attribution `run_task`'s redirect loop uses for the operator's own
+/// mid-flight steer instruction (issue #1949 review, CodeRabbit
+/// 3895599021) — a distinct label from [`OPERATOR_ATTRIBUTION`], not the
+/// word "operator" alone, so it needs its own entry in `relay_text`'s known
+/// set rather than piggybacking on the cancel-attribution constant.
+pub const OPERATOR_REDIRECT_ATTRIBUTION: &str = "operator redirect";
+
+/// The note attribution for an operator's review feedback on a settled
+/// `in_review` card, relayed back into its origin thread. A distinct label so
+/// [`relay_text`] strips it as board chrome the same way it strips the
+/// operator's mid-flight redirect, rather than leaking a `[reviewer]` prefix
+/// into the relayed bubble.
+pub const REVIEWER_ATTRIBUTION: &str = "reviewer";
+
 /// How one dispatch run ended, independent of who ran it or what it said.
 ///
 /// This is the whole input to the lifecycle decision. Keeping it separate from
@@ -111,6 +125,18 @@ pub enum TaskRunEnd {
     /// (`MAX_REDIRECTS_PER_DISPATCH`); the last run's reply is finalized
     /// rather than looping forever.
     RedirectsExhausted,
+    /// The turn stopped on something **a person can answer** and parked a
+    /// durable blocker instead of settling (issue #1861): a rejected model id,
+    /// an expired credential, a missing prerequisite, or the assignee's own
+    /// `escalate_to_human`.
+    ///
+    /// Separate from [`Failed`](Self::Failed) because the two need opposite
+    /// treatment. A failure is over — the card returns to To-do and the reason
+    /// is history. A blocker is an open question: the card parks, somebody is
+    /// asked, and the answer resumes the step. Reaching this arm means the
+    /// classifier decided the stop was answerable; everything it does not
+    /// recognise keeps settling `Failed`.
+    Blocked,
 }
 
 /// The orchestrator's verdict on a card sitting in `in_review` (issue #186
@@ -295,6 +321,11 @@ pub fn settled_landing_column(end: TaskRunEnd, parked_approvals: usize) -> &'sta
 /// * [`Paused`](TaskRunEnd::Paused) → [`Paused`](RunStatus::Paused). Epic #183
 ///   decision 2: an operator pause is resolved by *resuming*, not by a person
 ///   approving something, so it is `Paused` and never `WaitingApproval`.
+/// * [`Blocked`](TaskRunEnd::Blocked) → [`Blocked`](RunStatus::Blocked). Epic
+///   #183 decision 2 again, and the case it did not have a status for: the
+///   attempt is waiting on *a person*, but on an answer rather than on an
+///   approval. It parks rather than settling, so the card lands in
+///   [`COLUMN_PAUSED`] with the question on it.
 /// * [`Delegated`](TaskRunEnd::Delegated) → [`Paused`](RunStatus::Paused). A
 ///   hand-off is not an ending at all — the card stays in
 ///   [`COLUMN_IN_PROGRESS`] — and it is unreachable as a run settle today,
@@ -310,6 +341,7 @@ pub fn run_status_for(end: TaskRunEnd) -> RunStatus {
         TaskRunEnd::Failed => RunStatus::Failed,
         TaskRunEnd::Cancelled => RunStatus::Cancelled,
         TaskRunEnd::Paused | TaskRunEnd::Delegated => RunStatus::Paused,
+        TaskRunEnd::Blocked => RunStatus::Blocked,
     }
 }
 
@@ -338,6 +370,44 @@ pub fn settled_run_status(end: TaskRunEnd, parked_approvals: usize) -> RunStatus
     }
 }
 
+/// [`settled_run_status`] with issue #1861's blocker overlay: a turn that
+/// raised a question the operator has to answer settles
+/// [`Blocked`](RunStatus::Blocked).
+///
+/// `blockers` counts the blocker parks **this attempt's own turns** queued —
+/// an `escalate_to_human` call, or a host-classified failure inside a
+/// delegated turn.
+///
+/// # Why it outranks `WaitingApproval` but not a failure
+///
+/// Both park the card, so the board reads the same either way; the difference
+/// is what the run history says the operator owes. An approval is a decision
+/// about an effect that is ready to happen. A blocker is a question with
+/// nothing behind it yet. Reporting the second as the first sends somebody to
+/// the Approvals page looking for something to approve.
+///
+/// A run that **failed or was cancelled** keeps its own status, exactly as the
+/// approval overlay leaves it: the operator has a bigger problem than an
+/// unanswered question, and relabelling the failure would hide why the work
+/// actually stopped.
+///
+/// # Why the ending is not rewritten instead
+///
+/// [`TaskRunEnd`] stays whatever the turn did. The success-terminal check that
+/// records a run's artifacts and outputs reads the *ending*, not this status —
+/// so an agent that wrote a spec and then asked a question keeps the spec. It
+/// is the same separation the approval overlay draws, for the same reason.
+pub fn settled_run_status_with_blockers(
+    end: TaskRunEnd,
+    parked_approvals: usize,
+    blockers: usize,
+) -> RunStatus {
+    match settled_run_status(end, parked_approvals) {
+        RunStatus::Succeeded | RunStatus::WaitingApproval if blockers > 0 => RunStatus::Blocked,
+        settled => settled,
+    }
+}
+
 /// Who the note block for this ending is attributed to.
 ///
 /// A cancellation is the operator's act, not the assignee's, so it is recorded
@@ -359,7 +429,22 @@ pub fn note_attribution(end: TaskRunEnd, responder: &str) -> String {
 /// and it credits the doer when the doer is somebody else. A card the
 /// orchestrator ran itself would otherwise read "… (ceo ran it)" in a bubble
 /// already attributed to `ceo`.
-pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> String {
+///
+/// `prior_responders` names every other id this dispatch's own note blocks
+/// may already carry as attribution — chiefly, the pre-hand-off responder a
+/// mid-flight reassignment (issue #204, `run_task`'s delegate loop) leaves
+/// behind once `responder` itself has moved on to the delegate. Without it,
+/// `known_labels` only ever knew this relay's *final* two names, so a
+/// reassigned card's earlier `[<old responder>]` block survived the strip and
+/// leaked the board's internal chrome into the relay (issue #1949 review,
+/// CodeRabbit 3895599021). Pass `&[]` when this relay's dispatch never
+/// reassigned the card.
+pub fn relay_text(
+    card: &TaskRecord,
+    responder: &str,
+    orchestrator: &str,
+    prior_responders: &[&str],
+) -> String {
     let status = match card.column.as_str() {
         COLUMN_IN_REVIEW => "is ready for review",
         COLUMN_IN_PROGRESS => "is still in progress",
@@ -378,9 +463,63 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
     };
     let headline = format!("\"{}\" {status}{credit}.", card.title);
     match card.note.as_deref().filter(|n| !n.trim().is_empty()) {
-        Some(note) => format!("{headline}\n\n{note}"),
+        Some(note) => {
+            // The only labels a block can legitimately carry are the ones
+            // this card's own lifecycle generates: the runtime's own voice,
+            // an operator-initiated cancel, an operator's mid-flight redirect,
+            // or an identity this dispatch itself produced — the responder
+            // this relay is crediting, the orchestrator speaking, and (after a
+            // reassignment) whoever held the card before. An operator's own
+            // note text is never on this list, no matter how it happens to be
+            // bracketed (issue #1949 review, Codex thread 3895066483). Empty
+            // dynamic labels are dropped before matching — an unresolved
+            // responder/orchestrator must not turn a literal `[] ` prefix in
+            // operator-authored text into stripped attribution (CodeRabbit
+            // 3895599021).
+            let known_labels: Vec<&str> = [
+                crate::runtime::advance::SYSTEM_ATTRIBUTION,
+                OPERATOR_ATTRIBUTION,
+                OPERATOR_REDIRECT_ATTRIBUTION,
+                REVIEWER_ATTRIBUTION,
+                responder,
+                orchestrator,
+            ]
+            .into_iter()
+            .chain(prior_responders.iter().copied())
+            .filter(|label| !label.is_empty())
+            .collect();
+            format!(
+                "{headline}\n\n{}",
+                strip_note_attribution(note, &known_labels)
+            )
+        }
         None => headline,
     }
+}
+
+/// Strips a leading `[<label>] ` prefix from each block of a card note, so the
+/// relayed bubble carries the prose without the board's internal
+/// `[system]`/`[writer]` chrome — but only when `label` is one this card's own
+/// lifecycle actually generates (`known_labels`). The headline already
+/// credits the doer.
+///
+/// A block is a `\n\n`-separated span. A leading `[word] ` prefix is removed
+/// only when `word` is in `known_labels`; any other bracketed opener —
+/// including operator-authored content that happens to start with a bracket,
+/// like `[Important] Keep the legacy API` — is left verbatim. A block that
+/// opens with `[` but has no closing `] ` is also left verbatim, and brackets
+/// later in the block are untouched.
+fn strip_note_attribution(note: &str, known_labels: &[&str]) -> String {
+    note.split("\n\n")
+        .map(|block| {
+            block
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once("] "))
+                .filter(|(label, _)| known_labels.contains(label))
+                .map_or(block, |(_, body)| body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The orchestrator's relay of a finished card back into the conversation it
@@ -403,18 +542,23 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
 /// `task_id` here too would render a second "card opened" chip for a card
 /// that is not open by the time this bubble lands. It does not reach
 /// `AgentReply::task_id` and does not survive a transcript reload.
+///
+/// `prior_responders` is forwarded to [`relay_text`] unchanged — see its
+/// docs for why a reassigned dispatch needs to name more than its own final
+/// responder.
 pub fn relay_reply(
     card: &TaskRecord,
     responder: &str,
     orchestrator: &str,
     origin_chat_id: String,
+    prior_responders: &[&str],
 ) -> OutboundMessage {
     OutboundMessage {
         message_id: None,
         task_id: Some(card.id.clone()),
         channel: orchestrator.to_string(),
         agent: None,
-        text: relay_text(card, responder, orchestrator),
+        text: relay_text(card, responder, orchestrator, prior_responders),
         mentions: Vec::new(),
         reply_to: Some(ReplyTo {
             chat_id: origin_chat_id,
@@ -426,17 +570,18 @@ pub fn relay_reply(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
 
     fn card(column: &str, note: Option<&str>) -> TaskRecord {
         TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship the thing".to_string(),
+            title: TaskTitle::authored("Ship the thing"),
             note: note.map(str::to_string),
             column: column.to_string(),
             priority: "medium".to_string(),
             assignee: "maya".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -445,13 +590,15 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
         }
     }
 
     /// A card carrying an `origin_chat_id` — one spawned during a handoff.
     fn delegated_card(column: &str) -> TaskRecord {
         let mut c = card(column, None);
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = crate::ports::TaskOrigin::new(Some("strategy".to_string()), None);
         c
     }
 
@@ -519,6 +666,7 @@ mod test {
             "maya",
             "ceo",
             "strategy".to_string(),
+            &[],
         );
         assert_eq!(
             relayed.reply_to.as_ref().map(|r| r.chat_id.as_str()),
@@ -815,12 +963,138 @@ mod test {
         assert_eq!(note_attribution(TaskRunEnd::Failed, "maya"), "maya");
     }
 
+    /// The relayed bubble drops each note block's `[<who>]` attribution — the
+    /// board's internal chrome — while keeping the prose. The headline already
+    /// says who did the work.
+    #[test]
+    fn the_relay_strips_note_attribution_but_keeps_the_prose() {
+        let noted = card(
+            COLUMN_IN_REVIEW,
+            Some("[system] moved to review\n\n[writer] drafted the intro"),
+        );
+        let text = relay_text(&noted, "writer", "ceo", &[]);
+        assert!(!text.contains("[system]"), "{text}");
+        assert!(!text.contains("[writer]"), "{text}");
+        assert!(text.contains("moved to review"), "{text}");
+        assert!(text.contains("drafted the intro"), "{text}");
+
+        // A block that opens with `[` but never closes it stays verbatim.
+        assert_eq!(
+            strip_note_attribution("[unterminated note", &["writer"]),
+            "[unterminated note"
+        );
+        // Brackets after the leading prefix are left alone.
+        assert_eq!(
+            strip_note_attribution("[writer] see [ref] below", &["writer"]),
+            "see [ref] below"
+        );
+    }
+
+    /// A reviewer's feedback block is board chrome the relay strips: once a
+    /// re-run settles the card back to review, the relayed bubble carries the
+    /// reviewer's prose without the `[reviewer]` prefix, exactly as it strips
+    /// the operator's mid-flight redirect.
+    #[test]
+    fn the_relay_strips_a_reviewer_feedback_block() {
+        let noted = card(
+            COLUMN_IN_REVIEW,
+            Some("[writer] second draft\n\n[reviewer] tighten the intro"),
+        );
+        let text = relay_text(&noted, "writer", "ceo", &[]);
+        assert!(!text.contains("[reviewer]"), "{text}");
+        assert!(text.contains("tighten the intro"), "{text}");
+    }
+
+    /// PR #1949 review (Codex thread 3895066483): the strip used to treat ANY
+    /// leading `[label] ` span as generated attribution chrome, so an
+    /// operator-authored note that itself opens with a bracket — a heading, a
+    /// tag, a callout like "[Important] Keep the legacy API" — got silently
+    /// mangled by the relay, dropping content the operator wrote through the
+    /// task create/patch APIs. Only a label the caller actually generated
+    /// (`OPERATOR_ATTRIBUTION`, `OPERATOR_REDIRECT_ATTRIBUTION`,
+    /// `SYSTEM_ATTRIBUTION`, the responder, the orchestrator, or a prior
+    /// responder this same dispatch reassigned away from) may be stripped.
+    #[test]
+    fn operator_authored_bracket_survives_the_relay() {
+        let noted = card(COLUMN_IN_REVIEW, Some("[Important] Keep the legacy API"));
+        let text = relay_text(&noted, "writer", "ceo", &[]);
+        assert!(
+            text.contains("[Important] Keep the legacy API"),
+            "an operator's own bracketed note must not be read as generated attribution: {text}"
+        );
+    }
+
+    /// CodeRabbit 3895599021: `known_labels` used to know only this relay's
+    /// *final* two names, so a card whose note carries a block from BEFORE a
+    /// mid-flight reassignment (issue #204's hand-off loop reassigns
+    /// `responder` to the delegate and keeps going) leaked that prior
+    /// responder's `[<id>]` chrome straight into the operator-facing bubble —
+    /// the same class of bug `operator_authored_bracket_survives_the_relay`
+    /// fixed from the opposite direction, this time under-stripping instead
+    /// of over-stripping. `prior_responders` closes that gap, and an
+    /// operator-authored bracket that happens to match one of those prior ids
+    /// is not itself a scenario this needs to protect beyond what the
+    /// bracket-survives test above already proves for the current two names.
+    #[test]
+    fn the_relay_strips_a_reassigned_cards_prior_responder_label() {
+        let noted = card(
+            COLUMN_IN_REVIEW,
+            Some("[writer] delegated to editor: proofread the draft\n\n[editor] done"),
+        );
+        let text = relay_text(&noted, "editor", "ceo", &["writer"]);
+        assert!(!text.contains("[writer]"), "{text}");
+        assert!(!text.contains("[editor]"), "{text}");
+        assert!(
+            text.contains("delegated to editor: proofread the draft"),
+            "{text}"
+        );
+        assert!(text.contains("done"), "{text}");
+
+        // Without the prior-responder hint, the old-responder block is left
+        // exactly as `known_labels` used to leave it: attributed and leaking.
+        let unaware = relay_text(&noted, "editor", "ceo", &[]);
+        assert!(
+            unaware.contains("[writer]"),
+            "sanity check: an empty prior_responders must reproduce the pre-fix leak: {unaware}"
+        );
+    }
+
+    /// CodeRabbit 3895599021: an unresolved dynamic label (an empty
+    /// `responder`, as `refuse_dispatch` passes when nobody ran the card) must
+    /// not let a literal `[] ` prefix in operator-authored text read as
+    /// generated attribution.
+    #[test]
+    fn an_empty_responder_does_not_strip_a_literal_bracket_prefix() {
+        let noted = card(COLUMN_IN_REVIEW, Some("[] TODO: revisit this"));
+        let text = relay_text(&noted, "", "ceo", &[]);
+        assert!(
+            text.contains("[] TODO: revisit this"),
+            "an empty responder must not become a matchable known label: {text}"
+        );
+    }
+
+    /// The operator's own mid-flight redirect instruction is recorded with
+    /// its own generated label (`OPERATOR_REDIRECT_ATTRIBUTION`, distinct
+    /// from `OPERATOR_ATTRIBUTION`) by `run_task`'s steer loop — see
+    /// `harness::built_in::brain`. It must be recognized and stripped exactly
+    /// like the other generated labels.
+    #[test]
+    fn an_operator_redirect_label_is_recognized_and_stripped() {
+        let noted = card(
+            COLUMN_IN_REVIEW,
+            Some("[operator redirect] focus on the API instead"),
+        );
+        let text = relay_text(&noted, "writer", "ceo", &[]);
+        assert!(!text.contains("[operator redirect]"), "{text}");
+        assert!(text.contains("focus on the API instead"), "{text}");
+    }
+
     /// The one-voice change: the bubble is the orchestrator's, and the assignee
     /// is credited in the text rather than speaking to the operator directly.
     #[test]
     fn the_relay_bubble_is_the_orchestrators_and_credits_the_assignee() {
         let finished = card(COLUMN_IN_REVIEW, Some("[maya] shipped it"));
-        let msg = relay_reply(&finished, "maya", "ceo", "strategy".to_string());
+        let msg = relay_reply(&finished, "maya", "ceo", "strategy".to_string(), &[]);
 
         assert_eq!(msg.channel, "ceo", "the orchestrator owns the reply");
         assert_eq!(
@@ -843,12 +1117,12 @@ mod test {
     #[test]
     fn the_relay_does_not_credit_the_orchestrator_to_itself() {
         let finished = card(COLUMN_IN_REVIEW, None);
-        let msg = relay_reply(&finished, "ceo", "ceo", "main".to_string());
+        let msg = relay_reply(&finished, "ceo", "ceo", "main".to_string(), &[]);
         assert!(!msg.text.contains("ran it"), "{}", msg.text);
         assert_eq!(msg.text, "\"Ship the thing\" is ready for review.");
 
         // An unresolved assignee credits nobody rather than an empty paren.
-        let orphan = relay_reply(&finished, "", "ceo", "main".to_string());
+        let orphan = relay_reply(&finished, "", "ceo", "main".to_string(), &[]);
         assert!(!orphan.text.contains("ran it"), "{}", orphan.text);
     }
 
@@ -858,12 +1132,12 @@ mod test {
     fn the_relay_reflects_the_landing_column_not_a_presumed_success() {
         let paused = card(COLUMN_PAUSED, None);
         assert!(
-            relay_text(&paused, "maya", "ceo").contains("is paused"),
+            relay_text(&paused, "maya", "ceo", &[]).contains("is paused"),
             "paused card must not read as finished"
         );
 
         let returned = card(COLUMN_TODO, Some("[operator] cancelled while in flight"));
-        let text = relay_text(&returned, "maya", "ceo");
+        let text = relay_text(&returned, "maya", "ceo", &[]);
         assert!(text.contains("is back in Pending"), "{text}");
         // Issue #301: collapsing the backlog pool into To-do is only lossless
         // because the reason rides along on the card. The relay must keep
@@ -874,14 +1148,15 @@ mod test {
         // without an arm of its own a relay would fall through to the raw
         // column id and read `"Ship the thing" planning.`.
         for column in crate::ports::tasks::BOARD_COLUMNS {
-            let text = relay_text(&card(column, None), "maya", "ceo");
+            let text = relay_text(&card(column, None), "maya", "ceo", &[]);
             assert!(
                 !text.contains(&format!("\" {column}")),
                 "column {column} fell through to the raw-id fallback: {text}"
             );
         }
         assert!(
-            relay_text(&card(COLUMN_PLANNING, None), "maya", "ceo").contains("is being planned"),
+            relay_text(&card(COLUMN_PLANNING, None), "maya", "ceo", &[])
+                .contains("is being planned"),
             "planning needs its own sentence"
         );
     }
@@ -892,13 +1167,58 @@ mod test {
     fn a_noteless_card_still_relays_a_complete_sentence() {
         let bare = card(COLUMN_IN_REVIEW, None);
         assert_eq!(
-            relay_text(&bare, "maya", "ceo"),
+            relay_text(&bare, "maya", "ceo", &[]),
             "\"Ship the thing\" is ready for review (maya ran it)."
         );
         let blank = card(COLUMN_IN_REVIEW, Some("   \n  "));
         assert_eq!(
-            relay_text(&blank, "maya", "ceo"),
+            relay_text(&blank, "maya", "ceo", &[]),
             "\"Ship the thing\" is ready for review (maya ran it)."
         );
+    }
+
+    /// Issue #1861: a turn that raised a question settles `Blocked`, not
+    /// `Succeeded` and not `WaitingApproval` — the operator owes an answer, not
+    /// a decision.
+    #[test]
+    fn a_question_outranks_a_plain_success_and_an_approval() {
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Completed, 0, 1),
+            RunStatus::Blocked
+        );
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Completed, 2, 1),
+            RunStatus::Blocked,
+            "a turn that both asked and parked an approval is waiting on the answer first"
+        );
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Completed, 0, 0),
+            RunStatus::Succeeded,
+            "no question, no relabel"
+        );
+    }
+
+    /// A failure keeps its own status even with a question outstanding: the
+    /// operator has a bigger problem, and relabelling would hide why the work
+    /// stopped. The same stance the approval overlay takes.
+    #[test]
+    fn a_failure_keeps_its_status_even_with_a_question_pending() {
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Failed, 0, 1),
+            RunStatus::Failed
+        );
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Cancelled, 0, 1),
+            RunStatus::Cancelled
+        );
+    }
+
+    /// The card parks either way, and the blocker ending lands it in `paused`
+    /// rather than back in To-do where a bounced card and an open question
+    /// would look the same.
+    #[test]
+    fn a_blocked_ending_lands_the_card_paused() {
+        assert_eq!(landing_column(TaskRunEnd::Blocked), COLUMN_PAUSED);
+        assert_eq!(run_status_for(TaskRunEnd::Blocked), RunStatus::Blocked);
     }
 }

@@ -76,6 +76,7 @@ async fn state_at(dir: &std::path::Path) -> AppState {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -360,6 +361,74 @@ async fn read_reprobes_the_live_memory_engine() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["active"], "null");
     assert_eq!(body["healthy"], true, "GET must return its fresh probe");
+    // Pins the wire name the console reads. `null` answers every read, so the
+    // list is present and empty rather than absent -- absent means "not
+    // probed", which is a different statement and renders differently.
+    assert_eq!(
+        body["unreachableFamilies"],
+        serde_json::json!([]),
+        "the probed-family verdict must reach the console under this name"
+    );
+    assert_eq!(body["slowFamilies"], serde_json::json!([]));
+}
+
+/// Apply must refuse a candidate that refused a mandatory family, and must not
+/// refuse one that was merely slow.
+///
+/// The verdict is extracted into `family_refusal` precisely so this is
+/// falsifiable: inverting the guard, or letting `slow_families` reach it, fails
+/// here. Driving the whole route would need a live engine that answers health
+/// and refuses a read, which is a bigger harness than the decision deserves.
+#[test]
+fn a_refused_family_blocks_a_bind_and_a_slow_one_does_not() {
+    let refusal = super::family_refusal("supermemory", Some(&["recall".to_string()]))
+        .expect("a refused family must block the bind");
+    assert!(refusal.contains("recall"), "{refusal}");
+    assert!(
+        refusal.contains("force=true"),
+        "the refusal must name the override, since nothing in the console sends it: {refusal}"
+    );
+
+    assert!(
+        super::family_refusal("supermemory", Some(&[])).is_none(),
+        "an engine that refused nothing must bind"
+    );
+    assert!(
+        super::family_refusal("supermemory", None).is_none(),
+        "an unprobed engine must bind -- absent is not the same as refused"
+    );
+}
+
+/// Test and Apply must agree: a candidate `apply` rejects must not come back
+/// from `test` as bindable.
+///
+/// Both answers derive from `refused_families`, and this drives the two real
+/// functions rather than restating their logic — an earlier version of this
+/// test recomputed `true && refused.is_empty()` locally, which is a constant
+/// and passed no matter what the route did.
+#[test]
+fn test_and_apply_agree_about_a_refusing_candidate() {
+    let refused = ["recall".to_string()];
+
+    assert!(
+        !super::probe_is_bindable(Some(true), Some(&refused)),
+        "test must not report a candidate bindable when apply will reject it"
+    );
+    assert!(
+        super::family_refusal("supermemory", Some(&refused)).is_some(),
+        "apply must reject the same candidate"
+    );
+
+    // The other direction, so the two cannot drift into disagreeing by both
+    // becoming permissive: nothing refused means bindable and no refusal.
+    assert!(super::probe_is_bindable(Some(true), Some(&[])));
+    assert!(super::family_refusal("supermemory", Some(&[])).is_none());
+
+    // Health still dominates: an engine that did not answer at all is not
+    // bindable regardless of the family list.
+    assert!(!super::probe_is_bindable(Some(false), Some(&[])));
+    // And an unprobed overlay -- no provider seam to ask -- stays bindable.
+    assert!(super::probe_is_bindable(None, None));
 }
 
 /// The refusal this surface exists for: a deployment that injects
@@ -426,6 +495,56 @@ async fn applying_an_engine_persists_it_to_config_toml() {
     let (_, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
     assert_eq!(body["selected"], "store");
     assert_eq!(body["layer"], "config.toml");
+}
+
+/// The engine is a property of the host, so changing it needs authority over
+/// the host.
+///
+/// A company admin holds authority over one company. On a host running more
+/// than one, this route would let that admin repoint the engine every other
+/// company on the box reads from, and rebuild all of them. The single-company
+/// case stays open, because there the two authorities are the same authority
+/// and a self-hosted deployment has no platform credential to present.
+#[tokio::test]
+async fn a_company_admin_may_not_repoint_the_engine_a_second_company_also_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvVarGuard::capture(&MEMORY_ENV);
+    guard.remove("OPENCOMPANY_MEMORY");
+    guard.set("OPENCOMPANY_DATA_DIR", dir.path().to_str().unwrap());
+    let state = state_at(dir.path()).await;
+
+    let (status, body) = call(
+        &state,
+        "PUT",
+        "/api/v1/company/memory/engine",
+        Some(json!({ "engine": "store" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "one company on the host: {body}");
+
+    let second: CompanyManifest =
+        toml::from_str("[company]\nname = \"Beta\"\n[policy]\nmode = \"full\"\n").unwrap();
+    let beta = CompanyId::new("beta");
+    let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), second)
+        .with_id(beta.clone())
+        .build()
+        .await
+        .unwrap();
+    state.registry().insert(beta, Arc::new(runtime));
+
+    let (status, body) = call(
+        &state,
+        "PUT",
+        "/api/v1/companies/acme/memory/engine",
+        Some(json!({ "engine": "store" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "two companies on the host: {body}"
+    );
+    assert_eq!(body["code"], "forbidden", "{body}");
 }
 
 /// An engine id nothing in the catalog carries is a bad request, and the

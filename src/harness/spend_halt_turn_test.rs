@@ -46,7 +46,7 @@ use serde_json::{Value, json};
 
 use crate::company::CompanyManifest;
 use crate::company::credentials::Credential;
-use crate::harness::brain::{ITERATION_CAP_PAUSE_NOTICE, spend_halt_notice};
+use crate::harness::brain::{iteration_cap_pause_notice, spend_halt_notice};
 use crate::harness::mcp_probe::McpFailureQueue;
 use crate::harness::memory_loop;
 use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
@@ -292,6 +292,7 @@ fn record(budget: Option<f64>) -> CompanyRecord {
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     }
 }
 
@@ -306,6 +307,8 @@ fn record(budget: Option<f64>) -> CompanyRecord {
 fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        emergency_gate: None,
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -628,7 +631,8 @@ async fn a_spend_halted_chat_turn_says_so_in_a_second_bubble() {
         "the spend notice must never tell the operator to reply \"continue\": {notice}"
     );
     assert_ne!(
-        notice, ITERATION_CAP_PAUSE_NOTICE,
+        *notice,
+        iteration_cap_pause_notice(AGENT),
         "the two notices must not be interchangeable — the operator's next action differs"
     );
 }
@@ -692,7 +696,7 @@ async fn the_step_notice_and_the_spend_notice_do_not_cross_fire() {
         .map(|b| b.text.as_str())
         .collect();
     assert!(
-        texts.contains(&ITERATION_CAP_PAUSE_NOTICE),
+        texts.contains(&iteration_cap_pause_notice(AGENT).as_str()),
         "a turn that ran out of steps must emit the STEP notice: {texts:?}"
     );
     assert!(
@@ -720,7 +724,7 @@ async fn the_step_notice_and_the_spend_notice_do_not_cross_fire() {
         "a turn halted for money must emit the SPEND notice: {texts:?}"
     );
     assert!(
-        !texts.contains(&ITERATION_CAP_PAUSE_NOTICE),
+        !texts.contains(&iteration_cap_pause_notice(AGENT).as_str()),
         "a spend halt must not be reported as a step pause: {texts:?}"
     );
 }

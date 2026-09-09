@@ -145,25 +145,18 @@ impl Reach {
 ///
 /// [`ScopedGrantable`](Self::ScopedGrantable) answers the first question `yes`
 /// and the second `no`: an operator may delegate it to one teammate until a
-/// deadline, and it still parks under `auto`. That variant exists because an
-/// outward fetch needs the delegation half and must not have the unattended
-/// half — see its own documentation.
+/// deadline, while the call's [`Reach`] still decides whether it parks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// An operator may grant this to a teammate until a deadline — **and**,
     /// since issue #560, may run unattended under the `auto` tier. See the note
     /// on [`Standing`] before loosening a tool to this.
     Grantable,
-    /// An operator may grant this to a teammate until a deadline, but it still
-    /// parks under `auto` (issue #673).
+    /// An operator may grant this to a teammate until a deadline, but the
+    /// standing itself does not confer unattended execution under `auto`.
     ///
-    /// The variant exists because the two questions [`Standing`] answers pull
-    /// apart for an outward fetch. "May maya fetch `https://docs.rs` for the
-    /// next few days?" is a sentence an operator can consent to. "May every
-    /// agent fetch any address, unattended, for as long as the company sits in
-    /// `auto`?" is not — and marking the tool [`Grantable`](Self::Grantable) to
-    /// obtain the first would have silently bought the second, because
-    /// [`Consequence::parks_under_auto`] reads exactly that field.
+    /// This preserves scoped delegation without making standing itself confer
+    /// unattended execution.
     ///
     /// A tool declared this way is only ever grantable **with a scope**: its
     /// declaration is argument-classified, so a call whose scope cannot be
@@ -333,11 +326,7 @@ pub(crate) const SHELL_COMMAND_KEY: &str = "command";
 /// way down a tier by labelling `rm -rf` a read would be the whole gate.
 pub(crate) const SHELL_CATEGORY_KEY: &str = "category";
 
-/// The outward-fetch tool a standing grant may be scoped to a host on (#673).
-///
-/// Only this one of the three web tools. `http_request` and `curl` can mutate,
-/// so a host-scoped grant on them would consent to *writing* to that host —
-/// a different act from the read this issue is about, and one nobody asked for.
+/// An outward-fetch tool whose standing grant may be scoped to a host.
 pub const WEB_FETCH: &str = "web_fetch";
 
 /// The argument key [`WEB_FETCH`] carries its absolute URL under.
@@ -402,6 +391,17 @@ const DECLARED: &[Declared] = &[
     d("create_workflow", EffectGroup::Other, Reach::Nothing),
     d("assign_task", EffectGroup::Other, Reach::Nothing),
     d("review_task", EffectGroup::Other, Reach::Nothing),
+    // Issue #1861: `escalate_to_human` stages a question on this company's own
+    // approval queue and nothing leaves the company — the same class as
+    // `spawn_task`, which also puts something in front of the operator. It is
+    // strictly *less* consequential than the card: a card assigns work and can
+    // be dispatched, whereas an unanswered question expires through the
+    // approval TTL having changed nothing.
+    //
+    // `Reach::Nothing` also has to hold for the tool to be usable at all. The
+    // gate guessing from the name would be free to park the escalation itself,
+    // which would ask the operator to approve being asked a question.
+    d("escalate_to_human", EffectGroup::Other, Reach::Nothing),
     // Issue #661 (M7). `read_workflow` is a pure read of this company's own
     // saved graphs — the same class as `query_company`, which already lists
     // them.
@@ -449,6 +449,15 @@ const DECLARED: &[Declared] = &[
     // is a pure read of this process's own in-memory cache, no counterparty and
     // nothing an operator authored — same class as `query_company`.
     d("read_run_output", EffectGroup::Other, Reach::Nothing),
+    // Issue #1859: `list_tasks` / `read_task` / `read_run` are the read-only
+    // surface over the company's own task board — `TaskStore`, `RunStore` and
+    // `ArtifactStore`/`EventLog`, none of which carries a run's USD cost, a raw
+    // tool-call argument, or a step's full trace (see the fail-closed note on
+    // `ListTasksTool`). No counterparty is reached and nothing changes, the
+    // same class as `query_company` and `read_run_output` above.
+    d("list_tasks", EffectGroup::Other, Reach::Nothing),
+    d("read_task", EffectGroup::Other, Reach::Nothing),
+    d("read_run", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: reads ------------------------
     // All six are pure reads inside the workspace the agent is pinned to.
     // `file_read`, `glob`, `grep` and `image_info` PARKED before this table
@@ -492,10 +501,9 @@ const DECLARED: &[Declared] = &[
     // this layer does not get to see.
     d("git_operations", EffectGroup::Other, Reach::Consequence),
     // ---- Arbitrary code, arbitrary addresses -------------------------------
-    // The three shapes issue #444 names, plus the two web tools that share
-    // `http_request`'s shape. A standing grant on any of these is a standing
-    // grant on "anything the sandbox permits", which is not a sentence an
-    // operator can consent to.
+    // The broad execution and network shapes. A standing grant on any of these
+    // is a standing grant on "anything the sandbox permits", which is not a
+    // sentence an operator can consent to.
     d("shell", EffectGroup::Other, Reach::Consequence),
     // `read_workspace_state` sits here rather than with its fellow workspace
     // reads because of what it does, not what it is called (issue #459). It
@@ -873,7 +881,7 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 /// Issue #877 states the criterion this exists to meet: *"the coverage test
 /// keeps saying which tools answer from arguments and which from the table, so
 /// a new tool cannot quietly join the coarse side."* Before this, the four
-/// classifiers were four hand-written `if` arms in [`consequence_of`] and
+/// classifiers were hand-written `if` arms in [`consequence_of`] and
 /// [`declared_tools`] chained exactly one name — `composio_execute` — by hand.
 /// A fifth classifier could therefore be added, dispatched, and still be
 /// invisible to every test that walks [`declared_tools`], because nothing tied
@@ -886,11 +894,16 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 /// reach. `composio_execute` is the one entry with no row, which is why
 /// [`declared_tools`] has to union rather than concatenate.
 ///
-/// Ordered by the issue that added each, which is also the order they were
-/// dispatched in before:
+/// Ordered for reading:
 ///
 /// * `composio_execute` — #441, keyed on the action slug.
-/// * `web_fetch` — #673, keyed on the URL's host.
+/// * `web_fetch` — keyed on the URL's host.
+/// * `http_request` — keyed on its method, URL host, and the rest of the
+///   request shape: a body or a non-allowlisted header gates it even when the
+///   method reads GET/HEAD/OPTIONS (see [`http_request_consequence`]). `curl`
+///   is deliberately NOT here: unlike `web_fetch`/`http_request`, it always
+///   writes the response to the workspace `downloads/` dir, so it stays on
+///   the [`DECLARED`] row's `Reach::Consequence`.
 /// * `shell` — #875, keyed on the command line.
 /// * `git_operations` — #877, keyed on the `operation`.
 /// * `mcp_call_tool` / `mcp_registry_tool_call` — #1124, keyed on the
@@ -910,6 +923,7 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 const ARGUMENT_GRADED: &[(&str, Grader)] = &[
     (COMPOSIO_EXECUTE, composio_execute_consequence),
     (WEB_FETCH, web_fetch_consequence),
+    ("http_request", http_request_consequence),
     (SHELL, shell_consequence),
     (GIT_OPERATIONS, git_operations_consequence),
     (MCP_CALL_TOOL, mcp_call_tool_consequence),
@@ -966,7 +980,7 @@ fn tool_names(
 /// `args` are consulted, not decoration: `composio_execute` carries every
 /// Composio action under one name, so classifying it from the name alone
 /// collapsed a repository read and an outgoing email into the same verdict —
-/// and the cautious answer had to win for both (issue #441). Three more tools
+/// and the cautious answer had to win for both (issue #441). Additional tools
 /// have since joined it, and they are listed in [`ARGUMENT_GRADED`] rather than
 /// branched on here, so that the set of them can be tested rather than read off
 /// this function's body.
@@ -1470,28 +1484,136 @@ fn web_fetch_scope_of(args: &serde_json::Value) -> Option<String> {
 /// arguments, not of the tool's name. "Fetch from `docs.rs` for the next few
 /// days" is a sentence; "make any HTTP request" is not.
 ///
-/// The classification is [`Standing::ScopedGrantable`] **only when a host can be
-/// read**, and [`Standing::PerCall`] otherwise. That coupling is load-bearing
-/// rather than tidy: a grant is minted with the scope
-/// [`standing_scope_of`] returns, and
+/// Both fields turn on the same read: whether [`web_fetch_scope_of`] can name a
+/// concrete host.
+///
+/// * A resolvable host is [`Reach::ExternalRead`] (free under `supervised` and
+///   `auto`) and [`Standing::ScopedGrantable`] — a card the operator actually
+///   read, for a destination they actually saw.
+/// * An unreadable URL — no `url` key, an unparseable string, or an unresolved
+///   workflow expression such as `=item.endpoint` — falls back to
+///   [`Reach::Consequence`] and [`Standing::PerCall`], the same gated shape
+///   [`DECLARED`] gives the tool by default. "Free" is earned by a destination
+///   the operator can see, not by a call merely shaped like a read; a call
+///   whose destination is chosen at run time by an upstream value is exactly
+///   the dynamic-destination case the workflow gate's own
+///   `an_unresolved_url_gates_and_says_the_destination_is_not_known_yet` pins.
+///
+/// The standing half is also load-bearing beyond that: a grant is minted with
+/// the scope [`standing_scope_of`] returns, and
 /// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
 /// treats an unscoped grant as admitting **everything**. Were an unreadable URL
 /// still grantable, approving one card would mint a grant admitting every host
-/// on earth. Tying the two answers to one function makes that unrepresentable.
-///
-/// [`Reach`] is untouched: a fetch still reaches outside the company, so it
-/// still parks under `supervised`, and — via [`Standing::ScopedGrantable`] —
-/// still parks under `auto`. What changes is only that the operator now has
-/// something bounded to say yes to.
+/// on earth. Tying both answers to one read makes that unrepresentable.
 fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
-    Consequence {
-        group: EffectGroup::Other,
-        reach: Reach::Consequence,
-        standing: match web_fetch_scope_of(args) {
-            Some(_) => Standing::ScopedGrantable,
-            None => Standing::PerCall,
+    match web_fetch_scope_of(args) {
+        Some(_) => Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::ExternalRead,
+            standing: Standing::ScopedGrantable,
+        },
+        None => Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::Consequence,
+            standing: Standing::PerCall,
         },
     }
+}
+
+/// Header names an `http_request` classified [`Reach::ExternalRead`] is
+/// allowed to carry (PR #1989 review 3905098660).
+///
+/// An **allowlist**, not a denylist of override-style names such as
+/// `X-HTTP-Method-Override` — a blocklist only catches spellings someone
+/// thought to list (`X-Method-Override`, `X-HTTP-Method`, `X-Original-Method`,
+/// …), which is the reactive pattern this codebase keeps getting burned by.
+/// Every name below only shapes how the response is negotiated, cached, or
+/// authenticated; none of them is a channel a server-side routing layer reads
+/// as an instruction to treat the request as something other than the method
+/// actually sent.
+const HTTP_READ_SAFE_HEADERS: &[&str] = &[
+    "accept",
+    "accept-charset",
+    "accept-encoding",
+    "accept-language",
+    "authorization",
+    "cache-control",
+    "if-match",
+    "if-modified-since",
+    "if-none-match",
+    "if-unmodified-since",
+    "range",
+    "user-agent",
+];
+
+/// Whether every header key on an `http_request` call is in
+/// [`HTTP_READ_SAFE_HEADERS`]. No `headers` key, or an explicit `null`,
+/// passes trivially. A `headers` value that is not a JSON object cannot be
+/// enumerated, so it fails closed rather than being read as empty.
+fn http_request_headers_are_read_safe(args: &serde_json::Value) -> bool {
+    match args.get("headers") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(map)) => map
+            .keys()
+            .all(|key| HTTP_READ_SAFE_HEADERS.contains(&key.to_ascii_lowercase().as_str())),
+        Some(_) => false,
+    }
+}
+
+/// Whether an `http_request` call carries no `body`. Any present, non-null
+/// value — including an empty string — disqualifies the call: `to_tool_args`
+/// forwards it verbatim and `HttpRequestTool::execute_request` attaches
+/// whatever is forwarded to the outgoing request regardless of method, so a
+/// body is a payload the request actually carries.
+fn http_request_body_is_absent(args: &serde_json::Value) -> bool {
+    matches!(args.get("body"), None | Some(serde_json::Value::Null))
+}
+
+/// The consequence of one `http_request` call, keyed on its method, URL host,
+/// **and** the rest of the request shape (PR #1989 review 3905098660).
+///
+/// The method alone is not "read-only": [`crate::workflows::caps::http::to_tool_args`]
+/// forwards `body` and `headers` unconditionally, and the wired
+/// `HttpRequestTool::execute_request` attaches both to the outgoing request
+/// without consulting the method — reqwest does not refuse a body on GET, and
+/// a header such as `X-HTTP-Method-Override` is read by many server frameworks
+/// as the *real* verb regardless of what was actually sent. Grading a `GET`
+/// carrying either as [`Reach::ExternalRead`] would let `supervised`/`auto`
+/// wave through an outbound data transmission (a GET body) or a server-side
+/// mutation (a method-override header) with no approval card, defeating the
+/// point of gating writes at all.
+///
+/// So `ExternalRead` requires the **whole** shape to be read-only: a
+/// GET/HEAD/OPTIONS method, no `body`
+/// ([`http_request_body_is_absent`]), and headers drawn only from
+/// [`HTTP_READ_SAFE_HEADERS`] ([`http_request_headers_are_read_safe`]).
+/// Anything else — a mutating method, an unrecognized method, or a read-shaped
+/// method with a body or a non-allowlisted header — stays
+/// `Reach::Consequence`/`Standing::PerCall`, the same fail-closed shape
+/// [`DECLARED`] gives the tool by default.
+fn http_request_consequence(args: &serde_json::Value) -> Consequence {
+    let gated = Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    };
+    let method = match args.get("method") {
+        None => "GET",
+        Some(value) => match value.as_str() {
+            Some(method) => method,
+            None => return gated,
+        },
+    };
+    if !matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    ) {
+        return gated;
+    }
+    if !http_request_body_is_absent(args) || !http_request_headers_are_read_safe(args) {
+        return gated;
+    }
+    web_fetch_consequence(args)
 }
 
 /// The consequence of running one shell command (issue #875).
@@ -2055,11 +2177,91 @@ fn shell_command_is_read(_command: &str, _declared: Option<&str>) -> bool {
     false
 }
 
+/// What scope a standing permission for this call may be minted with — or that
+/// it may not be minted at all (issue #2148).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StandingMintScope {
+    /// Mint with no scope. The tool's name is the whole of what it can do, so
+    /// there is nothing to narrow.
+    Unscoped,
+    /// Mint confined to this slice of the tool — a host, or a Composio toolkit.
+    Scoped(String),
+    /// Do not mint. The sentence says why, and is written to be read by an
+    /// operator rather than by a developer.
+    Refused(String),
+}
+
+/// Whether a standing permission for this call may be minted, and how narrow.
+///
+/// ## The invariant this exists to enforce
+///
+/// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
+/// treats an **unscoped** grant as admitting everything — correct for a journal
+/// line written before the field existed, catastrophic for a permission that
+/// was supposed to name one host or one toolkit. So a tool whose declaration is
+/// [`Standing::ScopedGrantable`] must never reach the journal without a scope.
+///
+/// Today it cannot: the only classification that answers `ScopedGrantable` is
+/// [`web_fetch_consequence`], which answers it exclusively in the arm where the
+/// scope was already read, and degrades to [`Standing::PerCall`] otherwise —
+/// "tying both answers to one read makes that unrepresentable", as it says.
+///
+/// That is a property of one call site, and the next `ScopedGrantable` entry
+/// that derives its scope by a separate route would break it in silence. This
+/// makes the requirement explicit at the mint, where the consequence of getting
+/// it wrong actually lands, and `no_scope_required_tool_can_mint_unscoped`
+/// walks the table so a future violator fails a test rather than an operator.
+///
+/// ## Why a denial may go unscoped and an approval may not
+///
+/// The asymmetry is the whole point of the scope. An unscoped **approval**
+/// admits every host; an unscoped **denial** refuses every host, which is
+/// broader than asked but fails in the safe direction — and refusing to mint it
+/// would leave an operator unable to decline a tool for a period at all. A
+/// standing denial is a real state the console offers (issue #1458), so it
+/// keeps working.
+pub fn standing_mint_scope(
+    tool: &str,
+    args: &serde_json::Value,
+    verdict: crate::ports::types::Verdict,
+) -> StandingMintScope {
+    decide_standing_mint_scope(
+        consequence_of(tool, args).standing,
+        standing_scope_of(tool, args),
+        verdict,
+    )
+}
+
+/// [`standing_mint_scope`] over an explicit declaration.
+///
+/// Split out so the combination the shipped table cannot currently produce —
+/// scope-required, no scope, approving — is still reachable from a test. A rule
+/// whose failing case can only be described in prose is a rule nobody has run.
+fn decide_standing_mint_scope(
+    standing: Standing,
+    scope: Option<String>,
+    verdict: crate::ports::types::Verdict,
+) -> StandingMintScope {
+    match (scope, standing, verdict) {
+        (Some(scope), _, _) => StandingMintScope::Scoped(scope),
+        (None, Standing::ScopedGrantable, crate::ports::types::Verdict::Approve) => {
+            StandingMintScope::Refused(
+                "this permission has to name the account or address it covers, and this call \
+                 does not say which one — approve it once instead"
+                    .to_string(),
+            )
+        }
+        (None, _, _) => StandingMintScope::Unscoped,
+    }
+}
+
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
-    // Issue #673: the same one-function rule the Composio arm follows, for the
-    // same reason — the mint side and the live call must read the host with the
-    // identical code, or a grant could be minted that never matches its own tool.
-    if tool.eq_ignore_ascii_case(WEB_FETCH) {
+    // The mint side and the live call must read the host with identical code, or
+    // a grant could be minted that never matches its own tool.
+    if [WEB_FETCH, "http_request"]
+        .iter()
+        .any(|candidate| tool.eq_ignore_ascii_case(candidate))
+    {
         return web_fetch_scope_of(args);
     }
     if !tool.eq_ignore_ascii_case(COMPOSIO_EXECUTE) {
@@ -2076,9 +2278,11 @@ pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String>
 /// catalogue has never heard of it.
 #[cfg(feature = "openhuman")]
 fn composio_toolkit_of(slug: &str) -> Option<String> {
-    use openhuman_core::openhuman::memory::sync::composio::providers::{
-        catalog_for_toolkit, toolkit_from_slug,
-    };
+    // The curated catalogue moved upstream into TinyMemory's Composio
+    // vocabulary; `tinymemory_api` re-exports `tinymemory_bus::composio`
+    // wholesale, so this is the same items openhuman itself now uses.
+    use tinymemory_api::composio::catalogs::catalog_for_toolkit;
+    use tinymemory_api::composio::scopes::toolkit_from_slug;
     let toolkit = toolkit_from_slug(slug)?;
     // The slug's prefix is *some* word for every non-empty slug, so the
     // catalogue lookup is what separates a real toolkit from a typo.
@@ -2096,9 +2300,8 @@ fn composio_toolkit_of(_slug: &str) -> Option<String> {
 /// curated catalogue? Unknown is **not** a read.
 #[cfg(feature = "openhuman")]
 fn composio_catalog_lookup(slug: &str) -> CatalogLookup {
-    use openhuman_core::openhuman::memory::sync::composio::providers::{
-        ToolScope, catalog_for_toolkit, find_curated, toolkit_from_slug,
-    };
+    use tinymemory_api::composio::catalogs::catalog_for_toolkit;
+    use tinymemory_api::composio::scopes::{ToolScope, find_curated, toolkit_from_slug};
     let Some(toolkit) = toolkit_from_slug(slug) else {
         return CatalogLookup::UnknownToolkit { toolkit: None };
     };
@@ -2371,6 +2574,7 @@ fn undeclared_group(name: &str) -> EffectGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::types::Verdict;
     use serde_json::json;
 
     fn c(tool: &str) -> Consequence {
@@ -2575,6 +2779,130 @@ mod tests {
         }
     }
 
+    /// The declaration table, rendered and pinned (issue #2148).
+    ///
+    /// `Standing` decides what an operator may hand a teammate for a week, and
+    /// a one-word edit from `PerCall` to `Grantable` widens that silently — the
+    /// diff reads as a typo-sized change and the review question it should
+    /// raise ("should this run unattended for a week?") never gets asked.
+    /// Rendering the whole table makes every such edit a reviewable line.
+    ///
+    /// Deliberately the **static** table only, not `consequence_of`: the
+    /// argument-classified tools answer differently depending on whether the
+    /// curated Composio catalogue is compiled in, so a snapshot of their live
+    /// verdicts would pass on one CI lane and fail on the next.
+    ///
+    /// Re-bless with `BLESS_TOOL_STANDING=1`, then read the diff. A blessed
+    /// snapshot nobody read is not a pin.
+    #[test]
+    fn the_declared_grantability_table_is_pinned() {
+        let mut rows: Vec<String> = DECLARED
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} group={:?} reach={:?} standing={:?}",
+                    d.tool, d.group, d.reach, d.standing
+                )
+            })
+            .collect();
+        rows.sort_unstable();
+        let rendered = format!("{}\n", rows.join("\n"));
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/tool-standing.txt");
+        if std::env::var_os("BLESS_TOOL_STANDING").is_some() {
+            std::fs::write(&path, &rendered).expect("write the grantability snapshot");
+            return;
+        }
+        let committed = std::fs::read_to_string(&path).expect("read the grantability snapshot");
+        assert_eq!(
+            rendered, committed,
+            "the declared grantability table moved. If that is intended, re-bless with \
+             BLESS_TOOL_STANDING=1 and say in the PR why the tool's standing changed — a tool \
+             becoming Grantable is an operator being newly able to hand it over for a week"
+        );
+    }
+
+    /// A scope-required approval with no scope to give is refused, not minted
+    /// wide (issue #2148).
+    ///
+    /// Driven through the inner rule because the shipped table cannot currently
+    /// produce that combination — `web_fetch_consequence` answers
+    /// `ScopedGrantable` only where the scope was already read. That is exactly
+    /// why the case is worth a test: the rule has to hold for the next entry
+    /// that derives its scope by another route, and a rule whose failing case
+    /// can only be described in prose is one nobody has run.
+    #[test]
+    fn a_scope_required_approval_without_a_scope_is_refused() {
+        let refused = decide_standing_mint_scope(Standing::ScopedGrantable, None, Verdict::Approve);
+        let StandingMintScope::Refused(why) = refused else {
+            panic!("a scope-required approval with no scope must not mint: {refused:?}");
+        };
+        assert!(
+            why.contains("approve it once instead"),
+            "the refusal has to leave the operator somewhere to go: {why}"
+        );
+    }
+
+    /// The asymmetry, stated: an unscoped denial refuses everything, which is
+    /// broad but safe, and refusing to mint it would take away the operator's
+    /// only way to decline a tool for a period (issue #1458).
+    #[test]
+    fn a_scope_required_denial_may_be_unscoped() {
+        assert_eq!(
+            decide_standing_mint_scope(Standing::ScopedGrantable, None, Verdict::Deny),
+            StandingMintScope::Unscoped
+        );
+    }
+
+    #[test]
+    fn a_derived_scope_is_carried_whatever_the_declaration_says() {
+        for standing in [
+            Standing::Grantable,
+            Standing::ScopedGrantable,
+            Standing::PerCall,
+        ] {
+            for verdict in [Verdict::Approve, Verdict::Deny] {
+                assert_eq!(
+                    decide_standing_mint_scope(standing, Some("github".to_string()), verdict),
+                    StandingMintScope::Scoped("github".to_string()),
+                    "{standing:?}/{verdict:?}: a scope that was derived is never dropped"
+                );
+            }
+        }
+    }
+
+    /// No declared tool can reach the mint claiming a scope it cannot produce.
+    ///
+    /// This is the walk that makes the invariant enforced rather than merely
+    /// true today: it fails the moment a classification answers
+    /// `ScopedGrantable` down a path where `standing_scope_of` returns `None`.
+    /// Both probes matter — the rich one reaches the argument-classified
+    /// branches, the empty one is what a mint sees when a call carried nothing
+    /// the classifier could read.
+    #[test]
+    fn no_scope_required_tool_can_mint_unscoped() {
+        let rich = json!({
+            WEB_FETCH_URL_KEY: "https://docs.rs/serde",
+            COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+        });
+        for probe in [&rich, &json!({})] {
+            for tool in declared_tools() {
+                if consequence_of(tool, probe).standing != Standing::ScopedGrantable {
+                    continue;
+                }
+                assert!(
+                    !matches!(
+                        standing_mint_scope(tool, probe, Verdict::Approve),
+                        StandingMintScope::Unscoped
+                    ),
+                    "`{tool}` is scope-required but would mint unscoped, and an unscoped grant \
+                     admits every host and every toolkit"
+                );
+            }
+        }
+    }
+
     /// The same rule walked over the declaration table, so a tool that becomes
     /// scoped-grantable later is covered without editing this test.
     ///
@@ -2583,7 +2911,7 @@ mod tests {
     /// found no scoped-grantable verdict at all would pass while asserting
     /// nothing.
     #[test]
-    fn every_scoped_grantable_tool_in_the_table_parks_under_auto() {
+    fn every_scoped_grantable_tool_in_the_table_follows_its_reach() {
         let probe = json!({
             WEB_FETCH_URL_KEY: "https://docs.rs/serde",
             COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
@@ -2593,9 +2921,10 @@ mod tests {
             let verdict = consequence_of(tool, &probe);
             if verdict.standing == Standing::ScopedGrantable {
                 seen += 1;
-                assert!(
+                assert_eq!(
                     verdict.parks_under_auto(),
-                    "`{tool}` is scoped-grantable and must still park under auto"
+                    verdict.reach.parks_under_supervision(),
+                    "`{tool}` is scoped-grantable, so its reach alone decides whether it parks"
                 );
             }
         }
@@ -2638,11 +2967,178 @@ mod tests {
                 "an unreadable URL must not be grantable: {unreadable}"
             );
             assert_eq!(
+                verdict.reach,
+                Reach::Consequence,
+                "an unreadable URL must stay gated, not free: {unreadable}"
+            );
+            assert!(verdict.reach.parks_under_supervision(), "{unreadable}");
+            assert!(verdict.parks_under_auto(), "{unreadable}");
+            assert_eq!(
                 standing_scope_of(WEB_FETCH, &unreadable),
                 None,
                 "{unreadable}"
             );
         }
+    }
+
+    #[test]
+    fn read_shaped_http_is_free_but_readonly_and_spend_stay_closed() {
+        for method in ["GET", "get", "HEAD", "OPTIONS"] {
+            let verdict = consequence_of(
+                "http_request",
+                &json!({ "method": method, "url": "https://api.github.com/repos/o/r" }),
+            );
+            assert_eq!(verdict.reach, Reach::ExternalRead, "{method}");
+            assert_eq!(verdict.standing, Standing::ScopedGrantable, "{method}");
+            assert!(!verdict.reach.parks_under_supervision(), "{method}");
+            assert!(!verdict.parks_under_auto(), "{method}");
+            assert!(verdict.reach.denied_under_readonly(), "{method}");
+            assert!(!verdict.reach.costs_money(), "{method}");
+        }
+    }
+
+    /// A read-shaped method whose URL is a runtime expression — `=item.endpoint`
+    /// is tinyflows' own unresolved-value prefix — names no host yet. Free
+    /// classification is earned by a destination the operator can see; an
+    /// upstream node choosing the destination at run time is the case the
+    /// workflow gate's own
+    /// `an_unresolved_url_gates_and_says_the_destination_is_not_known_yet` pins.
+    #[test]
+    fn a_runtime_resolved_get_target_stays_gated() {
+        for method in ["GET", "HEAD", "OPTIONS"] {
+            let verdict = consequence_of(
+                "http_request",
+                &json!({ "method": method, "url": "=item.endpoint" }),
+            );
+            assert_eq!(verdict.reach, Reach::Consequence, "{method}");
+            assert_eq!(verdict.standing, Standing::PerCall, "{method}");
+            assert!(verdict.reach.parks_under_supervision(), "{method}");
+            assert!(verdict.parks_under_auto(), "{method}");
+        }
+    }
+
+    #[test]
+    fn mutating_and_unknown_http_methods_stay_per_call() {
+        for args in [
+            json!({ "method": "POST", "url": "https://api.example.com/items" }),
+            json!({ "method": "DELETE", "url": "https://api.example.com/items/1" }),
+            json!({ "method": "BREW", "url": "https://api.example.com/coffee" }),
+            json!({ "method": 7, "url": "https://api.example.com/items" }),
+        ] {
+            let verdict = consequence_of("http_request", &args);
+            assert_eq!(verdict.reach, Reach::Consequence, "{args}");
+            assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+            assert!(verdict.reach.parks_under_supervision(), "{args}");
+            assert!(verdict.parks_under_auto(), "{args}");
+            assert!(!verdict.reach.costs_money(), "{args}");
+        }
+    }
+
+    /// An authored `http_request` node with only a `url` omits `method`
+    /// entirely, and both the execution path
+    /// ([`crate::workflows::caps::http::to_tool_args`] forwards the omission,
+    /// then `HttpRequestTool` defaults it to GET) and the approvals-card path
+    /// ([`crate::workflows::gate::http_target`]) treat that omission as GET.
+    /// The classifier must agree, or a plain "fetch this URL" node parks under
+    /// `supervised`/`auto` while it actually runs a free read.
+    #[test]
+    fn an_omitted_http_method_defaults_to_get_and_is_free() {
+        let args = json!({ "url": "https://api.example.com/items" });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::ExternalRead, "{args}");
+        assert_eq!(verdict.standing, Standing::ScopedGrantable, "{args}");
+        assert!(!verdict.reach.parks_under_supervision(), "{args}");
+        assert!(!verdict.parks_under_auto(), "{args}");
+    }
+
+    /// A `GET` with a `body` is not a read: [`to_tool_args`] forwards the body
+    /// verbatim and `HttpRequestTool::execute_request` attaches it to the
+    /// outgoing request regardless of method, so this is an outbound data
+    /// transmission wearing a read-shaped method (PR #1989 review 3905098660).
+    /// Proven red pre-fix: before this change `http_request_consequence`
+    /// looked at `method` alone, so this call classified `ExternalRead` /
+    /// `ScopedGrantable` and ran unattended under `supervised`/`auto`.
+    #[test]
+    fn a_get_carrying_a_body_stays_gated() {
+        let args = json!({
+            "method": "GET",
+            "url": "https://api.example.com/items",
+            "body": "exfiltrated-secret",
+        });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::Consequence, "{args}");
+        assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        assert!(verdict.reach.parks_under_supervision(), "{args}");
+        assert!(verdict.parks_under_auto(), "{args}");
+    }
+
+    /// A `GET` carrying an `X-HTTP-Method-Override` header is not a read
+    /// either: many server frameworks treat that header as the real verb, so
+    /// a "free" GET can trigger a server-side mutation the operator never saw
+    /// a card for (PR #1989 review 3905098660). Proven red pre-fix for the
+    /// same reason as the body case above — the pre-fix classifier never
+    /// looked at `headers`.
+    #[test]
+    fn a_get_carrying_a_method_override_header_stays_gated() {
+        let args = json!({
+            "method": "GET",
+            "url": "https://api.example.com/items/1",
+            "headers": { "X-HTTP-Method-Override": "DELETE" },
+        });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::Consequence, "{args}");
+        assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        assert!(verdict.reach.parks_under_supervision(), "{args}");
+        assert!(verdict.parks_under_auto(), "{args}");
+    }
+
+    /// A read-shaped call with only allowlisted headers must stay free —
+    /// otherwise the fix would over-correct into gating every authenticated
+    /// read.
+    #[test]
+    fn a_get_with_only_safe_headers_stays_free() {
+        let args = json!({
+            "method": "GET",
+            "url": "https://api.example.com/items",
+            "headers": {
+                "Accept": "application/json",
+                "Authorization": "Bearer token",
+                "If-None-Match": "\"abc123\"",
+            },
+        });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::ExternalRead, "{args}");
+        assert_eq!(verdict.standing, Standing::ScopedGrantable, "{args}");
+    }
+
+    #[test]
+    fn web_fetch_is_an_external_read() {
+        let args = fetching("https://docs.rs/serde");
+        let verdict = consequence_of(WEB_FETCH, &args);
+        assert_eq!(verdict.reach, Reach::ExternalRead);
+        assert_eq!(verdict.standing, Standing::ScopedGrantable);
+        assert!(!verdict.reach.parks_under_supervision());
+        assert!(!verdict.parks_under_auto());
+        assert!(verdict.reach.denied_under_readonly());
+        assert!(!verdict.reach.costs_money());
+    }
+
+    /// `curl` shares `web_fetch`'s URL-reading shape but, unlike it, always
+    /// streams its response to a file under the workspace `downloads/` dir
+    /// (`CurlTool::execute`) — a write on every successful call. A readable
+    /// URL must not downgrade it to `web_fetch`'s `Reach::ExternalRead`: that
+    /// would let a workspace write skip the `supervised` park.
+    #[test]
+    fn curl_stays_consequence_gated_even_with_a_readable_url() {
+        let args = fetching("https://docs.rs/serde");
+        let verdict = consequence_of("curl", &args);
+        assert_eq!(verdict.reach, Reach::Consequence);
+        assert_eq!(verdict.standing, Standing::PerCall);
+        assert!(verdict.reach.parks_under_supervision());
+        assert!(verdict.parks_under_auto());
+        assert!(verdict.reach.denied_under_readonly());
+        assert!(!verdict.reach.costs_money());
+        assert_eq!(standing_scope_of("curl", &args), None);
     }
 
     /// **The userinfo trap.** `https://docs.rs@evil.example/` fetches
@@ -2850,9 +3346,7 @@ mod tests {
                 COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
             })),
             MOVED_BY_AUTO,
-            "a tool crossed the `auto` line once its arguments were read. An \
-             outward fetch must be delegable to one teammate (`ScopedGrantable`) \
-             WITHOUT running unattended for everyone under `auto` — see issue #673"
+            "a tool crossed the `auto` line once its arguments were read"
         );
 
         // The other direction, spelled out: the tools an operator would be
@@ -3322,9 +3816,7 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn we_do_not_fall_back_to_the_upstream_read_default() {
-        use openhuman_core::openhuman::memory::sync::composio::providers::{
-            ToolScope, classify_unknown,
-        };
+        use tinymemory_api::composio::scopes::{ToolScope, classify_unknown};
         assert_eq!(
             classify_unknown("GITHUB_INVENT_A_NEW_VERB"),
             ToolScope::Read,
@@ -3372,9 +3864,8 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn the_fallback_never_calls_a_curated_write_a_read() {
-        use openhuman_core::openhuman::memory::sync::composio::providers::{
-            ToolScope, agent_ready_toolkits, catalog_for_toolkit,
-        };
+        use tinymemory_api::composio::catalogs::catalog_for_toolkit;
+        use tinymemory_api::composio::scopes::{ToolScope, agent_ready_toolkits};
 
         let entries: Vec<_> = agent_ready_toolkits()
             .into_iter()
@@ -3659,22 +4150,24 @@ mod tests {
         }
     }
 
-    /// `ExternalRead` must not leak into the spend cap from any other tool.
-    ///
-    /// `web_search_is_still_a_priced_call` pins the `Money`→`Spend` direction;
-    /// this pins that no *declared* tool picked up the new variant by accident,
-    /// so the only thing carrying it is the Composio read branch.
+    /// `ExternalRead` must not leak into the spend cap.
     #[test]
-    fn no_declared_tool_claims_the_external_read_bucket() {
-        let args = json!({});
+    fn external_reads_never_claim_the_spend_bucket() {
+        let args = json!({
+            "url": "https://api.github.com/repos/o/r",
+            "method": "GET",
+            COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+        });
+        let mut seen = 0;
         for tool in declared_tools() {
-            assert_ne!(
-                consequence_of(tool, &args).reach,
-                Reach::ExternalRead,
-                "`{tool}` is a declared tool; `ExternalRead` is for the Composio \
-                 read branch, which is classified from its arguments"
-            );
+            let verdict = consequence_of(tool, &args);
+            if verdict.reach == Reach::ExternalRead {
+                seen += 1;
+                assert!(!verdict.reach.costs_money(), "`{tool}` is not spend");
+                assert_ne!(verdict.group, EffectGroup::Spend, "`{tool}` is not spend");
+            }
         }
+        assert!(seen > 0, "the walk reached no external read");
     }
 
     #[test]
@@ -3694,7 +4187,7 @@ mod tests {
         assert!(all.contains(&COMPOSIO_EXECUTE));
         assert!(all.contains(&"shell"));
         // `composio_execute` is the one roster entry with no `DECLARED` row;
-        // the other three shadow theirs and are counted once.
+        // the other four shadow theirs and are counted once.
         assert_eq!(all.len(), DECLARED.len() + 1);
     }
 
@@ -3777,14 +4270,14 @@ mod tests {
     /// A roster entry that shadows a [`DECLARED`] row is counted **once**.
     ///
     /// The union is what makes the partition above meaningful: a concatenation
-    /// would double-count `shell`, `web_fetch` and `git_operations`, and every
+    /// would double-count the roster entries that keep fallback rows, and every
     /// caller that walks [`declared_tools`] as a set — `always_approve`,
     /// `judgement`, the harness roster — would silently do redundant work over
     /// duplicated names.
     #[test]
     fn a_roster_entry_that_shadows_a_table_row_is_enumerated_once() {
         let names: Vec<&str> = declared_tools().collect();
-        for tool in ["shell", WEB_FETCH, GIT_OPERATIONS] {
+        for tool in ["shell", WEB_FETCH, "http_request", GIT_OPERATIONS] {
             assert_eq!(
                 names.iter().filter(|name| **name == tool).count(),
                 1,

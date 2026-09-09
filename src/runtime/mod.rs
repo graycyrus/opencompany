@@ -80,7 +80,19 @@ pub mod grants;
 /// harness pool, the MCP runtime, and the two serialising mutexes). See
 /// [`handover`].
 pub mod handover;
+/// The `tinyhivemind` session adapter: this company's journal read as the
+/// vendored library's [`SessionLog`](tinyhivemind::session::SessionLog) port,
+/// so a turn's transcript can be projected **attributed** rather than collapsed
+/// into the reader's own voice. Off by default and wired to nothing yet; see
+/// [`hivemind`].
+#[cfg(feature = "hivemind")]
+pub mod hivemind;
 pub mod journal;
+/// Issue #1845: [`LifecycleScheduler`] — the process-wide daily tick that
+/// nudges a signup who hit their day-7 boundary without saving a workflow,
+/// by email and by a durable in-app [`Notification`](crate::ports::notifications::Notification)
+/// row. See [`lifecycle_scheduler`].
+pub mod lifecycle_scheduler;
 pub mod mailbox_poller;
 /// Issue #971: [`MaintenanceTicker`] — the process-wide minute loop that retires
 /// expired approvals, expired grants and stale fire claims for EVERY registered
@@ -136,13 +148,15 @@ pub use advance::{SYSTEM_ATTRIBUTION, advance_settled_card, append_result};
 pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPDATED};
 pub use builder::{RuntimeBuilder, company_id_from_name};
 pub use channel::{
-    DeskChannel, OPERATOR_CHANNEL, OperatorChannel, is_deliverable_channel,
+    DeskChannel, DurableOperatorChannel, OPERATOR_CHANNEL, OPERATOR_CHANNEL_COLLISION_FALLBACK,
+    OWNER_FALLBACK_REPORT_AUTHOR, OperatorChannel, WORKFLOW_REPLY_AUTHOR,
     undeliverable_channel_message,
 };
 pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;
 pub use derived_guard::DerivedGuardWorkspace;
 pub use handover::RuntimeHandover;
+pub use lifecycle_scheduler::LifecycleScheduler;
 pub use maintenance::MaintenanceTicker;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
@@ -161,6 +175,15 @@ pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
 pub(crate) use workflow_scheduler::workflow_schedule_id;
 pub use workflow_spawn::WorkflowSpawn;
+// Issue #1865: only referenced outside this module by the orchestrator's
+// `run_workflow` tool path, which is `openhuman`-only — see
+// `harness::built_in::orchestrator::RunWorkflowTool::execute`. The default
+// build has no other consumer of the re-export, so an ungated `pub(crate) use`
+// here is flagged unused by that build's own lint pass.
+#[cfg(feature = "openhuman")]
+pub(crate) use workflow_spawn::{
+    PANICKED_BEFORE_FINISH, RUN_FAILED_DETAIL, file_run_unhealthy_notification,
+};
 pub use workspace_events::WorkspaceAnnouncer;
 pub use workspace_quota::{
     DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, UPLOAD_BODY_LIMIT_BYTES, WorkspaceQuota,

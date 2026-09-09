@@ -1,5 +1,15 @@
-import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock, PanelRight, Plus, SquarePen } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import {
+  ChevronRight,
+  CircleDot,
+  Hash,
+  Lock,
+  type LucideIcon,
+  PanelRight,
+  Plus,
+  Radio,
+  SquarePen,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -42,6 +52,22 @@ interface Props {
   directMessages?: Channel[];
   onStartDirectMessage?: (id: string) => void;
   className?: string;
+  /**
+   * Whether the channel this rail marks is the page on screen.
+   *
+   * `true` — the default, and what a rail beside its own transcript means —
+   * makes the marked row `aria-current="page"`. `false` demotes it to
+   * `aria-current="true"`: still "the one of these you are on", but not a claim
+   * to be the current *page*.
+   *
+   * It exists because this rail is pinned in the app sidebar on every section
+   * since #2130. On `#/finances/wallet` the marked channel is where Room will
+   * take you back to, not the page being read — and two nodes claiming `page`
+   * is a page a screen reader cannot locate you on, which is the same defect
+   * the section rail was reviewed for on that PR. `ChatView` passes its own
+   * `routeOpen` straight through.
+   */
+  currentPage?: boolean;
 }
 
 /**
@@ -67,7 +93,11 @@ export function ChannelRail({
   directMessages = [],
   onStartDirectMessage,
   className,
+  currentPage = true,
 }: Props) {
+  // Resolved once and threaded down, so the three row shapes cannot come to
+  // disagree about what marking the open channel means.
+  const activeAria: "page" | "true" = currentPage ? "page" : "true";
   // Section disclosure lives here rather than inside `Section`, because the
   // collapsed branch below unmounts every `Section`. Held inside them, folding
   // a section and then collapsing the rail would reopen it on expand — the
@@ -109,6 +139,7 @@ export function ChannelRail({
               key={channel.id}
               channel={channel}
               active={channel.id === activeId}
+              activeAria={activeAria}
               unread={unread[channel.id] ?? 0}
               mentions={mentions?.[channel.id] ?? 0}
               onSelect={onSelect}
@@ -126,55 +157,128 @@ export function ChannelRail({
         className,
       )}
     >
-      <div className="flex items-center justify-between px-3 py-3">
-        <h2 className="truncate text-sm font-semibold tracking-tight">Chat</h2>
-        {onStartDirectMessage && (
-          <NewMessageDialog
-            directMessages={directMessages}
-            onSelect={onStartDirectMessage}
-            trigger={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-8"
-                aria-label="New message"
-                disabled={directMessages.length === 0}
-                title="New message"
-              >
-                <SquarePen className="size-4" />
-              </Button>
-            }
+      {sections.map((section) =>
+        section.id === "operator" ? (
+          <PinnedOperatorRow
+            key={section.id}
+            channel={section.channels[0]}
+            active={section.channels[0]?.id === activeId}
+            activeAria={activeAria}
+            unread={section.channels[0] ? (unread[section.channels[0].id] ?? 0) : 0}
+            onSelect={onSelect}
           />
-        )}
-      </div>
-
-      {sections.map((section) => (
-        <Section
-          key={section.id}
-          section={section}
-          onAdd={section.id === "channels" ? onAddChannel : undefined}
-          activeId={activeId}
-          unread={unread}
-          mentions={mentions}
-          onSelect={onSelect}
-          open={resolvedOpenSections[section.id] ?? true}
-          onToggle={() => toggleSection(section.id)}
-        />
-      ))}
+        ) : (
+          <Section
+            key={section.id}
+            section={section}
+            // Each section header carries its own door, and only its own.
+            // Channels gets "+" (create a channel); Direct messages gets the
+            // compose pencil, because a DM is what it starts. It used to float
+            // alone above the whole list, attached to nothing and reading as
+            // chrome for the rail rather than an action on a section.
+            action={
+              section.id === "channels" ? (
+                onAddChannel && <SectionAction onClick={onAddChannel} label="New channel" icon={Plus} />
+              ) : section.id === "dms" && onStartDirectMessage ? (
+                <NewMessageDialog
+                  directMessages={directMessages}
+                  onSelect={onStartDirectMessage}
+                  trigger={
+                    <SectionAction
+                      label="New message"
+                      icon={SquarePen}
+                      disabled={directMessages.length === 0}
+                    />
+                  }
+                />
+              ) : undefined
+            }
+            activeId={activeId}
+            activeAria={activeAria}
+            unread={unread}
+            mentions={mentions}
+            onSelect={onSelect}
+            open={resolvedOpenSections[section.id] ?? true}
+            onToggle={() => toggleSection(section.id)}
+          />
+        ),
+      )}
     </aside>
+  );
+}
+
+/**
+ * The Operator feed's row (issue #1757 rework): pinned below a divider,
+ * outside every collapsible section, rather than folded into the Channels
+ * list `Section` renders. No add door (channel creation stays scoped to the
+ * Channels section's own `onAdd`), no member count, no mention badge — the
+ * feed is a single read-only broadcast rather than an addressable,
+ * multi-party line, so nobody is ever named in it.
+ *
+ * Unread IS shown (PR #1781 review, Codex P2): a workflow report can land
+ * here while another channel is open, same as any other channel, and the
+ * collapsed rail's `CompactChannelRow` already surfaced that (it flat-maps
+ * every section, this one included, and was never taught to skip it) — this
+ * expanded row was the one place unread silently dropped, so folding the
+ * rail changed whether the pinned row could tell you something was waiting.
+ */
+function PinnedOperatorRow({
+  channel,
+  active,
+  activeAria,
+  unread,
+  onSelect,
+}: {
+  channel: Channel | undefined;
+  active: boolean;
+  activeAria: "page" | "true";
+  unread: number;
+  onSelect: (id: string) => void;
+}) {
+  if (!channel) return null;
+  const hasUnread = unread > 0 && !active;
+  return (
+    <div className="mt-2 border-t pt-2">
+      <button
+        type="button"
+        onClick={() => onSelect(channel.id)}
+        aria-current={active ? activeAria : undefined}
+        title={channelSubtitle(channel) ?? undefined}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+          active
+            ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+            : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
+          hasUnread && "font-semibold text-foreground",
+        )}
+      >
+        <ChannelIcon channel={channel} />
+        <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+        {hasUnread && (
+          <span
+            data-testid="channel-unread"
+            title={UNREAD_IS_LOCAL}
+            className="shrink-0 rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
+          >
+            {unread > 99 ? "99+" : unread}
+          </span>
+        )}
+      </button>
+    </div>
   );
 }
 
 function CompactChannelRow({
   channel,
   active,
+  activeAria,
   unread,
   mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
+  activeAria: "page" | "true";
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
@@ -186,7 +290,7 @@ function CompactChannelRow({
     <button
       type="button"
       onClick={() => onSelect(channel.id)}
-      aria-current={active ? "page" : undefined}
+      aria-current={active ? activeAria : undefined}
       // The compact row renders unread as a bare dot, so the count has to live
       // in the accessible name — the expanded row says it in text, and
       // collapsing the rail must not strip the same fact from the screen-reader
@@ -229,25 +333,62 @@ function CompactChannelRow({
   );
 }
 
+/**
+ * One section header's door, on the right of its caption.
+ *
+ * One component for both, so "+" on Channels and the compose pencil on Direct
+ * messages read as the same kind of affordance — same size, same hit area, same
+ * hover — rather than two controls that happen to sit in the same place.
+ */
+function SectionAction({
+  label,
+  icon: Icon,
+  onClick,
+  disabled,
+  ...rest
+}: {
+  label: string;
+  icon: LucideIcon;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      // The whole of what a screen reader gets for an icon-only control.
+      aria-label={label}
+      className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+      {...rest}
+    >
+      <Icon className="size-3.5" aria-hidden />
+    </button>
+  );
+}
+
 function Section({
   section,
   activeId,
+  activeAria,
   unread,
   mentions,
   onSelect,
   open,
   onToggle,
-  onAdd,
+  action,
 }: {
   section: ChannelSection;
   activeId: string | null;
+  activeAria: "page" | "true";
   unread: Record<string, number>;
   mentions?: Record<string, number>;
   onSelect: (id: string) => void;
   open: boolean;
   onToggle: () => void;
-  /** Renders a "+" beside the header — the Channels section's create door. */
-  onAdd?: () => void;
+  /** This section's own door, rendered at the right of its caption. */
+  action?: ReactNode;
 }) {
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
@@ -257,13 +398,22 @@ function Section({
     : 0;
 
   return (
-    <section className="group/section select-none px-2 pt-2">
+    // No horizontal padding of its own. This rail was written as a standalone
+    // column with its own gutter; inside the sidebar that gutter doubles up
+    // against `SidebarGroup`'s `px-3` and pushes every channel row 8px right of
+    // the four nav rows above — which is what made the list read as a panel
+    // pasted into the column rather than part of it. Measured, not guessed: the
+    // nav row's box starts at x=12 and its icon at x=20, and with this removed
+    // a channel row lands on exactly the same two numbers.
+    <section className="group/section select-none pt-2">
       <div className="flex items-center gap-0.5">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        // `px-2`, matching the nav rows above: the caption's chevron then
+        // stands on the same vertical line as their icons.
+        className="flex w-full min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight
           className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
@@ -292,17 +442,7 @@ function Section({
           </span>
         )}
       </button>
-      {onAdd && (
-        <button
-          type="button"
-          onClick={onAdd}
-          title="New channel"
-          aria-label="New channel"
-          className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-        >
-          <Plus className="size-3.5" aria-hidden />
-        </button>
-      )}
+      {action}
       </div>
 
       {open && (
@@ -312,6 +452,7 @@ function Section({
               <ChannelRow
                 channel={channel}
                 active={channel.id === activeId}
+                activeAria={activeAria}
                 unread={unread[channel.id] ?? 0}
                 mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
@@ -330,12 +471,14 @@ function Section({
 function ChannelRow({
   channel,
   active,
+  activeAria,
   unread,
   mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
+  activeAria: "page" | "true";
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
@@ -347,7 +490,7 @@ function ChannelRow({
     <button
       type="button"
       onClick={() => onSelect(channel.id)}
-      aria-current={active ? "page" : undefined}
+      aria-current={active ? activeAria : undefined}
       // The row's own label is `channel.name`, so a tooltip that resolves to
       // the same string is the header's issue-#1180 duplicate in a slower
       // form: you hover for a second fact and get the one already under the
@@ -399,6 +542,11 @@ function ChannelIcon({ channel }: { channel: Channel }) {
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );
   }
+  // The Operator feed is a broadcast, not an addressable line — `#` implies a
+  // channel you post into, which this one refuses (issue #1757 rework). A
+  // distinct glyph is the honest mark, the same way `Lock` already distinguishes
+  // a private channel from an ordinary one.
+  if (channel.system) return <Radio className="size-4 shrink-0 opacity-70" aria-hidden />;
   const Icon = channel.private ? Lock : Hash;
   return <Icon className="size-4 shrink-0 opacity-70" aria-hidden />;
 }

@@ -248,6 +248,12 @@ impl ManifestApprovalGate {
     }
 
     /// Whether the emergency stop is currently engaged.
+    ///
+    /// This flag is the switch's single source of truth, but this gate is not
+    /// its only enforcer: denying effects leaves the turns that ask for them
+    /// running. The halt on work itself is
+    /// [`CompanyRuntime::ensure_not_emergency_stopped`](crate::runtime::CompanyRuntime::ensure_not_emergency_stopped),
+    /// which reads this same flag.
     pub fn is_emergency(&self) -> bool {
         self.emergency.load(Ordering::SeqCst)
     }
@@ -268,6 +274,19 @@ impl ManifestApprovalGate {
     /// the gate does not enforce.
     pub fn ttl_millis(&self) -> u64 {
         self.ttl_millis.load(Ordering::Relaxed)
+    }
+
+    /// Whether this gate currently turns policy (the tier, `always_approve`,
+    /// the spend cap) into approval requests, as opposed to allowing
+    /// everything the hard denials do not already refuse.
+    ///
+    /// Read by [`PolicyDto`](crate::server::ops::policy::PolicyDto) so the
+    /// console states this fact rather than assuming it: every gate built by
+    /// [`with_policy_hitl_disabled`](Self::with_policy_hitl_disabled) reports
+    /// `false` here, and a copy of that assumption in TypeScript would drift
+    /// the moment a gate is built without it.
+    pub fn policy_hitl_enabled(&self) -> bool {
+        self.policy_hitl_enabled.load(Ordering::Relaxed)
     }
 
     /// The policy snapshot the gate currently evaluates against.
@@ -575,9 +594,10 @@ impl ManifestApprovalGate {
     ///
     /// It is the supervised checkpoint taxonomy read as a question about the
     /// past rather than the future: signing, publishing, touching identity,
-    /// spending at or over the cap, first contact with a counterparty. Those
-    /// are the effects `evaluate_supervised` refuses to wave through, and they
-    /// are refused precisely because they cannot be taken back.
+    /// spending or engaging anything but a known amount under a configured
+    /// cap, first contact with a counterparty. Those are the effects
+    /// `evaluate_supervised` refuses to wave through, and they are refused
+    /// precisely because they cannot be taken back.
     ///
     /// Deliberately **mode-independent**. A `full`-mode company executes every
     /// one of these without ever parking it, which is exactly the case this
@@ -646,13 +666,14 @@ impl ManifestApprovalGate {
     /// tiers.
     ///
     /// The **native** taxonomy has no such calls to wave through. Every group
-    /// [`evaluate_supervised`](Self::evaluate_supervised) parks — spend at or
-    /// over the cap, a message to a counterparty nobody has talked to, a
-    /// signature, a publish, an identity change, an engagement over the cap — is
-    /// by definition something that leaves the company or spends money, which is
-    /// the exact line `auto` says it stops at. The only inside-the-company
-    /// native bucket is [`EffectGroup::Other`], and `supervised` already allows
-    /// it. So there is nothing for `auto` to loosen here, and the honest
+    /// [`evaluate_supervised`](Self::evaluate_supervised) parks — a spend not
+    /// known to be under the cap, a message to a counterparty nobody has talked
+    /// to, a signature, a publish, an identity change, an engagement on those
+    /// same cap terms — is by definition something that leaves the company or
+    /// spends money, which is the exact line `auto` says it stops at. The only
+    /// inside-the-company native bucket is [`EffectGroup::Other`], and
+    /// `supervised` already allows it. So there is nothing for `auto` to loosen
+    /// here, and the honest
     /// implementation is one that says so.
     ///
     /// # Why not the stricter reading
@@ -689,14 +710,25 @@ impl ManifestApprovalGate {
         Self::evaluate_supervised_with_policy(&policy, effect)
     }
 
+    /// The one cap comparison both money groups read (issue #2037).
+    ///
+    /// True only when the amount and the cap are **both** known and the amount
+    /// is strictly under: an unstated amount and an unconfigured cap are not
+    /// evidence of a small number, so neither is under anything.
+    fn under_cap(amount: Option<f64>, cap: Option<f64>) -> bool {
+        matches!((amount, cap), (Some(amount), Some(cap)) if amount < cap)
+    }
+
     fn evaluate_supervised_with_cap(effect: &Effect, cap: Option<f64>) -> PolicyDecision {
         match effect.group() {
-            // Spend under the cap (strict `<`) is auto-allowed; at/over the cap,
-            // with no cap, or with an unknown amount, it parks.
-            EffectGroup::Spend => match (effect.amount_usd(), cap) {
-                (Some(amount), Some(cap)) if amount < cap => PolicyDecision::Allow,
-                _ => PolicyDecision::RequireApproval,
-            },
+            // Spend under the cap is auto-allowed; anything else parks.
+            EffectGroup::Spend => {
+                if Self::under_cap(effect.amount_usd(), cap) {
+                    PolicyDecision::Allow
+                } else {
+                    PolicyDecision::RequireApproval
+                }
+            }
             // First message to a new counterparty parks; established threads pass.
             EffectGroup::Send => {
                 if effect.is_established_thread() && !effect.is_first_time_counterparty() {
@@ -709,16 +741,14 @@ impl ManifestApprovalGate {
             EffectGroup::Sign | EffectGroup::Publish | EffectGroup::Identity => {
                 PolicyDecision::RequireApproval
             }
-            // Hiring parks for a first-time counterparty or at/over the cap.
+            // Hiring is auto-allowed under the cap, and only for a
+            // counterparty this company has dealt with before.
             EffectGroup::Hire => {
-                let over_cap = matches!(
-                    (effect.amount_usd(), cap),
-                    (Some(amount), Some(cap)) if amount >= cap
-                );
-                if effect.is_first_time_counterparty() || over_cap {
-                    PolicyDecision::RequireApproval
-                } else {
+                if Self::under_cap(effect.amount_usd(), cap) && !effect.is_first_time_counterparty()
+                {
                     PolicyDecision::Allow
+                } else {
+                    PolicyDecision::RequireApproval
                 }
             }
             EffectGroup::Other => PolicyDecision::Allow,
@@ -738,10 +768,12 @@ impl ApprovalGate for ManifestApprovalGate {
         //    releasing it. Denial returns to the brain as a refusal it replans
         //    around, which is what "park all new work" has to mean.
         //
-        //    `EffectGroup::Other` is exempt so chat survives — the operator has
-        //    to be able to ask the company what it was doing. The gate does not
-        //    police which tools `Other` covers, so "chat survives" is an
-        //    observation, not a promise about every non-conversational effect.
+        //    `EffectGroup::Other` is exempt at this layer only. It used to be
+        //    the carve-out that kept chat alive under a stop; since the runtime
+        //    admits no cycle at all while stopped
+        //    ([`CompanyRuntime::ensure_not_emergency_stopped`]), nothing reaches
+        //    this gate to take the exemption during one. It remains so that
+        //    releasing restores evaluation to exactly its pre-stop shape.
         if self.is_emergency() && effect.group != EffectGroup::Other {
             return Ok(PolicyDecision::Deny);
         }
@@ -871,6 +903,16 @@ mod test {
         gate.evaluate(&company(), effect).await.unwrap()
     }
 
+    #[test]
+    fn policy_hitl_enabled_reflects_the_gate_that_reports_it() {
+        let live = ManifestApprovalGate::new(policy("supervised", None));
+        assert!(live.policy_hitl_enabled());
+
+        let disabled =
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+        assert!(!disabled.policy_hitl_enabled());
+    }
+
     #[tokio::test]
     async fn disabled_policy_hitl_allows_legacy_parks_but_keeps_hard_denials() {
         let gate =
@@ -906,6 +948,68 @@ mod test {
             )
             .await,
             PolicyDecision::Allow
+        );
+    }
+
+    /// `mode` is validated against `POLICY_MODES` before a company loads, so an
+    /// unrecognized word here should be unreachable in a healthy deployment —
+    /// but `evaluate` itself does not re-check it. Under the HITL-*enabled*
+    /// dispatch (`mode_decision`), an unrecognized mode fails *closed*
+    /// (`RequireApproval`, see the doc comment on the `Ok(Self::mode_decision(..))`
+    /// line). The disabled-HITL path — the one every production company
+    /// actually runs, per [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) —
+    /// has no such fence: it special-cases only `readonly` and allows
+    /// everything else, unrecognized words included. This pins down that real,
+    /// currently-shipped behavior rather than the safer one the enabled path's
+    /// fail-closed default might suggest it has.
+    #[tokio::test]
+    async fn disabled_policy_hitl_fails_open_on_an_unrecognized_mode() {
+        let gate =
+            ManifestApprovalGate::new(policy("not-a-real-tier", None)).with_policy_hitl_disabled();
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    /// Only one of this suite's gate constructions matches how
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) actually builds a
+    /// company's gate (`.with_policy_hitl_disabled()`); this is the one test
+    /// that exercises *that* gate under genuine concurrent access — many
+    /// in-flight `evaluate` reads racing a policy write via
+    /// `apply_effective_policy`, exactly as concurrent operator chat turns race
+    /// an admin's `PUT {scope}/policy` in production. Proves the `RwLock` does
+    /// not deadlock or poison under the access pattern production actually
+    /// produces, and that once every writer has landed the same policy, every
+    /// reader converges on it rather than a torn mix of the old and new snapshot.
+    #[tokio::test]
+    async fn disabled_policy_hitl_evaluate_is_race_safe_under_concurrent_policy_updates() {
+        let gate = std::sync::Arc::new(
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled(),
+        );
+
+        let mut tasks = Vec::new();
+        for i in 0..50u32 {
+            let gate = gate.clone();
+            tasks.push(tokio::spawn(async move {
+                if i % 5 == 0 {
+                    gate.apply_effective_policy(policy("readonly", None));
+                } else {
+                    let _ = decide(&gate, &effect("payment.send", EffectGroup::Spend)).await;
+                }
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("a concurrent read or write must not panic or poison the lock");
+        }
+
+        // Every writer converged on the same policy, so once they have all
+        // landed the gate must answer from it — not a torn mix of the
+        // original snapshot and the update.
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
         );
     }
 
@@ -1032,6 +1136,93 @@ mod test {
         let mut cheap = effect("a2a.engage", EffectGroup::Hire);
         cheap.amount_usd = Some(10.0);
         assert_eq!(decide(&gate, &cheap).await, PolicyDecision::Allow);
+    }
+
+    /// Issue #2037: the two money gates read the **same** two inputs — an
+    /// amount that may be unknown, and a cap that may not be configured — so
+    /// they must not disagree about what those shapes mean.
+    ///
+    /// `Spend` has always failed closed on the omitting shapes and says so in a
+    /// comment. `Hire` computed its `over_cap` as `(Some, Some) if amount >=
+    /// cap`, which is `false` whenever *either* input is absent — so an unknown
+    /// amount and an unconfigured cap both read as "under the cap", and a paid
+    /// engagement of an established counterparty was waved straight through.
+    ///
+    /// Walked as one table across both groups, so neither arm can be relaxed on
+    /// its own again. Absence of information is not evidence of a small number.
+    #[tokio::test]
+    async fn the_money_gates_agree_on_every_cap_shape() {
+        let shapes: &[(&str, Option<f64>, Option<f64>, PolicyDecision)] = &[
+            (
+                "under a configured cap",
+                Some(10.0),
+                Some(100.0),
+                PolicyDecision::Allow,
+            ),
+            (
+                "exactly at a configured cap",
+                Some(100.0),
+                Some(100.0),
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "over a configured cap",
+                Some(250.0),
+                Some(100.0),
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "an unknown amount under a configured cap",
+                None,
+                Some(100.0),
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "a known amount with no cap configured",
+                Some(10.0),
+                None,
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "an unknown amount with no cap configured",
+                None,
+                None,
+                PolicyDecision::RequireApproval,
+            ),
+        ];
+
+        let mut checked = 0;
+        for (group, kind) in [
+            (EffectGroup::Spend, "x402.spend"),
+            (EffectGroup::Hire, "a2a.engage"),
+        ] {
+            for (label, amount, cap, expected) in shapes {
+                let gate = ManifestApprovalGate::new(policy("supervised", *cap));
+                // An established counterparty throughout: the cap is the only
+                // thing under test here, and first contact is asserted
+                // separately below.
+                let mut eff = effect(kind, group);
+                eff.amount_usd = *amount;
+                assert_eq!(decide(&gate, &eff).await, *expected, "{group:?}: {label}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 2 * shapes.len(), "the walk skipped a shape");
+    }
+
+    /// First contact stays an independent reason to park, orthogonal to the cap
+    /// (issue #2037).
+    ///
+    /// An engagement can be small, known, and comfortably under a configured
+    /// cap and still be the first time this company has ever paid this
+    /// counterparty. Folding the two reasons into one cap check would lose it.
+    #[tokio::test]
+    async fn supervised_hire_parks_first_contact_even_under_the_cap() {
+        let gate = ManifestApprovalGate::new(policy("supervised", Some(100.0)));
+        let mut first = effect("a2a.engage", EffectGroup::Hire);
+        first.amount_usd = Some(10.0);
+        first.first_time_counterparty = true;
+        assert_eq!(decide(&gate, &first).await, PolicyDecision::RequireApproval);
     }
 
     // -----------------------------------------------------------------------
@@ -1516,6 +1707,40 @@ mod test {
             cold.first_time_counterparty = true;
             assert!(gate.is_irreversible(&cold), "{mode}: first contact");
 
+            // Hire: the same cap, read the same way — plus first contact.
+            let mut cheap_hire = effect("a2a.engage", EffectGroup::Hire);
+            cheap_hire.amount_usd = Some(99.0);
+            assert!(!gate.is_irreversible(&cheap_hire), "{mode}: under the cap");
+            let mut at_cap_hire = effect("a2a.engage", EffectGroup::Hire);
+            at_cap_hire.amount_usd = Some(100.0);
+            assert!(gate.is_irreversible(&at_cap_hire), "{mode}: at the cap");
+            let mut first_hire = effect("a2a.engage", EffectGroup::Hire);
+            first_hire.amount_usd = Some(10.0);
+            first_hire.first_time_counterparty = true;
+            assert!(gate.is_irreversible(&first_hire), "{mode}: first contact");
+
+            // Issue #2037: the shapes that omit one of the two inputs, for both
+            // money groups. An engagement whose price nobody stated, and one in
+            // a company that configured no cap, are irreversible for the same
+            // reason a spend is — and they are the shapes the retry dialog lost,
+            // because `record_executed` files nothing for a reversible effect.
+            let uncapped = ManifestApprovalGate::new(policy(mode, None));
+            for (label, group, kind) in [
+                ("a spend", EffectGroup::Spend, "x402.spend"),
+                ("an engagement", EffectGroup::Hire, "a2a.engage"),
+            ] {
+                assert!(
+                    gate.is_irreversible(&effect(kind, group)),
+                    "{mode}: {label} of unknown amount",
+                );
+                let mut known = effect(kind, group);
+                known.amount_usd = Some(10.0);
+                assert!(
+                    uncapped.is_irreversible(&known),
+                    "{mode}: {label} with no cap configured",
+                );
+            }
+
             // A read changes nothing and warns about nothing.
             assert!(
                 !gate.is_irreversible(&effect("web.search", EffectGroup::Other)),
@@ -1876,6 +2101,61 @@ mod test {
         // one-shot, and "last write wins" must hold in both directions.
         events.append(&id, change(true)).await.unwrap();
         assert!(replayed_emergency(&events, &id).await.unwrap());
+    }
+
+    /// The realistic shape of a company's log: the last
+    /// `EmergencyPauseChanged` is not the last event in the log at all — chat,
+    /// webhooks and everything else keep being appended after an operator
+    /// releases (or engages) the switch, right up to the moment this reads it.
+    /// `replayed_emergency` finds the *last matching* event scanning backward
+    /// ([`Iterator::rev`] plus [`Iterator::find_map`]), not the last event of
+    /// any kind, so trailing unrelated events must not shadow it.
+    #[tokio::test]
+    async fn replay_finds_the_last_emergency_event_under_trailing_unrelated_events() {
+        use crate::ports::EventLog;
+        use crate::ports::types::CompanyEvent;
+        use std::sync::Arc;
+
+        let home = tempfile::Builder::new()
+            .prefix("oc-emergency-replay-trailing-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(crate::store::FsEventLog::new(home.path()));
+        let id = company();
+
+        let filler = || CompanyEvent::WebhookReceived {
+            channel: "test".to_string(),
+            body: serde_json::Value::Null,
+        };
+        let change = |engaged: bool| CompanyEvent::EmergencyPauseChanged {
+            engaged,
+            by: operator(),
+            reason: None,
+        };
+
+        for _ in 0..5 {
+            events.append(&id, filler()).await.unwrap();
+        }
+        events.append(&id, change(true)).await.unwrap();
+        for _ in 0..25 {
+            events.append(&id, filler()).await.unwrap();
+        }
+
+        assert!(
+            replayed_emergency(&events, &id).await.unwrap(),
+            "25 trailing unrelated events must not shadow the last real \
+             EmergencyPauseChanged"
+        );
+
+        events.append(&id, change(false)).await.unwrap();
+        for _ in 0..25 {
+            events.append(&id, filler()).await.unwrap();
+        }
+
+        assert!(
+            !replayed_emergency(&events, &id).await.unwrap(),
+            "the release must still be found under the same trailing noise"
+        );
     }
 
     /// A fresh gate is not stopped. The boot path is the only caller that can

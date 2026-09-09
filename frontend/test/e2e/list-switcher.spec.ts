@@ -56,9 +56,15 @@ function switcherItem(page: Page, slug: string) {
 test("Work is one nav row, landing on Tasks by default with the title as the switcher", async ({
   page,
 }) => {
-  await page.goto("/#/overview");
+  await page.goto("/#/company");
   await dismissTour(page);
 
+  // Work is a row on Company's section rail — the first column of the content
+  // area since #2130, not the sidebar — so it is on screen because this spec
+  // opens on a Company-section address. Same `data-tour` anchor and same
+  // `role=button` shape it had in the sidebar: the anchors follow the view id
+  // and travelled with the row. One row, not one per declared list, which is
+  // the thing this assertion is actually about (Rule 2).
   await expect(page.locator('[data-tour="nav-ledgers"]')).toHaveCount(1);
   await expect(page.locator('[data-tour="nav-ledgers"]').getByRole("button")).toHaveText("Work");
 
@@ -158,7 +164,7 @@ test("List is a navigable view that survives a task-detail round trip", async ({
 });
 
 test("Back after choosing List returns to Board before leaving Work", async ({ page }) => {
-  await page.goto("/#/overview");
+  await page.goto("/#/company");
   await dismissTour(page);
 
   await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();

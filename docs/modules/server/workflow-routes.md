@@ -105,6 +105,18 @@ from `GET …/workflows/runs`. The journal is append-only and shared with chat a
 audit, so there is no per-workflow table to cascade; and what a workflow *did*
 stays true after the workflow is gone. Retention is a separate design.
 
+**A run still in flight is stopped, after the durable delete (B-121).** Before
+this, delete tore down the schedule and the revisions and left an executing run
+uncontrollable — the only Stop button in the product lives on the workflow
+detail page the delete just removed. `200` now carries `{ "stoppedRuns": <n> }`,
+the count the post-delete sweep actually fired a stop at — **not** `204`, which
+had nowhere to carry it. `stoppedRuns: 0` is a completely ordinary answer (no
+run was in flight); a caller that only checked the status code before still
+sees success the same way. An older host predating this still answers `204`
+with no body — the console's own client treats an absent body as `stoppedRuns:
+0` rather than throwing, and any other caller doing a plain status check is
+unaffected either way.
+
 **No scheduler change is involved.** `WorkflowScheduler::tick` re-reads the
 company record and re-derives the schedule set from the overlay union every
 minute, so the tick *is* a continuous reconcile: a deleted workflow stops firing
@@ -138,9 +150,10 @@ curl -X PUT "$HOST/api/v1/company/workflows/weekly_digest" \
 }'
 # → 200 with the stored graph and a FRESH version; or 409 if it moved.
 
-# Remove it. 204 on success; past runs stay readable.
+# Remove it. Past runs stay readable; a run still in flight is stopped (B-121).
 curl -X DELETE "$HOST/api/v1/company/workflows/weekly_digest?expectedVersion=a60663c5…" \
      -H "Authorization: Bearer $TOKEN"
+# → 200 { "stoppedRuns": 0 }  — or a positive count if one was going.
 ```
 
 **In the console.** The Workflows view offers Edit and Delete side by side, both
@@ -186,8 +199,20 @@ are refused with a `400` when the workflow is written, not only when it runs:
 
 | Destination | Refused when | Checked in |
 | --- | --- | --- |
-| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker, and which never includes `operator` | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
+| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker. Desk channels and enabled OpenHuman-provider manifest channels, plus the always-present `operator` channel (issue #1757) — now a durable, journal-backed destination, so the console offers it like any other rather than excluding it | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
 | `email` | this company's `[tools].allow` does not grant `email`, which delivery answers with `Denied` / `EmailNotGranted` before it even looks for a mailbox | `validate_draft_against_record` in `src/company/workflow_create.rs`, beside the `tool_call` grant gate — so the orchestrator's `create_workflow` tool is held to it too |
+
+The `operator` destination above is a delivery-plane fact only — it is unrelated
+to how the console *lists* the feed. `GET {scope}/desks` carries zero operator
+logic: it is the company's real desks (manifest `[[group_chat]]`s plus
+operator-created overlay desks) and nothing else. The Operator feed's identity
+— its id (ordinarily `operator`, or the collision-fallback id for the one
+grandfathered company shape where a roster teammate already owns that id — see
+`CompanyRecord::operator_feed_channel`), name, and description — is served by
+its own read-only endpoint, `GET {scope}/operator-channel`, which the console
+renders as a pinned row below a divider in the chat rail rather than folding
+into the desk list (issue #1757 rework, replacing an earlier synthetic-desk
+approach that collided with #1762's `#general`).
 
 The `channel` rule lived on the two write routes until issue #1191, which is
 why applying a copilot proposal persisted a graph the editor then refused to

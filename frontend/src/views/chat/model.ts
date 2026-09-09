@@ -1,7 +1,7 @@
 // The chat workspace's data model: channels, direct messages, and the grouping
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
-import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
+import type { ApprovalSummary, DeskDto, OperatorChannelDto, Verdict } from "@/api/types";
 import { isAnyBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
 import {
   clearTaskCard,
@@ -17,6 +17,7 @@ import {
   type Desk,
 } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
+import type { TaskStatus } from "@/api/tasks";
 
 /**
  * A host desk (`GET .../desks`), shaped into the console's `Desk`. The host
@@ -30,12 +31,178 @@ import { initials as nameInitials, type TeamMember } from "@/lib/team";
  * company declared. Dropping them here is what made every channel show the
  * whole company (issue #369).
  */
+/**
+ * The id of the most recent system settle pill carrying each `taskId`, last
+ * occurrence wins.
+ *
+ * Shared by {@link buildTimeline} (which stamps `isLatestSettlePill` on every
+ * row) and {@link reviewCardIdForThread} (which must apply the identical
+ * latest-pill gate to a reply anchor, not just to the row's Approve button) —
+ * one definition of "latest" for both surfaces.
+ */
+function latestSettlePillIdByTaskId(messages: readonly ChatMessage[]): Map<string, string> {
+  const latest = new Map<string, string>();
+  for (const m of messages) {
+    if (m.from === "system" && m.taskId !== undefined) latest.set(m.taskId, m.id);
+  }
+  return latest;
+}
+
+/**
+ * The in-review dispatch card a chat thread is reviewing, or `undefined` when
+ * `parent` is not a review surface.
+ *
+ * A parent is a review surface when it is the card's settle pill — a system
+ * marker carrying its `taskId` — or the relay bubble that followed it: the
+ * pill's *first* company line with no `taskId`, mirroring the backend's
+ * `is_relay_bubble_for`. A later, ordinary company reply is not a review
+ * surface even though it has the same shape. Either way the card must still
+ * be in `in_review`; one already approved or re-running is no longer open
+ * for review.
+ *
+ * A card that finished, was revised, and is `in_review` again mints a NEW
+ * settle pill while the old one stays in history under the same `taskId`.
+ * Only the newest pill (or its relay) is a live review surface — the same
+ * {@link latestSettlePillIdByTaskId} gate {@link buildTimeline} uses for the
+ * Approve control — so opening an old pill's thread and replying there does
+ * not silently apply feedback to, and re-dispatch, the latest attempt.
+ */
+export function reviewCardIdForThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): string | undefined {
+  const inReview = (taskId: string | undefined): taskId is string =>
+    taskId !== undefined && statusByTaskId[taskId]?.column === "in_review";
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
+  const isLatestPill = (pill: ChatMessage): boolean =>
+    pill.taskId !== undefined && latestPillIdByTaskId.get(pill.taskId) === pill.id;
+  if (parent.from === "system") {
+    return inReview(parent.taskId) && isLatestPill(parent) ? parent.taskId : undefined;
+  }
+  if (parent.from !== "company" || parent.taskId) return undefined;
+  const index = messages.findIndex((m) => m.id === parent.id);
+  if (index < 0) return undefined;
+  for (let i = index - 1; i >= 0; i--) {
+    const prior = messages[i];
+    if (prior.from === "company" && !prior.taskId) return undefined;
+    if (prior.from !== "system" || !prior.taskId) continue;
+    return inReview(prior.taskId) && isLatestPill(prior) ? prior.taskId : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Every distinct in-review card a thread anchors to, as `{taskId, anchorId}`
+ * pairs — one entry per card, newest-checked-first: `parent` itself, then
+ * `replies` from most to least recent.
+ *
+ * A thread usually anchors at most one card, but a second can be dispatched
+ * from inside it before the first is settled (Codex #3906594069), leaving
+ * both live in the same thread at once. Each stays its own entry here —
+ * {@link reviewCardIdForThread}'s stale-pill gate already keeps a superseded
+ * pass of the SAME card out of this list, so only genuinely distinct cards
+ * collect, never two anchors for one taskId.
+ */
+export function reviewAnchorsForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string }[] {
+  const seen = new Set<string>();
+  const anchors: { taskId: string; anchorId: string }[] = [];
+  const candidates: readonly ChatMessage[] = [parent, ...[...replies].reverse()];
+  for (const candidate of candidates) {
+    const taskId = reviewCardIdForThread(candidate, messages, statusByTaskId);
+    if (taskId === undefined || seen.has(taskId)) continue;
+    seen.add(taskId);
+    anchors.push({ taskId, anchorId: candidate.id });
+  }
+  return anchors;
+}
+
+/**
+ * Where a thread's review feedback should be anchored, or `undefined` when
+ * the thread is not reviewing anything.
+ *
+ * The newest of {@link reviewAnchorsForThread}'s cards — the thread's one
+ * composer can only ever target a single card with a typed reply, so when
+ * more than one is live this is the one it targets. `parent` itself is the
+ * review surface for a thread opened directly on a settle pill or its relay.
+ * But when the card that produced the pill was itself sent inside an
+ * existing thread, the pill and its relay land as replies under that
+ * thread's own root — `parent` is neither of them, so
+ * {@link reviewCardIdForThread} on `parent` alone finds nothing. Falls back
+ * to scanning `replies` (newest first) for the review surface among them,
+ * and anchors there instead.
+ */
+export function reviewAnchorForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string } | undefined {
+  return reviewAnchorsForThread(parent, replies, messages, statusByTaskId)[0];
+}
+
+/**
+ * Whether `taskId`'s Approve/Revise click should go out right now.
+ *
+ * `reviewingCardIds` is keyed per card, not a single global slot — since
+ * {@link reviewAnchorsForThread} (`a99b39e87`) made every distinct in-review
+ * card in a thread independently actionable, a click on one card's control
+ * must not be silently dropped just because a DIFFERENT card's verdict is
+ * still in flight (Codex #3906779123). Only a click repeated on the SAME
+ * card while its own verdict is outstanding is refused. The host is safe to
+ * take both at once: `runtime.task_writes` (`3ab934918`) serializes review
+ * verdicts per company, so a second card's write simply queues behind the
+ * first instead of racing it.
+ */
+export function canSubmitReview(
+  reviewingCardIds: ReadonlySet<string>,
+  activeThreadId: string | undefined,
+  taskId: string,
+): boolean {
+  return activeThreadId !== undefined && !reviewingCardIds.has(taskId);
+}
+
+/**
+ * Every message the open thread panel should show under `parent` — not just
+ * its direct children.
+ *
+ * Review feedback sent from inside a thread is anchored on whichever reply
+ * {@link reviewAnchorForThread} found (the card's settle pill or relay, when
+ * that card was dispatched from inside this very thread) rather than on
+ * `parent` itself, because that is what the backend needs to find the card
+ * (`review_anchor_card` on the host walks a message's *direct* parent, not
+ * its thread). That reply becomes the operator's own message's parent, so a
+ * same-level filter (`m.parentId === parent.id`) never finds it — the
+ * message the operator just typed disappears from the panel the moment it
+ * sends, in both the optimistic bubble and the persisted echo. Walk each
+ * message's parent chain back to `parent` instead, so a reply-to-a-reply
+ * still renders.
+ */
+export function repliesInThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  const descendsFromParent = (message: ChatMessage): boolean => {
+    const seen = new Set<string>();
+    let ancestorId = message.parentId;
+    while (ancestorId !== undefined && !seen.has(ancestorId)) {
+      if (ancestorId === parent.id) return true;
+      seen.add(ancestorId);
+      ancestorId = byId.get(ancestorId)?.parentId;
+    }
+    return false;
+  };
+  return messages.filter(descendsFromParent);
+}
+
 export function deskFromDto(d: DeskDto): Desk {
-  const slug = d.name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
+  const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return {
     id: d.id,
     channel: slug || d.id,
@@ -179,10 +346,7 @@ export interface HistoryHydration {
 }
 
 /** Before a company's rehydration pass has begun: everything is still pending. */
-export const HISTORY_UNSTARTED: HistoryHydration = {
-  discovered: false,
-  byChannel: {},
-};
+export const HISTORY_UNSTARTED: HistoryHydration = { discovered: false, byChannel: {} };
 
 /**
  * No rehydration is happening or ever will — for a `ChatView` mounted without a
@@ -191,10 +355,7 @@ export const HISTORY_UNSTARTED: HistoryHydration = {
  * track hydration renders exactly as it did before, rather than spinning on a
  * pass that is never coming.
  */
-export const HISTORY_UNTRACKED: HistoryHydration = {
-  discovered: true,
-  byChannel: {},
-};
+export const HISTORY_UNTRACKED: HistoryHydration = { discovered: true, byChannel: {} };
 
 /**
  * Whether we know enough about `channelId` to state that it is empty.
@@ -205,10 +366,7 @@ export const HISTORY_UNTRACKED: HistoryHydration = {
  * with no `chat/history`), and holding a spinner on it forever is worse than
  * the wrong claim this exists to prevent.
  */
-export function historyReady(
-  hydration: HistoryHydration,
-  channelId: string,
-): boolean {
+export function historyReady(hydration: HistoryHydration, channelId: string): boolean {
   const status = hydration.byChannel[channelId];
   if (status) return status === "ready";
   return hydration.discovered;
@@ -246,6 +404,12 @@ export interface Channel {
    */
   memberIds?: string[];
   /**
+   * Whether this is the built-in **Operator** system channel (issue #1757) — a
+   * read-only aggregation feed of workflow reports. The composer is disabled for
+   * it and it offers no membership editing.
+   */
+  system?: boolean;
+  /**
    * Whether this channel has **no lead** (issue #1835): an `auto` desk, whose
    * answerer is picked per message. `memberIds[0]` carries no rank here, so a
    * consumer must not badge it — the host's own `desk_lead` is `None` for such
@@ -261,21 +425,20 @@ export interface ChannelSection {
 }
 
 /**
- * The channel the company-wide line actually renders in.
+ * The channel list.
  *
- * `main` — the built-in channel — in every ordinary company. A blueprint that
- * declares a `[[group_chat]]` under a General id is grandfathered by the host
- * (`is_general_channel` is guarded on `!record.desk_exists`), and
- * {@link buildChannels} then lets that desk own the line and adds no built-in
- * channel beside it; here that desk's own id is the answer.
+ * `desks` become the `#channels` — they are the standing lines you can
+ * address, and each already carries a name, a blurb, and a tone. Defaults to
+ * `lib/desks.ts`'s static set for a host that doesn't expose `.../desks` yet
+ * (issue #53); the caller fetches the real ones and passes them in once they
+ * land, so a company's own desks show up instead of the generic
+ * strategy/creative/front-desk trio. A DM appears only after it has a
+ * transcript, newest conversation first; the compose picker still exposes the
+ * complete roster for starting one.
  *
- * One place, because two answers to "where does the main line render" is
- * precisely how a message ends up somewhere nothing is listening.
+ * Both kinds post to the same company endpoint. A channel scopes a transcript
+ * and gives the company side a stable identity; it is not a separate backend.
  */
-function generalChannelId(desks: Desk[]): string {
-  return desks.find(deskClaimsGeneralChannel)?.id ?? MAIN_THREAD_ID;
-}
-
 /**
  * The built-in `#general` channel: the company-wide line, in every company,
  * from first boot (issue #1743).
@@ -320,21 +483,6 @@ function generalChannel(members: TeamMember[]): Channel {
   };
 }
 
-/**
- * The channel list.
- *
- * `desks` become the `#channels` — they are the standing lines you can
- * address, and each already carries a name, a blurb, and a tone. Defaults to
- * `lib/desks.ts`'s static set for a host that doesn't expose `.../desks` yet
- * (issue #53); the caller fetches the real ones and passes them in once they
- * land, so a company's own desks show up instead of the generic
- * strategy/creative/front-desk trio. A DM appears only after it has a
- * transcript, newest conversation first; the compose picker still exposes the
- * complete roster for starting one.
- *
- * Both kinds post to the same company endpoint. A channel scopes a transcript
- * and gives the company side a stable identity; it is not a separate backend.
- */
 export function buildChannels(
   members: TeamMember[],
   // Defaults to no desks, not to the fabricated trio. The parameter exists so
@@ -353,9 +501,7 @@ export function buildChannels(
   // keeps its desk, its lead, its writes, and `responder_for` routes messages
   // addressed there to that lead. A rail that showed a second, lead-less
   // `#general` beside it, or hid the desk and named the orchestrator as who
-  // answers, would state something the host does not do. `channelIdForThread`
-  // below already scans the desks before folding the General spellings, for
-  // exactly this reason.
+  // answers, would state something the host does not do.
   //
   // Desk *creation* refuses every General spelling, so such a desk can only
   // come from a blueprint — and `defaultDesks()` no longer fabricates one, so
@@ -383,10 +529,7 @@ export function buildChannels(
 
   const dms = directMessageChannels(members)
     .filter((dm) => (transcripts[dm.id]?.length ?? 0) > 0)
-    .sort(
-      (a, b) =>
-        latestMessageAt(transcripts[b.id]) - latestMessageAt(transcripts[a.id]),
-    );
+    .sort((a, b) => latestMessageAt(transcripts[b.id]) - latestMessageAt(transcripts[a.id]));
 
   return [
     { id: "channels", label: "Channels", channels },
@@ -395,65 +538,87 @@ export function buildChannels(
 }
 
 /**
- * Every roster teammate as a DM target, including conversations not yet
- * started.
- *
- * **Including a teammate whose id is a General spelling** (issue #1743). This
- * used to exclude one, and the reason was sound while it held: a DM was
- * addressed on the host by the teammate's bare id, so for such a teammate the
- * DM's address *was* the company-wide line — the host folded it
- * (`is_general_chat`, since issue #65) and answered as the orchestrator, and a
- * row here opened a line that was not private, not that teammate's, and whose
- * replies rendered in `#general`.
- *
- * That is no longer how it is addressed. `ChatView` sends `dm:<id>` for exactly
- * this teammate, `chat_responder` unwraps it (`chat_responder("dm:main") ==
- * Some("main")`), and `channelIdForThread` maps the frames back — so the DM is
- * private, is that teammate's, and reads back under its own transcript. Keeping
- * the filter would have left that route working and unreachable: no row in the
- * picker, and `directMessageForId` rejecting even an explicit `#/chat/dm:main`
- * link, which is the one address the rest of this change exists to honour.
- *
- * `mint_agent_id` reserves `main` and `General`, so only a blueprint can declare
- * one; this is not a teammate anybody can create.
+ * Shape `GET {scope}/operator-channel`'s response into the console's
+ * `Channel` (issue #1757 rework). A read-only system channel — the composer
+ * is disabled for it and it offers no membership editing — distinct from
+ * every desk-backed channel `buildChannels` produces.
  */
+export function operatorChannelFrom(dto: OperatorChannelDto): Channel {
+  return {
+    id: dto.id,
+    name: dto.name,
+    kind: "channel",
+    purpose: dto.description,
+    system: true,
+  };
+}
+
+/**
+ * Whether `value` actually has the `OperatorChannelDto` shape — a runtime
+ * check, not just a type assertion. Callers hold this at the network
+ * boundary: a client stub/proxy that resolves every unlisted method to `[]`
+ * (a common test fixture pattern in this codebase) would otherwise satisfy
+ * TypeScript at the call site and only fail once `operatorChannelFrom` reads
+ * `dto.description` off an array and hands `channelSubtitle` an `undefined`
+ * `purpose` to `.trim()`. Treated the same as a fetch failure by callers:
+ * degrade to no pinned row rather than crash the view.
+ */
+export function isOperatorChannelDto(value: unknown): value is OperatorChannelDto {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const dto = value as Partial<OperatorChannelDto>;
+  return (
+    typeof dto.id === "string" && typeof dto.name === "string" && typeof dto.description === "string"
+  );
+}
+
+/**
+ * The pinned Operator row as its own {@link ChannelSection}, meant to be
+ * appended *after* every other section (issue #1757 rework) so the first
+ * writable desk still wins the "open by default" pick — see `buildChannels`'s
+ * `channels` section, which a caller composes ahead of this one.
+ *
+ * Callers at the network boundary MUST validate with {@link isOperatorChannelDto}
+ * before reaching here — this function does not re-check, and `operatorChannelFrom`
+ * reading `dto.description` off a shape that only satisfied the type assertion
+ * (never the runtime one) is exactly the crash `isOperatorChannelDto`'s own doc
+ * warns about. `ChatView`'s only production call site holds this invariant by
+ * construction: its `operator` state is set from `isOperatorChannelDto(dto) ?
+ * dto : null` and this function is only ever called on the non-null branch.
+ */
+export function operatorSection(dto: OperatorChannelDto): ChannelSection {
+  return { id: "operator", label: "Operator", channels: [operatorChannelFrom(dto)] };
+}
+
+/** Every roster teammate as a DM target, including conversations not yet started. */
 export function directMessageChannels(members: TeamMember[]): Channel[] {
-  return members
-    .map((m) => ({
-      id: dmChannelId(m),
-      name: m.name,
-      kind: "dm" as const,
-      // The teammate's **description**, which is the field parallel to a desk's
-      // `blurb` above — both answer "what is this line for", and neither repeats
-      // what the title already said. This used to read `m.role`, an identity
-      // field in a description slot, and that is precisely what made the header
-      // say the same words twice (issue #1180): `fromDto` falls back
-      // `dto.name?.trim() || dto.role`, so a company that names roles rather than
-      // people has name === role, and the title and the slot after the divider
-      // resolved to one string. The role is still the fallback — for a teammate
-      // the host *did* name it is a real second fact — and {@link channelSubtitle}
-      // is what declines to render even that when it just echoes the title.
-      purpose: m.description.trim() || m.role,
-      tone: m.tone,
-      member: m,
-    }));
+  return members.map((m) => ({
+    id: dmChannelId(m),
+    name: m.name,
+    kind: "dm" as const,
+    // The teammate's **description**, which is the field parallel to a desk's
+    // `blurb` above — both answer "what is this line for", and neither repeats
+    // what the title already said. This used to read `m.role`, an identity
+    // field in a description slot, and that is precisely what made the header
+    // say the same words twice (issue #1180): `fromDto` falls back
+    // `dto.name?.trim() || dto.role`, so a company that names roles rather than
+    // people has name === role, and the title and the slot after the divider
+    // resolved to one string. The role is still the fallback — for a teammate
+    // the host *did* name it is a real second fact — and {@link channelSubtitle}
+    // is what declines to render even that when it just echoes the title.
+    purpose: m.description.trim() || m.role,
+    tone: m.tone,
+    member: m,
+  }));
 }
 
 /** A DM target addressed by `id`, whether or not it is in the rail yet. */
-export function directMessageForId(
-  members: TeamMember[],
-  id: string | null,
-): Channel | null {
+export function directMessageForId(members: TeamMember[], id: string | null): Channel | null {
   if (!id) return null;
-  return (
-    directMessageChannels(members).find((channel) => channel.id === id) ?? null
-  );
+  return directMessageChannels(members).find((channel) => channel.id === id) ?? null;
 }
 
 function latestMessageAt(messages: ChatMessage[] | undefined): number {
-  return (
-    messages?.reduce((latest, message) => Math.max(latest, message.at), 0) ?? 0
-  );
+  return messages?.reduce((latest, message) => Math.max(latest, message.at), 0) ?? 0;
 }
 
 /**
@@ -469,10 +634,8 @@ function latestMessageAt(messages: ChatMessage[] | undefined): number {
  * journaled under the old one. An id does not change when a person's name does,
  * which is the entire reason to prefer it.
  */
-export const DM_PREFIX = "dm:";
-
 export function dmChannelId(member: TeamMember): string {
-  return `${DM_PREFIX}${member.id}`;
+  return `dm:${member.id}`;
 }
 
 /**
@@ -519,10 +682,7 @@ export function memberForThread(members: TeamMember[], threadId: string): TeamMe
  */
 export function legacyDmChannelId(member: TeamMember): string {
   const name = member.name.trim();
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return `dm:${slug ? `${slug}-` : ""}${nameHash(name)}`;
 }
 
@@ -533,10 +693,7 @@ export function legacyDmChannelId(member: TeamMember): string {
  * Resolves the current id first, then the pre-#364 name-derived form, so an old
  * link keeps working without the old id ever becoming addressable again.
  */
-export function resolveDmChannelId(
-  id: string,
-  members: TeamMember[],
-): string | null {
+export function resolveDmChannelId(id: string, members: TeamMember[]): string | null {
   if (!id.startsWith("dm:")) return null;
   const match = members.find(
     (m) => dmChannelId(m) === id || legacyDmChannelId(m) === id,
@@ -569,8 +726,7 @@ export function channelIdFromSegment(segment: string | null): string | null {
 
 function nameHash(name: string): string {
   let hash = 0;
-  for (let i = 0; i < name.length; i++)
-    hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
   return (hash >>> 0).toString(36);
 }
 
@@ -600,24 +756,13 @@ export function channelIdForThread(
   // under four ids — `""`, `main`, `General`, `general` — and folds them on
   // read; a thread carrying any of them belongs to the one channel that
   // renders it. Without this, an approval raised on the company's main line
-  // matched no channel and stayed stranded on the Approvals page.
+  // matched no channel and stayed stranded on the Approvals page, and an
+  // unaddressed live message had nowhere in `Transcripts` to land.
   //
-  // **Before the roster**, and in this order for a reason. `responder_for`
-  // resolves a chat key desk-first, then the General fold, and only then the
-  // roster; this mirrors it, so the console never claims a thread belongs
-  // somewhere the host would answer from somewhere else. A teammate whose id
-  // *is* one of these spellings — which `mint_agent_id` reserves, though a
-  // manifest can still declare one — therefore keeps its DM under `dm:<id>`
-  // while the bare key stays the company's line, which is also what
-  // `GET chat/history?desk=main` returns: the folded General conversation, not
-  // that teammate's transcript.
-  //
-  // When a desk does own the line, every *other* spelling follows it there:
-  // `buildChannels` renders no built-in channel beside such a desk, so
-  // answering `main` for a company whose line is `#general` names a channel
-  // that does not exist, and whatever was addressed there — a live frame, an
-  // unread badge, an approval's "Asked in" link — lands in a bucket the
-  // operator cannot open.
+  // Checked before the roster, same order the host resolves in
+  // (`responder_for`: desk, then the General fold, then the roster) — so the
+  // console never claims a thread belongs somewhere the host would answer
+  // from somewhere else.
   if (isGeneralChannel(threadId)) {
     return generalChannelId(desks);
   }
@@ -632,9 +777,32 @@ export function channelIdForThread(
   // `dm:<id>`, which the host does answer. The frames it emits carry that
   // prefixed key, so without this arm they resolved to no channel at all and
   // the reply never appeared — the DM was writable and unreadable at once.
-  const prefixed = threadId.startsWith(DM_PREFIX) ? threadId.slice(DM_PREFIX.length) : null;
+  const prefixed = threadId.startsWith("dm:") ? threadId.slice("dm:".length) : null;
   const dmMember = prefixed ? members.find((m) => m.id === prefixed) : null;
   return dmMember ? dmChannelId(dmMember) : null;
+}
+
+/**
+ * The channel the company-wide line actually renders in.
+ *
+ * `main` — the built-in channel — in every ordinary company. A blueprint that
+ * declares a `[[group_chat]]` under a General id is grandfathered by the host
+ * (`is_general_channel` is guarded on `!record.desk_exists`), and
+ * {@link buildChannels} then lets that desk own the line and adds no built-in
+ * channel beside it; here that desk's own id is the answer.
+ *
+ * One place, because two answers to "where does the main line render" is
+ * precisely how a message ends up somewhere nothing is listening.
+ *
+ * Exported because `ChatView` folds a General *address* onto it too: the host
+ * accepts four spellings for this one conversation (`isGeneralChannel`), and
+ * every other consumer of that fold — `generalAwareChannel`, `channelForThread`,
+ * `mention-badge` — already applies it. Routing was the one place that did not,
+ * so `#/chat/main` raised "isn't a channel here" in exactly the grandfathered
+ * company where the built-in channel had stepped aside for a desk.
+ */
+export function generalChannelId(desks: Desk[]): string {
+  return desks.find(deskClaimsGeneralChannel)?.id ?? MAIN_THREAD_ID;
 }
 
 /**
@@ -661,10 +829,7 @@ export function channelForThread(
   return generalAwareChannel(map, threadId);
 }
 
-export function findChannel(
-  sections: ChannelSection[],
-  id: string | null,
-): Channel | null {
+export function findChannel(sections: ChannelSection[], id: string | null): Channel | null {
   if (!id) return null;
   for (const s of sections) {
     const hit = s.channels.find((c) => c.id === id);
@@ -700,10 +865,7 @@ export function firstChannel(sections: ChannelSection[]): Channel | null {
  * teammate removed since the desks were fetched) drops out rather than
  * rendering a placeholder for somebody who isn't there.
  */
-export function channelMembers(
-  channel: Channel,
-  roster: TeamMember[],
-): TeamMember[] | null {
+export function channelMembers(channel: Channel, roster: TeamMember[]): TeamMember[] | null {
   if (!channel.memberIds) return null;
   const byId = new Map(roster.map((m) => [m.id, m]));
   return channel.memberIds
@@ -766,10 +928,7 @@ export function channelSubtitle(channel: Channel): string | null {
  * claims that the channel has no history, and neither may be made before the
  * host has answered (issue #934).
  */
-export function channelIntroSentence(
-  channel: Channel,
-  loading: boolean,
-): string {
+export function channelIntroSentence(channel: Channel, loading: boolean): string {
   const subtitle = channelSubtitle(channel);
   if (loading) return subtitle ? sentence(subtitle) : "";
   if (channel.kind === "dm") {
@@ -812,15 +971,9 @@ function sentence(s: string): string {
  * `buildChannels` already sets it from `member.tone`, which was id-seeded from
  * the start.
  */
-export function dmFace(
-  channel: Channel,
-): { name: string; tone?: string; avatar?: string } | null {
+export function dmFace(channel: Channel): { name: string; tone?: string; avatar?: string } | null {
   if (channel.kind !== "dm" || !channel.member) return null;
-  return {
-    name: channel.name,
-    tone: channel.tone,
-    avatar: channel.member.avatar,
-  };
+  return { name: channel.name, tone: channel.tone, avatar: channel.member.avatar };
 }
 
 /**
@@ -912,10 +1065,8 @@ export function senderOf(
   // is what identifies the line, and a name there would read as somebody else.
   // Only the face is yours — which is the half a reader scanning a busy channel
   // actually picks their own lines out by.
-  if (m.from === "you")
-    return { key: "you", name: "You", kind: "you", avatar: youAvatar };
-  if (m.from === "system")
-    return { key: "system", name: "System", kind: "system" };
+  if (m.from === "you") return { key: "you", name: "You", kind: "you", avatar: youAvatar };
+  if (m.from === "system") return { key: "system", name: "System", kind: "system" };
 
   const named = m.channel?.trim().toLowerCase() ?? "";
   if (named && !COMPANY_VOICE.has(named)) {
@@ -946,9 +1097,7 @@ export function senderOf(
 }
 
 function titleize(s: string): string {
-  return s
-    .replace(/[._-]+/g, " ")
-    .replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
+  return s.replace(/[._-]+/g, " ").replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
 }
 
 export const initials = nameInitials;
@@ -981,6 +1130,13 @@ export interface TimelineEntry {
    * replied four times is still one face.
    */
   replySenders: Sender[];
+  /**
+   * For a system settle pill, whether it is the most recent one carrying its
+   * `taskId`. A card that has re-run since parks an older pill in history
+   * with the same id; only the latest should offer Approve. Meaningless (and
+   * left `undefined`) for any other row.
+   */
+  isLatestSettlePill?: boolean;
 }
 
 /**
@@ -1007,11 +1163,219 @@ function distinctSenders(
 }
 
 /**
+ * Which first replies render **inline** in the channel rather than folding into
+ * their parent's summary row (issue #1890 D, part 2).
+ *
+ * # Why this exists at all
+ *
+ * Part 1 of #1890 D threads every answer under the message that opened it, so
+ * that `parent` is uniform and a thread means a *topic*. Fold every parented
+ * line, as this module did before, and the channel becomes a column of your own
+ * questions each wearing a "1 reply" chip — every answer deleted from the view.
+ *
+ * # Flat when nothing overlaps, threaded when it does
+ *
+ * A question answered with nothing in between is not a thread anyone opened; it
+ * is a normal exchange, and it reads as one. So its first reply is laid out
+ * inline, in its own chronological place. Only when something *else* arrived
+ * between the question and its answer does the pair collapse to the summary
+ * row — which is the case the fold was always for: two conversations racing in
+ * one channel, where inline rendering would interleave them into nonsense.
+ *
+ * # Decided here, never in the journal
+ *
+ * The tempting version stamps this at write time — "thread it only if another
+ * question arrived while I was working". That makes `parent` a function of race
+ * timing, and `parent` is permanent: two operators doing the identical thing
+ * would get permanently different transcripts on microseconds, and the console
+ * renders a reply as it streams, before the backend could know, so a bubble
+ * would render inline and jump into a thread on reload. Re-deciding
+ * presentation on every render costs nothing and writes nothing racy down.
+ *
+ * # What counts as "in between"
+ *
+ * Any message that is neither the root nor one of the root's own replies. That
+ * is deliberately wider than "another root": a sibling thread's reply landing
+ * between question and answer interleaves the two conversations on screen just
+ * as visibly as a new question does, and the rule is about what a reader sees.
+ *
+ * Returns the reply ids to render inline, so the caller can lay each out in its
+ * own place and leave the remainder on the parent's chip.
+ */
+function inlineFirstReplies(
+  messages: ChatMessage[],
+  replies: Map<string, ChatMessage[]>,
+): Set<string> {
+  const position = new Map<string, number>();
+  const roots = new Set<string>();
+  messages.forEach((m, i) => {
+    position.set(m.id, i);
+    if (!m.parentId) roots.add(m.id);
+  });
+
+  const inline = new Set<string>();
+  for (const [rootId, bucket] of replies) {
+    // **An orphan renders flat rather than not at all** (issue #1890 D).
+    //
+    // A reply whose parent is absent from this transcript used to be dropped,
+    // which was safe while only hand-opened threads carried a `parentId`. Part
+    // 1 gives *every* answer one, so the same rule silently deletes answers —
+    // and two of them are ordinary: a reply to a message another client sent
+    // (this console deliberately does not draw an operator line it did not
+    // send), and a reply that arrives before `reconcileIds` has swapped a
+    // locally-sent message's id for the host's, which a killed POST leaves
+    // pending for good.
+    //
+    // There is no summary row to fold into, so the whole bucket renders. The
+    // cost is a reply whose root fell outside the history window reading
+    // without its question; the alternative is an answer that is simply gone,
+    // and a lost answer is the failure this whole sub-issue exists to prevent.
+    if (!position.has(rootId)) {
+      for (const orphan of bucket) inline.add(orphan.id);
+      continue;
+    }
+    // **Only a root's reply is ever promoted.** A reply-to-a-reply must render
+    // nowhere, and promoting one would give the console a second fold level —
+    // which is not a cosmetic difference: `cycle_conversation`
+    // (`src/runtime/cycle.rs`) parents an approval continuation to the thread
+    // *root* rather than to the message that raised it precisely because a
+    // grandchild is unrenderable, and #435's routing choice would quietly stop
+    // being necessary. Pinned by the one-level-deep test.
+    //
+    // A grandchild whose own parent IS present is therefore still dropped —
+    // the orphan arm above is about a root this transcript never held, not
+    // about relaxing the depth rule.
+    if (!roots.has(rootId)) continue;
+    // **One turn's output is not promoted apart.**
+    //
+    // Promotion is safe because it *empties* the chip — `own` below drops what
+    // was promoted, so a lone answer renders inline, no chip appears, and the
+    // thread is never opened. The message lives on exactly one surface. That is
+    // the case #1890 D / #1972 / #2001 built this for, and it still holds when
+    // the rest of the bucket is the operator writing again: their follow-up is
+    // a separate act, and the answer they were waiting for belongs in the
+    // channel.
+    //
+    // A capped turn is not that. It emits the agent's partial write-up and then
+    // the host's `iteration_cap_pause_notice`, both parented to the same
+    // operator message, and promoting only the first splits one turn's output
+    // across two surfaces: the write-up renders inline *and* in the panel,
+    // because `repliesInThread` walks the parent chain and knows nothing of
+    // what was promoted. Dropping it from the panel instead is not open to us —
+    // the notice under it opens "The reply above is a pause", and there has to
+    // be a reply above.
+    //
+    // So promotion stops at the boundary it was always about: a lone answer.
+    // When the runtime spoke more than once, the whole turn stays folded and
+    // the chip says so.
+    const runtimeReplies = bucket.filter(
+      (r) => (r.from === "company" && !r.byPerson) || r.from === "system",
+    );
+    if (runtimeReplies.length > 1) continue;
+    const root = position.get(rootId);
+    // **Only the runtime's own answer is ever promoted** (codex on #1972).
+    //
+    // `bucket[0]` is merely the earliest reply, and that is the *operator's*
+    // own follow-up whenever they wrote again before the agent answered — a
+    // thread they deliberately opened, flattened back into the channel, with
+    // the answer they were waiting for still folded behind the root's chip. The
+    // reader sees their own words twice and the reply not at all, which is the
+    // failure this promotion exists to prevent, in the one case where a person
+    // was demonstrably treating the exchange as a thread.
+    //
+    // A `system` line is excluded on the same terms: a settle marker is
+    // runtime-generated but it is not an answer, and #1890 B put markers in the
+    // thread that raised the card on purpose. Promoting one back into the
+    // channel would undo that from the render side.
+    //
+    // **`from` alone does not say "the runtime wrote this".** `fromHistory`
+    // projects `from` off `mine`, so *another signed-in person's* reply arrives
+    // as `company` too, carrying `byPerson` to tell them apart — and without
+    // that term a colleague answering first was promoted exactly as the
+    // operator's own follow-up had been, reproducing this defect for everyone
+    // except the viewer (codex + coderabbit on #2001).
+    //
+    // Only an explicit `true` blocks it. `undefined` means the host did not
+    // say, and it is what *every* locally built company line carries — this
+    // console's own POST, an `AgentReplyEvent` — so reading it as "might be a
+    // person" would fold the live answer this promotion exists for.
+    if (root === undefined) continue;
+    const own = new Set(bucket.map((r) => r.id));
+
+    // Promotion is for the ORDINARY EXCHANGE ONLY: one question, one answer,
+    // nothing in between. That is the whole case #1890 D part 2 argued for —
+    // without it the channel becomes "a column of your own questions each
+    // wearing a 1 reply chip".
+    //
+    // A root with SEVERAL runtime answers is not that case. It is a multi-party
+    // exchange (agent A hands to B, B answers), and it belongs in the thread as
+    // a unit. Promoting just the first one — what this did before — put that
+    // reply in the channel AND in the thread panel at once, and left the chip
+    // counting the remainder while the panel counted everything, so the two
+    // disagreed. Promoting ALL of them is worse still: the thread empties into
+    // the channel and two concurrent exchanges interleave, which is the exact
+    // nonsense the fold exists to prevent.
+    //
+    // So: promote only when there is exactly one promotable answer AND it is
+    // the earliest reply in the thread. Both terms carry weight, and dropping
+    // either reintroduces a defect this comment already describes:
+    //
+    //   - Without the count, a multi-party exchange promotes its first answer
+    //     into the channel while the panel still shows it — the disagreement
+    //     described just above.
+    //   - Without "earliest", the operator's own follow-up (or a colleague's)
+    //     no longer blocks promotion: it is a reply, so it lives in `bucket`
+    //     and the interleave scan below counts it as `own` rather than as an
+    //     interruption. The runtime's answer is then flattened out from behind
+    //     the very words the person wrote while waiting for it — the case the
+    //     `bucket[0]` paragraph above exists to prevent.
+    const promotable = bucket.filter((r) => r.from === "company" && !r.byPerson);
+    if (promotable.length !== 1 || promotable[0] !== bucket[0]) continue;
+    const first = promotable[0];
+    const answer = position.get(first.id);
+    if (answer === undefined) continue;
+    let interleaved = false;
+    for (let i = root + 1; i < answer; i += 1) {
+      if (!own.has(messages[i].id)) {
+        interleaved = true;
+        break;
+      }
+    }
+    if (!interleaved) inline.add(first.id);
+  }
+  return inline;
+}
+
+/**
+ * Which of `messages` render **inline** in the channel rather than folding into
+ * a parent's summary row (issue #1890 D).
+ *
+ * The public form of {@link inlineFirstReplies}, for the surfaces that must
+ * agree with the timeline about what is on screen. Today that is the mention
+ * badge: a summons inside a *folded* reply must stay unread until its thread is
+ * opened, and one inside an *inline* reply is visible the moment the channel
+ * is, so deferring it would leave a badge nobody can clear.
+ *
+ * Two surfaces, one definition — the discipline `owns` enforces on the host
+ * side, and the reason this is exported rather than reimplemented.
+ */
+export function inlineReplyIds(messages: ChatMessage[]): ReadonlySet<string> {
+  const replies = new Map<string, ChatMessage[]>();
+  for (const m of messages) {
+    if (!m.parentId) continue;
+    const bucket = replies.get(m.parentId);
+    if (bucket) bucket.push(m);
+    else replies.set(m.parentId, [m]);
+  }
+  return inlineFirstReplies(messages, replies);
+}
+
+/**
  * Flatten a channel's messages into rows the timeline can render directly.
  *
- * Replies are folded into their parent rather than laid out inline: a parent
- * carries its own replies and renders a summary row, matching how a threaded
- * chat keeps the main channel readable.
+ * A thread's **first reply renders inline** when nothing interleaved between
+ * the question and it; everything else folds into the parent's summary row. See
+ * {@link inlineFirstReplies} for the rule and why it is the renderer's to make.
  */
 export function buildTimeline(
   messages: ChatMessage[],
@@ -1027,12 +1391,15 @@ export function buildTimeline(
     if (bucket) bucket.push(m);
     else replies.set(m.parentId, [m]);
   }
+  const inline = inlineFirstReplies(messages, replies);
+
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
 
   const entries: TimelineEntry[] = [];
   let prev: TimelineEntry | undefined;
 
   for (const m of messages) {
-    if (m.parentId) continue;
+    if (m.parentId && !inline.has(m.id)) continue;
     const sender = senderOf(m, channel, members, youAvatar);
     const newDay = !prev || !sameDay(prev.message.at, m.at);
     const continuation =
@@ -1061,7 +1428,18 @@ export function buildTimeline(
       // a run is a claim that they are.
       !!prev.message.byPerson === !!m.byPerson;
 
-    const own = replies.get(m.id) ?? [];
+    // **Only a root carries a chip.** An inline reply is a rendered row, so
+    // hanging its own bucket off it would put the second fold level back on
+    // screen through the summary instead of through a row — the same
+    // one-level-deep invariant `inlineFirstReplies` guards, and just as
+    // invisible when it breaks.
+    //
+    // And the inline first reply is a row of its own, so it must not also count
+    // on its parent's chip: a reader would see the answer and be told there is
+    // one more thing to open, which there is not.
+    const own = m.parentId
+      ? []
+      : (replies.get(m.id) ?? []).filter((r) => !inline.has(r.id));
     const entry: TimelineEntry = {
       message: m,
       sender,
@@ -1069,6 +1447,10 @@ export function buildTimeline(
       dayLabel: newDay ? formatDay(m.at) : undefined,
       replies: own,
       replySenders: distinctSenders(own, channel, members, youAvatar),
+      isLatestSettlePill:
+        m.from === "system" && m.taskId !== undefined
+          ? latestPillIdByTaskId.get(m.taskId) === m.id
+          : undefined,
     };
     entries.push(entry);
     prev = entry;
@@ -1185,6 +1567,11 @@ export type TimelineItem =
  * the second surface just wasn't reading it.
  */
 export function approvalBatchKey(approval: ApprovalSummary): string {
+  // A blocker folds by its root cause (#1862): every card stalled on one
+  // broken integration is one question, even across turns a batch would keep
+  // apart. Falls back to the turn batch, then to the id — so an ordinary
+  // approval groups exactly as before.
+  if (approval.group_key) return `group:${approval.group_key}`;
   return approval.batch ?? `solo:${approval.id}`;
 }
 
@@ -1214,10 +1601,7 @@ export function buildTimelineItems(
   }
 
   for (const [key, batch] of batches) {
-    batch.sort(
-      (a, b) =>
-        a.at_millis - b.at_millis || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-    );
+    batch.sort((a, b) => a.at_millis - b.at_millis || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const verdicts: Record<string, Verdict> = {};
     for (const approval of batch) {
       const verdict = decided[approval.id]?.verdict;
@@ -1245,10 +1629,7 @@ export function buildTimelineItems(
 /* ---- formatting ---- */
 
 export function formatTime(at: number): string {
-  return new Date(at).toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
 export function sameDay(a: number, b: number): boolean {
@@ -1262,11 +1643,7 @@ export function formatDay(at: number): string {
   yesterday.setDate(today.getDate() - 1);
   if (d.toDateString() === today.toDateString()) return "Today";
   if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return d.toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  });
+  return d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 }
 
 /* ---- reactions ---- */
@@ -1299,10 +1676,7 @@ export function toggleReaction(
 }
 
 /** Whether the reader has already reacted to a message with this emoji. */
-export function hasReacted(
-  reactions: Reaction[] | undefined,
-  emoji: string,
-): boolean {
+export function hasReacted(reactions: Reaction[] | undefined, emoji: string): boolean {
   return !!reactions?.some((r) => r.emoji === emoji && r.mine);
 }
 
@@ -1322,9 +1696,7 @@ export interface ReactionChip {
  * Chips keep first-reacted order rather than sorting by count, so a message's
  * reactions do not reshuffle under the reader as others react.
  */
-export function reactionChips(
-  reactions: Reaction[] | undefined,
-): ReactionChip[] {
+export function reactionChips(reactions: Reaction[] | undefined): ReactionChip[] {
   const chips: ReactionChip[] = [];
   const byEmoji = new Map<string, ReactionChip>();
   for (const row of reactions ?? []) {
@@ -1354,10 +1726,7 @@ export function reactionChips(
  *
  * Returns the same object when nothing changed, so React sees no new state.
  */
-export function clearTaskCardEverywhere(
-  transcripts: Transcripts,
-  taskId: string,
-): Transcripts {
+export function clearTaskCardEverywhere(transcripts: Transcripts, taskId: string): Transcripts {
   let changed = false;
   const next: Transcripts = {};
   for (const [channelId, messages] of Object.entries(transcripts)) {

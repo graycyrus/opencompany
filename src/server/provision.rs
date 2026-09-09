@@ -4,8 +4,10 @@
 //! or `{ "manifest_toml", "id"? }` JSON), validates it, builds a
 //! [`CompanyRuntime`](crate::company::runtime::CompanyRuntime) over the data
 //! dir, registers it, and records its owning tenant. Provisioning and suspension
-//! require the `platform` scope; pause/resume/archive are owner-scoped and never
-//! cross tenants.
+//! require the `platform` scope; archive is owner-scoped; the pause, resume and
+//! emergency-stop routes additionally require authority over the company —
+//! [`AdminScopedCompany`] — because they decide something for the whole company
+//! rather than for the caller. None of them cross tenants.
 //!
 //! Lifecycle transitions persist the new [`CompanyRecord`](crate::ports::types::CompanyRecord)
 //! `lifecycle` and append a [`LifecycleChanged`](crate::ports::types::CompanyEvent::LifecycleChanged)
@@ -25,9 +27,9 @@ use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::AppState;
@@ -39,6 +41,7 @@ use crate::runtime::types::CycleReport;
 use crate::runtime::{RuntimeBuilder, company_id_from_name};
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
+use crate::server::ops::AdminScopedCompany;
 use crate::server::platform_auth::{PlatformScope, acting_tenant, authorize_address};
 use crate::server::webhook::{WebhookEvent, WebhookKind};
 use crate::store::FsCompanyStore;
@@ -47,6 +50,7 @@ use crate::store::FsCompanyStore;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/companies", post(provision))
+        .route("/api/v1/companies/provisioning", get(provisioning_info))
         .route("/api/v1/companies/{id}/pause", post(pause))
         .route("/api/v1/companies/{id}/resume", post(resume))
         .route(
@@ -80,6 +84,40 @@ fn not_found(id: &str) -> Response {
 // ---------------------------------------------------------------------------
 // Provisioning
 // ---------------------------------------------------------------------------
+
+/// What `GET /api/v1/companies/provisioning` reports: the sign-in mode a
+/// company provisioned on this host right now would land in, and whether that
+/// mode requires the create/reset dialog to collect wallet addresses.
+///
+/// Reachable by a console platform bearer, unlike `GET /api/v1/setup` (loopback
+/// / peer-gated), so the create/reset dialog can render mode-appropriate fields
+/// before it provisions rather than discovering the host's `wallet` override
+/// only when the manifest is refused (`auth_mode_wallet_no_wallets`).
+#[derive(Debug, Serialize)]
+struct ProvisioningInfoDto {
+    /// The effective sign-in mode: `wallet`, `email`, or `none`.
+    auth_mode: &'static str,
+    /// Whether provisioning requires at least one `[users].wallets` address.
+    wallets_required: bool,
+}
+
+/// `GET /api/v1/companies/provisioning` — the auth-mode preflight the create /
+/// reset dialog reads before building a manifest.
+async fn provisioning_info(
+    PlatformScope(_claims): PlatformScope,
+    State(state): State<AppState>,
+) -> Response {
+    // When no host-wide override is set, each company's own `[users].mode`
+    // decides — and the console builds an `email` manifest by default, so the
+    // default report is `email`. A `wallet` override is the case that forces
+    // the dialog to collect addresses.
+    let mode = state.auth_mode_override().unwrap_or_default();
+    let dto = ProvisioningInfoDto {
+        auth_mode: mode.as_str(),
+        wallets_required: mode == AuthMode::Wallet,
+    };
+    (StatusCode::OK, Json(dto)).into_response()
+}
 
 /// The JSON provisioning body: a manifest string plus an optional explicit id.
 #[derive(Debug, Deserialize)]
@@ -624,11 +662,27 @@ fn reason_is_budget(uri: &Uri) -> bool {
         .unwrap_or(false)
 }
 
-/// Applies a lifecycle transition to `to`, returning the fresh status.
+/// Applies a lifecycle transition to the company registered under `id`,
+/// returning the fresh status.
 async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) -> Response {
     let Some(runtime) = state.registry().get(id) else {
         return not_found(id.as_ref());
     };
+    transition_runtime(&runtime, auth, to).await
+}
+
+/// Applies a lifecycle transition directly to an already-resolved `runtime`,
+/// returning the fresh status.
+///
+/// A caller holding an authorized runtime (e.g. [`AdminScopedCompany`]) must
+/// use this rather than [`transition`]: looking `id` back up in the registry
+/// can return a different runtime than the one authorization approved, if a
+/// rebuild swap lands in between.
+async fn transition_runtime(
+    runtime: &crate::runtime::CompanyRuntime,
+    auth: &GqlAuth,
+    to: &str,
+) -> Response {
     if let Err(err) = runtime.set_lifecycle(to, lifecycle_actor(auth)).await {
         return ApiError(err).into_response();
     }
@@ -638,58 +692,40 @@ async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) 
     }
 }
 
-/// `POST /api/v1/companies/{id}/pause` — stop accepting work (owner-scoped).
+/// `POST /api/v1/companies/{id}/pause` — stop accepting work (admin-scoped).
 async fn pause(
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
     State(state): State<AppState>,
-    Path(id): Path<String>,
     uri: Uri,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
-    let response = transition(&state, &auth, &id, "paused").await;
+    let response = transition_runtime(&admin.runtime, &auth, "paused").await;
     // A budget-triggered pause emits the `budget.exhausted` webhook.
     if response.status() == StatusCode::OK && reason_is_budget(&uri) {
-        emit_budget_exhausted(&state, &id).await;
+        emit_budget_exhausted(&state, admin.id()).await;
     }
     response
 }
 
-/// `POST /api/v1/companies/{id}/resume` — resume accepting work (owner-scoped).
+/// `POST /api/v1/companies/{id}/resume` — resume accepting work (admin-scoped).
 async fn resume(
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // `suspended` is a platform-forced pause (billing/abuse); only a
     // platform-scope caller may lift it. Neither an owner token nor a company's
     // own admin may resume a company the platform suspended.
     let platform = matches!(&auth, GqlAuth::Platform(c) if c.has_platform_scope());
     if !platform {
-        match state.registry().get(&id) {
-            Some(runtime) => match runtime.status().await {
-                Ok(status) if status.lifecycle == "suspended" => {
-                    return crate::server::platform_auth::forbidden();
-                }
-                Ok(_) => {}
-                Err(err) => return ApiError(err).into_response(),
-            },
-            None => return not_found(id.as_ref()),
+        match admin.runtime.status().await {
+            Ok(status) if status.lifecycle == "suspended" => {
+                return crate::server::platform_auth::forbidden();
+            }
+            Ok(_) => {}
+            Err(err) => return ApiError(err).into_response(),
         }
     }
-    transition(&state, &auth, &id, "running").await
+    transition_runtime(&admin.runtime, &auth, "running").await
 }
 
 // ---------------------------------------------------------------------------
@@ -735,28 +771,27 @@ fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
 }
 
 /// `POST /api/v1/companies/{id}/emergency-pause` — the governance kill switch
-/// (owner-scoped, issue #86).
+/// (admin-scoped, issue #86).
 ///
-/// Denies every new effect outside `EffectGroup::Other` until an operator
-/// deliberately releases it. Distinct from `/pause`, which stops the company
-/// *including chat* by moving `lifecycle`; this leaves the lifecycle untouched
-/// so the operator can keep asking the company what it was doing.
+/// The confirmation phrase below is a step-up against a stray click, not an
+/// authority check: it is a fixed, published string every member knows. Authority is
+/// [`AdminScopedCompany`] in the signature.
+///
+/// Halts admission of new work — chat included — until an operator
+/// deliberately releases it; every new effect outside `EffectGroup::Other` is
+/// also denied at the gate, as defense-in-depth under that admission halt. A
+/// turn already running is not killed. Distinct from `/pause`, which moves
+/// `lifecycle` and is what a console reads to tell "paused" from "stopped" —
+/// this leaves `lifecycle` untouched, so `emergency-resume` always works even
+/// on a company an operator separately paused.
 ///
 /// Idempotent: pressing it twice returns `200` with `changed: false` rather than
 /// an error. A panic button that punishes a second press is a bad panic button.
 async fn emergency_pause(
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
     body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // A missing, empty, or malformed JSON body all read as "no step-up was
     // supplied" and fall through to the same `confirmation_required` envelope a
     // request with an absent body already gets — a panic button has to tell the
@@ -768,17 +803,15 @@ async fn emergency_pause(
     if let Some(resp) = confirmation_error(&body.confirm, PAUSE_CONFIRMATION) {
         return resp;
     }
-    let Some(runtime) = state.registry().get(&id) else {
-        return not_found(id.as_ref());
-    };
+    let runtime = &admin.runtime;
     match runtime
         .emergency_pause(lifecycle_actor(&auth), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Ok(changed) => emergency_response(runtime, changed, None).await,
         Err(err) => {
             emergency_response(
-                &runtime,
+                runtime,
                 false,
                 Some(format!(
                     "the emergency stop is active in memory but its journal \
@@ -791,7 +824,7 @@ async fn emergency_pause(
 }
 
 /// `POST /api/v1/companies/{id}/emergency-resume` — release the kill switch
-/// (owner-scoped, issue #86).
+/// (admin-scoped, issue #86).
 ///
 /// **The confirmation is the company's own id**, which is a deliberately
 /// stronger step-up than the fixed phrase `emergency-pause` takes. Releasing is
@@ -803,18 +836,10 @@ async fn emergency_pause(
 /// There is no timeout anywhere in this path. A stop persists until this
 /// endpoint is called by an identified operator, across restarts included.
 async fn emergency_resume(
+    admin: AdminScopedCompany,
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
     body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
-    let id = CompanyId::new(id);
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return resp;
-    }
-    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
-        return resp;
-    }
     // Same contract as `emergency_pause`: a missing, empty, or malformed body
     // reads as "no step-up was supplied" and answers with the documented
     // `confirmation_required` envelope rather than a bare `Json` rejection.
@@ -822,20 +847,18 @@ async fn emergency_resume(
         confirm: String::new(),
         reason: None,
     });
-    if let Some(resp) = confirmation_error(&body.confirm, id.as_ref()) {
+    if let Some(resp) = confirmation_error(&body.confirm, admin.id().as_ref()) {
         return resp;
     }
-    let Some(runtime) = state.registry().get(&id) else {
-        return not_found(id.as_ref());
-    };
+    let runtime = &admin.runtime;
     match runtime
         .emergency_resume(lifecycle_actor(&auth), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Ok(changed) => emergency_response(runtime, changed, None).await,
         Err(err) => {
             emergency_response(
-                &runtime,
+                runtime,
                 false,
                 Some(format!(
                     "the emergency stop is still engaged in memory but its journal \
@@ -930,27 +953,130 @@ async fn archive(
     // reset done and never calls `archive` again — permanently skipping
     // cleanup a single-shot blip on this read would otherwise have caused
     // (issue #1828 comment 3875297944).
-    let archived = if response.status() == StatusCode::OK {
-        true
-    } else {
-        match state.registry().get(&id) {
-            Some(runtime) => archive_reconcile_status(&runtime)
-                .await
-                .map(|status| status.lifecycle == "archived")
-                .unwrap_or(false),
-            None => false,
-        }
-    };
-    if archived {
-        state.registry().remove(&id);
-        state.remove_owner(&id);
-        if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())
-            && let Err(err) = ownership.remove_owner(&id).await
-        {
-            tracing::warn!(company = %id, error = %err, "failed to remove persisted ownership");
-        }
+    // The runtime confirmed archived, not just the id — `evict_archived_company`
+    // needs the specific instance so it can refuse to remove a replacement that
+    // has since taken this id over (a rebuild swap; see that function's comment).
+    let archived_runtime: Option<Arc<crate::runtime::CompanyRuntime>> =
+        if response.status() == StatusCode::OK {
+            state.registry().get(&id)
+        } else {
+            match state.registry().get(&id) {
+                Some(runtime) => {
+                    let confirmed = archive_reconcile_status(&runtime)
+                        .await
+                        .map(|status| status.lifecycle == "archived")
+                        .unwrap_or(false);
+                    confirmed.then_some(runtime)
+                }
+                None => None,
+            }
+        };
+    if let Some(runtime) = archived_runtime {
+        evict_archived_company(&state, &id, &runtime).await;
     }
     response
+}
+
+/// Removes an archived company from the live registry and drops both its
+/// in-memory and persisted ownership rows.
+///
+/// The single implementation of archive's post-transition cleanup, shared by
+/// [`archive`] and [`RegistryEvictor`] (the maintenance-loop hook) so
+/// the inline path and the stranded-cleanup retry cannot drift.
+///
+/// Two orderings matter here, each guarding a different way this call could
+/// destroy something it never actually confirmed (codex review on #1943, PR
+/// comments 3894439351 and 3894439358):
+///
+/// - **The persisted ownership row is removed BEFORE the registry entry and
+///   the in-memory owner, not after.** `MaintenanceTicker::tick` only
+///   retries a company it can still see in [`CompanyRegistry::list`]
+///   (`src/runtime/maintenance.rs`) — so a company de-registered here with
+///   its persisted-ownership deletion still failed can never be revisited.
+///   Failing closed (leaving the company registered) instead lets the next
+///   tick retry the whole eviction; failing the old way (registry gone,
+///   ownership row still failed to delete) orphans that row forever with
+///   nothing left in the registry to trigger a retry against it.
+/// - **The registry removal is conditional on `expected`, not "whatever is
+///   at `id`".** [`CompanyRegistry::insert`] is the one choke point every
+///   registration goes through, and it replaces an already-occupied slot
+///   unconditionally — a rebuild swap (`runtime::rebuild::rebuild_company`)
+///   is the production caller that can land a fresh runtime under this same
+///   id in the window between a caller observing `"archived"` and this call
+///   actually running. Removing by id alone would deregister that live
+///   replacement instead of doing nothing. The ownership rows above stay
+///   unconditional by id regardless: `POST /api/v1/companies` refuses
+///   `company_exists` for any id still registered (`provision`, this file),
+///   so the only thing that can ever replace an already-registered id is a
+///   rebuild of the SAME company — same owner, same durable lifecycle
+///   (`CompanyRuntime::status` reads it from the handed-over store, so a
+///   rebuild successor of an archived company reports `"archived"` too) —
+///   never a different company's row.
+pub(crate) async fn evict_archived_company(
+    state: &AppState,
+    id: &CompanyId,
+    expected: &Arc<crate::runtime::CompanyRuntime>,
+) {
+    let ownership = state.stores().and_then(|s| s.ownership.clone());
+    if evict_registry_and_ownership(state.registry(), &ownership, id, expected).await {
+        state.remove_owner(id);
+    }
+}
+
+/// The sequencing `evict_archived_company`'s doc comment above describes,
+/// pulled out of `AppState` so the ordering is unit-testable against a
+/// lightweight [`OwnershipStore`](crate::store::select::OwnershipStore) fake
+/// and a bare [`CompanyRegistry`] instead of a full `StorageHandles`.
+///
+/// Returns whether the persisted ownership row was successfully removed (or
+/// there was none configured) — the caller's cue to also clear the
+/// AppState-level in-memory owner cache, which stays unconditional by id
+/// regardless of the registry outcome below (see the "same company" argument
+/// in `evict_archived_company`'s doc comment).
+async fn evict_registry_and_ownership(
+    registry: &crate::runtime::CompanyRegistry,
+    ownership: &Option<Arc<dyn crate::store::select::OwnershipStore>>,
+    id: &CompanyId,
+    expected: &Arc<crate::runtime::CompanyRuntime>,
+) -> bool {
+    if let Some(ownership) = ownership
+        && let Err(err) = ownership.remove_owner(id).await
+    {
+        tracing::warn!(
+            company = %id,
+            error = %err,
+            "failed to remove persisted ownership; leaving the company registered for a later maintenance retry"
+        );
+        return false;
+    }
+    if registry.remove_if(id, expected).is_none() {
+        tracing::info!(
+            company = %id,
+            "kept the registered runtime — it was replaced since being observed archived"
+        );
+    }
+    true
+}
+
+/// The production [`CompanyEvictor`](crate::runtime::maintenance::CompanyEvictor):
+/// runs archive's cleanup against `AppState` for a company the maintenance loop
+/// found archived but still registered.
+pub struct RegistryEvictor {
+    state: AppState,
+}
+
+impl RegistryEvictor {
+    /// Builds an evictor over `state`.
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::maintenance::CompanyEvictor for RegistryEvictor {
+    async fn evict(&self, company: &CompanyId, expected: &Arc<crate::runtime::CompanyRuntime>) {
+        evict_archived_company(&self.state, company, expected).await;
+    }
 }
 
 // ---------------------------------------------------------------------------

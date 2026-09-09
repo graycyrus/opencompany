@@ -53,7 +53,15 @@ import type { CompanyStreamEvent } from "@/hooks/use-events";
 import { withHostParam } from "@/hooks/use-host-route";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import type { ApprovalSummary, GrantScope, TeamMemberDto, Verdict } from "@/api/types";
+import type {
+  ApprovalSummary,
+  DecideApproval,
+  NotificationDto,
+  TeamMemberDto,
+  Verdict,
+} from "@/api/types";
+import { Week1NudgeBanner } from "@/components/week1-nudge-banner";
+import { pickActiveNudge, WEEK1_NUDGE_KIND } from "@/lib/week1-nudge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -86,6 +94,7 @@ import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 import { useAskerNames } from "@/components/approval-card";
 import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
+import { settingsHref } from "@/views/settings-pages";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
 import { workflowSavedToast } from "@/lib/workflow-saved-toast";
@@ -126,7 +135,11 @@ import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
 // Issue #981: which nodes produced a report that never went out, so the canvas
 // card can say so beside the DONE badge instead of leaving it to a banner.
-import { undeliveredNodes } from "@/views/workflows/run-health";
+import {
+  legacyRunVerdict,
+  settledRunNotice,
+  undeliveredNodes,
+} from "@/views/workflows/run-health";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
@@ -324,11 +337,7 @@ export function WorkflowsView({
    * renders exactly as it did before #1002: it says the run parked cards and
    * points at the queue, without offering to decide them.
    */
-  onDecideApproval?: (
-    approval: ApprovalSummary,
-    verdict: Verdict,
-    scope: GrantScope,
-  ) => void;
+  onDecideApproval?: DecideApproval;
 }) {
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -427,6 +436,152 @@ export function WorkflowsView({
   // fetch is keyed on) or by a list read that succeeds.
   const [listError, setListError] = useState<string | null>(null);
   const [graphError, setGraphError] = useState<string | null>(null);
+  // Issue #1845: the week-1 "save your first workflow" nudge, server-backed
+  // (`GET …/notifications?kind=workflow_nudge`) rather than the tour's
+  // `localStorage` flag — a signup earns this from `LifecycleScheduler` on the
+  // host, and dismissing/creating persists back through `markNotificationsRead`
+  // rather than a client-only flag, so it survives a reload.
+  const [nudge, setNudge] = useState<NotificationDto | null>(null);
+  // Readable from callbacks that must stay stable (`handleCreated`'s own
+  // deps), the same pattern `selectedIdRef`/`companyRef` use above.
+  const nudgeRef = useRef<NotificationDto | null>(null);
+  nudgeRef.current = nudge;
+  // Issue #1845 (review: PR #1878): set the moment `handleCreated` fires,
+  // before `refreshNudge` below has necessarily resolved. A fetch already in
+  // flight when a local create happens (the mount fetch, or a poll tick) can
+  // land AFTER `handleCreated`, carrying the row the scheduler filed before
+  // this create — `clearNudge` could not have marked it read yet, because at
+  // that moment it did not know the row's id (`nudgeRef.current` was still
+  // `null`). This nudge is a one-time, first-workflow-only ask (the
+  // scheduler's own idempotency ledger never files a second one), so once
+  // this session has created a workflow, no fetch response — stale or not —
+  // should ever put the banner back up. Reset on a company switch, since a
+  // create in one company says nothing about another.
+  const hasCreatedLocallyRef = useRef(false);
+  // codex review finding (comment 3892534919): `hasCreatedLocallyRef` only
+  // ever invalidates a stale `refreshNudge` response against a LOCAL CREATE.
+  // Dismissal (`clearNudge` below) had no equivalent — a poll already in
+  // flight when the operator clicks Dismiss can resolve afterward carrying
+  // the same row, still unread from the server's point of view at the
+  // instant that response was captured, and `setNudge(active)` would put the
+  // just-dismissed banner right back up. A monotonic generation counter,
+  // bumped by every local action that should invalidate whatever is
+  // currently in flight (dismissal, and — folded into the mount/reseat
+  // effect below — a company or client change), closes both gaps with one
+  // mechanism: a response is only applied if the request that produced it is
+  // still the most recent one this component cares about.
+  const nudgeRequestGeneration = useRef(0);
+  // codex review finding (comment 3892594021): `pickActiveNudge` picks ONE
+  // row to show — by design, per its own doc comment, since
+  // `LifecycleScheduler` explicitly permits two racing replicas to both file
+  // a nudge for the same user. Dismissal used to mark only the shown row
+  // (`current.id`) read, so a genuine duplicate landed back on the very next
+  // poll: the other, still-unread row is exactly what `pickActiveNudge`
+  // picks next. Tracked separately from `nudge` (which is deliberately the
+  // single row the banner renders) so `clearNudge` can mark every duplicate
+  // read in one write instead of only the one on screen.
+  const unreadNudgeIdsRef = useRef<string[]>([]);
+  const refreshNudge = useCallback(() => {
+    const requestCompany = company;
+    const requestGeneration = ++nudgeRequestGeneration.current;
+    client
+      .notifications(requestCompany, "workflow_nudge")
+      .then((feed) => {
+        if (requestCompany !== companyRef.current) return; // stale: company switched mid-flight
+        if (requestGeneration !== nudgeRequestGeneration.current) return; // stale: superseded by a newer request or a local action
+        const rows = Array.isArray(feed?.notifications) ? feed.notifications : [];
+        const active = pickActiveNudge(rows);
+        unreadNudgeIdsRef.current = rows
+          .filter((row) => row.kind === WEEK1_NUDGE_KIND && row.readAt === undefined)
+          .map((row) => row.id);
+        if (active && hasCreatedLocallyRef.current) {
+          // This response was already stale the moment it landed — see
+          // `hasCreatedLocallyRef`'s own doc comment. Reconcile the server
+          // row rather than display it, the same best-effort mark-read
+          // `clearNudge` performs below.
+          setNudge(null);
+          void client.markNotificationsRead([active.id], requestCompany).catch(() => {
+            // The next poll tick retries; nothing renders in the meantime
+            // either way, since `hasCreatedLocallyRef` stays set.
+          });
+          return;
+        }
+        setNudge(active);
+      })
+      .catch(() => {
+        // An older host (404) or a transient failure: no banner, and nothing
+        // else about the view changes — this is the least important thing on
+        // screen, same reasoning the mention badge's own poll follows.
+      });
+  }, [client, company]);
+  useEffect(() => {
+    setNudge(null);
+    hasCreatedLocallyRef.current = false;
+    // Also invalidates anything already in flight against the previous
+    // company or client (the "in-place host reseat that preserves the
+    // company slug" half of comment 3892534919) — `refreshNudge`'s identity
+    // already changes on either, so this effect already re-runs for both.
+    nudgeRequestGeneration.current += 1;
+    refreshNudge();
+  }, [company, refreshNudge]);
+  // Issue #1845 (review: PR #1878): the host files this nudge off a daily
+  // scheduler tick, which mounts no SSE frame — nothing else tells a tab left
+  // open across that tick that a nudge landed, so it would otherwise sit
+  // unseen until the next reload or company switch. `approvalsNow` is the
+  // same polling cadence the mention badge already piggybacks on for the
+  // identical reason (`app-shell.tsx`'s own `feed.now` — no per-viewer SSE
+  // projection either), so this re-runs the fetch on every tick rather than
+  // adding a second poller.
+  useEffect(() => {
+    if (approvalsNow === undefined) return;
+    refreshNudge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on the poll tick only
+  }, [approvalsNow]);
+  // Marks the current nudge read (best-effort) and hides it locally at once,
+  // rather than waiting for the next poll to confirm the write. Shared by the
+  // banner's own Dismiss button and by a workflow actually getting created
+  // (below) — both are "stop asking", the same action either way.
+  const clearNudge = useCallback(() => {
+    const current = nudgeRef.current;
+    if (!current) return;
+    // Invalidate any `refreshNudge` fetch already in flight — see
+    // `nudgeRequestGeneration`'s own doc comment. Its `.then` still runs
+    // (this does not cancel the network request), it just no longer applies
+    // what it finds.
+    nudgeRequestGeneration.current += 1;
+    setNudge(null);
+    // Every unread duplicate from the last refresh, not only the one shown —
+    // see `unreadNudgeIdsRef`'s own doc comment. Falls back to just the shown
+    // row if nothing was tracked yet (dismissed before any refresh landed).
+    const ids = unreadNudgeIdsRef.current.length > 0 ? unreadNudgeIdsRef.current : [current.id];
+    unreadNudgeIdsRef.current = [];
+    void client.markNotificationsRead(ids, company).catch(() => {
+      // The optimistic clear could be wrong (offline, older host); the next
+      // poll below reconciles rather than leaving a stale local `null`.
+      refreshNudge();
+    });
+  }, [client, company, refreshNudge]);
+  // Issue #1845 (review: PR #1878): `listEventTick` bumps on every
+  // `workflow_created` frame, and the frame is deliberately thin — no actor,
+  // by design (`use-events.ts`) — so it cannot tell "this user's own create"
+  // apart from a teammate's or the orchestrator's. Calling `clearNudge` here
+  // used to persist THIS user's dismissal off of anyone's create in the
+  // company, which could silence a nudge for someone who has never saved a
+  // workflow themselves. `handleCreated` below already calls `clearNudge`
+  // directly the moment this session's own create is confirmed, so the only
+  // job left for the tick is picking up state this user changed elsewhere —
+  // a dismissal or an attributed create from another of their own sessions —
+  // which is exactly what re-asking the host's own per-user feed answers.
+  // Skip the tick this effect mounts with (there is nothing to refresh yet).
+  const nudgeListTickMounted = useRef(false);
+  useEffect(() => {
+    if (!nudgeListTickMounted.current) {
+      nudgeListTickMounted.current = true;
+      return;
+    }
+    if (nudgeRef.current) refreshNudge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on the tick, reads current nudge via ref
+  }, [listEventTick]);
   const [createOpen, setCreateOpen] = useState(false);
   // Issue #259: the same dialog, hydrated from the selected graph. Separate
   // state from `createOpen` rather than a mode flag, so the create path keeps
@@ -521,6 +676,32 @@ export function WorkflowsView({
   // out (Reload) — a toast that auto-dismisses would leave them staring at the
   // old graph believing the write landed.
   const [conflict, setConflict] = useState<string | null>(null);
+  /**
+   * The corrections the host made while drafting the workflow that was just
+   * created — "matched the teammate you named by role to `qa_engineer`", and
+   * so on.
+   *
+   * They used to be read in the dialog, next to the form the draft hydrated.
+   * The one-box dialog closes onto the canvas the instant the write lands, so
+   * without this they would be written, applied, and never shown. Not a toast,
+   * for the same reason `conflict` is not: they say the saved graph differs
+   * from a literal reading of the sentence, which is worth reading once and
+   * dismissing deliberately.
+   *
+   * Keyed by the workflow AND the company they describe rather than held bare.
+   * The workflow half is because a create MOVES the selection — so the
+   * selection-change sweep below has to tell "the operator navigated away from
+   * it" from "the operator has just this instant arrived on it", and a bare
+   * value cannot. The company half is because ids are only unique within a
+   * company: two companies with a `weekly-digest` would otherwise carry one's
+   * corrections onto the other's canvas, which is the failure every other
+   * persistent banner here is swept on the same axis to avoid.
+   */
+  const [createdNotes, setCreatedNotes] = useState<{
+    company: string | null;
+    workflowId: string;
+    notes: string[];
+  } | null>(null);
   // Bumped by the conflict banner's Reload, to re-fetch the selected graph (and
   // with it a fresh `version`) without changing the selection.
   const [graphTick, setGraphTick] = useState(0);
@@ -1402,8 +1583,36 @@ export function WorkflowsView({
             description:
               "Your test run executed real effects (teammate turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
           });
+        } else if (dryRun) {
+          // CodeRabbit review (PR #2053): a dry run still drives the real
+          // engine (issue #542) and can fail or degrade exactly like a real
+          // one, so this used to say "nothing was sent" even over a dry run
+          // that failed — the same false green B-039 fixed below for the
+          // non-dry-run path, just for this one too. Success only for a
+          // clean run — a legacy host that sent no verdict at all is read
+          // via `legacyRunVerdict` (Codex review, PR #2053) rather than
+          // assumed clean.
+          const verdict = res.verdict ?? legacyRunVerdict(res);
+          if (verdict !== "ok") {
+            const settled = settledRunNotice(verdict);
+            toast[settled.tone](settled.message);
+          } else {
+            toast.success("Test run complete — nothing was sent.");
+          }
         } else {
-          toast.success(dryRun ? "Test run complete — nothing was sent." : "Workflow ran.");
+          // B-039: read the host's verdict rather than asserting a clean run.
+          // This line used to be an unconditional "Workflow ran.", which a run
+          // the operator had just STOPPED got too — so the same screen called
+          // one run stopped and ran at the same time.
+          //
+          // Codex review (PR #2053): `res.verdict` alone maps EVERY legacy
+          // host (predating issue #981, no `verdict` key on the wire) to the
+          // green fallback below, even one whose response shows it blocked,
+          // dropped a report, or was stopped — `legacyRunVerdict` derives the
+          // same reading `verdictOf` gives a history row from those other
+          // fields instead of assuming clean.
+          const settled = settledRunNotice(res.verdict ?? legacyRunVerdict(res));
+          toast[settled.tone](settled.message);
         }
       }
       // A dry run journals NOTHING (#542), so there is no history row to pull
@@ -1526,7 +1735,14 @@ export function WorkflowsView({
     const removedName = graph.name;
     setDeleting(true);
     try {
-      await deleteWorkflow(client, company, selectedId, graph.version);
+      // CodeRabbit review (PR #2053): the confirmation dialog's "a run is
+      // going right now" is a pre-request guess (`watchingRun`, read where
+      // this is called) and the toast below reads the sweep's own count
+      // instead of that same guess — they can legitimately disagree with no
+      // race at all: a run this view was watching can settle on its own in
+      // the seconds between the operator confirming and this request
+      // reaching the host, and the sweep then truthfully stops nothing.
+      const { stoppedRuns } = await deleteWorkflow(client, company, selectedId, graph.version);
       // Drop it locally rather than re-listing: the host has confirmed, and a
       // re-list would flash an empty picker. A list request already in flight
       // predates this and would put the entry back — hence the bump.
@@ -1550,7 +1766,20 @@ export function WorkflowsView({
       setResult(null);
       setSelectedNodeId(null);
       setConflict(null);
-      toast.success(`Deleted “${removedName}”.`);
+      // B-121: the run(s) went with it, and saying so is the whole point of
+      // having warned. The host stops EVERY run of a deleted workflow still
+      // in flight, not just the one this view happened to be watching — a
+      // manual run overlapping a scheduled one, or several manual triggers,
+      // are all live at once up to the company's concurrency ceiling (Codex
+      // review, PR #2053) — before that they were left executing with the
+      // only Stop button in the product on the page this delete just
+      // unmounted.
+      setActiveRunId(null);
+      toast.success(
+        stoppedRuns > 0
+          ? `Deleted “${removedName}” and stopped ${stoppedRuns === 1 ? "the run" : `${stoppedRuns} runs`} in flight.`
+          : `Deleted “${removedName}”.`,
+      );
     } catch (e) {
       // A 409 is the one failure the operator can actually act on, and acting
       // on it means reloading — so it gets the persistent banner, not a toast.
@@ -1709,7 +1938,14 @@ export function WorkflowsView({
 
   // The creator posts the full graph back, so the new entry can be spliced
   // straight into the list and selected — no extra round trip to re-list.
-  const handleCreated = useCallback((created: WorkflowGraph) => {
+  const handleCreated = useCallback((created: WorkflowGraph, notes?: string[]) => {
+    // What the copilot changed on the way from the sentence to the graph. Set
+    // BEFORE the selection moves, so the sweep on `[selectedId, company]` sees
+    // them already keyed to the workflow it is arriving at.
+    const kept = (notes ?? []).filter((note) => note.trim().length > 0);
+    setCreatedNotes(
+      kept.length ? { company, workflowId: created.id, notes: kept } : null,
+    );
     // Newer than any list request already in flight — see `localWriteRef`.
     // This is the race the operator would notice most: the workflow they just
     // created disappearing out of the picker a moment after it appeared.
@@ -1749,7 +1985,17 @@ export function WorkflowsView({
     } else {
       toast.success("Workflow created.");
     }
-  }, [announceDisarm]);
+    // Issue #1845: this console's own create is the clearest possible signal
+    // — do not wait for the `workflow_created` SSE round trip to clear the
+    // nudge when we already know it landed. Set BEFORE `clearNudge`, and
+    // unconditionally: `clearNudge` only marks the row read when it already
+    // knows the nudge's id (`nudgeRef.current`), which a fetch still in
+    // flight at this instant has not supplied yet — see
+    // `hasCreatedLocallyRef`'s own doc comment for how `refreshNudge`
+    // reconciles that response when it lands.
+    hasCreatedLocallyRef.current = true;
+    clearNudge();
+  }, [announceDisarm, clearNudge, company]);
 
   // Issue #1110: leave the workflow on screen and go back to the index.
   //
@@ -2088,6 +2334,13 @@ export function WorkflowsView({
     // clears it — but a graph read that FAILS does not, which is precisely the
     // case where the operator is left staring at it.
     setConflict(null);
+    // The draft's corrections, but ONLY once the selection has actually left
+    // the workflow they are about. A create sets them and moves the selection
+    // in the same batch, so an unconditional clear here would wipe them on the
+    // very render that was supposed to show them.
+    setCreatedNotes((prev) =>
+      prev && prev.workflowId === selectedId && prev.company === company ? prev : null,
+    );
     // Issue #1704: and the graph-load error, whose reach is wider still. It
     // renders outside the `detailOpen` gate, so "could not load the workflow
     // graph" about the workflow just left follows the operator all the way back
@@ -2730,10 +2983,37 @@ export function WorkflowsView({
                         <AlertDialogTitle>Delete “{graph?.name ?? selectedId}”?</AlertDialogTitle>
                         {/* Say exactly what goes and what stays. "Stops its schedule"
                             is the consequence an operator most needs spelled out, and
-                            "past runs stay" stops them hesitating over losing history. */}
-                        <AlertDialogDescription>
-                          This removes the workflow and stops it running on its schedule. Past runs
-                          stay in the run history. This can&apos;t be undone.
+                            "past runs stay" stops them hesitating over losing history.
+
+                            B-121: and when a run is in flight, say THAT — it was
+                            the one consequence this dialog never mentioned, while
+                            being word for word the sentence an idle workflow gets.
+                            Deleting stops that run, which is a bigger thing to
+                            agree to than stopping a schedule.
+
+                            Codex review (PR #2053): `watchingRun` is this VIEW's
+                            own belief, current only as of its last history poll
+                            or SSE frame — a run a scheduler or another operator
+                            just started can be genuinely in flight server-side
+                            with nothing here having heard about it yet. Delete
+                            stops it either way (the host's own sweep, not this
+                            view's knowledge, decides that — see the toast below,
+                            which reads the sweep's real count rather than this
+                            guess), so the "nothing running" branch hedges rather
+                            than promising a fact this view cannot actually see.
+
+                            Codex review (PR #2053), second round: manual and
+                            scheduled runs of the SAME workflow can overlap —
+                            the host admits several at once up to the company's
+                            concurrency ceiling — and the sweep stops every one
+                            of them, not just the one this view happens to be
+                            watching. "that run" (singular) undersold it; say
+                            "every run … still going" so the warning is accurate
+                            whether one is in flight or several. */}
+                        <AlertDialogDescription data-testid="workflow-delete-consequence">
+                          {watchingRun
+                            ? "A run of this workflow is going right now. Deleting it stops every run of it still going — the steps each one finished stay in the run history — and stops it running on its schedule. This can't be undone."
+                            : "This removes the workflow, stops it running on its schedule, and stops any run of it still going that hasn't shown up here yet. Past runs stay in the run history. This can't be undone."}
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
@@ -2882,6 +3162,47 @@ export function WorkflowsView({
         </div>
       )}
 
+      {/* What the copilot corrected while drafting the workflow now on screen.
+          The one-box New-workflow dialog saves and closes in one gesture, so
+          the canvas is the first surface these can be read on — and they are
+          the answer to "why does this graph not say quite what I asked for?".
+          Not destructive: nothing is wrong, something was decided for you. */}
+      {/* Keyed on BOTH axes at render time, not only swept by the effect below.
+          The sweep runs after paint, so between a company or selection change
+          and that effect there is one committed frame in which these notes are
+          on screen over a workflow they are not about. The guard was removed on
+          the reasoning that mutation testing could not kill it — but `act()`
+          flushes effects synchronously, so the test harness cannot produce the
+          frame the guard exists for, which is a statement about the harness and
+          not about the render. */}
+      {detailOpen &&
+        createdNotes &&
+        createdNotes.workflowId === selectedId &&
+        createdNotes.company === company && (
+        <div className="px-4 pt-3">
+          <Alert data-testid="workflow-created-notes">
+            <AlertDescription className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p>The copilot made a few calls of its own while drafting this:</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {createdNotes.notes.map((note, i) => (
+                    <li key={i}>{note}</li>
+                  ))}
+                </ul>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setCreatedNotes(null)}
+                data-testid="workflow-created-notes-dismiss"
+              >
+                Got it
+              </Button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       {/* Issue #528 / #514: the host refused the run for a reason the operator
           can clear from Settings. Persistent (not a toast) and mirroring the
           conflict banner's layout, with the fix one click away. Keyed on the
@@ -2895,9 +3216,16 @@ export function WorkflowsView({
                   ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Inference, then run again."
                   : runRefusal.message}
               </span>
+              {/* Inference, not the accounts page. The sentence above says "Set
+                  a provider under Settings → Inference" and the button says
+                  "Set up inference", but the href was `#/settings/oauth` — so
+                  following it landed the operator on the third-party accounts
+                  page, which cannot configure a model. Found while moving that
+                  page to `#/connections/apps`; the typed helper is what stops
+                  it recurring. */}
               {runRefusal.code === "inference_required" && (
                 <a
-                  href="#/settings/oauth"
+                  href={settingsHref("inference")}
                   className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                   data-testid="workflow-run-inference-cta"
                 >
@@ -2958,6 +3286,16 @@ export function WorkflowsView({
               </Button>
             </AlertDescription>
           </Alert>
+        </div>
+      )}
+
+      {/* Issue #1845: the week-1 "save your first workflow" nudge. Index only
+          (not the canvas detail) — it points at the same CTA the empty state
+          offers, which only exists there, and a nudge to create a workflow
+          while one is already open on screen would be an odd thing to say. */}
+      {nudge && !detailOpen && (
+        <div className="px-4 pt-3">
+          <Week1NudgeBanner onCreate={() => setCreateOpen(true)} onDismiss={clearNudge} />
         </div>
       )}
 

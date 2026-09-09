@@ -1,17 +1,21 @@
-import { X } from "lucide-react";
+import { TriangleAlert, X } from "lucide-react";
 
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import type { MessageIntent } from "@/api/tasks";
-import type { AttachmentDto, CognitionState } from "@/api/types";
+import type { AttachmentDto, CognitionState, TurnStep } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
+import { cn } from "@/lib/utils";
 import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
+import { FailedSendNotice } from "./MessageRow";
 import { MessageAttachments } from "./MessageAttachments";
+import { StepTimeline } from "./StepTimeline";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
+import { WorkingIndicator } from "./WorkingIndicator";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
 import { type Mention, type Mentionable } from "./mentions";
 
@@ -26,6 +30,36 @@ interface Props {
   /** The message the thread hangs off. */
   parent: ChatMessage;
   replies: ChatMessage[];
+  /**
+   * The subset of `replies` already laid out inline in the channel, from
+   * {@link inlineReplyIds} — excluded from the count above the list, never
+   * from the list itself.
+   *
+   * The two are different questions and were being answered by one number.
+   * The channel's chip counts what is left to open (`buildTimeline` filters
+   * the promoted reply out of `replies`, deliberately: "a reader seeing the
+   * answer must not be told there is one more thing to open"), while this
+   * panel counted every descendant `repliesInThread` walked to. A capped turn
+   * emits two replies — the agent's write-up and the host's pause notice — so
+   * the chip said "1 reply", the header said "2 replies", and the same thread
+   * reported two sizes on screen at once.
+   *
+   * Counting the same set the chip counts settles that. The promoted reply
+   * still *renders* here, because the notice under it opens "The reply above
+   * is a pause" — drop the reply above and that sentence points at nothing.
+   * Shown but not counted is the honest reading: it is context the reader has
+   * already seen in the channel, not a further thing to open.
+   */
+  inlineReplyIds?: ReadonlySet<string>;
+  /**
+   * Live rows per query, keyed by the asking message's id.
+   *
+   * The panel needs its own copy because `buildTimeline` keeps every parented
+   * line out of the channel timeline: a query typed into an open thread renders
+   * here or nowhere. Passing this only to `MessageTimeline` left such a turn
+   * with no render path at all (Codex on #2069).
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
   sending: boolean;
   /**
    * Everything an `@` can name here (issue #1645). Drawn from the parent
@@ -39,6 +73,58 @@ interface Props {
    * composer's outside-channel warning. Absent when membership is unknown.
    */
   channelMemberIds?: string[];
+  /**
+   * Whether the channel this thread belongs to is read-only (issue #1757's
+   * Operator channel, `Boolean(channel?.system)` in `ChatView`). The main
+   * composer is not rendered on such a channel, but a thread has its own
+   * composer — so without this a durable Operator report could still be
+   * opened as a thread and replied to there, only for the server's read-only
+   * guard to reject it after the text was written. Absent means "no such
+   * channel is open", the same as the main composer's default.
+   *
+   * The panel answers it the way the channel does: **no composer at all**,
+   * and a notice in its place saying why. See the render site.
+   */
+  readOnly?: boolean;
+  /**
+   * Whether this thread hangs off a settled `in_review` dispatch card's review
+   * surface — its settle pill or the relay bubble that followed it. When set, a
+   * reply here is review feedback that re-runs the card, so the composer says
+   * so instead of reading like an ordinary reply.
+   */
+  reviewing?: boolean;
+  /**
+   * The `reviewing` card's id, so the panel can offer Approve beside its own
+   * notice (CodeRabbit #3905116857) — a card settled inside an already-open
+   * thread folds its settle pill into a plain reply line with no room for
+   * `MessageRow`'s Approve button, so without this the ONLY way to approve
+   * such a card was to close the thread and find the pill in the channel.
+   * Absent exactly when `reviewing` is, since the anchor is what makes it so.
+   */
+  reviewTaskId?: string;
+  /** Approves or revises {@link reviewTaskId}. Mirrors `MessageRow`'s prop of the same name. */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Whether {@link reviewTaskId}'s verdict is already in flight. */
+  reviewInFlight?: boolean;
+  /**
+   * Every OTHER in-review card this thread anchors to, besides
+   * {@link reviewTaskId} — `reviewAnchorsForThread`'s entries after its
+   * newest (CodeRabbit review on #1981). A card dispatched into an
+   * already-open thread before an earlier one settles leaves both live at
+   * once, and the newest already owns the notice + Approve above the
+   * composer; without a control of its own, the older card was only
+   * reachable by first settling the newer one. Each entry here gets its own
+   * notice row with its own Approve button instead.
+   */
+  additionalReviewAnchors?: { taskId: string; anchorId: string }[];
+  /**
+   * Every task id currently mid-verdict — `ChatView`'s own
+   * `reviewingCardIds`. {@link reviewInFlight} already covers
+   * {@link reviewTaskId}; this is the same signal for each entry in
+   * {@link additionalReviewAnchors}, which has no scalar prop of its own to
+   * carry it.
+   */
+  reviewingTaskId?: ReadonlySet<string>;
   /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
@@ -80,6 +166,16 @@ interface Props {
    * this component filtered by it or rendered a line for it.
    */
   typingNames?: string[];
+  /**
+   * A turn open in **this thread**, when one is (issue #1934's other half).
+   *
+   * The panel used to carry no live-turn state at all, and the channel behind
+   * it blanked its own the moment a thread opened — so a turn running in the
+   * thread you were reading was visible nowhere. It could only be wired once
+   * the shell keyed its open turns per thread rather than per channel; before
+   * that there was no way to ask "is *this* thread working".
+   */
+  openTurn?: { queued: boolean };
   /** This console is typing here. Distinct from the main composer's callback
    * so the ping this thread sends carries the thread's own `parentId`. */
   onTyping?: () => void;
@@ -107,6 +203,14 @@ interface Props {
   onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
   redeemingBudgetPauseAgent?: string | null;
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
+  /**
+   * Retries a reply that failed to send from *this thread's* composer
+   * (B-099). `MessageRow` gets the same prop of the same name; without it a
+   * threaded reply's `sendFailed` field had nowhere to go, because `Line` is
+   * its own renderer and never received it — a failed reply read as
+   * delivered, with no way to send it again (Codex review, PR #2052).
+   */
+  onRetrySend?: (messageId: string) => void;
 }
 
 /**
@@ -121,20 +225,37 @@ export function ThreadPanel({
   members,
   parent,
   replies,
+  inlineReplyIds,
+  liveStepsByMessage,
   sending,
   mentionables,
   channelMemberIds,
+  readOnly,
   youAvatar,
   resolveAttachmentUrl,
   onSend,
+  reviewing,
+  reviewTaskId,
+  onReviewCard,
+  reviewInFlight,
+  additionalReviewAnchors,
+  reviewingTaskId,
   onClose,
   typingNames = [],
+  openTurn,
   onTyping,
   cognition,
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
+  onRetrySend,
 }: Props) {
+  // Absent `inlineReplyIds` counts everything, which is what every caller did
+  // before the prop existed: a panel that cannot know what the channel
+  // promoted must not silently under-count.
+  const countedReplies = inlineReplyIds
+    ? replies.reduce((n, r) => (inlineReplyIds.has(r.id) ? n : n + 1), 0)
+    : replies.length;
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
@@ -152,16 +273,18 @@ export function ThreadPanel({
           channel={channel}
           members={members}
           message={parent}
+          liveSteps={liveStepsByMessage?.[parent.id]}
           youAvatar={youAvatar}
           resolveAttachmentUrl={resolveAttachmentUrl}
           cognition={cognition}
           onRedeemBudgetPause={onRedeemBudgetPause}
           redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
           latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+          onRetrySend={onRetrySend}
         />
         <div className="flex items-center gap-2 px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">
-            {replies.length} {replies.length === 1 ? "reply" : "replies"}
+            {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
           </span>
           <span className="h-px flex-1 bg-border" aria-hidden />
         </div>
@@ -171,26 +294,104 @@ export function ThreadPanel({
             channel={channel}
             members={members}
             message={r}
+            liveSteps={liveStepsByMessage?.[r.id]}
             youAvatar={youAvatar}
             resolveAttachmentUrl={resolveAttachmentUrl}
             cognition={cognition}
             onRedeemBudgetPause={onRedeemBudgetPause}
             redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+            onRetrySend={onRetrySend}
             latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
           />
         ))}
       </div>
 
-      <TypingLine names={typingNames} />
-      <MessageComposer
-        compact
-        placeholder="Reply…"
-        disabled={sending}
-        mentionables={mentionables}
-        channelMemberIds={channelMemberIds}
-        onSend={onSend}
-        onTyping={onTyping}
-      />
+      {/* A read-only thread gets the notice and no composer, the way its
+          channel does. The panel used to render a *disabled* composer with the
+          placeholder "This channel is read-only" — but a disabled reply box is
+          still a claim that replying is a thing you do here, and it was the
+          only thing this panel said on the subject. The explanation is what
+          should occupy the space; the affordance should not be there at all.
+
+          `noopSend` went with it: with no composer there is nothing left to
+          wire a no-op to. The belt that mattered is the server's read-only
+          guard (issue #1757), which is untouched, plus `ChatView`'s own
+          `if (readOnly) return;` before it calls `client.chat`. */}
+      {readOnly ? (
+        <p
+          role="status"
+          data-testid="thread-read-only-notice"
+          className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+        >
+          <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0">
+            The <span className="font-medium text-foreground">Operator</span> channel is a
+            read-only feed of workflow reports and notifications. There is nothing to reply to
+            here.
+          </span>
+        </p>
+      ) : (
+        <>
+          {openTurn && (
+            <div className="px-4 py-2">
+              <WorkingIndicator
+                srLabel={openTurn.queued ? "Queued…" : "Replying…"}
+                queued={openTurn.queued}
+              />
+            </div>
+          )}
+          <TypingLine names={typingNames} />
+          {reviewing && (
+            <div className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5">
+              <p className="text-xs text-muted-foreground">
+                This card is ready for review. A reply sends it back for another pass
+                with your notes.
+              </p>
+              {reviewTaskId !== undefined && onReviewCard !== undefined && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-xs"
+                  disabled={reviewInFlight}
+                  onClick={() => onReviewCard(reviewTaskId, "approve")}
+                >
+                  {reviewInFlight ? "Approving…" : "Approve"}
+                </Button>
+              )}
+            </div>
+          )}
+          {additionalReviewAnchors?.map((anchor) => (
+            <div
+              key={anchor.taskId}
+              className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5"
+            >
+              <p className="text-xs text-muted-foreground">
+                Another card in this thread is also ready for review.
+              </p>
+              {onReviewCard !== undefined && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-xs"
+                  disabled={reviewingTaskId?.has(anchor.taskId) ?? false}
+                  onClick={() => onReviewCard(anchor.taskId, "approve")}
+                >
+                  {reviewingTaskId?.has(anchor.taskId) ? "Approving…" : "Approve"}
+                </Button>
+              )}
+            </div>
+          ))}
+          <MessageComposer
+            compact
+            placeholder={reviewing ? "Send for another pass…" : "Reply…"}
+            disabled={sending}
+            mentionables={mentionables}
+            channelMemberIds={channelMemberIds}
+            onSend={onSend}
+            onTyping={onTyping}
+          />
+        </>
+      )}
     </aside>
   );
 }
@@ -199,22 +400,27 @@ function Line({
   channel,
   members,
   message,
+  liveSteps,
   youAvatar,
   resolveAttachmentUrl,
   cognition,
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
+  onRetrySend,
 }: {
   channel: Channel;
   members: TeamMember[];
   message: ChatMessage;
+  /** This message's in-flight turn rows, if one is running (see `MessageRow`). */
+  liveSteps?: readonly TurnStep[];
   youAvatar?: string;
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   cognition?: CognitionState | null;
   onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
   redeemingBudgetPauseAgent?: string | null;
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
+  onRetrySend?: (messageId: string) => void;
 }) {
   // Four arguments, not three: `youAvatar` is the last parameter, and omitting
   // it left your own line with no avatar to seed from but the name "You" —
@@ -270,13 +476,39 @@ function Line({
             {formatTime(message.at)}
           </span>
         </div>
-        <Markdown mentions={message.mentions} className="text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1">{message.text}</Markdown>
+        <Markdown
+          mentions={message.mentions}
+          className={cn(
+            "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
+            // Same rule and the same reason as `MessageRow` (B-099): a threaded
+            // reply that never left the browser must not read as delivered just
+            // because this panel draws replies with its own renderer.
+            message.sendFailed !== undefined && "text-muted-foreground",
+          )}
+        >
+          {message.text}
+        </Markdown>
+        {message.sendFailed !== undefined && (
+          <FailedSendNotice
+            reason={message.sendFailed || "something went wrong"}
+            onRetry={onRetrySend ? () => onRetrySend(message.id) : undefined}
+          />
+        )}
         {message.attachments && message.attachments.length > 0 && (
           <MessageAttachments
             attachments={message.attachments}
             resolveUrl={resolveAttachmentUrl}
           />
         )}
+        {/* The same two step blocks `MessageRow` renders, because a message
+            asked or answered inside a thread is not a lesser message.
+            `buildTimeline` keeps every parented line OUT of the channel
+            timeline, so this panel is the only surface a threaded query has —
+            without these, a turn started from an open thread showed no account
+            of itself anywhere, even after the panel was closed (Codex on
+            #2069). */}
+        {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
+        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
       </div>
     </div>
   );

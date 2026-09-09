@@ -95,7 +95,7 @@ const FILTERS: { key: string; label: string; statuses?: RunStatus[] }[] = [
   {
     key: "parked",
     label: "Waiting",
-    statuses: ["waiting_approval", "paused"],
+    statuses: ["waiting_approval", "paused", "blocked"],
   },
   { key: "failed", label: "Failed", statuses: ["failed", "cancelled"] },
 ];
@@ -129,6 +129,7 @@ function statusIcon(status: RunStatus) {
       return <Ban className="size-4" />;
     case "waiting_approval":
     case "paused":
+    case "blocked":
       return <Hourglass className="size-4" />;
     default:
       return <Loader2 className="size-4 animate-spin" />;
@@ -510,9 +511,14 @@ function RunTotals({ runs }: { runs: RunSummary[] }) {
       {/* Cost is settled-only, like the token figures it sits beside — a live
           attempt contributes nothing until it settles. Rendered as "—" rather
           than "$0.00" when the whole page is unsettled, because a zero here
-          would read as free work rather than as unbilled-so-far. */}
+          would read as free work rather than as unbilled-so-far.
+
+          The label names the page because this is not the teammate's spend:
+          it counts only attempts listed here, and only ones that ran as a
+          tracked attempt. The daily cap is enforced against a different, wider
+          total — see the Budget section. */}
       <Stat
-        label="Cost"
+        label="Cost on this page"
         value={
           totals.costUsd > 0
             ? (formatUsdCost({ amountUsd: totals.costUsd }, "total") ?? "—")

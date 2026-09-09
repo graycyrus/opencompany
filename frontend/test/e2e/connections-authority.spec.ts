@@ -4,8 +4,9 @@ import { expect, test } from "@playwright/test";
  * Issue #403 — the connection pages must not offer a member controls the host
  * refuses.
  *
- * Since the Connections split there are three of them: OAuth (`#/settings/oauth`),
- * MCP (`#/settings/mcp`) and Inference (`#/settings/inference`). Each carries
+ * Since the Connections split there are three of them, now across two sections:
+ * Apps (`#/connections/apps`), MCP (`#/connections/mcp`) and Inference
+ * (`#/settings/inference`). Each carries
  * its own read-only banner and its own credential fields, so each is driven
  * here — a split that left one page still inviting a member to paste a token
  * would be exactly the regression this spec is about.
@@ -95,7 +96,7 @@ test("a member sees what is connected but is offered nothing that changes it", a
     await signInAsMember(page.request, memberContext.request);
     const memberPage = await memberContext.newPage();
 
-    // ---- OAuth: the third-party accounts the company acts through ----------
+    // ---- Apps: the third-party accounts the company acts through -----------
     await openSettingsPage(memberPage, "oauth");
 
     // The page says why, in the operator's language.
@@ -117,7 +118,7 @@ test("a member sees what is connected but is offered nothing that changes it", a
 
     // But the read is intact — a member can still see what the company is
     // wired to, which is what explains why an agent can reach a provider.
-    await expect(memberPage.getByRole("heading", { name: "OAuth" })).toBeVisible();
+    await expect(memberPage.getByRole("heading", { name: "Apps" })).toBeVisible();
     const status = await memberPage.request.get("/api/v1/company/composio");
     expect(status.ok()).toBeTruthy();
     expect(await status.text()).not.toContain("token");
@@ -143,13 +144,25 @@ test("a member sees what is connected but is offered nothing that changes it", a
 
 test("an admin is still offered every control across the three pages", async ({ page }) => {
   await openSettingsPage(page, "oauth");
-  // The member's banner is absent, and the credential surface is present.
-  // The company-credential key is the OAuth page's write surface on every
-  // build: the Composio token card only renders when the host reports a
-  // composio credential the admin may override (default-feature hosts never
-  // do), so it is not the invariant to assert here.
+  // The member's banner is absent, and the control it was refused is present.
+  //
+  // This used to assert `#company-credential`, on the reasoning that the
+  // company-credential key is the Apps page's write surface on every build.
+  // `src/product-scope.ts` hides the OpenHuman-managed Composio route and
+  // `OAuthView` hides that card with it — deliberately, since a company
+  // reaching Composio through its own account has nothing to spend that key on.
+  // It is no longer a surface on any build, so it cannot be the invariant.
+  //
+  // What survives is the provider grid's own "Sign in", which is exactly the
+  // control the member case above asserts a member does NOT get. Presence, not
+  // enabledness: with no credential there is nothing to authorize against, so it
+  // renders disabled on a host with no Composio compiled in — which is this
+  // lane. Asserting it is enabled would pass only on the gated build and turn
+  // this into a second Composio test.
   await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
-  await expect(page.locator("#company-credential")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(1, {
+    timeout: 30_000,
+  });
 
   await openSettingsPage(page, "mcp");
   await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);

@@ -40,7 +40,7 @@ use crate::ports::run_output::{
 use crate::ports::sessions::{SessionKind, SessionRecord, SessionStore};
 use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
-use crate::ports::tasks::{TaskRecord, TaskStore};
+use crate::ports::tasks::{TaskOrigin, TaskRecord, TaskStore, TaskTitle};
 use crate::ports::types::{
     Attachment, ChunkAddr, ChunkMeta, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
     ContextChunk, EventSeq, LedgerEntry, SecretValue, TemplateProvenance,
@@ -245,6 +245,7 @@ fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
             description: Some("Customer mail triage.".to_string()),
             members: vec!["ceo".to_string(), "aria_stone".to_string()],
             responder: ResponderMode::default(),
+            hive: Default::default(),
         },
         OverlayDesk {
             id: "launch".to_string(),
@@ -252,6 +253,7 @@ fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
             description: None,
             members: vec!["ceo".to_string(), "aria_stone".to_string()],
             responder: ResponderMode::Auto,
+            hive: Default::default(),
         },
     ]
 }
@@ -348,6 +350,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         setup: Some(sample_setup_answers()),
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     }
 }
 
@@ -929,6 +932,31 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
         events.read_before(&id, None, 0).await.unwrap().is_empty(),
         "a zero limit never reads a page"
     );
+
+    // Issue #1890 G. `usize::MAX` is the port's "no limit" sentinel, and the
+    // one input a backend is most likely to get wrong while looking correct:
+    // an implementation that reserves against the limit allocates 2^64 slots,
+    // and one that reads from the end must not treat it as a stopping count.
+    // Every caller of the unbounded form is a full-history reader, so a page
+    // silently short here is a reader silently missing history.
+    let all = events.read_before(&id, None, usize::MAX).await.unwrap();
+    assert_eq!(
+        all.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![seqs[3], seqs[2], seqs[1], seqs[0]],
+        "an unlimited page is the whole log, newest-first"
+    );
+    let unbounded_before = events
+        .read_before(&id, Some(seqs[2]), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        unbounded_before
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![seqs[1], seqs[0]],
+        "…and still stops at the cursor"
+    );
 }
 
 /// Asserts the [`EventLog`] retention contract (issue #275): the default
@@ -952,6 +980,7 @@ pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
         run_id: format!("run-{n}"),
         scheduled: false,
         started_by: None,
+        resume_semantic: None,
     };
     let audit = |n: u64| CompanyEvent::LifecycleChanged {
         from: "running".to_string(),
@@ -1550,13 +1579,13 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
     let beta = CompanyId::new("beta");
     let task = |id: &str, col: &str, at: u64| TaskRecord {
         id: id.to_string(),
-        title: format!("title {id}"),
+        title: TaskTitle::authored(&format!("title {id}")),
         note: Some(format!("note {id}")),
         column: col.to_string(),
         priority: "medium".to_string(),
         assignee: "Strategy desk".to_string(),
         updated_at_millis: at,
-        origin_chat_id: None,
+        origin: None,
         parent_task_id: None,
         output: None,
         plan: None,
@@ -1565,6 +1594,8 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
+        bounced: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
@@ -1594,6 +1625,59 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
     assert!(tasks.delete(&alpha, "t1").await.unwrap());
     assert!(!tasks.delete(&alpha, "t1").await.unwrap());
     assert_eq!(tasks.list(&alpha).await.unwrap().len(), 1);
+
+    // Issue #1865: seed every recently-added optional field with a meaningful
+    // value. An empty/`None` fixture would let a backend silently drop the
+    // bounced marker, output lineage, or workflow proposal without failing.
+    let populated = TaskRecord {
+        note: Some("retry after the transport failed".to_string()),
+        origin: TaskOrigin::new(
+            Some("chat-1".to_string()),
+            Some(crate::ports::EventSeq::new(41)),
+        ),
+        parent_task_id: Some("parent-1".to_string()),
+        output: Some(crate::ports::tasks::TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "run-1".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 10,
+            artifacts: vec![crate::ports::tasks::TaskOutputArtifact {
+                artifact_id: "artifact-1".to_string(),
+                version: 3,
+                title: "Release notes".to_string(),
+                kind: crate::ports::ArtifactKind::Markdown,
+            }],
+            workflows: vec![crate::ports::tasks::TaskOutputWorkflow {
+                workflow_id: "release".to_string(),
+                run_id: Some("run-1".to_string()),
+                action: crate::ports::tasks::TaskOutputAction::Ran,
+            }],
+        }),
+        deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
+        workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
+            summary: "Publish the release notes".to_string(),
+            ops: serde_json::json!({"id": "release", "nodes": []}),
+            generated_at_millis: 11,
+            run_id: "run-1".to_string(),
+        }),
+        origin_run_id: Some("run-1".to_string()),
+        origin_workflow_id: Some("release".to_string()),
+        bounced: Some("the previous dispatch failed".to_string()),
+        ..task("t-populated", "todo", 12)
+    };
+    tasks.upsert(&alpha, &populated).await.unwrap();
+    let populated_back = tasks
+        .list(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == populated.id)
+        .expect("the populated card persists");
+    assert_eq!(
+        populated_back, populated,
+        "all populated fields must survive"
+    );
 
     // Issue #337: a card carrying a full plan round-trips **byte-identically**
     // on every backend.
@@ -3592,7 +3676,10 @@ pub async fn assert_context_search_ranking(context: Arc<dyn ContextStore>) {
     );
 
     // And the noise was not thrown away: it is still there, it just scores lower.
-    assert_eq!(context.list(&alpha, "").await.unwrap().len(), noise.len() + 1);
+    assert_eq!(
+        context.list(&alpha, "").await.unwrap().len(),
+        noise.len() + 1
+    );
 }
 
 /// Asserts the [`UsageMeter`] contract: isolation, record, and windowed query.
@@ -4330,6 +4417,153 @@ async fn drain(stream: crate::ports::workspace::BlobStream) -> Vec<u8> {
 /// this is a shared suite rather than a Mongo-only test: fs and sqlite run the
 /// identical assertion, so "the big file round-trips" is a property of the
 /// port, not a property of whichever backend somebody remembered to test.
+/// [`WorkspaceStore::read_capped`] answers the length of every text body, and
+/// hands back only the ones that fit.
+///
+/// The property that matters is what it does *not* return: a body over the cap
+/// comes back empty, with its true length beside it, so a caller that would
+/// discard it never receives it. Every backend has to be checked, because each
+/// one measures differently — a `stat`, a SQL `length()`, an aggregation stage —
+/// and only the contract is shared.
+pub async fn assert_workspace_read_capped(ws: Arc<dyn WorkspaceStore>) {
+    let company = CompanyId::new("capped-co");
+    let operator = WorkspaceOrigin::Operator;
+    let node = |id: &str, name: &str, kind: NodeKind, mime: Option<&str>| WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: operator.clone(),
+        updated_by: operator.clone(),
+        mime: mime.map(str::to_string),
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+
+    // Multi-byte on purpose: the cap is bytes, and a backend that measures
+    // characters would call this note shorter than it is.
+    let small = "héllo wörld";
+    let small_len = small.len() as u64;
+    assert!(small_len > small.chars().count() as u64);
+    ws.create(
+        &company,
+        &node("cap-small", "small.md", NodeKind::File, None),
+        Some(small),
+    )
+    .await
+    .expect("create the small note");
+
+    let big = "x".repeat(4096);
+    ws.create(
+        &company,
+        &node("cap-big", "big.md", NodeKind::File, None),
+        Some(&big),
+    )
+    .await
+    .expect("create the big note");
+
+    ws.create(
+        &company,
+        &node("cap-empty", "empty.md", NodeKind::File, None),
+        Some(""),
+    )
+    .await
+    .expect("create the empty note");
+
+    ws.create(
+        &company,
+        &node("cap-folder", "folder", NodeKind::Folder, None),
+        None,
+    )
+    .await
+    .expect("create the folder");
+
+    ws.create_binary(
+        &company,
+        &node(
+            "cap-blob",
+            "blob.bin",
+            NodeKind::File,
+            Some("application/octet-stream"),
+        ),
+        &[0xff, 0xfe, 0x00, 0x01],
+    )
+    .await
+    .expect("create the payload");
+
+    // Under the cap: the body comes back whole, measured in bytes.
+    let (_, body, len) = ws
+        .read_capped(&company, "cap-small", 1024)
+        .await
+        .expect("read the small note")
+        .expect("the small note exists");
+    assert_eq!(body, small, "a body under the cap is returned in full");
+    assert_eq!(len, small_len, "the length is bytes, not characters");
+
+    // Over the cap: the length is still exact, and the body is withheld.
+    let (_, body, len) = ws
+        .read_capped(&company, "cap-big", 1024)
+        .await
+        .expect("read the big note")
+        .expect("the big note exists");
+    assert_eq!(
+        len, 4096,
+        "the true length is reported even when the body is not"
+    );
+    assert!(
+        body.is_empty(),
+        "a body over the cap must not be transferred"
+    );
+
+    // Exactly at the cap is under it, not over it.
+    let (_, body, _) = ws
+        .read_capped(&company, "cap-big", 4096)
+        .await
+        .expect("read at the cap")
+        .expect("the big note exists");
+    assert_eq!(body.len(), 4096, "a body exactly at the cap still fits");
+
+    // An empty note and an over-cap note both answer an empty body; the length
+    // is what tells them apart.
+    let (_, body, len) = ws
+        .read_capped(&company, "cap-empty", 1024)
+        .await
+        .expect("read the empty note")
+        .expect("the empty note exists");
+    assert!(body.is_empty());
+    assert_eq!(len, 0);
+
+    // A folder and a payload answer the same empty body `read` gives them.
+    for id in ["cap-folder", "cap-blob"] {
+        let (_, body, len) = ws
+            .read_capped(&company, id, 1024)
+            .await
+            .expect("read")
+            .unwrap_or_else(|| panic!("{id} exists"));
+        assert!(body.is_empty(), "{id} must read as an empty body");
+        assert_eq!(len, 0, "{id} must report no text length");
+    }
+
+    assert!(
+        ws.read_capped(&company, "cap-missing", 1024)
+            .await
+            .expect("read a missing id")
+            .is_none(),
+        "an id naming nothing answers None, as `read` does"
+    );
+
+    // Company isolation, the same as every other read on this port.
+    assert!(
+        ws.read_capped(&CompanyId::new("capped-other"), "cap-small", 1024)
+            .await
+            .expect("read across companies")
+            .is_none(),
+        "another company's node must not be readable"
+    );
+}
+
 pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     let alpha = CompanyId::new("bin-alpha");
     let beta = CompanyId::new("bin-beta");
@@ -5372,6 +5606,120 @@ pub async fn assert_workspace_read_never_tears(ws: Arc<dyn WorkspaceStore>) {
         .expect("the settled read")
         .expect("the note is still there");
     assert!(final_body == whole_a || final_body == whole_b);
+}
+
+/// A stat-then-open [`WorkspaceStore::read_capped`] measures a file's length
+/// with one call and materializes its body with a second, so a concurrent
+/// replacement can land between them: the length describes one revision and
+/// the body handed back is another, larger, one — defeating the cap the
+/// method exists to enforce. The fix has to answer from a single snapshot.
+/// Every backend measures differently (a `stat`, a document field, ...), so
+/// only the contract is shared: whatever `read_capped` returns, the body
+/// never exceeds the cap, and when a body comes back, its length matches the
+/// one reported beside it.
+pub async fn assert_workspace_read_capped_race(ws: Arc<dyn WorkspaceStore>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// How many times the note is rewritten end to end.
+    const ROUNDS: usize = 60;
+    /// Concurrent readers. More than one, because a single reader spends much
+    /// of its time not inside the window.
+    const READERS: usize = 4;
+    const MAX_BYTES: u64 = 300_000;
+
+    let company = CompanyId::new("cap-race-co");
+    // One revision fits under the cap, the other is well past it, so a length
+    // measured against the wrong revision is caught either way: a stale
+    // "small" length paired with the big body still overruns the cap, and a
+    // stale "big" length paired with the small body still mismatches it.
+    let small = "y".repeat(1_000);
+    let big = "x".repeat(600_000);
+    assert!((small.len() as u64) <= MAX_BYTES, "small must fit the cap");
+    assert!((big.len() as u64) > MAX_BYTES, "big must exceed the cap");
+
+    let node = WorkspaceNode {
+        id: "race-note".to_string(),
+        name: "Race.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    ws.create(&company, &node, Some(&small))
+        .await
+        .expect("seed the note");
+
+    let done = Arc::new(AtomicBool::new(false));
+
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let ws = Arc::clone(&ws);
+            let company = company.clone();
+            let done = Arc::clone(&done);
+            tokio::spawn(async move {
+                let mut observed = 0usize;
+                while !done.load(Ordering::Relaxed) {
+                    let (_, body, len) =
+                        match ws.read_capped(&company, "race-note", MAX_BYTES).await {
+                            Ok(Some(hit)) => hit,
+                            Ok(None) => {
+                                return Err("the note vanished; nothing in this test deletes it"
+                                    .to_string());
+                            }
+                            Err(e) => {
+                                return Err(format!(
+                                    "a capped read concurrent with a write FAILED ({e})"
+                                ));
+                            }
+                        };
+                    if body.len() as u64 > MAX_BYTES {
+                        return Err(format!(
+                            "read_capped returned a {actual}-byte body against a {cap}-byte \
+                             cap (reported length {len}) — a concurrent write defeated the cap.",
+                            actual = body.len(),
+                            cap = MAX_BYTES,
+                        ));
+                    }
+                    if !body.is_empty() && body.len() as u64 != len {
+                        return Err(format!(
+                            "read_capped reported length {len} but returned a {actual}-byte \
+                             body — length and body must describe the same snapshot.",
+                            actual = body.len(),
+                        ));
+                    }
+                    observed += 1;
+                    // Yield so a current-thread runtime interleaves the writer.
+                    tokio::task::yield_now().await;
+                }
+                Ok(observed)
+            })
+        })
+        .collect();
+
+    for round in 0..ROUNDS {
+        let body = if round % 2 == 0 { &big } else { &small };
+        ws.write(&company, "race-note", body, WorkspaceOrigin::Operator)
+            .await
+            .expect("the writer itself must not fail");
+    }
+    done.store(true, Ordering::Relaxed);
+
+    let mut total = 0usize;
+    for reader in readers {
+        match reader.await.expect("a reader task panicked") {
+            Ok(observed) => total += observed,
+            Err(why) => panic!("{why}"),
+        }
+    }
+    assert!(
+        total > 0,
+        "no capped read ran while the note was being rewritten, so this case proved nothing"
+    );
 }
 
 /// A folder node for the binary suite.

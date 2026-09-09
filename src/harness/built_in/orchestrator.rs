@@ -9,10 +9,18 @@
 //! first agent when none is tagged (so a company without an orchestrator behaves
 //! exactly as before).
 //!
-//! It reaches eight tools, all wired only onto the orchestrator agent:
+//! It reaches sixteen tools, all wired only onto the orchestrator agent:
 //!
-//! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`] and
-//!   recent [`EventLog`] history.
+//! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`],
+//!   recent [`EventLog`] history, and (issue #1859) a `## Board` summary of
+//!   open task cards.
+//! * [`ListTasksTool`] / [`ReadTaskTool`] / [`ReadRunTool`] (issue #1859) —
+//!   the execution-state read trio: `list_tasks` answers "what are you
+//!   working on?" with real cards and statuses, `read_task` reads one card's
+//!   full attempt history and output, and `read_run` reads one recorded
+//!   run's outcome (an agent attempt, or a workflow run folded out of the
+//!   journal). Where the board tools below are write-only, this trio is how
+//!   an agent reads back what it — or the board — already did.
 //! * [`SpawnTaskTool`] / [`DelegateToDeskTool`] — delegation tools that push a
 //!   [`Delegation`] onto a shared [`DelegationQueue`]. They perform no work
 //!   themselves; the [`HarnessBrain`](crate::harness::HarnessBrain) drains the
@@ -59,6 +67,10 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use crate::ports::store::company_write_lock;
 
 use async_trait::async_trait;
+// Issue #1865: `.catch_unwind()` on the `run_workflow` tool's runner call —
+// see the call site in `RunWorkflowTool::execute` for why this path needs its
+// own catch rather than routing through `WorkflowSpawn`.
+use futures::future::FutureExt;
 use serde_json::{Value, json};
 
 use openhuman_core::openhuman as oh;
@@ -73,10 +85,18 @@ use crate::company::{
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
 use crate::harness::workflow_refs::WorkflowRefQueue;
+use crate::ports::artifacts::ArtifactStore;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
-use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
-use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent};
+use crate::ports::notifications::NotificationStore;
+use crate::ports::runs::{RunFilter, RunRecord, RunStore};
+use crate::ports::tasks::{
+    BOARD_COLUMNS, COLUMN_DONE, TaskOutput, TaskOutputAction, TaskOutputWorkflow, TaskRecord,
+    TaskStore, column_label, is_board_column,
+};
+use crate::ports::types::{
+    CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent, WorkflowNodeStatus,
+};
 use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
@@ -135,6 +155,7 @@ pub const QUERY_COMPANY_TOOL: &str = "query_company";
 // The `spawn_task` / `delegate_to_desk` names are the brain-agnostic canonical
 // constants (issue #176) — re-exported here so the harness path and the hosted
 // path share one definition and cannot drift.
+use crate::runtime::assignee;
 use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::delegation_tools;
 pub use crate::runtime::delegation_tools::{
@@ -153,6 +174,35 @@ pub const CREATE_WORKFLOW_TOOL: &str = "create_workflow";
 pub const ASSIGN_TASK_TOOL: &str = "assign_task";
 /// The `review_task` tool name (issue #186 — orchestrator lifecycle authority).
 pub const REVIEW_TASK_TOOL: &str = "review_task";
+/// The `list_tasks` tool name (issue #1859 — execution-state read surface).
+pub const LIST_TASKS_TOOL: &str = "list_tasks";
+/// The `read_task` tool name (issue #1859).
+pub const READ_TASK_TOOL: &str = "read_task";
+/// The `read_run` tool name (issue #1859).
+pub const READ_RUN_TOOL: &str = "read_run";
+/// How many cards [`ListTasksTool`] renders before truncating with an honest
+/// marker (issue #1859) — the same silent-cut discipline
+/// [`QueryCompanyTool`]'s `FACT_LIMIT` already applies: a company with more
+/// open cards than this must not read as though nothing is happening past
+/// card N.
+const LIST_TASKS_LIMIT: usize = 40;
+
+/// `read_task`'s cap on rendered attempt rows (issue #1859's follow-up
+/// review). A card retried many times — especially with failed attempts
+/// carrying a 200-char error preview — can otherwise fill the whole
+/// `TOOL_RESULT_BUDGET_BYTES` before the `## Output` section that answers
+/// what the task actually produced ever renders. Bounded to the newest rows,
+/// which are the ones a "why isn't this done" question is about, with an
+/// honest count of what was cut.
+const READ_TASK_ATTEMPTS_LIMIT: usize = 10;
+
+/// `read_task`'s cap on the rendered card title (issue #1859's follow-up
+/// review). The task-edit PATCH route persists an operator-pasted title
+/// verbatim and without a length limit; an unusually long one can otherwise
+/// consume `TOOL_RESULT_BUDGET_BYTES` before the `## Attempts` or `## Output`
+/// sections are reached, and `read_task` has no paging mechanism to recover
+/// them on a repeat call.
+const READ_TASK_TITLE_LIMIT: usize = 200;
 
 /// The id of the orchestrator agent for a roster: the first agent tagged
 /// `tier = "orchestrator"`, else the first roster agent, else `None` (empty
@@ -261,8 +311,10 @@ tool in order to influence it. Anything substantial handed to a desk is opened a
 automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
 hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
 and never prefer one over the other to get something tracked. Reach for `spawn_task` only for work \
-that belongs on the board but must NOT start in this turn: something for later, for somebody else, \
-or waiting on a person. \
+that belongs on the board but must NOT start in this turn: something for later, or for somebody \
+else. Work that is waiting on a PERSON is not a card — a card notifies nobody and resumes \
+nothing. When you cannot proceed without something only the operator can give you, call \
+`escalate_to_human` with the question; the work parks and their answer restarts it. \
 WHEN YOU CAN DO THE WORK IN THIS TURN, DO IT — do not park it as a card for later. Asked to \
 capture a repeatable process (\"create a workflow that…\"), author it NOW with `create_workflow` — \
 a trigger plus agent / tool / condition / output steps — and say it is ready; it is enabled \
@@ -1250,17 +1302,25 @@ pub struct QueryCompanyTool {
     /// agents + operator-added overlay teammates) and the manifest's enabled
     /// workflow ids. `None` on builds with no store wired.
     store: Option<Arc<dyn CompanyStore>>,
+    /// The company's task board, so the insight document's `## Board` section
+    /// (issue #1859) can summarize open work by column instead of the
+    /// orchestrator having to reach for the separate `list_tasks` tool just to
+    /// answer "is anything blocked?" as part of a broader question. `None`
+    /// renders the section as unavailable rather than failing the whole tool.
+    tasks: Option<Arc<dyn TaskStore>>,
 }
 
 impl QueryCompanyTool {
     /// Builds the tool over the company's read ports. Any handle may be `None`;
     /// the tool reports whatever surface is wired.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         company: CompanyId,
         facts: Option<Arc<dyn FactStore>>,
         events: Option<Arc<dyn EventLog>>,
         workflow_source_dir: Option<PathBuf>,
         store: Option<Arc<dyn CompanyStore>>,
+        tasks: Option<Arc<dyn TaskStore>>,
     ) -> Self {
         Self {
             company,
@@ -1268,6 +1328,7 @@ impl QueryCompanyTool {
             events,
             workflow_source_dir,
             store,
+            tasks,
         }
     }
 }
@@ -1279,7 +1340,7 @@ impl Tool for QueryCompanyTool {
     }
 
     fn description(&self) -> &str {
-        "Read the company's durable facts, recent activity, saved workflows, team roster, and desks to ground an answer in whole-company context — use this to answer \"what workflows do we have?\", \"who is on the team?\", or \"which desks can take work?\" instead of guessing, and to get the exact desk id `delegate_to_desk` needs. Optionally pass a `query` to filter facts by a case-insensitive substring."
+        "Read the company's durable facts, recent activity, saved workflows, team roster, desks, and a board summary to ground an answer in whole-company context — use this to answer \"what workflows do we have?\", \"who is on the team?\", \"which desks can take work?\", or \"what's in flight?\" instead of guessing, and to get the exact desk id `delegate_to_desk` needs. For a specific card's full attempt history and output, use `list_tasks` / `read_task` instead. Optionally pass a `query` to filter facts by a case-insensitive substring."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1582,6 +1643,76 @@ impl Tool for QueryCompanyTool {
             }
         }
 
+        // Board summary (issue #1859): open cards grouped by column, so a
+        // whole-company query surfaces execution state alongside facts and
+        // roster instead of forcing a second `list_tasks` call for "what's in
+        // flight?" as part of a broader question.
+        //
+        // **LAST section, deliberately.** Every section above it (Facts,
+        // Recent activity, Saved workflows, Team, Desks) is inside the outer
+        // tool-result byte budget the harness enforces
+        // (`TOOL_RESULT_BUDGET_BYTES`), and a company with an unusually large
+        // board must never be able to push that cut back far enough to drop
+        // the Desks list `delegate_to_desk` depends on. Unlike Facts (which
+        // has `query` to narrow with) this section has no narrowing argument
+        // of its own — `list_tasks` is the fallback for a board too big to
+        // fit here, exactly as its own truncation marker below says.
+        let mut board_open_count = 0usize;
+        md.push_str("\n## Board\n");
+        match &self.tasks {
+            Some(tasks) => match tasks.list(&self.company).await {
+                Ok(cards) => {
+                    let total_open = cards.iter().filter(|c| c.column != COLUMN_DONE).count();
+                    if total_open == 0 {
+                        md.push_str("_No open cards._\n");
+                    } else {
+                        let mut shown = 0usize;
+                        for column in BOARD_COLUMNS {
+                            if column == COLUMN_DONE {
+                                continue;
+                            }
+                            let in_column: Vec<&TaskRecord> =
+                                cards.iter().filter(|c| c.column == column).collect();
+                            if in_column.is_empty() {
+                                continue;
+                            }
+                            let mut titles: Vec<&str> = Vec::new();
+                            for c in &in_column {
+                                if shown >= LIST_TASKS_LIMIT {
+                                    break;
+                                }
+                                titles.push(c.title.as_str());
+                                shown += 1;
+                            }
+                            md.push_str(&format!(
+                                "- **{}** ({}): {}\n",
+                                column_label(column),
+                                in_column.len(),
+                                if titles.is_empty() {
+                                    "…".to_string()
+                                } else {
+                                    titles.join("; ")
+                                }
+                            ));
+                        }
+                        if shown < total_open {
+                            md.push_str(&format!(
+                                "\n[TRUNCATED — {} more open card(s) not shown here. Use \
+                                 `{LIST_TASKS_TOOL}` to page through the rest.]\n",
+                                total_open - shown
+                            ));
+                        }
+                    }
+                    board_open_count = total_open;
+                }
+                Err(err) => {
+                    tracing::debug!(company = %self.company, error = %err, "query_company: board read failed");
+                    md.push_str("_Board unavailable._\n");
+                }
+            },
+            None => md.push_str("_Board unavailable._\n"),
+        }
+
         Ok(ToolResult::success_with_markdown(
             json!({
                 "facts": facts.len(),
@@ -1590,7 +1721,654 @@ impl Tool for QueryCompanyTool {
                 "workflows": workflows.len(),
                 "team": roster.len(),
                 "desks": desks.len(),
+                "board_open": board_open_count,
             }),
+            md,
+        ))
+    }
+}
+
+/// Renders `attempt N status` for the newest row in `runs`, or `None` when
+/// `runs` is empty — a card nobody has attempted yet gets no attempt clause
+/// rather than a fabricated one (issue #1859, the same rule
+/// [`inject_handed_task_awareness`](crate::runtime::cycle::CycleRunner) follows
+/// for the chat-side briefing). `runs` is assumed newest-first, the
+/// [`RunStore::list_runs`] ordering, so the first row is the latest attempt.
+///
+/// Deliberately never reads [`RunRecord::usage`] — no run's cost reaches any
+/// of the three read tools this backs.
+fn latest_attempt_label(runs: &[RunRecord]) -> Option<String> {
+    let run = runs.first()?;
+    Some(format!("attempt {} {}", run.attempt, run.status.as_str()))
+}
+
+/// Renders the `## Output` section's fallback line for a card with no
+/// published artifact to show — either because no [`ArtifactStore`] is
+/// wired at all (`store_wired = false`) or because one is wired but has
+/// nothing for this task (`store_wired = true`, an empty list). Falls back to
+/// the card's own recorded output stamp ([`TaskRecord::output`]) so a card
+/// whose only trace is a `TaskOutput` (an operator reply, not a published
+/// file) is not reported identically to a card that produced nothing.
+fn output_stamp_markdown(output: Option<&TaskOutput>, store_wired: bool) -> String {
+    let banner = if store_wired {
+        "No artifacts published"
+    } else {
+        "No artifact store wired"
+    };
+    match output {
+        Some(output) => match output.source.run_id() {
+            Some(run_id) => {
+                let attempt = output
+                    .source
+                    .attempt()
+                    .map(|a| format!(" (attempt {a})"))
+                    .unwrap_or_default();
+                format!(
+                    "_{banner}; this card's last successful attempt was run `{run_id}`{attempt}. \
+                     Use `read_run` for that attempt's outcome._\n"
+                )
+            }
+            None => format!(
+                "_{banner}; this card's output came from an operator chat turn, not an \
+                 attempt._\n"
+            ),
+        },
+        None if store_wired => "_Nothing published yet._\n".to_string(),
+        None => "_Nothing produced yet._\n".to_string(),
+    }
+}
+
+/// A read-only surface over the company's task board (issue #1859): every
+/// open card, grouped by column, with its assignee and latest attempt status
+/// — the surface an agent queries directly to answer "what are you working
+/// on?" or "what's in review?" truthfully, on the same terms
+/// [`OPEN_WORK_ANNOTATION`](crate::runtime::cycle::OPEN_WORK_ANNOTATION)
+/// already briefs into an addressed chat message, but reachable from any turn
+/// rather than only one already addressed to a desk with open work.
+///
+/// Fail-closed by construction: this tool reads only [`TaskStore`] and
+/// [`RunStore`], neither of which carries a run's USD cost, a raw tool-call
+/// argument, or a step's full trace — so none of those can leak here no
+/// matter what the rendering does with them.
+pub struct ListTasksTool {
+    company: CompanyId,
+    tasks: Option<Arc<dyn TaskStore>>,
+    runs: Option<Arc<dyn RunStore>>,
+}
+
+impl ListTasksTool {
+    /// Builds the tool over the company's board ports. Either may be `None`;
+    /// the tool reports the surface unavailable rather than failing.
+    pub fn new(
+        company: CompanyId,
+        tasks: Option<Arc<dyn TaskStore>>,
+        runs: Option<Arc<dyn RunStore>>,
+    ) -> Self {
+        Self {
+            company,
+            tasks,
+            runs,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ListTasksTool {
+    fn name(&self) -> &str {
+        LIST_TASKS_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "List task cards on the company board, grouped by column, with each card's id, assignee, and latest attempt status — use this to answer \"what are you working on?\", \"what's in review?\", or \"is anything stuck?\" instead of guessing. Excludes Done cards unless `column` explicitly asks for them. Pass a card's id to `read_task` for its full history and output."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "column": {
+                    "type": "string",
+                    "description": "Only cards in this column (todo, planning, in_progress, paused, in_review, done). Omit to see every not-done column."
+                },
+                "assignee": {
+                    "type": "string",
+                    "description": "Only cards assigned to this desk/teammate id (case-insensitive exact match)."
+                }
+            },
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn supports_markdown(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let Some(tasks) = &self.tasks else {
+            return Ok(ToolResult::error(
+                "No task board wired to this company build; `list_tasks` cannot answer.",
+            ));
+        };
+        let column_filter = args
+            .get("column")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(col) = column_filter
+            && !is_board_column(col)
+        {
+            return Ok(ToolResult::error(format!(
+                "Unknown column `{col}`. Valid columns: {}.",
+                BOARD_COLUMNS.join(", ")
+            )));
+        }
+        let assignee_filter = args
+            .get("assignee")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let mut cards = match tasks.list(&self.company).await {
+            Ok(cards) => cards,
+            Err(err) => {
+                tracing::debug!(company = %self.company, error = %err, "list_tasks: board read failed");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read the task board: {err}"
+                )));
+            }
+        };
+        cards.retain(|c| match column_filter {
+            Some(col) => c.column == col,
+            None => c.column != COLUMN_DONE,
+        });
+        if let Some(assignee) = assignee_filter {
+            cards.retain(|c| c.assignee.eq_ignore_ascii_case(assignee));
+        }
+        let total = cards.len();
+
+        let mut md = String::from("# Task board\n");
+        if total == 0 {
+            md.push_str("_No matching cards._\n");
+        } else {
+            let mut shown = 0usize;
+            for column in BOARD_COLUMNS {
+                let in_column: Vec<&TaskRecord> =
+                    cards.iter().filter(|c| c.column == column).collect();
+                if in_column.is_empty() {
+                    continue;
+                }
+                md.push_str(&format!("\n## {}\n", column_label(column)));
+                for c in in_column {
+                    if shown >= LIST_TASKS_LIMIT {
+                        continue;
+                    }
+                    let attempt = match &self.runs {
+                        Some(runs) => match runs
+                            .list_runs(
+                                &self.company,
+                                &RunFilter::for_task(c.id.as_str()).with_limit(1),
+                            )
+                            .await
+                        {
+                            Ok(rows) => latest_attempt_label(&rows),
+                            Err(_) => Some("attempt status unavailable".to_string()),
+                        },
+                        None => None,
+                    };
+                    md.push_str(&format!(
+                        "- `{}` {} — {}{}\n",
+                        c.id,
+                        c.title,
+                        c.assignee,
+                        attempt.map(|a| format!(" — {a}")).unwrap_or_default()
+                    ));
+                    shown += 1;
+                }
+            }
+            if shown < total {
+                md.push_str(&format!(
+                    "\n[TRUNCATED — {} more card(s) not shown. Narrow with `column` or \
+                     `assignee` before concluding a card is absent.]\n",
+                    total - shown
+                ));
+            }
+        }
+
+        Ok(ToolResult::success_with_markdown(
+            json!({ "shown": total.min(LIST_TASKS_LIMIT), "total": total }),
+            md,
+        ))
+    }
+}
+
+/// A read-only surface over one task card's full record (issue #1859): its
+/// header, every attempt's status, and what it produced — so an agent can
+/// discuss a finished task, explain why one is stuck, or answer a follow-up
+/// about its output instead of inventing an answer.
+///
+/// Deliberately **not** built over [`crate::server::ops::ScopedCompany`] or
+/// the console's `assemble_detail` / task-export renderer (`task_export.rs`):
+/// those exist to serve an operator's browser through a redaction pipeline
+/// shaped for that surface, and fabricating a `ScopedCompany` outside a
+/// request would be reaching for state this tool has no business holding.
+/// This tool is fail-closed on its own, narrower terms instead — it holds
+/// only [`TaskStore`], [`RunStore`] and [`ArtifactStore`], none of which
+/// carries a run's USD cost, a raw tool-call argument, or a step's full
+/// trace, so none of those can leak here no matter what the rendering does.
+pub struct ReadTaskTool {
+    company: CompanyId,
+    tasks: Option<Arc<dyn TaskStore>>,
+    runs: Option<Arc<dyn RunStore>>,
+    artifacts: Option<Arc<dyn ArtifactStore>>,
+}
+
+impl ReadTaskTool {
+    /// Builds the tool over the company's board ports. Any may be `None`; the
+    /// tool reports whatever surface is wired and falls back where it can
+    /// (see the `## Output` section in [`Self::execute`]).
+    pub fn new(
+        company: CompanyId,
+        tasks: Option<Arc<dyn TaskStore>>,
+        runs: Option<Arc<dyn RunStore>>,
+        artifacts: Option<Arc<dyn ArtifactStore>>,
+    ) -> Self {
+        Self {
+            company,
+            tasks,
+            runs,
+            artifacts,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadTaskTool {
+    fn name(&self) -> &str {
+        READ_TASK_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Read one task card in full: its column, assignee, note, its 10 most recent attempts' status, and what it produced — use this to discuss a finished task, explain why one is stuck, or answer a follow-up about its output. Pass the card's `task_id`, from `list_tasks` or a board reference."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The card's id, from `list_tasks` or a board reference."
+                }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn supports_markdown(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let Some(tasks) = &self.tasks else {
+            return Ok(ToolResult::error(
+                "No task board wired to this company build; `read_task` cannot answer.",
+            ));
+        };
+        let task_id = args
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(task_id) = task_id else {
+            return Ok(ToolResult::error(
+                "`task_id` is required: pass the card's id from `list_tasks`.",
+            ));
+        };
+
+        let cards = match tasks.list(&self.company).await {
+            Ok(cards) => cards,
+            Err(err) => {
+                tracing::debug!(company = %self.company, error = %err, "read_task: board read failed");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read the task board: {err}"
+                )));
+            }
+        };
+        let Some(card) = cards.into_iter().find(|c| c.id == task_id) else {
+            return Ok(ToolResult::error(format!(
+                "No card `{task_id}` on this board. Call `{LIST_TASKS_TOOL}` for the current ids."
+            )));
+        };
+
+        let mut md = format!("# {}\n", truncate_chars(&card.title, READ_TASK_TITLE_LIMIT));
+        md.push_str(&format!(
+            "- **Column**: {}\n- **Priority**: {}\n- **Assignee**: {}\n",
+            column_label(&card.column),
+            card.priority,
+            card.assignee
+        ));
+        if let Some(note) = card.note.as_deref().map(str::trim)
+            && !note.is_empty()
+        {
+            md.push_str(&format!("- **Note**: {}\n", truncate_chars(note, 400)));
+        }
+
+        md.push_str("\n## Attempts\n");
+        let mut attempt_count = 0usize;
+        match &self.runs {
+            Some(runs) => match runs
+                .list_runs(&self.company, &RunFilter::for_task(task_id))
+                .await
+            {
+                Ok(mut attempts) => {
+                    attempt_count = attempts.len();
+                    if attempts.is_empty() {
+                        md.push_str("_No attempts yet._\n");
+                    } else {
+                        // `list_runs` is newest-first — keep the newest rows
+                        // (the ones a "why isn't this done" question is
+                        // about) before reversing the kept window to render
+                        // the timeline oldest-first.
+                        let omitted = attempts.len().saturating_sub(READ_TASK_ATTEMPTS_LIMIT);
+                        attempts.truncate(READ_TASK_ATTEMPTS_LIMIT);
+                        attempts.reverse();
+                        if omitted > 0 {
+                            md.push_str(&format!(
+                                "_{omitted} earlier attempt(s) omitted — showing the \
+                                 {READ_TASK_ATTEMPTS_LIMIT} most recent._\n"
+                            ));
+                        }
+                        for run in &attempts {
+                            md.push_str(&format!(
+                                "- attempt {} — {} (run `{}`)",
+                                run.attempt,
+                                run.status.as_str(),
+                                run.id
+                            ));
+                            if let Some(err) = &run.error {
+                                md.push_str(&format!(" — {}", truncate_chars(err, 200)));
+                            }
+                            md.push('\n');
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(company = %self.company, task_id, error = %err, "read_task: run-history read failed");
+                    md.push_str(
+                        "_Run history unavailable — the run store couldn't be read. This is \
+                         NOT the same as no attempts._\n",
+                    );
+                }
+            },
+            None => md.push_str("_Run history unavailable._\n"),
+        }
+
+        md.push_str("\n## Output\n");
+        match &self.artifacts {
+            Some(artifacts) => match artifacts.list(&self.company, Some(task_id)).await {
+                Ok(published) => {
+                    if published.is_empty() {
+                        md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
+                    } else {
+                        let pinned = card.output.as_ref().map(|o| o.artifacts.as_slice());
+                        let has_stamp = pinned.is_some();
+                        let mut rendered = 0usize;
+                        for artifact in &published {
+                            let pinned_entry = pinned.and_then(|entries| {
+                                entries.iter().find(|a| a.artifact_id == artifact.id)
+                            });
+                            if has_stamp && pinned_entry.is_none() {
+                                continue;
+                            }
+                            rendered += 1;
+                            let preview = pinned_entry
+                                .and_then(|entry| artifact.version(entry.version))
+                                .or_else(|| artifact.latest())
+                                .map(|v| truncate_chars(v.body.trim(), 400))
+                                .unwrap_or_default();
+                            md.push_str(&format!(
+                                "- **{}** ({}): {}\n",
+                                artifact.title,
+                                artifact.kind.as_str(),
+                                preview
+                            ));
+                        }
+                        if has_stamp && rendered == 0 {
+                            md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(company = %self.company, task_id, error = %err, "read_task: artifact read failed");
+                    md.push_str(
+                        "_Output unavailable — the artifact store couldn't be read. This is \
+                         NOT the same as nothing published._\n",
+                    );
+                }
+            },
+            None => md.push_str(&output_stamp_markdown(card.output.as_ref(), false)),
+        }
+
+        if let Some(output) = &card.output
+            && !output.workflows.is_empty()
+        {
+            md.push_str("\n### Workflows\n");
+            for wf in &output.workflows {
+                let run_note = wf
+                    .run_id
+                    .as_deref()
+                    .map(|id| format!(" — run `{id}`"))
+                    .unwrap_or_default();
+                md.push_str(&format!(
+                    "- {} `{}`{run_note}\n",
+                    wf.action.as_str(),
+                    wf.workflow_id
+                ));
+            }
+        }
+
+        Ok(ToolResult::success_with_markdown(
+            json!({
+                "task_id": card.id,
+                "column": card.column,
+                "attempts": attempt_count,
+            }),
+            md,
+        ))
+    }
+}
+
+/// A read-only surface over one recorded run (issue #1859): an agent-attempt
+/// row from [`RunStore`] when one exists, else a workflow run folded straight
+/// out of the journal — so "why isn't X done?" or "what happened on run X?"
+/// can be answered from the same two sources the console's Attempts list and
+/// workflow history panel already read, instead of guessing.
+///
+/// **Summarizes, never dumps.** A run's [`RunStepRecord`](crate::ports::runs::RunStepRecord)
+/// trace and a workflow node's raw output are deliberately never read here —
+/// this tool answers with the run's status/verdict and, for a workflow run,
+/// each node's terminal status and the pending-approval/blocked counts. No
+/// step trace, no tool-call argument, no cost reaches the rendering, because
+/// none of those are read off the ports this tool holds in the first place.
+pub struct ReadRunTool {
+    company: CompanyId,
+    runs: Option<Arc<dyn RunStore>>,
+    events: Option<Arc<dyn EventLog>>,
+}
+
+impl ReadRunTool {
+    /// Builds the tool over the company's run ports. Either may be `None`;
+    /// the tool reports whichever half of its dual-source lookup is missing
+    /// rather than failing outright, as long as the other half can answer.
+    pub fn new(
+        company: CompanyId,
+        runs: Option<Arc<dyn RunStore>>,
+        events: Option<Arc<dyn EventLog>>,
+    ) -> Self {
+        Self {
+            company,
+            runs,
+            events,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadRunTool {
+    fn name(&self) -> &str {
+        READ_RUN_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Read one run's status and outcome — an agent-attempt run id (from `list_tasks` / `read_task`) or a workflow run id (from a `run_workflow` summary) — use this to explain why a run is stuck, failed, or blocked. Summarizes the verdict and node/approval state; does not dump the full step trace."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run id — an agent-attempt id or a workflow run id."
+                }
+            },
+            "required": ["run_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn supports_markdown(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let run_id = args
+            .get("run_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(run_id) = run_id else {
+            return Ok(ToolResult::error(
+                "`run_id` is required: pass an agent-attempt id or a workflow run id.",
+            ));
+        };
+
+        // Agent-attempt path first — the common case (`list_tasks` /
+        // `read_task` both surface this id).
+        if let Some(runs) = &self.runs {
+            match runs.get_run(&self.company, run_id).await {
+                Ok(Some(run)) => {
+                    let mut md = format!("# Attempt {} — {}\n", run.attempt, run.status.as_str());
+                    if let Some(task_id) = &run.task_id {
+                        md.push_str(&format!("- **Task**: `{task_id}`\n"));
+                    }
+                    md.push_str(&format!("- **Agent**: {}\n", run.agent_id));
+                    if let Some(err) = &run.error {
+                        md.push_str(&format!("- **Error**: {}\n", truncate_chars(err, 300)));
+                    }
+                    return Ok(ToolResult::success_with_markdown(
+                        json!({ "run_id": run.id, "kind": "attempt", "status": run.status.as_str() }),
+                        md,
+                    ));
+                }
+                // Not an attempt row — fall through to the workflow-run path.
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::debug!(company = %self.company, run_id, error = %err, "read_run: run-store read failed");
+                    return Ok(ToolResult::error(format!(
+                        "Couldn't read the run store: {err}"
+                    )));
+                }
+            }
+        }
+
+        // Workflow-run path: fold the journal, the same fold the console's
+        // run-history route reads (`fold_run_events`) — reading the whole
+        // company journal once, on the same terms `QueryCompanyTool` already
+        // does for its recent-activity section, rather than the paged,
+        // live-run-cross-checked walk `list_runs` does for an unbounded
+        // history page (this tool answers about ONE run, not a page of them).
+        let Some(events) = &self.events else {
+            return Ok(ToolResult::error(format!(
+                "No run `{run_id}` found, and no event log wired to check workflow runs."
+            )));
+        };
+        let rows = match events
+            .read_from(&self.company, EventSeq::new(0), usize::MAX)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::debug!(company = %self.company, run_id, error = %err, "read_run: event log read failed");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read the event journal: {err}"
+                )));
+            }
+        };
+        let (folded, _read_through) = crate::server::ops::workflows::fold_run_events(rows, None);
+        let Some(outcome) = folded
+            .into_iter()
+            .find(|o| o.run_id.as_deref() == Some(run_id))
+        else {
+            return Ok(ToolResult::error(format!(
+                "No run `{run_id}` found — not an agent attempt and not a workflow run in this \
+                 company's history."
+            )));
+        };
+
+        // `outcome.verdict` is only ever the fold's placeholder (`Running`,
+        // never resolved by `fold_run_events` itself — see
+        // `WorkflowRunOutcome::derive_verdict`'s doc comment) unless something
+        // calls `derive_verdict` after the fold, which the console's
+        // `list_runs` route does and this tool must too.
+        let verdict = outcome.derive_verdict();
+        let mut md = format!("# Workflow run — {}\n", verdict.as_str());
+        md.push_str(&format!("- **Workflow**: {}\n", outcome.workflow_id));
+        md.push_str(&format!(
+            "- **Status**: {}\n",
+            if outcome.running {
+                "still running"
+            } else {
+                "settled"
+            }
+        ));
+        if let Some(err) = &outcome.error {
+            md.push_str(&format!("- **Error**: {}\n", truncate_chars(err, 300)));
+        }
+        if !outcome.nodes.is_empty() {
+            md.push_str("\n## Nodes\n");
+            for node in &outcome.nodes {
+                md.push_str(&format!("- {} — {:?}\n", node.node_id, node.status));
+            }
+        }
+        if !outcome.pending_approvals.is_empty() {
+            md.push_str(&format!(
+                "\n{} pending approval(s).\n",
+                outcome.pending_approvals.len()
+            ));
+        }
+        if !outcome.blocked_nodes.is_empty() {
+            md.push_str(&format!(
+                "{} node(s) blocked on a person.\n",
+                outcome.blocked_nodes.len()
+            ));
+        }
+
+        Ok(ToolResult::success_with_markdown(
+            json!({ "run_id": run_id, "kind": "workflow", "verdict": verdict.as_str() }),
             md,
         ))
     }
@@ -1619,6 +2397,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn summarize_event(event: &CompanyEvent) -> String {
     match event {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
+        // Structural only, like every arm here: which desks, never the content.
+        CompanyEvent::ReferralEnqueued {
+            from_desk, to_desk, ..
+        } => format!("referral {from_desk} → {to_desk}"),
         // Issue #983. Structural only, like every arm here: the turn id, which
         // is a minted identifier, and nothing else. Neither the desk nor the
         // failure reason is named — the desk is operator-authored free text on
@@ -1879,12 +2661,22 @@ fn summarize_event(event: &CompanyEvent) -> String {
 /// [`Delegation::SpawnTask`]; the harness brain writes the card on drain.
 pub struct SpawnTaskTool {
     queue: DelegationQueue,
+    company: CompanyId,
+    /// The company store, read at call time so the roster an `assignee` is
+    /// grounded against is the **current** one — the same reasoning as
+    /// [`DelegateToDeskTool::store`].
+    store: Arc<dyn CompanyStore>,
 }
 
 impl SpawnTaskTool {
-    /// Builds the tool over the shared delegation queue.
-    pub fn new(queue: DelegationQueue) -> Self {
-        Self { queue }
+    /// Builds the tool over the shared delegation queue and the company store
+    /// it grounds an `assignee` against.
+    pub fn new(queue: DelegationQueue, company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
+        Self {
+            queue,
+            company,
+            store,
+        }
     }
 }
 
@@ -1927,12 +2719,55 @@ impl Tool for SpawnTaskTool {
             .filter(|a| !a.is_empty())
             .map(str::to_string);
 
+        // Ground the target before queuing anything, on the same terms
+        // `delegate_to_desk`/`delegate_to_teammate` already do (issue #272):
+        // a name that resolves to nobody is refused here, in the model's own
+        // turn, rather than surviving as a queued card the drain silently
+        // opens unowned with no signal anywhere that the assignee was bogus.
+        let owner = match assignee.as_deref() {
+            Some(name) => match self.store.load(&self.company).await {
+                Ok(Some(record)) => {
+                    let resolution = assignee::resolve(&record, name);
+                    if !resolution.names_something_real() {
+                        tracing::info!(
+                            company = %self.company,
+                            "[spawn_task] refused an assignee naming nobody on the roster"
+                        );
+                        return Ok(ToolResult::error(format!(
+                            "Could not open the card: {}",
+                            resolution.rejection().unwrap_or_else(|| format!(
+                                "\"{name}\" is not on this company's roster"
+                            ))
+                        )));
+                    }
+                    resolution.canonical().map(str::to_string)
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        "[spawn_task] could not ground assignee: this company's record is not \
+                         there"
+                    );
+                    Some(name.to_string())
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        error = %err,
+                        "[spawn_task] could not read the company record to ground the assignee"
+                    );
+                    Some(name.to_string())
+                }
+            },
+            None => None,
+        };
+
         let effect = format!("the card \"{title}\" was NOT opened");
         match self.queue.push_within_cap(
             Delegation::SpawnTask {
                 title: title.clone(),
                 note,
-                assignee,
+                assignee: owner,
             },
             MAX_DELEGATIONS_PER_TURN,
             NO_DEPTH_BOUND,
@@ -2767,7 +3602,11 @@ pub fn delegation_tools(
     store: Arc<dyn CompanyStore>,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(SpawnTaskTool::new(queue.clone())),
+        Box::new(SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+        )),
         Box::new(DelegateToDeskTool::new(
             queue.clone(),
             company.clone(),
@@ -2807,7 +3646,11 @@ pub fn member_delegation_tools(
     scope: MemberScope,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(SpawnTaskTool::new(queue.clone())),
+        Box::new(SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+        )),
         Box::new(DelegateToDeskTool::for_member(
             queue.clone(),
             company.clone(),
@@ -3097,6 +3940,20 @@ impl Tool for AddAgentTool {
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.company.to_string()))?;
 
+        let roster_size = record
+            .manifest
+            .own_agents()
+            .map(|agent| agent.id.as_str())
+            .chain(record.overlay_agents.iter().map(|agent| agent.id.as_str()))
+            .filter(|id| !record.is_retired(id))
+            .count();
+        if roster_size >= crate::company::setup::MAX_AGENTS {
+            return Ok(ToolResult::error(format!(
+                "The company roster has reached its limit of {} teammates, so \"{name}\" was not added.",
+                crate::company::setup::MAX_AGENTS
+            )));
+        }
+
         // The BYO real-money namespaces are not inherited by a minted teammate
         // (#788/#789). What an unstated grant inherits depends on the minter:
         // an empty minter line means the whole company allow-list (so an
@@ -3224,7 +4081,11 @@ impl Tool for AddAgentTool {
 /// the company source directory (`companies/<name>`) whose `workflows/` subtree
 /// holds the graphs; `workflow_runner` is the shared handle the runtime builder
 /// fills once the runner is built. `store` is the company store the `add_agent`
-/// tool writes through.
+/// tool writes through. `tasks` / `runs` / `artifacts` (issue #1859) back the
+/// `list_tasks`, `read_task` and `read_run` execution-state read trio, plus
+/// `query_company`'s `## Board` section — any of the three may be `None`, in
+/// which case the surface it backs answers that it is unavailable rather than
+/// failing the call.
 // One more dependency than clippy's threshold, and each is a distinct wired
 // port the orchestrator's tools need. Bundling them into a struct would only
 // relocate the surface — the same call is made from exactly one place
@@ -3234,6 +4095,11 @@ pub fn orchestrator_tools(
     company: CompanyId,
     facts: Option<Arc<dyn FactStore>>,
     events: Option<Arc<dyn EventLog>>,
+    // Issue #1859: the board + run-history read surface. See the doc comment
+    // above for why any of the three may be `None`.
+    tasks: Option<Arc<dyn TaskStore>>,
+    runs: Option<Arc<dyn RunStore>>,
+    artifacts: Option<Arc<dyn ArtifactStore>>,
     queue: &DelegationQueue,
     workflow_source_dir: Option<PathBuf>,
     workflow_runner: WorkflowRunnerHandle,
@@ -3248,6 +4114,10 @@ pub fn orchestrator_tools(
     minter: String,
     minter_tools: Option<Vec<String>>,
     minter_grants: Vec<String>,
+    // Issue #1865: where `run_workflow` files a `workflow_run_failed`
+    // notification on a run the agent itself started — see
+    // `RunWorkflowTool::notifications` for why this is optional.
+    notifications: Option<Arc<dyn NotificationStore>>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
         company.clone(),
@@ -3255,7 +4125,29 @@ pub fn orchestrator_tools(
         events.clone(),
         workflow_source_dir.clone(),
         Some(store.clone()),
+        tasks.clone(),
     ))];
+    // Issue #1859: the board/run-history read trio, grouped right after
+    // `query_company` — all four answer "what does the company know?" rather
+    // than acting on it. `list_tasks` and `read_task` share the board ports;
+    // `read_run` additionally needs the event log to fold a workflow run's
+    // outcome when the id names no agent-attempt row.
+    tools.push(Box::new(ListTasksTool::new(
+        company.clone(),
+        tasks.clone(),
+        runs.clone(),
+    )));
+    tools.push(Box::new(ReadTaskTool::new(
+        company.clone(),
+        tasks,
+        runs.clone(),
+        artifacts,
+    )));
+    tools.push(Box::new(ReadRunTool::new(
+        company.clone(),
+        runs,
+        events.clone(),
+    )));
     tools.extend(delegation_tools(queue, company.clone(), store.clone()));
     tools.push(Box::new(RunWorkflowTool::new(
         company.clone(),
@@ -3266,6 +4158,7 @@ pub fn orchestrator_tools(
         events.clone(),
         workflow_refs.clone(),
         run_outputs.clone(),
+        notifications,
     )));
     // `read_run_output` (issue #418) is the run tool's companion: it reads full
     // node output out of the same bounded cache the run tool populates, so a
@@ -3565,6 +4458,19 @@ pub struct RunWorkflowTool {
     /// so the read tool built in the same `build_agent` pass sees what this one
     /// stores. A cancelled or failed run stores nothing.
     run_outputs: RunOutputCache,
+    /// Issue #1865 (PR #1883 review comment 3877185396): where a failed run
+    /// files its `workflow_run_failed` notification, on the same terms as the
+    /// console run route, the cron scheduler, and the approval-resume path —
+    /// this tool is the one run-outcome chokepoint `WorkflowSpawn` does not
+    /// cover (see [`crate::runtime::WorkflowSpawn`]'s own `notifications` doc
+    /// comment), because an agent-started run stays inside the calling turn
+    /// rather than routing through `WorkflowSpawn::spawn`.
+    ///
+    /// `None` (the default build, and most of the tool's own tests) simply
+    /// skips the notification — the run itself still journals and answers the
+    /// tool call either way, exactly as `events` degrades above; only the
+    /// company-wide alert is lost.
+    notifications: Option<Arc<dyn NotificationStore>>,
 }
 
 impl RunWorkflowTool {
@@ -3572,8 +4478,10 @@ impl RunWorkflowTool {
     /// (`companies/<name>`, whose `workflows/` subtree holds the seed graphs),
     /// the company store (holding the runtime-authored graph bodies), the
     /// shared runner handle, the company's journal, the shared queue a
-    /// dispatched card's output link is staged on (issue #339), and the run
-    /// output cache the `read_run_output` companion reads back (issue #418).
+    /// dispatched card's output link is staged on (issue #339), the run
+    /// output cache the `read_run_output` companion reads back (issue #418),
+    /// and the company's notification store a failed run alerts through
+    /// (issue #1865).
     // Each argument is a distinct wired dependency; the tool is built from
     // exactly one place (`orchestrator_tools`), so there is nothing a parameter
     // struct would deduplicate — same rationale as `orchestrator_tools` above.
@@ -3587,6 +4495,7 @@ impl RunWorkflowTool {
         events: Option<Arc<dyn EventLog>>,
         workflow_refs: WorkflowRefQueue,
         run_outputs: RunOutputCache,
+        notifications: Option<Arc<dyn NotificationStore>>,
     ) -> Self {
         Self {
             company,
@@ -3597,6 +4506,7 @@ impl RunWorkflowTool {
             events,
             workflow_refs,
             run_outputs,
+            notifications,
         }
     }
 }
@@ -3742,8 +4652,85 @@ impl Tool for RunWorkflowTool {
                 )));
             }
         };
-        match runner.run(&self.company, &file, input, &ctx).await {
-            Ok(run) => {
+        // Issue #1865: this call sits inside an agent turn (see the #383
+        // comment above — the run is deliberately NOT spawned onto its own
+        // task, because spawning would reset the task-local `WORKFLOW_DEPTH`
+        // re-entry guard mid-chain), so it cannot route through
+        // `WorkflowSpawn`'s own `catch_unwind` the way the console run route
+        // and the cron scheduler do. Left uncaught, a panic in the runner
+        // future unwound straight past both journal-write arms below, so the
+        // run's `WorkflowRunStarted` never got a matching finish and
+        // `GET …/workflows/runs` read it `running: true` until the next boot
+        // sweep — which does not run on rebuild, so a panicked agent-run could
+        // zombie for the life of the process. This is its own catch rather
+        // than a second call into `WorkflowSpawn`: that type owns a
+        // `RunGuard`/supervisor registration this call already holds via
+        // `_run_guard` above, and re-raising (as the spawned-task catch does,
+        // so its `JoinHandle` still resolves to a `JoinError`) is wrong here —
+        // there is no task boundary to preserve, only a tool call to answer,
+        // so the payload is swallowed after the finish is journaled and this
+        // returns an ordinary `ToolResult::error` instead.
+        match std::panic::AssertUnwindSafe(runner.run(&self.company, &file, input, &ctx))
+            .catch_unwind()
+            .await
+        {
+            Err(_payload) => {
+                tracing::error!(
+                    company = %self.company,
+                    workflow = %wid,
+                    run_id = %ctx.run_id,
+                    "run_workflow: the runner panicked; journaling a finish so the run does not \
+                     read as in-flight forever"
+                );
+                if let Some(events) = self.events.as_ref() {
+                    let journaled = crate::runtime::record_run_finished(
+                        events,
+                        &self.company,
+                        &wid,
+                        false,
+                        &ctx.run_id,
+                        Err(crate::runtime::workflow_spawn::PANICKED_BEFORE_FINISH.into()),
+                    )
+                    .await;
+                    if !journaled {
+                        tracing::error!(
+                            company = %self.company,
+                            workflow = %wid,
+                            run_id = %ctx.run_id,
+                            "run_workflow: a panicked run's finish could not be journaled; it \
+                             will read as in-flight until the next boot sweep settles it"
+                        );
+                    }
+                }
+                // Issue #1865 (PR #1883 review comment 3877518535): a panic is
+                // unambiguously the worst reading a run can settle with —
+                // notify without needing a verdict computation, mirroring
+                // `WorkflowSpawn::spawn_admitted`'s own panic arm. Fired
+                // unconditionally like the journal write above, not gated on
+                // it landing — the two are independent stores, and a journal
+                // miss must not also cost the alert.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    crate::runtime::file_run_unhealthy_notification(
+                        notifications.as_ref(),
+                        &self.company,
+                        &wid,
+                        &ctx.run_id,
+                        "failed",
+                        crate::runtime::PANICKED_BEFORE_FINISH,
+                    )
+                    .await;
+                }
+                // No re-raise: unlike `WorkflowSpawn`'s catch, there is no
+                // `JoinHandle` here to preserve a `JoinError` on — this call is
+                // itself the tool's execution, so the honest answer is an
+                // ordinary tool failure the agent can read and act on.
+                return Ok(ToolResult::error(format!(
+                    "Workflow `{wid}` hit an internal error while running. Its completed steps, \
+                     if any, are recorded in the run history. Don't retry it in a loop — check \
+                     the run history or ask an operator."
+                )));
+            }
+            Ok(Ok(run)) => {
                 tracing::debug!(
                     company = %self.company,
                     workflow = %wid,
@@ -3760,6 +4747,68 @@ impl Tool for RunWorkflowTool {
                         Ok(&run),
                     )
                     .await;
+                }
+                // Issue #1865 (PR #1883 review comment 3877518530): the same
+                // unhealthy-run classification `WorkflowSpawn::spawn_admitted`
+                // applies to its own settled runs — a stranded or blocked
+                // agent-started run is otherwise silent to every operator not
+                // watching this turn, especially a stranded run with no
+                // approval card to surface.
+                //
+                // Issue #1865 (PR #1883 review comment 3878430677): gated on
+                // `!run.cancelled`, matching `WorkflowSpawn::spawn_admitted`'s
+                // own `Ok(run) if run.cancelled => {}` arm (added for the same
+                // comment). The clean node-boundary cancel arm in
+                // `run_workflow_inner` carries `blocked_nodes: blocks.take()`
+                // forward, so a cancelled run reaches here with a non-empty
+                // `blocked_nodes` exactly like a genuinely blocked one — this
+                // must not tell an operator "a step is waiting on a person to
+                // decide something" about a run somebody already stopped.
+                //
+                // Stranded checked before blocked, same as `WorkflowSpawn`:
+                // `HarnessAgentRunner` pushes a `WorkflowBlockedNode` whenever
+                // a turn gated anything at all, parked or not, so a fully
+                // unparkable node lands in `blocked_nodes` exactly like one
+                // with a live card — only `stranded_approvals` equalling the
+                // full pending count, with no card still `Pending` delivery
+                // either, tells the two apart.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    if run.cancelled {
+                        // Handled below by the `run.cancelled` arm, which
+                        // returns a `ToolResult::error` — no unhealthy
+                        // notification for a deliberate stop.
+                    } else if !run.pending_approvals.is_empty()
+                        && crate::ports::workflow_runner::stranded_approvals(
+                            &run.pending_approvals,
+                            &run.approvals,
+                        ) == run.pending_approvals.len()
+                        && !run
+                            .deliveries
+                            .iter()
+                            .any(|d| matches!(d.status, crate::ports::DeliveryStatus::Pending))
+                    {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications.as_ref(),
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "stranded",
+                            "This run tried to park an approval and could not — nothing is \
+                             waiting on it any more, and nobody was asked.",
+                        )
+                        .await;
+                    } else if !run.blocked_nodes.is_empty() {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications.as_ref(),
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "blocked",
+                            "This run stopped because a step is waiting on a person to decide \
+                             something.",
+                        )
+                        .await;
+                    }
                 }
                 // Issue #383: a cancelled run is `Ok`, so without this arm the
                 // agent would read the empty node summary as "the workflow did
@@ -3841,7 +4890,7 @@ impl Tool for RunWorkflowTool {
                     md,
                 ))
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
                 if let Some(events) = self.events.as_ref() {
                     let message = err.to_string();
@@ -3859,6 +4908,27 @@ impl Tool for RunWorkflowTool {
                             error: message.as_str(),
                             partial: err.partial_run(),
                         }),
+                    )
+                    .await;
+                }
+                // Issue #1865 (PR #1883 review comment 3877185396): this is
+                // the second run-outcome chokepoint alongside `WorkflowSpawn`
+                // — console, scheduled, and resumed failures already file a
+                // `workflow_run_failed` notification through that type, but
+                // an agent-started run never routed through it (see
+                // `WorkflowSpawn`'s own `notifications` doc comment) and so
+                // stayed silent to every operator not watching this turn.
+                // Fired unconditionally like the journal write above, not
+                // gated on it landing — the two are independent stores, and a
+                // journal miss must not also cost the alert.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    crate::runtime::file_run_unhealthy_notification(
+                        notifications.as_ref(),
+                        &self.company,
+                        &wid,
+                        &ctx.run_id,
+                        "failed",
+                        crate::runtime::RUN_FAILED_DETAIL,
                     )
                     .await;
                 }
@@ -3896,6 +4966,14 @@ fn summarize_run(
     let mut md = format!("Ran workflow **{}** (`{}`).\n\n", file.name.trim(), file.id);
     md.push_str("## Per-node outcome\n");
     let nodes = run.output.get("nodes").and_then(Value::as_object);
+    // A declined node is scrubbed from `output`, so without this it is
+    // indistinguishable from one the run never reached.
+    let declined: Vec<&str> = run
+        .nodes
+        .iter()
+        .filter(|n| n.status == WorkflowNodeStatus::Declined)
+        .map(|n| n.node_id.as_str())
+        .collect();
     // Whether any per-node line carried output — drives the footer, which only
     // makes sense when there is something to read the full of.
     let mut rendered_output = false;
@@ -3939,6 +5017,10 @@ fn summarize_run(
                             )),
                         }
                     }
+                    None if declined.contains(&id) => md.push_str(&format!(
+                        "- **{name}** (`{id}`, {kind}): not needed — the step stopped here on \
+                         purpose\n"
+                    )),
                     None => md.push_str(&format!("- **{name}** (`{id}`, {kind}): not reached\n")),
                 }
             }
@@ -3986,8 +5068,54 @@ fn summarize_run(
             paused.join(", ")
         ));
     }
-    if blocked.is_empty() && paused.is_empty() {
+    if !declined.is_empty() {
+        md.push_str(&format!(
+            "\n**{} step(s) were declined as not needed:** {}. Each judged the work already done \
+             or unnecessary and stopped its own branch deliberately — this is not a failure, but \
+             nothing downstream of {} ran.\n",
+            declined.len(),
+            declined.join(", "),
+            if declined.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    if blocked.is_empty() && paused.is_empty() && declined.is_empty() {
         md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
+    }
+
+    // Codex (PR #1883 review comment 3892522591): a node under `on_error =
+    // "continue"`/`"route"`, or one truncated at the iteration cap, settles
+    // this run as `Degraded` — `runner.rs` already turns that into a per-node
+    // notice (`errored_node_notice`) the console reads, but nothing here ever
+    // read it. An agent-started run only checked the blocked/paused and
+    // delivery cases above, so a run that silently continued past a broken
+    // step summarized as "reached its terminal node(s)" with no hint a step
+    // was skipped over — the model then reports a clean run to whoever asked
+    // for one, exactly the silence issue #981 closed for dropped deliveries
+    // two blocks below, just for a different fact.
+    //
+    // Read `run.nodes` directly rather than `run.notices`: `notices` also
+    // carries `blocked_notice` for every row already named above, and
+    // rendering the whole vector here would print those a second time. By the
+    // time a run settles, a row is still `Error` only when it is a genuine
+    // continued/capped error — the host's own blocked-node reclassification
+    // (mirroring `WorkflowRun::cancelled`'s) always leaves a blocked row
+    // `Blocked`, never `Error`, so this filter can never double up with
+    // `blocked` above. See `WorkflowNodeStatus::Blocked`'s doc.
+    let errored: Vec<&str> = run
+        .nodes
+        .iter()
+        .filter(|n| n.status == WorkflowNodeStatus::Error)
+        .map(|n| n.node_id.as_str())
+        .collect();
+    if !errored.is_empty() {
+        md.push_str(&format!(
+            "\n**{} step(s) did not finish cleanly, and the run continued past {}:** {}. This is \
+             NOT a clean run — check each step's own output for what went wrong before treating \
+             its results as complete.\n",
+            errored.len(),
+            if errored.len() == 1 { "it" } else { "them" },
+            errored.join(", ")
+        ));
     }
 
     // Issue #981: what happened to the reports. Nothing here read `deliveries`,
@@ -4576,6 +5704,8 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
                 // which is the operator's to make, not the agent's to author.
                 repeatable: None,
                 destination: n.destination,
+                postcondition: None,
+                verify: None,
             });
         }
         Ok(Self {
@@ -4848,8 +5978,10 @@ pub(crate) fn create_workflow_parameters_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
     use std::sync::Mutex as StdMutex;
 
+    use crate::ports::runs::RunStatus;
     use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
 
     fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
@@ -5252,7 +6384,11 @@ mod tests {
 
         let cases: Vec<(Box<dyn Tool>, Value, &str)> = vec![
             (
-                Box::new(SpawnTaskTool::new(queue.clone())),
+                Box::new(SpawnTaskTool::new(
+                    queue.clone(),
+                    CompanyId::new("acme"),
+                    store.clone(),
+                )),
                 json!({ "title": "Ship it" }),
                 "the card \"Ship it\" was NOT opened",
             ),
@@ -5311,10 +6447,14 @@ mod tests {
     async fn the_triage_refusal_says_it_read_a_question_and_offers_a_way_forward() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim_answering();
-        let refused = SpawnTaskTool::new(queue.clone())
-            .execute(json!({ "title": "Build the landing page" }))
-            .await
-            .expect("execute");
+        let refused = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        )
+        .execute(json!({ "title": "Build the landing page" }))
+        .await
+        .expect("execute");
         assert!(refused.is_error, "{}", refused.text());
         let text = refused.text();
 
@@ -5354,10 +6494,14 @@ mod tests {
     #[tokio::test]
     async fn the_unwired_refusal_still_says_the_context_cannot_do_board_work() {
         let queue = DelegationQueue::default();
-        let refused = SpawnTaskTool::new(queue.clone())
-            .execute(json!({ "title": "Ship it" }))
-            .await
-            .expect("execute");
+        let refused = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        )
+        .execute(json!({ "title": "Ship it" }))
+        .await
+        .expect("execute");
         let text = refused.text();
         assert!(refused.is_error, "{text}");
         assert!(
@@ -5417,7 +6561,11 @@ mod tests {
     async fn spawn_task_refuses_past_the_cap_instead_of_promising_a_discarded_card() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         for i in 0..MAX_DELEGATIONS_PER_TURN {
             let ok = tool
                 .execute(json!({ "title": format!("item {i}") }))
@@ -5517,7 +6665,14 @@ mod tests {
     async fn spawn_task_tool_enqueues_a_task() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
+        // An empty store loads no record, so assignee grounding fails open and
+        // the string is queued exactly as typed — isolating this test to the
+        // plain enqueue path. Grounding itself is covered separately below.
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         tool.execute(json!({ "title": "Ship it", "note": "soon", "assignee": "eng" }))
             .await
             .expect("execute");
@@ -5535,7 +6690,11 @@ mod tests {
     #[tokio::test]
     async fn spawn_task_tool_requires_a_title() {
         let queue = DelegationQueue::default();
-        let tool = SpawnTaskTool::new(queue.clone());
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         assert!(tool.execute(json!({ "note": "no title" })).await.is_err());
         assert_eq!(queue.queued(), 0);
     }
@@ -6695,12 +7854,13 @@ members = ["legal_counsel"]
                 column: "done".to_string(),
                 artifact_ids: Vec::new(),
                 origin_chat_id: None,
+                origin_parent: None,
             },
             at_millis: 30,
         });
 
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(history));
-        let tool = QueryCompanyTool::new(company, None, Some(log), None, None);
+        let tool = QueryCompanyTool::new(company, None, Some(log), None, None, None);
         let out = tool
             .execute(json!({}))
             .await
@@ -6783,7 +7943,7 @@ members = ["legal_counsel"]
         // off, the notice sits at the top, and the JSON summary counts them.
         let over: Vec<StoredEvent> = (0..(RECENT_EVENTS as u64 + 5)).map(dispatch).collect();
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(over));
-        let tool = QueryCompanyTool::new(company.clone(), None, Some(log), None, None);
+        let tool = QueryCompanyTool::new(company.clone(), None, Some(log), None, None, None);
         let result = tool.execute(json!({})).await.expect("execute");
         let md = result.output_for_llm(true);
         let activity = md
@@ -6805,7 +7965,7 @@ members = ["legal_counsel"]
         // (b) Exactly the tail width: nothing was dropped, so nothing is said.
         let exact: Vec<StoredEvent> = (0..RECENT_EVENTS as u64).map(dispatch).collect();
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(exact));
-        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None, None)
             .execute(json!({}))
             .await
             .expect("execute");
@@ -6846,7 +8006,7 @@ members = ["legal_counsel"]
         // total = 3 posts + (RECENT_EVENTS + 2) dispatches; the tail holds
         // RECENT_EVENTS dispatches, so 2 dispatches + 3 posts = 5 fall off.
         let log: Arc<dyn EventLog> = Arc::new(FixedLog(mixed));
-        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None, None)
             .execute(json!({}))
             .await
             .expect("execute");
@@ -6909,16 +8069,17 @@ members = ["legal_counsel"]
 
         // Exactly at the cap: complete, so no notice.
         let exact: Arc<dyn FactStore> = Arc::new(ManyFacts(FACT_LIMIT));
-        let out = QueryCompanyTool::new(CompanyId::new("acme"), Some(exact), None, None, None)
-            .execute(json!({}))
-            .await
-            .expect("execute")
-            .output_for_llm(true);
+        let out =
+            QueryCompanyTool::new(CompanyId::new("acme"), Some(exact), None, None, None, None)
+                .execute(json!({}))
+                .await
+                .expect("execute")
+                .output_for_llm(true);
         assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
 
         // Past the cap: the cut is announced, counted, and points at `query`.
         let many: Arc<dyn FactStore> = Arc::new(ManyFacts(FACT_LIMIT + 7));
-        let out = QueryCompanyTool::new(CompanyId::new("acme"), Some(many), None, None, None)
+        let out = QueryCompanyTool::new(CompanyId::new("acme"), Some(many), None, None, None, None)
             .execute(json!({}))
             .await
             .expect("execute")
@@ -6973,7 +8134,7 @@ members = ["legal_counsel"]
         };
         let render = |facts: Vec<FactRecord>| async move {
             let store: Arc<dyn FactStore> = Arc::new(Facts(facts));
-            QueryCompanyTool::new(CompanyId::new("acme"), Some(store), None, None, None)
+            QueryCompanyTool::new(CompanyId::new("acme"), Some(store), None, None, None, None)
                 .execute(json!({}))
                 .await
                 .expect("execute")
@@ -7045,7 +8206,7 @@ members = ["legal_counsel"]
 
     #[tokio::test]
     async fn query_company_tool_reports_no_data_when_unwired() {
-        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None);
+        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, None);
         let result = tool.execute(json!({})).await.expect("execute");
         // The insight surface lives in the markdown; `output()` is the summary.
         let out = result.output_for_llm(true);
@@ -7100,6 +8261,7 @@ name = "Morning"
             None,
             Some(dir.path().to_path_buf()),
             Some(store),
+            None,
         );
         let out = tool
             .execute(json!({}))
@@ -7142,11 +8304,12 @@ name = "Morning"
         });
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record.clone()));
 
-        let out = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, Some(store))
-            .execute(json!({}))
-            .await
-            .expect("execute")
-            .output_for_llm(true);
+        let out =
+            QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, Some(store), None)
+                .execute(json!({}))
+                .await
+                .expect("execute")
+                .output_for_llm(true);
 
         let line = out
             .lines()
@@ -7181,7 +8344,7 @@ name = "Morning"
     async fn query_company_tool_lists_the_desks_delegation_accepts() {
         let company = CompanyId::new("acme");
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(desks_record(&company)));
-        let tool = QueryCompanyTool::new(company, None, None, None, Some(store));
+        let tool = QueryCompanyTool::new(company, None, None, None, Some(store), None);
         let out = tool
             .execute(json!({}))
             .await
@@ -7260,6 +8423,7 @@ name = "Morning"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -7810,6 +8974,29 @@ name = "Morning"
         }
     }
 
+    /// A [`WorkflowRunner`] test double whose `run` always returns `Err` — the
+    /// engine-failed shape issue #1865's review comment 3877185396 flagged as
+    /// silent: `RunWorkflowTool`'s `Ok(Err(err))` arm journaled a finish but
+    /// filed no `workflow_run_failed` notification, unlike the console run
+    /// route, the cron scheduler, and the approval-resume path, which all
+    /// file one through `WorkflowSpawn`.
+    struct FailingRunner;
+
+    #[async_trait::async_trait]
+    impl WorkflowRunner for FailingRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
+        ) -> crate::Result<WorkflowRun> {
+            Err(crate::error::OpenCompanyError::Harness(
+                "the engine blew up".to_string(),
+            ))
+        }
+    }
+
     /// Writes `DEMO_WF` to `<dir>/workflows/demo.toml`.
     fn seed_demo_workflow(dir: &std::path::Path) {
         let wf = dir.join("workflows");
@@ -7843,13 +9030,16 @@ name = "Morning"
     }
 
     #[test]
-    fn orchestrator_tools_includes_all_thirteen() {
+    fn orchestrator_tools_includes_all_sixteen() {
         use crate::harness::workflow_admin::{
             DELETE_WORKFLOW_TOOL, READ_WORKFLOW_TOOL, UPDATE_WORKFLOW_TOOL,
         };
         let queue = DelegationQueue::default();
         let tools = orchestrator_tools(
             CompanyId::new("acme"),
+            None,
+            None,
+            None,
             None,
             None,
             &queue,
@@ -7863,12 +9053,14 @@ name = "Morning"
             "ceo".to_string(),
             None,
             vec!["fs:*".to_string()],
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
         // `read_run_output` makes nine; #661's read/update/delete_workflow
-        // trio makes twelve; #884's `delegate_to_teammate` makes thirteen.
-        assert_eq!(names.len(), 13, "got {names:?}");
+        // trio makes twelve; #884's `delegate_to_teammate` makes thirteen;
+        // #1859's `list_tasks` / `read_task` / `read_run` trio makes sixteen.
+        assert_eq!(names.len(), 16, "got {names:?}");
         assert!(names.contains(&DELEGATE_TO_TEAMMATE_TOOL), "got {names:?}");
         assert!(names.contains(&RUN_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&READ_RUN_OUTPUT_TOOL), "got {names:?}");
@@ -7882,6 +9074,9 @@ name = "Morning"
         assert!(names.contains(&DELEGATE_TO_DESK_TOOL), "got {names:?}");
         assert!(names.contains(&ASSIGN_TASK_TOOL), "got {names:?}");
         assert!(names.contains(&REVIEW_TASK_TOOL), "got {names:?}");
+        assert!(names.contains(&LIST_TASKS_TOOL), "got {names:?}");
+        assert!(names.contains(&READ_TASK_TOOL), "got {names:?}");
+        assert!(names.contains(&READ_RUN_TOOL), "got {names:?}");
         // `read_run_output` sits immediately after `run_workflow`.
         let run_at = names.iter().position(|n| *n == RUN_WORKFLOW_TOOL).unwrap();
         assert_eq!(names[run_at + 1], READ_RUN_OUTPUT_TOOL, "got {names:?}");
@@ -7900,6 +9095,64 @@ name = "Morning"
             ],
             "got {names:?}"
         );
+        // #1859's read trio sits immediately after `query_company`: all four
+        // answer "what does the company know?" rather than acting on it.
+        let query_at = names.iter().position(|n| *n == QUERY_COMPANY_TOOL).unwrap();
+        assert_eq!(
+            &names[query_at + 1..query_at + 4],
+            &[LIST_TASKS_TOOL, READ_TASK_TOOL, READ_RUN_TOOL],
+            "got {names:?}"
+        );
+    }
+
+    /// A runner panic is converted into an agent-visible error, and the RAII
+    /// supervisor slot is gone when the tool returns. This covers both cleanup
+    /// obligations without changing the runner architecture.
+    #[tokio::test]
+    async fn panicking_run_cleans_up_its_active_attempt() {
+        struct PanickingRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for PanickingRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &WorkflowFile,
+                _input: Value,
+                _ctx: &crate::ports::WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                panic!("test runner panic")
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(PanickingRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let supervisor = crate::runtime::RunSupervisor::default();
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            supervisor.clone(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            None,
+        );
+
+        let result = tool
+            .execute(json!({"id": "demo"}))
+            .await
+            .expect("panic is converted to a tool result");
+        assert!(result.is_error, "panic must be agent-visible: {result:?}");
+        assert!(
+            result.output_for_llm(false).contains("internal error"),
+            "the result should not leak panic payload: {result:?}"
+        );
+        assert_eq!(supervisor.len(), 0, "the active attempt must be cleaned up");
     }
 
     #[tokio::test]
@@ -7935,6 +9188,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo", "input": { "seed": 1 } }))
@@ -7981,6 +9235,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8017,6 +9272,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unwired
@@ -8039,6 +9295,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unknown
@@ -8083,6 +9340,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8090,6 +9348,164 @@ name = "Morning"
             .expect("execute");
         assert!(result.is_error, "a cancelled run reports as a stop");
         assert_eq!(refs.queued(), 0);
+    }
+
+    /// Issue #1861: an agent-initiated run that ends blocked badges the
+    /// operator, exactly as the console's and the scheduler's runs do.
+    ///
+    /// This is the one trigger nobody is watching a progress bar for, so the
+    /// badge is the only way a run that stopped waiting on a person becomes
+    /// visible without somebody thinking to open the run history.
+    #[tokio::test]
+    async fn a_blocked_agent_run_badges_the_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": {} }),
+            pending_approvals: vec!["worker".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::workflow_runner::WorkflowBlockedNode {
+                node_id: "worker".to_string(),
+                tools: vec!["send_email".to_string()],
+                approval_ids: vec!["ap-1".to_string()],
+                unparkable: 0,
+                stranded: 0,
+                blockers: 0,
+            }],
+            approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert_eq!(feed.len(), 1, "one badge for one unhealthy run: {feed:?}");
+        assert_eq!(feed[0].notification.kind, "workflow_run_blocked");
+    }
+
+    /// The same contract for the other unhealthy end: the run could not park
+    /// the approval at all, so nobody was asked and nothing is waiting.
+    #[tokio::test]
+    async fn a_stranded_agent_run_badges_the_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": {} }),
+            // Stranded is counted per pending *node* (`stranded_approvals`),
+            // not per gated call: the node is pending, and every approval row
+            // it owns failed to park, so there is nothing an operator can be
+            // asked about. A fixture with no pending node at all is not a
+            // stranded run under that reconciliation — it is an empty one.
+            pending_approvals: vec!["worker".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: vec![crate::ports::workflow_runner::WorkflowRunApprovalRow {
+                node_id: Some("worker".to_string()),
+                tool: Some("send_email".to_string()),
+                outcome: crate::ports::workflow_runner::WorkflowApprovalOutcome::ParkFailed,
+                approval_id: None,
+            }],
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert_eq!(feed.len(), 1, "{feed:?}");
+        assert_eq!(feed[0].notification.kind, "workflow_run_stranded");
+    }
+
+    /// A run that finished cleanly badges nobody. The badge means "this needs
+    /// you"; one per successful run would train the operator to ignore it.
+    #[tokio::test]
+    async fn a_healthy_agent_run_badges_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": [] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert!(feed.is_empty(), "{feed:?}");
     }
 
     #[tokio::test]
@@ -8120,6 +9536,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8162,6 +9579,7 @@ name = "Morning"
                 approval_ids: vec!["appr-1".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![
                 crate::ports::WorkflowRunApprovalRow {
@@ -8194,6 +9612,7 @@ name = "Morning"
             None,
             refs,
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8249,6 +9668,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8256,6 +9676,65 @@ name = "Morning"
             .expect("execute");
         assert!(result.is_error, "expected an error result");
         assert!(result.output_for_llm(false).contains("wired"), "{result:?}");
+    }
+
+    /// Issue #1865 (PR #1883 review comment 3877185396): an agent-started run
+    /// that the engine returns `Err` on is the second run-outcome chokepoint
+    /// `WorkflowSpawn` does not cover — console, scheduled, and resumed
+    /// failures all file a `workflow_run_failed` notification through that
+    /// type, but this tool's own `Ok(Err(err))` arm used to journal a finish
+    /// and stop, leaving every agent-started failure invisible to an operator
+    /// not watching this turn. Reused `crate::store::FsOps` as the
+    /// notification-store double, the same one `WorkflowSpawn`'s own
+    /// equivalent test (`a_failed_run_does_not_leak_the_raw_engine_error_into_its_notification`
+    /// in `runtime::workflow_spawn`) uses.
+    #[tokio::test]
+    async fn run_workflow_tool_files_a_notification_when_the_engine_run_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(FailingRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let company = CompanyId::new("acme");
+        let notifications: Arc<dyn NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+
+        let tool = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "the engine failed: {result:?}");
+
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        let failed = notes
+            .iter()
+            .find(|n| n.notification.kind == "workflow_run_failed")
+            .expect(
+                "an agent-started run that fails must file the same durable notification a \
+                 console, scheduled, or resumed run does",
+            );
+        assert!(
+            failed
+                .notification
+                .title
+                .contains(crate::runtime::RUN_FAILED_DETAIL),
+            "{:?}",
+            failed.notification.title
+        );
     }
 
     #[tokio::test]
@@ -8275,6 +9754,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "nope" }))
@@ -8298,6 +9778,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool.execute(json!({})).await.expect("execute");
         assert!(result.is_error);
@@ -8321,6 +9802,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "../secrets" }))
@@ -8359,6 +9841,7 @@ name = "Morning"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -8435,6 +9918,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "greeter" }))
@@ -8504,6 +9988,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
 
         let result = run
@@ -8583,6 +10068,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             !run.execute(json!({ "id": "greeter" }))
@@ -8685,6 +10171,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "hosted" }))
@@ -9309,6 +10796,7 @@ name = "Morning"
             None,
             refs,
             cache,
+            None,
         );
         (tool, runner)
     }
@@ -9521,6 +11009,131 @@ name = "Morning"
         assert!(
             md.contains("1 report(s) did NOT reach a destination"),
             "{md}"
+        );
+    }
+
+    /// Codex review on #1990 (#3905407434): a `halt_benign` judge verdict
+    /// scrubs the declined node from `run.output`, so this summary — which
+    /// derives its per-node lines from that map and separately inspects only
+    /// `Error` rows — called the node "not reached" and still claimed the run
+    /// reached its terminal nodes. The intentional stop was invisible to the
+    /// agent that started the run.
+    #[test]
+    fn the_summary_reports_a_declined_node_as_not_needed() {
+        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
+        let declined = WorkflowRun {
+            output: json!({ "nodes": { "start": { "items": ["go"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Declined,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let md = summarize_run(&file, &declined, "run-declined", RunOutputStored::Stored);
+        assert!(
+            md.contains("not needed"),
+            "a declined node must read as an intentional stop: {md}"
+        );
+        assert!(
+            !md.contains("**Worker** (`worker`, agent): not reached"),
+            "a declined node is not an unreached one: {md}"
+        );
+        assert!(
+            !md.contains("reached its terminal node(s) without pausing"),
+            "the run stopped on purpose; the happy-path sentence is false: {md}"
+        );
+        assert!(
+            !md.contains("NOT a clean run"),
+            "a declined node is not an error: {md}"
+        );
+    }
+
+    /// Codex (PR #1883 review comment 3892522591): a node under `on_error =
+    /// "continue"`/`"route"` settles the run `Degraded`, and `runner.rs`
+    /// already writes a per-node notice for it — but `summarize_run` never
+    /// read `run.nodes`, so an agent-started run through this exact case
+    /// summarized as "reached its terminal node(s) without pausing for
+    /// approval" with no hint anything went wrong. This pins the fix: a row
+    /// still `Error` after settle must show up in the tool result.
+    #[test]
+    fn the_summary_says_when_a_node_errored_and_the_run_continued() {
+        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
+        let degraded = WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": ["partial"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let md = summarize_run(&file, &degraded, "run-degraded", RunOutputStored::Stored);
+        assert!(
+            md.contains("did not finish cleanly, and the run continued past it"),
+            "{md}"
+        );
+        assert!(md.contains("worker"), "{md}");
+        assert!(
+            md.contains("NOT a clean run"),
+            "an agent skimming for the happy-path sentence must not miss this: {md}"
+        );
+
+        // A node that finished clean says nothing about it — an ordinary
+        // summary is unchanged.
+        let clean = WorkflowRun {
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Ok,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            ..degraded.clone()
+        };
+        let md = summarize_run(&file, &clean, "run-clean", RunOutputStored::Stored);
+        assert!(!md.contains("did not finish cleanly"), "{md}");
+        assert!(!md.contains("NOT a clean run"), "{md}");
+
+        // A blocked node must not ALSO print here — it is already named by the
+        // "Blocked, waiting on a person" paragraph above, sourced from
+        // `blocked_nodes`, not from a node row's own status (the host never
+        // leaves a blocked row `Error`; see `WorkflowNodeStatus::Blocked`'s doc).
+        let blocked = WorkflowRun {
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Blocked,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "worker".into(),
+                tools: vec!["send_email".into()],
+                approval_ids: vec!["appr-1".into()],
+                unparkable: 0,
+                stranded: 0,
+                blockers: 0,
+            }],
+            ..degraded.clone()
+        };
+        let md = summarize_run(&file, &blocked, "run-blocked", RunOutputStored::Stored);
+        assert!(md.contains("Blocked, waiting on a person"), "{md}");
+        assert!(
+            !md.contains("did not finish cleanly"),
+            "a blocked row must not double up with the degraded paragraph: {md}"
         );
     }
 
@@ -10209,5 +11822,1980 @@ name = "Morning"
         .map(|r| r.as_str());
         let unique: std::collections::BTreeSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len(), "{labels:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1859: the execution-state read trio (`list_tasks` / `read_task` /
+    // `read_run`) and `query_company`'s `## Board` section.
+    // -----------------------------------------------------------------------
+
+    /// A minimal board card, for fixtures below. Named `task_card` rather than
+    /// `card` — that name is already the `Delegation` fixture above.
+    fn task_card(id: &str, title: &str, column: &str, assignee: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: TaskTitle::authored(title),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: assignee.to_string(),
+            updated_at_millis: 1,
+            origin: crate::ports::TaskOrigin::new(None, None),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tasks_filters_by_column_and_assignee_and_excludes_done_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Draft the memo",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "maya",
+                ),
+            )
+            .await
+            .unwrap();
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-2",
+                    "Fix the flaky test",
+                    crate::ports::tasks::COLUMN_PAUSED,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+        tasks
+            .upsert(
+                &company,
+                &task_card("t-3", "Ship the release", COLUMN_DONE, "maya"),
+            )
+            .await
+            .unwrap();
+
+        let tool = ListTasksTool::new(company, Some(tasks), None);
+
+        let default_view = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        assert!(default_view.contains("Draft the memo"), "{default_view}");
+        assert!(
+            default_view.contains("Fix the flaky test"),
+            "{default_view}"
+        );
+        assert!(
+            !default_view.contains("Ship the release"),
+            "done cards must be excluded by default: {default_view}"
+        );
+
+        let by_column = tool
+            .execute(json!({ "column": "paused" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(by_column.contains("Fix the flaky test"), "{by_column}");
+        assert!(!by_column.contains("Draft the memo"), "{by_column}");
+
+        let by_assignee = tool
+            .execute(json!({ "assignee": "MAYA" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(
+            by_assignee.contains("Draft the memo"),
+            "case-insensitive assignee match: {by_assignee}"
+        );
+        assert!(!by_assignee.contains("Fix the flaky test"), "{by_assignee}");
+
+        let done_explicit = tool
+            .execute(json!({ "column": "done" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(
+            done_explicit.contains("Ship the release"),
+            "an explicit `column: done` must still answer: {done_explicit}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tasks_truncates_with_an_honest_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        for n in 0..(LIST_TASKS_LIMIT + 5) {
+            tasks
+                .upsert(
+                    &company,
+                    &task_card(
+                        &format!("t-{n}"),
+                        &format!("Card {n}"),
+                        crate::ports::tasks::COLUMN_TODO,
+                        "maya",
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+
+        let tool = ListTasksTool::new(company, Some(tasks), None);
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        assert!(out.contains("TRUNCATED"), "{out}");
+        assert!(out.contains("5 more card"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_reports_unavailable_when_the_board_is_unwired() {
+        let tool = ListTasksTool::new(CompanyId::new("acme"), None, None);
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(
+            result.is_error,
+            "no task board wired must be a refusal, not an empty board"
+        );
+        assert!(
+            result.output_for_llm(true).contains("No task board wired"),
+            "{:?}",
+            result.output_for_llm(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_renders_header_every_attempt_and_falls_back_to_the_cards_output_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Investigate the outage",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.note = Some("check the load balancer first".to_string());
+        card.output = Some(crate::ports::tasks::TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-2".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 5,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let mut r1 = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        r1.status = RunStatus::Failed;
+        r1.error = Some("timed out".to_string());
+        runs.put_run(&company, &r1).await.unwrap();
+        let mut r2 = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-2", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        r2.status = RunStatus::Succeeded;
+        runs.put_run(&company, &r2).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(out.contains("Investigate the outage"), "{out}");
+        assert!(out.contains("check the load balancer first"), "{out}");
+        assert!(out.contains("attempt 1"), "{out}");
+        assert!(out.contains("attempt 2"), "{out}");
+        assert!(out.contains("timed out"), "{out}");
+        // No artifact store wired: falls back to the card's own recorded
+        // output stamp rather than fabricating anything.
+        assert!(out.contains("run `r-2`"), "{out}");
+        assert!(out.contains("attempt 2)"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn read_task_errors_on_an_unknown_id_instead_of_fabricating_a_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), Some(tasks), None, None);
+        let result = tool.execute(json!({ "task_id": "nope" })).await.unwrap();
+        assert!(result.is_error, "an unknown task_id must error");
+        let text = result.output_for_llm(true);
+        assert!(text.contains("nope"), "{text}");
+        assert!(text.contains("list_tasks"), "{text}");
+    }
+
+    /// AUTH-axis (HT-072): `read_task` is company-scoped only through
+    /// `tasks.list(&self.company)` — a real backend (here `FsOps`, the
+    /// production store, not a hand-rolled fake) partitions its data by
+    /// company on disk, so a `task_id` that exists but is filed under a
+    /// DIFFERENT company must read as not-found, never leak.
+    #[tokio::test]
+    async fn read_task_never_leaks_a_task_id_belonging_to_another_company() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        tasks
+            .upsert(
+                &CompanyId::new("beta"),
+                &task_card(
+                    "t-secret",
+                    "beta's confidential rollout plan",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), Some(tasks), None, None);
+        let result = tool
+            .execute(json!({ "task_id": "t-secret" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "acme asking about beta's task_id must read as not-found: {}",
+            result.text()
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("confidential rollout"),
+            "must not render beta's card: {text}"
+        );
+    }
+
+    /// Fail-closed by construction (issue #1859's approved redaction posture):
+    /// `read_task` never reads [`RunRecord::usage`], so a run's USD cost cannot
+    /// reach its rendering no matter what that run cost.
+    #[tokio::test]
+    async fn read_task_never_renders_a_runs_usd_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Send the invoice",
+                    crate::ports::tasks::COLUMN_IN_PROGRESS,
+                    "finance",
+                ),
+            )
+            .await
+            .unwrap();
+        let mut run = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "finance"),
+            )
+            .await
+            .unwrap();
+        run.status = RunStatus::Succeeded;
+        run.usage = crate::ports::types::TokenUsage {
+            input: 500,
+            output: 200,
+            cached_input: 0,
+            cost_usd: 4.20,
+        };
+        runs.put_run(&company, &run).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("4.2") && !out.to_lowercase().contains("cost") && !out.contains("usd"),
+            "a run's USD cost must never reach read_task: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_run_reads_an_agent_attempt_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs: Arc<dyn RunStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let mut run = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        run.status = RunStatus::Failed;
+        run.error = Some("connection refused".to_string());
+        runs.put_run(&company, &run).await.unwrap();
+
+        let tool = ReadRunTool::new(company, Some(runs), None);
+        let out = tool
+            .execute(json!({ "run_id": "r-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(out.contains("failed"), "{out}");
+        assert!(out.contains("connection refused"), "{out}");
+        assert!(out.contains("t-1"), "{out}");
+    }
+
+    /// The dual-source lookup's second half: no [`RunStore`] row named
+    /// `run_id`, so `read_run` folds it out of the journal via
+    /// [`crate::server::ops::workflows::fold_run_events`] instead — the same
+    /// fold the console's run-history route reads.
+    #[tokio::test]
+    async fn read_run_folds_a_workflow_run_out_of_the_journal_when_no_attempt_row_exists() {
+        use crate::ports::types::{StoredEvent, WorkflowNodeStatus};
+        use futures::stream::{self, BoxStream};
+
+        struct FixedLog(Vec<StoredEvent>);
+
+        #[async_trait]
+        impl EventLog for FixedLog {
+            async fn append(
+                &self,
+                _id: &CompanyId,
+                _event: CompanyEvent,
+            ) -> crate::Result<EventSeq> {
+                unreachable!("read_run only reads")
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                Ok(self
+                    .0
+                    .iter()
+                    .filter(|e| e.seq.value() >= seq.value())
+                    .take(limit)
+                    .cloned()
+                    .collect())
+            }
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let history = vec![
+            StoredEvent {
+                seq: EventSeq::new(0),
+                company: company.clone(),
+                event: CompanyEvent::WorkflowRunStarted {
+                    workflow_id: "demo".to_string(),
+                    run_id: "wf-run-1".to_string(),
+                    scheduled: false,
+                    started_by: None,
+                    resume_semantic: None,
+                },
+                at_millis: 1,
+            },
+            StoredEvent {
+                seq: EventSeq::new(1),
+                company: company.clone(),
+                event: CompanyEvent::WorkflowNodeFinished {
+                    workflow_id: "demo".to_string(),
+                    run_id: "wf-run-1".to_string(),
+                    node_id: "fetch".to_string(),
+                    status: WorkflowNodeStatus::Ok,
+                    elapsed_ms: 10,
+                    diagnostics: Vec::new(),
+                    agent_run_id: None,
+                },
+                at_millis: 2,
+            },
+            StoredEvent {
+                seq: EventSeq::new(2),
+                company: company.clone(),
+                event: CompanyEvent::WorkflowRunFinished {
+                    workflow_id: "demo".to_string(),
+                    scheduled: false,
+                    run_id: Some("wf-run-1".to_string()),
+                    deliveries: Vec::new(),
+                    pending_approvals: vec!["gate-1".to_string()],
+                    error: None,
+                    cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                },
+                at_millis: 3,
+            },
+        ];
+        let events: Arc<dyn EventLog> = Arc::new(FixedLog(history));
+
+        let tool = ReadRunTool::new(company, None, Some(events));
+        let out = tool
+            .execute(json!({ "run_id": "wf-run-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(out.contains("demo"), "{out}");
+        assert!(out.contains("fetch"), "{out}");
+        assert!(out.contains("1 pending approval"), "{out}");
+        // Summarized, never dumped: no step trace, no node output/argument text
+        // rides this fold in the first place (see `WorkflowNodeFinished`'s own
+        // doc comment), so there is nothing here to assert absent beyond what
+        // the fixture itself never supplied.
+    }
+
+    #[tokio::test]
+    async fn read_run_errors_on_an_id_that_is_neither_an_attempt_nor_a_workflow_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs: Arc<dyn RunStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tool = ReadRunTool::new(CompanyId::new("acme"), Some(runs), None);
+        let result = tool.execute(json!({ "run_id": "nope" })).await.unwrap();
+        assert!(result.is_error, "an unknown run_id must error");
+        assert!(result.output_for_llm(true).contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn query_company_board_section_groups_open_cards_by_column_and_omits_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Draft the memo",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "maya",
+                ),
+            )
+            .await
+            .unwrap();
+        tasks
+            .upsert(
+                &company,
+                &task_card("t-2", "Ship the release", COLUMN_DONE, "maya"),
+            )
+            .await
+            .unwrap();
+
+        let tool = QueryCompanyTool::new(company, None, None, None, None, Some(tasks));
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+
+        assert!(out.contains("## Board"), "{out}");
+        assert!(out.contains("Draft the memo"), "{out}");
+        assert!(
+            !out.contains("Ship the release"),
+            "the Board section must exclude Done, like `list_tasks`: {out}"
+        );
+        // Desks stays present AND after Board never gets to run — Board is the
+        // LAST section, so this just pins Desks is still there at all.
+        assert!(out.contains("## Desks"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn query_company_board_section_is_unavailable_when_the_board_is_unwired() {
+        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, None);
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        assert!(out.contains("## Board"), "{out}");
+        assert!(out.contains("Board unavailable"), "{out}");
+    }
+
+    /// The ordering guarantee the byte-budget reasoning depends on: Board is
+    /// the LAST section, so a company with an oversized board can never push
+    /// the Desks list — which `delegate_to_desk` needs to ground a hand-off —
+    /// out of the tool result ahead of it.
+    #[tokio::test]
+    async fn query_company_desks_section_still_renders_after_the_board_section() {
+        let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, None);
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+        let desks_at = out.find("## Desks").expect("Desks section present");
+        let board_at = out.find("## Board").expect("Board section present");
+        assert!(
+            board_at > desks_at,
+            "Board must render after Desks, never before: {out}"
+        );
+    }
+
+    /// A task board that cannot answer, so a read failure never collapses
+    /// into an empty or missing board.
+    struct BrokenTaskStore;
+
+    #[async_trait]
+    impl TaskStore for BrokenTaskStore {
+        async fn list(&self, _company: &CompanyId) -> crate::Result<Vec<TaskRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated board read failure".into(),
+            ))
+        }
+        async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tasks_reports_a_read_failure_instead_of_an_empty_board() {
+        let tasks: Arc<dyn TaskStore> = Arc::new(BrokenTaskStore);
+        let tool = ListTasksTool::new(CompanyId::new("acme"), Some(tasks), None);
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(
+            result.is_error,
+            "a board read failure must be a refusal, not a silently empty board"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No matching cards"),
+            "must not claim the board is simply empty: {text}"
+        );
+        assert!(text.contains("Couldn't read the task board"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn read_task_reports_a_read_failure_instead_of_a_missing_card() {
+        let tasks: Arc<dyn TaskStore> = Arc::new(BrokenTaskStore);
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), Some(tasks), None, None);
+        let result = tool.execute(json!({ "task_id": "t-1" })).await.unwrap();
+        assert!(
+            result.is_error,
+            "a board read failure must be a refusal, not a fabricated missing-card error"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No card `t-1`"),
+            "must not claim the card doesn't exist when the board couldn't be read: {text}"
+        );
+        assert!(text.contains("Couldn't read the task board"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn query_company_board_section_reports_unavailable_on_a_read_failure_not_empty() {
+        let tasks: Arc<dyn TaskStore> = Arc::new(BrokenTaskStore);
+        let tool =
+            QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, Some(tasks));
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.is_error, "the whole tool must still answer");
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No open cards"),
+            "must not claim the board is empty when it could not be read: {text}"
+        );
+        assert!(text.contains("Board unavailable"), "{text}");
+
+        let payload = match &result.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data.clone(),
+            other => panic!("expected a JSON content block, got {other:?}"),
+        };
+        assert_eq!(
+            payload["board_open"], 0,
+            "board_open must stay at zero on a read failure, not report a fabricated count: \
+             {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_falls_back_to_the_output_stamp_when_the_artifact_store_is_wired_but_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Reply to the customer",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-9".to_string(),
+                attempt: Some(3),
+            },
+            at_millis: 5,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("run `r-9`"),
+            "an artifact store wired but empty must still surface the card's own output \
+             stamp instead of claiming nothing published: {out}"
+        );
+        assert!(out.contains("attempt 3)"), "{out}");
+        assert!(
+            !out.contains("Nothing published yet"),
+            "must not claim nothing happened when the card recorded an attempt: {out}"
+        );
+    }
+
+    /// A run store that cannot answer, so a run-history read failure never
+    /// collapses into "no attempts" or a missing run — the same distinction
+    /// `list_tasks`/`read_task`'s board read already makes for [`TaskStore`].
+    struct BrokenRunStore;
+
+    #[async_trait]
+    impl RunStore for BrokenRunStore {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<RunRecord> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn get_run(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-store read failure".into(),
+            ))
+        }
+        async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-history read failure".into(),
+            ))
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn read_task_reports_run_history_unavailable_instead_of_no_attempts_on_a_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Investigate the outage",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let runs: Arc<dyn RunStore> = Arc::new(BrokenRunStore);
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("No attempts yet"),
+            "a run-history read failure must not look like a card nobody attempted: {out}"
+        );
+        assert!(out.contains("Run history unavailable"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_reports_attempt_status_unavailable_on_a_run_history_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Draft the memo",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "maya",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let runs: Arc<dyn RunStore> = Arc::new(BrokenRunStore);
+        let tool = ListTasksTool::new(company, Some(tasks), Some(runs));
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+
+        assert!(
+            out.contains("attempt status unavailable"),
+            "a per-card run-history read failure must not render identically to a card with \
+             no attempt clause at all: {out}"
+        );
+    }
+
+    /// A run store that answers `get_run` but never `list_runs`, to isolate
+    /// [`ReadRunTool`]'s agent-attempt lookup from its journal fallback.
+    struct FailingGetRun;
+
+    #[async_trait]
+    impl RunStore for FailingGetRun {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<RunRecord> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn get_run(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-store read failure".into(),
+            ))
+        }
+        async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<RunRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn read_run_reports_a_run_store_failure_instead_of_a_missing_run() {
+        let runs: Arc<dyn RunStore> = Arc::new(FailingGetRun);
+        let tool = ReadRunTool::new(CompanyId::new("acme"), Some(runs), None);
+        let result = tool.execute(json!({ "run_id": "r-1" })).await.unwrap();
+        assert!(
+            result.is_error,
+            "a run-store read failure must be a refusal, not a fabricated miss"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No run"),
+            "must not claim the run doesn't exist when the run store couldn't be read: {text}"
+        );
+    }
+
+    /// An event log that always fails `read_from`, to prove
+    /// [`ReadRunTool`]'s workflow-run fallback distinguishes a journal read
+    /// failure from a genuinely absent run.
+    struct BrokenEventLog;
+
+    #[async_trait]
+    impl EventLog for BrokenEventLog {
+        async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
+            unreachable!("read_run only reads")
+        }
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+            Err(OpenCompanyError::Store(
+                "simulated event-log read failure".into(),
+            ))
+        }
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn read_run_reports_an_event_log_failure_instead_of_a_missing_run() {
+        let events: Arc<dyn EventLog> = Arc::new(BrokenEventLog);
+        let tool = ReadRunTool::new(CompanyId::new("acme"), None, Some(events));
+        let result = tool.execute(json!({ "run_id": "wf-1" })).await.unwrap();
+        assert!(
+            result.is_error,
+            "an event-log read failure must be a refusal, not a fabricated miss"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("not an agent attempt and not a workflow run"),
+            "must not claim the run doesn't exist when the event log couldn't be read: {text}"
+        );
+    }
+
+    /// An artifact store that cannot answer, so an output-surface read
+    /// failure never collapses into "nothing published".
+    struct BrokenArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for BrokenArtifactStore {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+            _task_id: Option<&str>,
+        ) -> crate::Result<Vec<crate::ports::artifacts::ArtifactRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated artifact-store read failure".into(),
+            ))
+        }
+        async fn get(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<crate::ports::artifacts::ArtifactRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _artifact: &crate::ports::artifacts::ArtifactRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn read_task_reports_output_unavailable_on_an_artifact_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Reply to the customer",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let artifacts: Arc<dyn ArtifactStore> = Arc::new(BrokenArtifactStore);
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("Nothing published yet"),
+            "an artifact-store read failure must not look like a genuinely empty store: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_includes_each_attempts_run_id_so_read_run_is_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Investigate the outage",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+        let mut run = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        run.status = RunStatus::Failed;
+        run.error = Some("timed out".to_string());
+        runs.put_run(&company, &run).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("r-1"),
+            "an attempt's run id must be discoverable from read_task, since read_run requires \
+             it: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_bounds_rendered_attempts_so_output_cannot_be_pushed_out_of_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Flaky deploy",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+        for n in 1..=(READ_TASK_ATTEMPTS_LIMIT + 3) {
+            let mut run = runs
+                .create_run(
+                    &company,
+                    crate::ports::runs::NewRun::for_task(format!("r-{n}"), "t-1", "engineer"),
+                )
+                .await
+                .unwrap();
+            run.status = RunStatus::Failed;
+            run.error = Some("boom".to_string());
+            runs.put_run(&company, &run).await.unwrap();
+        }
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("3 earlier attempt(s) omitted"),
+            "must report how many older attempts were cut: {out}"
+        );
+        let output_at = out.find("## Output").expect("Output section present");
+        let attempts_at = out.find("## Attempts").expect("Attempts section present");
+        assert!(
+            output_at > attempts_at,
+            "the Output section must still be reachable after a long attempt history: {out}"
+        );
+    }
+
+    /// LIMIT-axis (HT-072): `ReadTaskTool::description()` used to promise the
+    /// model "every attempt's status" while the render silently truncates to
+    /// `READ_TASK_ATTEMPTS_LIMIT` rows — a false completeness claim the model
+    /// reads before ever calling the tool, independent of the honest
+    /// `_N earlier attempt(s) omitted_` notice the render itself carries (see
+    /// `read_task_bounds_rendered_attempts_...` above). The description must
+    /// name the same cap the render enforces, and the two are pinned against
+    /// the same literal so a change to one is forced to touch the other
+    /// instead of silently drifting out of step the way they did to get here.
+    #[test]
+    fn read_task_description_names_the_same_cap_the_render_enforces() {
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), None, None, None);
+        assert!(
+            !tool.description().contains("every attempt's status"),
+            "the description must not promise completeness the render does not keep: {}",
+            tool.description()
+        );
+        assert!(
+            tool.description().contains("10 most recent"),
+            "the description should name the cap the render enforces: {}",
+            tool.description()
+        );
+        assert_eq!(
+            READ_TASK_ATTEMPTS_LIMIT, 10,
+            "pinned against the same literal the description names, so a cap change cannot \
+             drift silently out of step with the sentence the model reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_bounds_the_rendered_title_so_attempts_and_output_stay_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let long_title = "x".repeat(5_000);
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    &long_title,
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        let header_line = out.lines().next().expect("header line present");
+        assert!(
+            header_line.chars().count() <= READ_TASK_TITLE_LIMIT + 2,
+            "an operator-pasted title must not render verbatim and unbounded, or it can \
+             consume the whole tool-result budget before later sections: {} chars",
+            header_line.chars().count()
+        );
+        let output_at = out.find("## Output").expect("Output section present");
+        let attempts_at = out.find("## Attempts").expect("Attempts section present");
+        assert!(
+            output_at > attempts_at,
+            "the Output section must stay reachable behind a very long card title: {} bytes total",
+            out.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_resolves_the_pinned_artifact_version_not_a_later_operator_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Draft the memo",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-1".to_string(),
+                attempt: Some(1),
+            },
+            at_millis: 5,
+            artifacts: vec![crate::ports::tasks::TaskOutputArtifact {
+                artifact_id: "art-1".to_string(),
+                version: 1,
+                title: "Memo".to_string(),
+                kind: crate::ports::artifacts::ArtifactKind::Markdown,
+            }],
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let mut record = crate::ports::artifacts::ArtifactRecord::new(
+            "art-1",
+            "t-1",
+            "Memo",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "the agent's draft body",
+            "engineer",
+            5,
+        );
+        record.push_version(
+            "an operator edited this after the attempt settled",
+            crate::ports::artifacts::ArtifactAuthor::Operator,
+            "operator",
+            10,
+            None,
+        );
+        artifacts.upsert(&company, &record).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("the agent's draft body"),
+            "must render the version the task's output pinned, not the latest: {out}"
+        );
+        assert!(
+            !out.contains("an operator edited this"),
+            "a later operator edit must not render as what the task produced: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_only_renders_artifacts_pinned_by_the_current_output_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Draft the memo",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-2".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 10,
+            artifacts: vec![crate::ports::tasks::TaskOutputArtifact {
+                artifact_id: "art-b".to_string(),
+                version: 1,
+                title: "Follow-up".to_string(),
+                kind: crate::ports::artifacts::ArtifactKind::Markdown,
+            }],
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let record_a = crate::ports::artifacts::ArtifactRecord::new(
+            "art-a",
+            "t-1",
+            "First draft",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "attempt 1's body — superseded, no longer part of the latest output",
+            "engineer",
+            5,
+        );
+        artifacts.upsert(&company, &record_a).await.unwrap();
+        let record_b = crate::ports::artifacts::ArtifactRecord::new(
+            "art-b",
+            "t-1",
+            "Follow-up",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "attempt 2's body",
+            "engineer",
+            10,
+        );
+        artifacts.upsert(&company, &record_b).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("attempt 2's body"),
+            "the artifact pinned by the current output stamp must render: {out}"
+        );
+        assert!(
+            !out.contains("First draft") && !out.contains("superseded"),
+            "an artifact from an earlier attempt that the current output stamp does not pin \
+             must not render as part of the latest output: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_treats_an_empty_output_stamp_as_the_latest_attempt_publishing_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Draft the memo",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-2".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 10,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let record_a = crate::ports::artifacts::ArtifactRecord::new(
+            "art-a",
+            "t-1",
+            "First draft",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "attempt 1's body — attempt 2 published nothing",
+            "engineer",
+            5,
+        );
+        artifacts.upsert(&company, &record_a).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("First draft") && !out.contains("attempt 1's body"),
+            "an earlier attempt's artifact must not render as the latest attempt's output when \
+             the current output stamp pins an empty (non-absent) artifact list: {out}"
+        );
+        assert!(
+            out.contains("No artifacts published"),
+            "an empty-but-present output stamp must render as the latest attempt publishing \
+             nothing, not fall through to the all-artifacts legacy fallback: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_renders_workflows_recorded_in_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Automate the weekly report",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "orchestrator",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-1".to_string(),
+                attempt: Some(1),
+            },
+            at_millis: 5,
+            artifacts: Vec::new(),
+            workflows: vec![TaskOutputWorkflow {
+                workflow_id: "wf-weekly-report".to_string(),
+                run_id: Some("wf-run-1".to_string()),
+                action: TaskOutputAction::Ran,
+            }],
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(out.contains("### Workflows"), "{out}");
+        assert!(out.contains("wf-weekly-report"), "{out}");
+        assert!(
+            out.contains("wf-run-1"),
+            "the workflow's run id must be surfaced for read_run: {out}"
+        );
+    }
+
+    // -- FAIL-axis: cross-tenant reach, ungrounded targets, unbounded growth -
+
+    /// A `RunStore` that genuinely partitions by company — the shape every
+    /// real backend promises — so a lookup under one company can never answer
+    /// with a row filed under another.
+    struct TenantScopedRunStore {
+        rows: std::sync::Mutex<Vec<RunRecord>>,
+    }
+
+    #[async_trait]
+    impl RunStore for TenantScopedRunStore {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<RunRecord> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn get_run(&self, company: &CompanyId, id: &str) -> crate::Result<Option<RunRecord>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| &r.company == company && r.id == id)
+                .cloned())
+        }
+        async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<RunRecord>> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    fn tenant_run(company: &str, id: &str) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            company: CompanyId::new(company),
+            task_id: None,
+            chat_id: None,
+            agent_id: "ceo".to_string(),
+            attempt: 1,
+            status: crate::ports::runs::RunStatus::Running,
+            trigger_event_seq: None,
+            thread_root: None,
+            created_at_millis: 1_000,
+            started_at_millis: None,
+            finished_at_millis: None,
+            error: None,
+            usage: crate::ports::types::TokenUsage::default(),
+            step_count: 0,
+            workflow_run_id: None,
+            node_id: None,
+        }
+    }
+
+    /// FAIL-axis (HT-073): `ReadRunTool` is company-scoped only by
+    /// construction — `self.company` is the sole company argument it ever
+    /// passes to the run store, never anything derived from the `run_id`
+    /// argument. This pins that structural argument against a store that
+    /// genuinely partitions by company: a `run_id` that exists, but filed
+    /// under a DIFFERENT company, must read as not found, never leak.
+    #[tokio::test]
+    async fn read_run_never_leaks_a_run_id_belonging_to_another_company() {
+        let runs: Arc<dyn RunStore> = Arc::new(TenantScopedRunStore {
+            rows: std::sync::Mutex::new(vec![tenant_run("beta", "r-secret")]),
+        });
+        let tool = ReadRunTool::new(CompanyId::new("acme"), Some(runs), None);
+        let out = tool
+            .execute(json!({ "run_id": "r-secret" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(
+            out.contains("No run"),
+            "acme asking about beta's run_id must read as not-found: {out}"
+        );
+        assert!(
+            !out.contains("Attempt"),
+            "must not render beta's run: {out}"
+        );
+    }
+
+    /// INPUT/STATE-axis (HT-074): `spawn_task` now grounds `assignee` on the
+    /// same terms `delegate_to_desk`/`delegate_to_teammate` already do (issue
+    /// #272) — a name that resolves to nobody on the roster is refused here,
+    /// in the model's own turn, rather than surviving as a queued card the
+    /// drain silently opens unowned with no signal anywhere that the assignee
+    /// was bogus.
+    ///
+    /// The store is seeded (not empty) so grounding actually resolves the
+    /// roster rather than taking the fail-open path — an empty store would
+    /// pass this test for the wrong reason.
+    #[tokio::test]
+    async fn spawn_task_refuses_an_assignee_that_names_nobody_on_the_roster() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            Arc::new(MemStore::seeded(seeded_record(&company))),
+        );
+
+        let outcome = tool
+            .execute(json!({
+                "title": "Investigate the outage",
+                "assignee": "totally-nonexistent-agent-id",
+            }))
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_error,
+            "an assignee naming nobody on the roster must be refused before queuing"
+        );
+        assert!(
+            outcome.text().contains("totally-nonexistent-agent-id"),
+            "the refusal names the target the model typed: {}",
+            outcome.text()
+        );
+        assert_eq!(queue.queued(), 0, "nothing should have been staged");
+    }
+
+    /// The other half: a real teammate id grounds and queues under its
+    /// canonical form, and a blank/absent `assignee` opens the card unowned
+    /// without ever touching the store.
+    #[tokio::test]
+    async fn spawn_task_grounds_a_real_teammate_and_leaves_a_blank_assignee_alone() {
+        let company = CompanyId::new("acme");
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "eng"
+role = "Engineer"
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            manifest,
+            ..seeded_record(&company)
+        };
+        let store = Arc::new(MemStore::seeded(record));
+
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), company.clone(), store.clone());
+        let grounded = tool
+            .execute(json!({ "title": "Fix the outage", "assignee": "ENG" }))
+            .await
+            .expect("execute");
+        assert!(!grounded.is_error, "{}", grounded.text());
+
+        let unassigned_tool = SpawnTaskTool::new(queue.clone(), company, store);
+        let unassigned = unassigned_tool
+            .execute(json!({ "title": "Untargeted work" }))
+            .await
+            .expect("execute");
+        assert!(!unassigned.is_error, "{}", unassigned.text());
+
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![
+                Delegation::SpawnTask {
+                    title: "Fix the outage".to_string(),
+                    note: None,
+                    assignee: Some("eng".to_string()),
+                },
+                Delegation::SpawnTask {
+                    title: "Untargeted work".to_string(),
+                    note: None,
+                    assignee: None,
+                },
+            ],
+            "a display name grounds to the canonical roster id, and no assignee is queued as \
+             None rather than being pushed through the resolver at all"
+        );
+    }
+
+    /// A `CompanyStore` that genuinely partitions by company — unlike
+    /// `MemStore`, which ignores the `id` argument and answers for whichever
+    /// company it was seeded with regardless of who asks. Needed to prove
+    /// `spawn_task`'s grounding actually scopes its lookup to `self.company`
+    /// rather than happening to work because every test fixture only ever
+    /// holds one company's record.
+    struct TenantScopedCompanyStore {
+        records: std::collections::HashMap<String, CompanyRecord>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompanyStore for TenantScopedCompanyStore {
+        async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(self.records.get(id.as_ref()).cloned())
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// AUTH-axis (HT-074): `spawn_task`'s grounding must scope its roster
+    /// lookup to the tool's OWN company (`self.company`), never to a
+    /// different one — a teammate id that is real, but only on ANOTHER
+    /// company's roster, must be refused exactly as an invented id would be,
+    /// not accidentally admitted through a leaked cross-tenant read.
+    #[tokio::test]
+    async fn spawn_task_grounds_only_against_its_own_companys_roster() {
+        let acme = CompanyId::new("acme");
+        let beta = CompanyId::new("beta");
+        let beta_manifest = toml::from_str(
+            r#"
+[company]
+name = "Beta"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "eng"
+role = "Engineer"
+"#,
+        )
+        .expect("valid manifest");
+        let mut records = std::collections::HashMap::new();
+        records.insert("acme".to_string(), seeded_record(&acme));
+        records.insert(
+            "beta".to_string(),
+            CompanyRecord {
+                manifest: beta_manifest,
+                ..seeded_record(&beta)
+            },
+        );
+        let store = Arc::new(TenantScopedCompanyStore { records });
+
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), acme, store);
+
+        let outcome = tool
+            .execute(json!({ "title": "Fix the outage", "assignee": "eng" }))
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_error,
+            "a teammate id real only on a DIFFERENT company's roster must be refused, not \
+             leaked in: {}",
+            outcome.text()
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// FAIL-axis (HT-074): when the company record cannot be read at all —
+    /// the same store failure `DelegateToDeskTool`/`DelegateToTeammateTool`
+    /// fail OPEN on for the orchestrator's own unrestricted copy (see
+    /// `Grounding::ungrounded`) — `spawn_task` must fail open too, not refuse
+    /// to open a card just because the roster could not be checked this
+    /// instant. The assignee is queued exactly as typed, unresolved, the same
+    /// as it has always been for a request with no assignee to ground.
+    #[tokio::test]
+    async fn spawn_task_fails_open_when_the_company_record_cannot_be_read() {
+        struct BrokenStore;
+        #[async_trait::async_trait]
+        impl CompanyStore for BrokenStore {
+            async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+                Err(crate::OpenCompanyError::Store("store is down".to_string()))
+            }
+            async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+                Ok(Vec::new())
+            }
+            async fn append_ledger(
+                &self,
+                _id: &CompanyId,
+                _entry: LedgerEntry,
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), company, Arc::new(BrokenStore));
+
+        let outcome = tool
+            .execute(json!({ "title": "Investigate the outage", "assignee": "eng" }))
+            .await
+            .unwrap();
+        assert!(
+            !outcome.is_error,
+            "a store failure must not block opening the card: {}",
+            outcome.text()
+        );
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![Delegation::SpawnTask {
+                title: "Investigate the outage".to_string(),
+                note: None,
+                assignee: Some("eng".to_string()),
+            }],
+            "the assignee is queued as typed, unresolved, when grounding could not run at all"
+        );
+    }
+
+    /// FAIL-axis (HT-076): every fixture in this module hand-writes its
+    /// `CompanyRecord` manifest with short, convenient agent ids ("ceo",
+    /// "writer"). The real setup pipeline
+    /// (`company::setup::manifest_from_setup`) derives ids from the agent's
+    /// ROLE text via `unique_agent_id`/`snake_id` — multi-word,
+    /// underscore-separated ids no hand fixture happens to produce. This
+    /// proves `delegate_to_teammate`'s grounding
+    /// (`CompanyRecord::resolve_teammate_key`) agrees with that real shape,
+    /// not just the fixtures' convenient one.
+    #[tokio::test]
+    async fn delegate_to_teammate_grounds_against_a_realistically_derived_roster_id() {
+        let agents = vec![
+            crate::company::setup::ProposedAgent {
+                name: "Head".to_string(),
+                role: "Head of Product Strategy".to_string(),
+                description: "Owns the roadmap.".to_string(),
+                focus: None,
+            },
+            crate::company::setup::ProposedAgent {
+                name: "Ops".to_string(),
+                role: "Chief Operating Officer".to_string(),
+                description: "Runs the business.".to_string(),
+                focus: None,
+            },
+        ];
+        let manifest = crate::company::setup::manifest_from_setup(
+            &crate::company::setup::SetupAnswers::default(),
+            &agents,
+            None,
+        );
+        let real_id = manifest.agents[0].id.clone();
+        assert!(
+            real_id.contains('_'),
+            "the real roster builder derives multi-word ids, unlike this module's short hand \
+             fixtures: got {real_id:?}"
+        );
+
+        let company = CompanyId::new("acme");
+        let record = CompanyRecord {
+            manifest,
+            ..seeded_record(&company)
+        };
+        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record));
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
+
+        let out = tool
+            .execute(json!({ "teammate": real_id.clone(), "instruction": "review the roadmap" }))
+            .await
+            .unwrap();
+        assert!(
+            !out.is_error,
+            "grounding must resolve a real setup-derived id, not just the hand fixtures' short \
+             ones: {}",
+            out.text()
+        );
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![Delegation::DelegateToTeammate {
+                teammate: real_id,
+                instruction: "review the roadmap".to_string(),
+            }]
+        );
+    }
+
+    /// The cap counts the company's own roster, and every load appends more.
+    ///
+    /// `apply_globals` puts the host's baseline teammates into `agents` on
+    /// every production load. A cap that counted the whole list would spend
+    /// most of its budget on teammates the company neither added nor can
+    /// remove, and a company with a designed roster would be refused its first
+    /// mint. The manifest here is built the way production builds one, so the
+    /// baseline is present and the count has to see past it.
+    #[tokio::test]
+    async fn add_agent_counts_manifest_teammates_toward_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        let mut manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"designer\"\nrole = \"Designer\"\n",
+        )
+        .expect("valid manifest");
+        manifest.apply_globals();
+        assert!(
+            manifest.agents.len() > manifest.own_agents().count(),
+            "this test is only meaningful while the baseline is appended to a roster"
+        );
+        record.manifest = manifest;
+        let store = Arc::new(MemStore::seeded(record));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        for i in 1..crate::company::setup::MAX_AGENTS {
+            let result = tool
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(
+                !result.is_error,
+                "mint {i} unexpectedly refused: {}",
+                result.text()
+            );
+        }
+
+        let result = tool
+            .execute(json!({ "name": "One too many", "role": "Generalist" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{}", result.text());
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS - 1,
+            "refusal must not persist another teammate"
+        );
+    }
+
+    /// A roster at the setup cap refuses further minting.
+    #[tokio::test]
+    async fn add_agent_refuses_once_the_roster_reaches_the_setup_cap() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        for i in 0..crate::company::setup::MAX_AGENTS {
+            let result = tool
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .unwrap();
+            assert!(!result.is_error);
+        }
+        let result = tool
+            .execute(json!({ "name": "One too many", "role": "Generalist" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "a roster already at the setup cap must refuse further minting"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_agent_does_not_count_retired_teammates_toward_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"designer\"\nrole = \"Designer\"\n",
+        )
+        .expect("valid manifest");
+        record.overlay_retired_agents.push("designer".to_string());
+        let store = Arc::new(MemStore::seeded(record));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        for i in 0..crate::company::setup::MAX_AGENTS {
+            let result = tool
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(!result.is_error, "{}", result.text());
+        }
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_add_agent_calls_cannot_exceed_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(YieldingStore {
+            record: StdMutex::new(Some(seeded_record(&company))),
+        });
+        let first = unscoped_add_agent(company.clone(), store.clone());
+        let second = unscoped_add_agent(company.clone(), store.clone());
+        for i in 1..crate::company::setup::MAX_AGENTS {
+            let result = first
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(!result.is_error, "{}", result.text());
+        }
+
+        let (a, b) = tokio::join!(
+            first.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+            second.execute(json!({ "name": "Alex", "role": "Support Lead" })),
+        );
+        let (a, b) = (a.expect("execute"), b.expect("execute"));
+        assert_eq!([a, b].iter().filter(|result| result.is_error).count(), 1);
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS
+        );
+    }
+
+    /// A store that yields between reading a record and writing it back, so two
+    /// concurrent `add_agent` calls genuinely interleave their load → push →
+    /// save cycle rather than each running to completion uncontended.
+    struct YieldingStore {
+        record: StdMutex<Option<CompanyRecord>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompanyStore for YieldingStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            let snapshot = self.record.lock().expect("record").clone();
+            tokio::task::yield_now().await;
+            Ok(snapshot)
+        }
+        async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+            tokio::task::yield_now().await;
+            *self.record.lock().expect("record") = Some(record.clone());
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// FAIL-axis (HT-079, the concurrency half): `add_agent` is a read-modify-
+    /// write over the whole record — load, push onto `overlay_agents`, save —
+    /// with awaits on both ends. `company_write_lock` is what stops two of them
+    /// interleaving; without it the second save writes a record built from a
+    /// snapshot taken before the first landed, and one minted teammate simply
+    /// disappears while its caller is told it was added.
+    #[tokio::test]
+    async fn concurrent_add_agent_calls_cannot_lose_a_mint_to_the_load_push_save_race() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(YieldingStore {
+            record: StdMutex::new(Some(seeded_record(&company))),
+        });
+        let first = unscoped_add_agent(company.clone(), store.clone());
+        let second = unscoped_add_agent(company.clone(), store.clone());
+
+        let (a, b) = tokio::join!(
+            first.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+            second.execute(json!({ "name": "Alex", "role": "Support Lead" })),
+        );
+        assert!(!a.expect("execute").is_error);
+        assert!(!b.expect("execute").is_error);
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        let names: Vec<&str> = record
+            .overlay_agents
+            .iter()
+            .map(|agent| agent.name.as_str())
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "both mints were acknowledged, so both must survive the race: {names:?}"
+        );
+        assert!(
+            names.contains(&"Jamie") && names.contains(&"Alex"),
+            "{names:?}"
+        );
+    }
+
+    /// The other half of the same window: the duplicate-name guard reads
+    /// `overlay_agents` from a snapshot and pushes onto it, so two concurrent
+    /// mints of the SAME name are exactly the check-then-act the write lock has
+    /// to serialise. One must be refused, and the roster must hold one entry.
+    #[tokio::test]
+    async fn concurrent_add_agent_calls_for_one_name_mint_it_once() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(YieldingStore {
+            record: StdMutex::new(Some(seeded_record(&company))),
+        });
+        let first = unscoped_add_agent(company.clone(), store.clone());
+        let second = unscoped_add_agent(company.clone(), store.clone());
+
+        let (a, b) = tokio::join!(
+            first.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+            second.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+        );
+        let (a, b) = (a.expect("execute"), b.expect("execute"));
+        assert_eq!(
+            [&a, &b].iter().filter(|r| r.is_error).count(),
+            1,
+            "exactly one of two identical mints must be refused.\nfirst: {}\nsecond: {}",
+            a.text(),
+            b.text()
+        );
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            1,
+            "the duplicate guard must leave exactly one teammate: {:?}",
+            record
+                .overlay_agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 }

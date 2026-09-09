@@ -366,6 +366,31 @@ jobs:
       - name: Assert desktop feature sets agree
         run: scripts/ci/assert-desktop-features.sh
 
+  # The 500-line Markdown cap, asserted rather than trusted (issue #695), in a
+  # job that always runs (issue #1974).
+  #
+  # This used to ride `Console` because that job is Node-only and cheap. But
+  # `Console` is gated on the `frontend` path filter, and `docs/**` is not in
+  # it — so the Markdown cap skipped on exactly the pull requests that change
+  # Markdown. A docs-only PR could add a 900-line file and go green.
+  #
+  # That is the same failure the `frontend` filter's own comment records for
+  # `scripts/ci/**`: "a guard that asserts nothing merges green. That is how
+  # the broken `assert-single-tauri-app.sh` got in." Adding `**/*.md` to the
+  # frontend filter would close it too, but it would keep a repository-wide
+  # rule hostage to a console path list — which is what created the gap. A
+  # policy check with no toolchain belongs in a job with no gate.
+  markdown-cap:
+    name: Markdown line cap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: ./scripts/ci/assert-md-line-cap.sh
+
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
@@ -445,6 +470,16 @@ jobs:
       # between two lanes twenty minutes later.
       - name: Assert toolchain pins agree
         run: scripts/ci/assert-toolchain-pin.sh
+
+      # Issue #592, second instance. Also config-only, also before the
+      # toolchain: `deploy-staging.yml` sets `submodules: false` and names its
+      # vendored checkouts by hand, and it does not run on pull requests — so a
+      # vendored path dependency missing from that list is green here and fails
+      # only on deploy. Cargo reads every path dependency's manifest during
+      # resolution whatever the feature selection, so the break is the default
+      # build, not the feature that added the crate.
+      - name: Assert vendored path dependencies are checked out
+        run: scripts/ci/assert-vendored-deps-checked-out.sh
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
@@ -593,6 +628,15 @@ jobs:
       - name: Test the export bundle
         run: scripts/ci/run-scoped-suite.sh "export bundle" export store::export
 
+      # `hivemind`: the `tinyhivemind` session adapter (`runtime::hivemind`).
+      # The feature gates one module and its tests, and nothing on the default
+      # path enables it — which is exactly the shape #770 was filed about, so it
+      # gets its lane in the same breath as the code rather than after somebody
+      # notices. Offline and dependency-free at this job's expense: the crate is
+      # already vendored and pure, so this costs one recompile of the lib.
+      - name: Test the hivemind session adapter
+        run: scripts/ci/run-scoped-suite.sh "hivemind adapter" hivemind runtime::hivemind
+
       # `imap`/`smtp`: the mail surface. One gated test runs here today — the
       # RFC822 parser — and it is a parser, which is precisely the kind of code
       # that rots silently. `smtp` is compiled alongside deliberately: it carries
@@ -615,7 +659,7 @@ jobs:
       - name: Test the sidecar brain
         run: scripts/ci/run-scoped-suite.sh "sidecar brain" sidecar brain::sidecar
 
-      # `analytics` (issue #1739): the Mixpanel transport, and the acceptance
+      # `analytics` (issue #1739): the OpenPanel transport, and the acceptance
       # criterion that needs it. The port, the mocks, the enable/disable
       # decision and the payload vocabulary are all in the DEFAULT build and run
       # in the bare `cargo test` above — deliberately, since a content leak
@@ -623,8 +667,9 @@ jobs:
       #
       # What this lane adds is the pair that cannot be written without the
       # transport compiled in: `a_self_hosted_build_makes_no_request` stands up
-      # a local collector, hands the process a token and an endpoint, declares
-      # nothing, and asserts ZERO requests; `a_hosted_tenant_reports` is its
+      # a local collector, hands the process a credential and an endpoint,
+      # declares nothing, and asserts ZERO requests; `a_hosted_tenant_reports`
+      # is its
       # positive control against the same collector. Without the second, a zero
       # request count would be indistinguishable from a test that sends nothing
       # at all — which is the #770 shape one level down.
@@ -635,6 +680,25 @@ jobs:
       # built.
       - name: Test the analytics surface
         run: scripts/ci/run-scoped-suite.sh "analytics" analytics analytics
+
+      # `crash-reporting`: the `before_send` hook, which is the only part of
+      # crash reporting that needs a `sentry::` type to exist at all.
+      #
+      # Same split as `analytics` above, for the same reason. The
+      # enable/disable decision (`observability::config`) and the secret
+      # scrubber (`observability::redaction`) are deliberately NOT gated — they
+      # name no `sentry::` type, they are the two parts that have to be provably
+      # right, and they run in the bare `cargo test` above. What this lane adds
+      # is the half that cannot be written without the protocol types compiled
+      # in: `no_credential_survives_the_hook` builds one event carrying a
+      # credential in every field an event can carry one in, runs it through the
+      # real `before_send`, serializes the result and greps it.
+      #
+      # It rides this job because the feature's only dependency is `sentry`
+      # itself, which brings a small `ureq` and the `rustls` already in the
+      # graph — no second HTTP client and no native TLS. See Cargo.toml.
+      - name: Test the crash-reporting surface
+        run: scripts/ci/run-scoped-suite.sh "crash reporting" crash-reporting observability
 
       # Issue #428. The `Console E2E` job drives a REAL host, so it needs a
       # binary. Building one over there would mean a second submodule checkout
@@ -997,6 +1061,14 @@ jobs:
       # is what makes it meaningful.
       - name: Clippy (openhuman, tinymemory)
         run: cargo clippy --locked --no-deps --features openhuman --all-targets -- -D warnings
+
+      # The route-authority matrix names its target explicitly, because a
+      # bare `cargo test` reports success when it selects no tests at all —
+      # which is how a disabled integration target passes as green. The
+      # script exists so the target name lives in one place; a lane that
+      # inlines the command instead drifts the moment the target is renamed.
+      - name: Route authority matrix
+        run: scripts/ci/assert-auth-matrix.sh
 
       # Issue #1524 (PR 1). `pub mod memory` is gated on `tinymemory`
       # (`store/mod.rs`), and neither strict lane enabled that gate: the
@@ -1578,15 +1650,6 @@ jobs:
       # the failure as one. See docs/design-system/README.md.
       - run: ./scripts/ci/assert-design-tokens.sh
 
-      # The 500-line Markdown cap, asserted rather than trusted (issue #695).
-      #
-      # `CLAUDE.md` has stated the rule since the beginning and nothing measured
-      # it, so three files drifted past — one to 699 lines — a paragraph at a
-      # time. Same family as the check above: a policy grep, no toolchain
-      # needed, and a separate step so a failure is named as a policy failure
-      # rather than a build one. It rides the Console job because that job is
-      # Node-only and cheap; the rule itself is repository-wide.
-      - run: ./scripts/ci/assert-md-line-cap.sh
 
       # The release-notes generator, which is otherwise only ever exercised by a
       # `workflow_dispatch` release — the one moment nobody wants to discover a

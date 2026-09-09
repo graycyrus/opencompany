@@ -9,11 +9,31 @@ import {
   SETTINGS_PAGE_GROUPS,
   SETTINGS_PAGES,
 } from "@/views/settings-pages";
+import { SETTINGS_NAMED_BY } from "./support/routed-views";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("Settings navigation (issue #1468)", () => {
+  it("keeps the Integrations group, which the Connections move did not empty", () => {
+    // Apps and MCP Servers left this rail for `#/connections`. Inference,
+    // Hosting and Search stayed, deliberately: each is a credential form
+    // beside the one thing it unlocks, which is the argument the file makes
+    // twice. Pinned by id rather than by count so that "the group survived" and
+    // "it survived with the right three" are the same assertion.
+    const integrations = SETTINGS_PAGES.filter((page) => page.group === "integrations");
+    expect(integrations.map((page) => page.id)).toEqual(["inference", "hosting", "search"]);
+  });
+
+  it("no longer carries the two pages that became the Connections section", () => {
+    // Widened to `string` for the same reason the Brain assertion below is:
+    // once these ids are gone from the table they are not in the union, so a
+    // narrow comparison is a type error rather than the assertion being made.
+    const ids = SETTINGS_PAGES.map((page) => page.id as string);
+    expect(ids).not.toContain("oauth");
+    expect(ids).not.toContain("mcp");
+  });
+
   it("groups every settings page exactly once", () => {
     expect(SETTINGS_PAGE_GROUPS.map((group) => group.label)).toEqual([
       "Identity & lifecycle",
@@ -51,19 +71,20 @@ describe("Settings navigation (issue #1468)", () => {
   it("renders linkable rows and gives narrow-screen navigation its missing context", () => {
     const section = read("views/SettingsSection.tsx");
     // The settings sub-pages (one view per SETTINGS_PAGES id). Devices and
-    // Connections became pages of their own elsewhere in the redesign, so the
-    // list tracks the ids settings-pages.ts actually declares.
-    const settingsPages = [
-      "SettingsView.tsx",
-      "PeopleView.tsx",
-      "OAuthView.tsx",
-      "McpServersView.tsx",
-      "InferenceView.tsx",
-      "HostingView.tsx",
-      "SearchView.tsx",
-      "SkillsView.tsx",
-      "UsageView.tsx",
-    ].map((page) => read(`views/${page}`));
+    // Connections became pages of their own elsewhere in the redesign, and Apps
+    // (the third-party accounts) and MCP Servers then left this rail entirely
+    // for the Connections section — `connections-navigation.test.ts` holds them
+    // to the same rules there. The list tracks the ids settings-pages.ts
+    // actually declares.
+    // Derived from `SETTINGS_NAMED_BY`, not restated. A hand-written list is a
+    // list that quietly stops covering the newest page: Observatory joined this
+    // rail and the hard-coded seven still passed, testing six-sevenths of it and
+    // saying nothing. `SETTINGS_NAMED_BY` is a `Record<SettingsPage, …>`, so a
+    // page with no entry is a compile error and this sweep cannot fall behind.
+    const settingsPages = SETTINGS_PAGES.map(({ id }) =>
+      read(`views/${SETTINGS_NAMED_BY[id]}`),
+    );
+    expect(settingsPages.length).toBe(SETTINGS_PAGES.length);
 
     expect(section.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
     expect(section).toContain("title={item.hint}");
@@ -85,7 +106,39 @@ describe("Settings navigation (issue #1468)", () => {
     // #1763 makes it visible at every width, because every one of its siblings
     // above sits beside that same rail and shows one.
     expect(read("views/SettingsView.tsx")).toContain(
-      '<PageHeader title="General settings" width="3xl" />',
+      '<PageHeader title="General settings" width="full" />',
     );
+  });
+
+  it("gives every settings page the whole pane, not a centred column", () => {
+    // Issue #2131. Each page used to centre its body on a fixed column — `3xl`
+    // on General and People, `5xl` on Inference, Hosting, Search and Skills,
+    // `6xl` on Usage — which on a 1920px window left General's cards in a
+    // 768px strip with ~600px of empty margin either side, beside a rail that
+    // already narrows the pane.
+    //
+    // Swept rather than restated per page, and derived from `SETTINGS_NAMED_BY`
+    // for the same reason the header check above is: a page added to the rail
+    // with a centred body would otherwise pass by not being on anyone's list.
+    //
+    // Observatory is excluded and is the one honest exception: its row here is
+    // a doorway, `#/settings/observatory` is rewritten onto `#/observatory`
+    // before this section ever dispatches, and the view is routed by the shell
+    // rather than rendered inside this pane. It is already full width.
+    const paneRendered = SETTINGS_PAGES.filter(({ id }) => id !== "observatory");
+    expect(paneRendered.length).toBe(SETTINGS_PAGES.length - 1);
+
+    for (const { id } of paneRendered) {
+      const source = read(`views/${SETTINGS_NAMED_BY[id]}`);
+      // Said explicitly even though `full` is `PageHeader`'s default: the
+      // header's row has to track the body's column, and a page that states
+      // its width is a page whose next editor knows the two are paired.
+      expect(source, `${id} header width`).toContain('width="full"');
+      // The body. `mx-auto` is what a centred column needs and what none of
+      // these pages has any other use for, so its absence is the property —
+      // narrower than banning `max-w-*`, which these pages still legitimately
+      // use on a search box, a dialog, and the field measure inside a form.
+      expect(source, `${id} body column`).not.toContain("mx-auto");
+    }
   });
 });

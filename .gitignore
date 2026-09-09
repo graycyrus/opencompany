@@ -58,6 +58,13 @@ instance-id
 # `frontend/.gitignore` already covers; this catches the root-level copy.
 test-results/
 
+# Python bytecode from the headless drivers in `scripts/` (e.g.
+# `scripts/hive-euler.py`). CPython writes these beside the script whenever one
+# is imported rather than run, and the tag is interpreter-specific, so a
+# committed copy is both noise and wrong for the next reader's Python.
+__pycache__/
+*.pyc
+
 # A local `serve` data root inside the checkout. `OPENCOMPANY_DATA_DIR` is the
 # only knob that isolates two local `serve` processes from each other
 # (`docs/spec/runtime/storage.md`), so pointing it at a directory beside the

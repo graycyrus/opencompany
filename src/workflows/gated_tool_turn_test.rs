@@ -201,6 +201,8 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
     let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
     let journal = Arc::new(RuntimeJournal::new(dir.join("journal.jsonl")));
     let deps = HarnessDeps {
+        emergency_gate: None,
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -300,6 +302,7 @@ pub(super) fn record() -> CompanyRecord {
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     }
 }
 

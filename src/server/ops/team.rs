@@ -74,6 +74,18 @@ pub fn router() -> Router<AppState> {
             "/team/draft",
             post(super::team_agent::draft_new_profile),
         ))
+        // Issue #1989: designs a WHOLE teammate from a name and a sentence, for
+        // the reduced Add-teammate dialog. A static segment beside `/team/draft`
+        // and for the same reason — nothing serves `POST` on `/team/{agent_id}`,
+        // so this cannot be confused with a teammate whose id is `design`.
+        //
+        // Deliberately id-less: this is the only pass that may write a `role`,
+        // and taking no agent id is what makes it structurally unable to rewrite
+        // an existing teammate's. See `design_teammate`.
+        .merge(scoped(
+            "/team/design",
+            post(super::team_agent::design_teammate),
+        ))
         // Issue #1776: drafting a mandate or persona for one teammate. Its own
         // path rather than another method on `/team/{agent_id}`, because it is
         // not a write to that teammate — it reads the record and returns text,
@@ -487,6 +499,32 @@ async fn add_member(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
 ) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
+    // The blank-field gap, closed (issue #1989). This was the ONE write path in
+    // the repository that stored a teammate's `name` and `role` exactly as they
+    // arrived: `PATCH {scope}/team/{agent_id}` refuses a blank one through
+    // `trimmed_field`, the orchestrator's `add_agent` tool refuses one,
+    // `company.toml` refuses one and `agents/<id>.toml` refuses one — and this
+    // route accepted `{"name": "", "role": ""}` with a `200`.
+    //
+    // What that produced is not a tidiness complaint. `persona_prompt`
+    // (`src/company/prompt.rs`) interpolates the role UNGUARDED while the
+    // description and instructions blocks beside it are blank-guarded, so a
+    // blank role ships the teammate a system prompt reading "You are Dana, the
+    //  at Acme."; the orchestrator's Team block and the auto-responder's
+    // channel-member block both render `id — role`, so delegation is grounded
+    // on a dash; and the detail page's copilot disables itself on a blank role,
+    // which is the page the console's create flow lands on. A console-side
+    // check is not a substitute for this one — the wire is open to anything
+    // holding a session, and the invariant belongs where the record is written.
+    //
+    // Before the authority check below rather than after, unlike
+    // `edit_agent`'s deliberate existence-then-authority ordering: there is no
+    // resource to confirm or deny the existence of here, so nothing is
+    // disclosed by answering "this request is malformed" first, and a
+    // request that cannot be stored should not first cost a permission lookup.
+    let name = required_field(&body.name, "name").map_err(|e| e.into_response())?;
+    let role = required_field(&body.role, "role").map_err(|e| e.into_response())?;
+
     // Setting a cap is admin-only, so an add that carries one is too — but an
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
@@ -610,9 +648,9 @@ async fn add_member(
         // stamps every artifact it authors, so it has to be right on the first
         // save. The surrounding write lock is what makes the uniqueness check
         // and the save below one atomic step.
-        id: record.mint_agent_id(&body.name),
-        name: body.name,
-        role: body.role,
+        id: record.mint_agent_id(&name),
+        name,
+        role,
         description: body.description,
         // Issue #661 / L5: the teammate's own grant, intersected with the
         // company allow-list by the shared reads/roster build. A teammate created
@@ -734,6 +772,23 @@ async fn remove_member(
         )));
     }
 
+    // Tombstone the operator-feed divert before it can be lost (issue #1781
+    // review, Codex P2 follow-up to the desk-deletion fix): a manifest
+    // teammate at the literal id `operator` is already covered below —
+    // `retire_agent` tombstones it under the same key
+    // `operator_feed_channel`'s own `is_retired` check reads — but an
+    // *overlay* teammate is deleted outright with no tombstone at all. If
+    // this removal is what's currently holding the divert (id or, via
+    // `is_roster_agent`, nothing else does for a teammate — desks are the
+    // only case matched by display name), the fallback address must stay
+    // fixed after the removal exactly as `delete_desk` already keeps it
+    // fixed after a colliding desk's removal — see
+    // `CompanyRecord::divert_operator_feed_permanently`'s doc.
+    if record.operator_feed_channel()
+        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+    {
+        record.divert_operator_feed_permanently();
+    }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
     if is_manifest {
         // A tombstone, not a manifest rewrite: `company.toml` and the global
@@ -1025,6 +1080,26 @@ async fn load_domain(company: &ScopedCompany) -> Result<Option<String>, ApiError
     Ok(Some(status.domain))
 }
 
+/// A required create-time field, trimmed, refusing a blank one (issue #1989).
+///
+/// Deliberately the same refusal and the same wording as `trimmed_field` in
+/// `team_agent.rs`, which is what `PATCH {scope}/team/{agent_id}` applies to the
+/// same two fields — a teammate that cannot be *edited* into a blank name or
+/// role must not be *born* with one, and an operator who meets both routes
+/// should meet one sentence. It is a separate function rather than a shared one
+/// because the shapes differ: `PATCH` takes `Option<&str>` where absent means
+/// leave-alone, and at creation there is nothing to leave alone — these fields
+/// are required by `AddMember` itself, so only their emptiness is in question.
+fn required_field(value: &str, field: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "a teammate's {field} can't be empty."
+        ))));
+    }
+    Ok(trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::{Body, to_bytes};
@@ -1089,6 +1164,7 @@ mod tests {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -1494,6 +1570,89 @@ mod tests {
             "the cap and the teammate landed in one save: {row}"
         );
         assert!(row["budgetSetBy"].is_string(), "{row}");
+    }
+
+    /// Issue #1989: `POST {scope}/team` refuses a blank name or role, which it
+    /// used to store.
+    ///
+    /// This was the only write path in the repository that did not. `PATCH
+    /// {scope}/team/{agent_id}`, the orchestrator's `add_agent`, `company.toml`
+    /// and `agents/<id>.toml` all refuse one, so a teammate with an empty role
+    /// was unreachable by every route except this one — and reachable by this
+    /// one with a plain `200`.
+    ///
+    /// Asserted through the wire and then read back off the roster, because the
+    /// failure this closes is a *stored* record: a blank role interpolates into
+    /// `persona_prompt` unguarded ("You are Dana, the  at Acme.") and renders as
+    /// `id — ` in the orchestrator's Team block, neither of which errors and
+    /// neither of which anyone is told about.
+    #[tokio::test]
+    async fn add_member_refuses_a_blank_name_or_role() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        // Whitespace as well as empty: `"   "` is what a form sends when
+        // somebody tabs through a field, and it stores just as blank.
+        for body in [
+            json!({"name": "", "role": "Growth"}),
+            json!({"name": "   ", "role": "Growth"}),
+            json!({"name": "Jamie", "role": ""}),
+            json!({"name": "Jamie", "role": "  \t "}),
+        ] {
+            let (status, answer) = send(
+                &state,
+                "POST",
+                "/api/v1/company/team",
+                Some(body.clone()),
+                Some(&member),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{body} must be refused, not stored: {answer}"
+            );
+            assert!(
+                answer.to_string().contains("can't be empty"),
+                "and refused in the same words `PATCH` uses: {answer}"
+            );
+        }
+
+        // Nothing landed. The roster is still exactly the manifest's.
+        let (status, roster) = send(
+            &state,
+            "GET",
+            "/api/v1/company/team",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{roster}");
+        assert!(
+            roster.as_array().unwrap().iter().all(|row| !row["role"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()),
+            "no teammate may exist with a blank role: {roster}"
+        );
+
+        // And the surrounding whitespace is trimmed off a good one rather than
+        // stored, so `" Jamie "` and `"Jamie"` are not two different teammates.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "  Jamie  ", "role": "  Growth  "})),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(created["name"], "Jamie", "{created}");
+        assert_eq!(created["role"], "Growth", "{created}");
     }
 
     /// Issue #1530: a teammate can be born with a persona override — the
@@ -1907,6 +2066,77 @@ mod tests {
         assert_eq!(
             again["id"], "dana_designer",
             "the freed slug comes back rather than suffixing past a ghost: {again}"
+        );
+    }
+
+    /// Issue #1781 review, Codex P2 follow-up: the sibling of the desk-side
+    /// fix — a legacy **overlay** teammate at the literal id `operator`
+    /// (grandfathered; `POST .../team` reserves this id going forward, the
+    /// same way `create_desk` reserves it for desks) diverts
+    /// `operator_feed_channel()` to the fallback address via `is_roster_agent`.
+    /// Unlike a manifest teammate, `remove_member`'s overlay branch deletes
+    /// outright with no `retire_agent` tombstone — so without this fix the
+    /// live `is_roster_agent`/`is_retired` checks would both go false the
+    /// moment the delete lands, reverting the feed to `OPERATOR_CHANNEL` and
+    /// orphaning every report already journaled under the fallback.
+    ///
+    /// Seeded directly on the stored record rather than through `POST
+    /// .../team`, for the same reason the desk-side test seeds its collision
+    /// directly: the creation route has refused this id since before this fix
+    /// existed, so this shape can only be reached by data that predates it.
+    #[tokio::test]
+    async fn removing_an_overlay_teammate_at_the_operator_id_keeps_the_feed_diverted() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record
+            .overlay_agents
+            .push(crate::ports::types::OverlayAgent {
+                id: "operator".to_string(),
+                name: "Legacy Operator".to_string(),
+                role: "Chief of Staff".to_string(),
+                description: None,
+                tools: None,
+                model: None,
+                harness: None,
+            });
+        runtime.store().save(&record).await.unwrap();
+
+        let reloaded = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "fixture must start in the collision state this test exercises"
+        );
+
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/team/operator",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let after = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            !after.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL),
+            "the colliding teammate must actually be gone, or this is not \
+             exercising the live-check-flips-back failure mode at all"
+        );
+        assert_eq!(
+            after.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed address must stay on the fallback once the overlay \
+             teammate that caused the collision is deleted — flipping back to \
+             OPERATOR_CHANNEL would orphan every report already journaled \
+             under the fallback and let the deleted teammate's own historical \
+             DM history (chat_id == \"operator\") resurface as system-feed \
+             content"
         );
     }
 

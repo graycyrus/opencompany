@@ -16,11 +16,28 @@
 //!   written with no reason is refused at the write rather than reported at the
 //!   read, because a row that closed silently is worth nothing to whoever picks
 //!   it up next and by then the person who knew has moved on.
+//! * **A required field is required at the write.** A ledger that declares the
+//!   `required-field` check refuses a row that would land without one, for the
+//!   same reason: the reader already calls such a row unreadable, so accepting
+//!   it stores something every surface then reports as a fault — the row
+//!   rendered twice, once as itself and once under *rows that could not be
+//!   read*. The check runs against the merged row, so amending one that already
+//!   carries the field is not refused for declining to repeat it.
 //! * **The derived file follows the write.** Every mutation re-renders and
 //!   republishes, so `derived/` is never a stale copy of something.
+//! * **A write and a purge on the same ledger never interleave.** Checking a
+//!   required field or a close reason reads the stored row first and only
+//!   then appends; a purge landing in that gap would remove the very events
+//!   the check just relied on, so the append that follows would recreate the
+//!   row without them and still report success. [`record`], [`delete_entry`]
+//!   and [`retire`] all take [`ledger_lock`] for one company's one ledger
+//!   before touching the store, so the two paths queue behind each other
+//!   instead of racing.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::Result;
 use crate::company::runtime::CompanyRuntime;
@@ -30,6 +47,75 @@ use crate::ledger::{
     Order, REASON_FIELD, Registry, budget, derived, engine, native, parse_order,
 };
 use crate::ports::now_millis;
+use crate::ports::types::CompanyId;
+
+/// What a write lock covers.
+///
+/// A ledger's rows are its own, so they lock per slug and unrelated ledgers
+/// never queue behind each other. The set of declarations is not any one
+/// ledger's: the cap counts across slugs, and no two ledgers may write the
+/// same derived file. Both are answered by reading every spec, so a
+/// declaration locks the registry rather than the slug it is about.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum LockScope {
+    Registry,
+    Rows(String),
+}
+
+/// One company's one lock scope — the key a write lock is held under.
+type LedgerKey = (CompanyId, LockScope);
+
+/// A registry of per-[`LedgerKey`] async locks, one per every distinct scope
+/// a write has touched.
+struct LedgerLocks {
+    inner: StdMutex<HashMap<LedgerKey, Arc<AsyncMutex<()>>>>,
+}
+
+impl LedgerLocks {
+    fn get(&self, company: &CompanyId, scope: LockScope) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.inner.lock().expect("ledger-write-lock map poisoned");
+        locks
+            .entry((company.clone(), scope))
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+}
+
+/// Every write's lock, shared by every [`Ledgers`] instance in the process.
+///
+/// A `static` rather than a field: two `Ledgers` built over the same company
+/// (one per request, per the routes) must meet on the same lock, which only
+/// something the process shares — not something each instance constructs —
+/// can guarantee. Mirrors the precedent `FS_WRITE_LOCKS` set for the
+/// filesystem store, deliberately including its scope: in-process only, so a
+/// second process over the same data directory is outside its reach and
+/// relies on the store's own write atomicity instead.
+static LEDGER_WRITE_LOCKS: LazyLock<LedgerLocks> = LazyLock::new(|| LedgerLocks {
+    inner: StdMutex::new(HashMap::new()),
+});
+
+/// The write lock for one company's one ledger's rows.
+///
+/// Held across a check-then-append (or a purge) so the two never observe each
+/// other's half-done state. Scoped to one slug rather than to the whole store,
+/// so writes to unrelated ledgers — or unrelated companies — never queue
+/// behind each other.
+fn rows_lock(company: &CompanyId, slug: &str) -> Arc<AsyncMutex<()>> {
+    LEDGER_WRITE_LOCKS.get(company, LockScope::Rows(slug.to_string()))
+}
+
+/// The write lock for one company's set of declarations.
+///
+/// Held across a check-then-write so that what [`Registry::admits`] answered
+/// is still true when the spec lands. Its two rules — the cap on how many a
+/// company declares, and one writer per derived file — range over every
+/// declaration, so two declarations of *different* slugs contend just as two
+/// of the same slug do.
+///
+/// A path that takes both takes this one first.
+fn registry_lock(company: &CompanyId) -> Arc<AsyncMutex<()>> {
+    LEDGER_WRITE_LOCKS.get(company, LockScope::Registry)
+}
 
 /// Everything a ledger operation needs, without a whole [`CompanyRuntime`].
 ///
@@ -191,6 +277,12 @@ pub struct Read {
     pub matched: usize,
     /// What the declared checks found on the whole ledger.
     pub faults: Vec<String>,
+    /// Rows not in a closed status, counted over the same fold `entries` came
+    /// from — never a second, independent fold that could observe a write
+    /// landing between the two.
+    pub open: usize,
+    /// Rows in one, counted over that same fold.
+    pub closed: usize,
 }
 
 /// What a read is narrowed by.
@@ -253,10 +345,14 @@ pub async fn read(ctx: &Ledgers, spec: &LedgerSpec, query: &Query) -> Result<Rea
         .unwrap_or(budget::DEFAULT_READ_LIMIT)
         .clamp(1, budget::MAX_READ_LIMIT);
     rows.truncate(limit);
+    let open = folded.open_count(spec);
+    let closed = folded.closed_count(spec);
     Ok(Read {
         entries: rows,
         matched,
         faults: folded.faults,
+        open,
+        closed,
     })
 }
 
@@ -273,13 +369,13 @@ pub async fn read(ctx: &Ledgers, spec: &LedgerSpec, query: &Query) -> Result<Rea
 /// write it, when the event names no entry, when it sets a status the ledger
 /// does not declare, or when it closes a row into a status that demands a
 /// reason without giving one.
-pub async fn record(
-    ctx: &Ledgers,
-    spec: &LedgerSpec,
-    author: &LedgerAuthor,
-    id: &str,
-    fields: BTreeMap<String, Option<String>>,
-) -> Result<engine::Entry> {
+/// Whether this author may write this ledger at all, and under what id.
+///
+/// Every one of these outranks anything read off the ledger's rows: a caller
+/// holding the wrong ledger needs to hear that, and a report about some row's
+/// contents would send them looking for a row instead of for the tool they
+/// should be using. Returns the trimmed id the write proceeds under.
+fn guard_write<'a>(spec: &LedgerSpec, author: &LedgerAuthor, id: &'a str) -> Result<&'a str> {
     if spec.source == LedgerSource::Native {
         return Err(OpenCompanyError::InvalidRequest(format!(
             "`{}` is not written with `record_entry`. {}",
@@ -302,8 +398,53 @@ pub async fn record(
                 .to_string(),
         ));
     }
+    Ok(id)
+}
+
+pub async fn record(
+    ctx: &Ledgers,
+    spec: &LedgerSpec,
+    author: &LedgerAuthor,
+    id: &str,
+    fields: BTreeMap<String, Option<String>>,
+) -> Result<engine::Entry> {
+    record_amending(ctx, spec, author, id, fields, false).await
+}
+
+/// [`record`], with the existence check [`close`] needs folded into the same
+/// locked section as the append it guards. A check made before the lock is
+/// acquired and an append made after it are two separate looks at the store;
+/// a [`delete_entry`] landing between them would purge the row the check saw
+/// and let the append that follows recreate it, closed and empty. Requiring
+/// `require_existing` here instead means the row that answers the check is
+/// the same row the append amends.
+async fn record_amending(
+    ctx: &Ledgers,
+    spec: &LedgerSpec,
+    author: &LedgerAuthor,
+    id: &str,
+    fields: BTreeMap<String, Option<String>>,
+    require_existing: bool,
+) -> Result<engine::Entry> {
+    let id = guard_write(spec, author, id)?;
+
+    let lock = rows_lock(&ctx.company, &spec.slug);
+    let _guard = lock.lock().await;
 
     let fields = normalize_fields(fields);
+    // Every check below judges the row the write produces, not the event that
+    // produces it: a ledger write is a merge, so an event supplying only the
+    // fields that changed is complete whenever the row already holds the rest.
+    let existing = entries(ctx, spec).await?;
+    if require_existing && existing.find(id).is_none() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "there is no `{id}` on `{}` to close. Check the id — closing a row that does not \
+             exist would open one, closed and empty.",
+            spec.slug
+        )));
+    }
+    let prospective = existing.preview(id, &fields);
+
     if let Some(field) = spec.status_field()
         && let Some(Some(status)) = fields.get(&field.name)
     {
@@ -321,34 +462,42 @@ pub async fn record(
                     .join(", ")
             )));
         }
-        // The reason may arrive on this event or already be on the row, so the
-        // check runs against the merged result rather than against the event —
-        // otherwise closing a row that already explained itself would be
-        // refused for saying it twice.
+        // The reason may arrive on this event or already be on the row, which
+        // the merged row above already accounts for — otherwise closing a row
+        // that already explained itself would be refused for saying it twice.
         if spec
             .status(status)
             .is_some_and(|declared| declared.needs_reason)
+            && prospective.get(REASON_FIELD).trim().is_empty()
         {
-            let arriving = fields
-                .get(REASON_FIELD)
-                .and_then(|value| value.as_deref())
-                .unwrap_or_default();
-            if arriving.trim().is_empty() {
-                let existing = entries(ctx, spec).await?;
-                let held = existing
-                    .find(id)
-                    .map(|entry| entry.get(REASON_FIELD).to_string())
-                    .unwrap_or_default();
-                if held.trim().is_empty() {
-                    return Err(OpenCompanyError::InvalidRequest(format!(
-                        "closing `{id}` as `{status}` needs a `{REASON_FIELD}`. A row that does \
-                         not say why it closed is worth nothing to whoever reads it next — and \
-                         'did not work' costs the same to write as the reason that would have \
-                         saved them."
-                    )));
-                }
-            }
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "closing `{id}` as `{status}` needs a `{REASON_FIELD}`. A row that does not say \
+                 why it closed is worth nothing to whoever reads it next — and 'did not work' \
+                 costs the same to write as the reason that would have saved them."
+            )));
         }
+    }
+
+    // Last of the write checks: a value the caller got wrong is more useful to
+    // report than one they left out, so a bad status is named before the row's
+    // gaps are counted.
+    let missing = engine::missing_required(&prospective, spec);
+    if !missing.is_empty() {
+        let declared: Vec<&str> = spec
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect();
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "recording `{id}` on `{}` leaves {} unset, which this ledger requires. The row would \
+             not be readable back — it would be reported under the ledger's unreadable rows \
+             instead of appearing in its section. Send {} in this same call. `{}` declares: {}.",
+            spec.slug,
+            described_list(&missing, spec),
+            name_list(&missing),
+            spec.slug,
+            name_list(&declared),
+        )));
     }
 
     let event = LedgerEvent {
@@ -388,6 +537,12 @@ pub async fn close(
     status: &str,
     reason: &str,
 ) -> Result<engine::Entry> {
+    // First, ahead of everything read off the spec or the rows: on a ledger
+    // this author may not write — a native one above all — every message below
+    // answers a question the caller is not in a position to ask, and each one
+    // buries the `written_by` line naming the tool that does own the write.
+    let id = guard_write(spec, author, id)?;
+
     let closing = spec.closing_statuses();
     if !closing
         .iter()
@@ -413,12 +568,17 @@ pub async fn close(
             spec.slug
         )));
     };
+
     let mut fields = BTreeMap::new();
     fields.insert(field.name.clone(), Some(status.trim().to_string()));
     if !reason.trim().is_empty() {
         fields.insert(REASON_FIELD.to_string(), Some(reason.trim().to_string()));
     }
-    record(ctx, spec, author, id, fields).await
+    // Closing is an amendment to a row that exists: an id naming none would
+    // otherwise open one, carrying nothing but the status that closed it. The
+    // check runs inside `record_amending`'s locked section, alongside the
+    // append it guards.
+    record_amending(ctx, spec, author, id, fields, true).await
 }
 
 /// Declares a new ledger.
@@ -434,8 +594,9 @@ pub async fn close(
 /// malformed, collides with an existing ledger, or is past the cap.
 pub async fn define(ctx: &Ledgers, document: &serde_json::Value) -> Result<LedgerSpec> {
     let spec = crate::ledger::parse(document, false)?;
-    let registry = registry(ctx).await?;
-    registry.admits(&spec)?;
+    let lock = registry_lock(&ctx.company);
+    let _guard = lock.lock().await;
+    registry(ctx).await?.admits(&spec)?;
     ctx.ledgers.put_spec(&ctx.company, &spec).await?;
     // Rendered immediately, empty, so the ledger is visible in `derived/` from
     // the moment it exists rather than from its first row. A folder that gains
@@ -460,6 +621,8 @@ pub async fn define(ctx: &Ledgers, document: &serde_json::Value) -> Result<Ledge
 /// nothing carries that slug.
 pub async fn retire(ctx: &Ledgers, author: &LedgerAuthor, slug: &str, purge: bool) -> Result<()> {
     refuse_non_human(author, "retire a ledger")?;
+    let lock = registry_lock(&ctx.company);
+    let _guard = lock.lock().await;
     let registry = registry(ctx).await?;
     let spec = registry.require(slug)?;
     if spec.builtin {
@@ -471,6 +634,8 @@ pub async fn retire(ctx: &Ledgers, author: &LedgerAuthor, slug: &str, purge: boo
     }
     ctx.ledgers.delete_spec(&ctx.company, &spec.slug).await?;
     if purge {
+        let lock = rows_lock(&ctx.company, &spec.slug);
+        let _guard = lock.lock().await;
         ctx.ledgers.purge_ledger(&ctx.company, &spec.slug).await?;
     }
     Ok(())
@@ -499,6 +664,8 @@ pub async fn delete_entry(
             spec.slug, spec.written_by
         )));
     }
+    let lock = rows_lock(&ctx.company, &spec.slug);
+    let _guard = lock.lock().await;
     let removed = ctx
         .ledgers
         .purge_entry(&ctx.company, &spec.slug, id.trim())
@@ -546,6 +713,38 @@ fn refuse_non_human(author: &LedgerAuthor, what: &str) -> Result<()> {
 }
 
 /// Trims and caps every value, dropping keys that are only whitespace.
+/// Backtick-quoted names, comma separated, for an error a caller has to act on.
+fn name_list(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// [`name_list`], with each field's description alongside its name.
+///
+/// A caller who left a field out is told what belongs there in the same
+/// refusal, rather than having to read the spec back to find out.
+fn described_list(names: &[&str], spec: &LedgerSpec) -> String {
+    names
+        .iter()
+        .map(|name| {
+            match spec
+                .fields
+                .iter()
+                .find(|field| field.name == *name)
+                .map(|field| field.description.trim())
+                .filter(|description| !description.is_empty())
+            {
+                Some(description) => format!("`{name}` ({description})"),
+                None => format!("`{name}`"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn normalize_fields(fields: BTreeMap<String, Option<String>>) -> BTreeMap<String, Option<String>> {
     fields
         .into_iter()

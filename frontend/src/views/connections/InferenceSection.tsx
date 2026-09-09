@@ -3,6 +3,8 @@ import { BrainCircuit, Check, Loader2, RotateCcw, Save, Trash2, Zap } from "luci
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { getCompanyCredential, type CompanyCredentialStatus } from "@/api/credential";
+import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
 import {
   getInferenceStatus,
   listInferenceModels,
@@ -42,6 +44,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
+import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
 
 /** The abstract cognition tiers the tenant model table maps. */
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
@@ -130,11 +135,56 @@ const PROVIDERS: Record<
 };
 
 /**
+ * The providers on offer. {@link PROVIDERS} keeps every descriptor, including the
+ * ones not listed here — the form still needs a hidden route's `requiresBaseUrl`
+ * and `preset`, and the host resolves the stored value exactly as it always did.
+ *
+ * Declared ahead of everything that reads it: `PROVIDER_LABEL_ITEMS` below is a
+ * module-level const built through `isOffered`, so a later declaration would be
+ * read in its temporal dead zone and throw on import.
+ */
+const PROVIDER_OPTIONS: InferenceProvider[] = (Object.keys(PROVIDERS) as InferenceProvider[]).filter(
+  (p) => p !== "managed" || !INFERENCE_MANAGED_HIDDEN,
+);
+
+/**
+ * What a provider this console does not offer is called on screen.
+ *
+ * Deliberately says nothing about the route it stands in for. The host reports
+ * an unconfigured company as `provider: "managed"` — the same value a newer
+ * host could send for something else entirely — and this console neither offers
+ * that route nor brands it, so the honest thing to render is the fact that
+ * nothing is configured *here*, which is true of every value that lands in it.
+ */
+const NOT_CONFIGURED = "Not configured";
+
+/** Whether this console offers `provider` as something to choose. */
+function isOffered(provider: string): provider is InferenceProvider {
+  return (PROVIDER_OPTIONS as string[]).includes(provider);
+}
+
+/**
+ * The label for a provider as the operator sees it.
+ *
+ * Never reaches into {@link PROVIDERS} for a route that is not offered: that
+ * table still holds the descriptor (the form needs its `requiresBaseUrl` and
+ * `preset`), but its label is a brand name for a choice this console does not
+ * present, and printing it is what made the card claim a route.
+ */
+function providerLabel(provider: string): string {
+  return isOffered(provider) ? PROVIDERS[provider].label : NOT_CONFIGURED;
+}
+
+/**
  * The base-ui `Select` wants a plain id -> label map for its `items` prop, so
  * project one out of the descriptor rather than maintaining a second list.
+ *
+ * Built through {@link providerLabel}, because `items` is what the *trigger*
+ * renders — a filtered `SelectItem` list alone leaves the closed control still
+ * showing the hidden route's own name.
  */
 const PROVIDER_LABEL_ITEMS: Record<InferenceProvider, string> = Object.fromEntries(
-  (Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => [p, PROVIDERS[p].label]),
+  (Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => [p, providerLabel(p)]),
 ) as Record<InferenceProvider, string>;
 
 /**
@@ -147,40 +197,76 @@ const METERING_NOTES: Record<UsageMetering, string> = {
   none: "no model runs on this path, so Usage stays at zero",
 };
 
-/** Per-provider form defaults applied when the operator picks a provider. */
+/**
+ * Per-provider form defaults applied when the operator picks a provider.
+ *
+ * `catalogTierDefaults` is `null` when **no** catalog has been read yet, and an
+ * object — possibly `{}` — once one has. The two are not interchangeable, and
+ * collapsing them was a defect (Codex review on #2045): a catalog classified
+ * `unknown` legitimately implies **no** defaults, and testing only the key count
+ * read that confirmed emptiness as "nothing loaded" and fell through to
+ * OpenRouter's ids. Switching provider away and back then repopulated four ids
+ * the endpoint's own catalog had just proved absent, and Save persisted them —
+ * the exact failure the vocabulary work exists to remove.
+ */
 function presetFor(
   provider: InferenceProvider,
   defaultTierModels?: Partial<Record<Tier, string>>,
+  catalogTierDefaults?: Partial<Record<Tier, string>> | null,
 ): {
   baseUrl: string;
   models: Partial<Record<Tier, string>>;
 } {
   const preset = PROVIDERS[provider].preset;
-  // The host's own `defaultTierModels` (from `GET …/inference`) is the source
-  // of truth once it has loaded; `PROVIDERS.openrouter.preset.models` is only
-  // the fallback used before that first status read resolves, so switching to
-  // OpenRouter still has something to prefill with immediately.
-  if (provider === "openrouter" && defaultTierModels && Object.keys(defaultTierModels).length > 0) {
+  if (provider !== "openrouter") return preset;
+  // A catalog has been read: its answer is the whole answer, including when
+  // that answer is "this endpoint implies no defaults".
+  //
+  // `status.defaultTierModels` is OpenRouter's vocabulary and nothing wider, so
+  // prefilling from it against an endpoint that publishes `chat-v1` writes four
+  // ids that endpoint has already told us it does not serve — an explicit,
+  // saved, silently unusable mapping, which is worse than the unmapped case the
+  // host now resolves correctly on its own.
+  if (catalogTierDefaults) {
+    return { ...preset, models: catalogTierDefaults };
+  }
+  // No catalog yet: the host's own `defaultTierModels` (from `GET …/inference`)
+  // beats `PROVIDERS.openrouter.preset.models`, which is only the fallback used
+  // before that first status read resolves, so switching to OpenRouter still
+  // has something to prefill with immediately.
+  if (defaultTierModels && Object.keys(defaultTierModels).length > 0) {
     return { ...preset, models: defaultTierModels };
   }
   return preset;
 }
 
-type Load = "loading" | "ready" | "unavailable" | "error";
+type Load = "loading" | "ready" | "unavailable" | "unconfigured" | "error";
 type TestState =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "ok"; note: string }
   | { kind: "error"; message: string };
 
+/**
+ * `baseUrl` and `message` travel with the state because the catalog is now the
+ * *configured endpoint's*, not a vendor registry: "could not be loaded" has to
+ * name which endpoint could not be loaded, or the operator has no idea what to
+ * go and look at.
+ */
 type ModelCatalogState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "ready"; models: InferenceModel[] }
-  | { kind: "empty" }
-  | { kind: "error" };
+  | {
+      kind: "ready";
+      models: InferenceModel[];
+      baseUrl: string;
+      /** The tier → model mapping this endpoint's own vocabulary implies. */
+      tierDefaults: Record<string, string>;
+    }
+  | { kind: "empty"; baseUrl: string }
+  | { kind: "error"; message: string };
 
-/** Keep a stored custom id selectable even after the registry no longer lists it. */
+/** Keep a stored custom id selectable even after the catalog no longer lists it. */
 function optionsForTier(catalog: InferenceModel[], current: string): InferenceModel[] {
   if (!current || catalog.some((model) => model.id === current)) return catalog;
   return [{ id: current, name: "Current custom model" }, ...catalog];
@@ -343,11 +429,34 @@ export function InferenceSection({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
+  // Whether this host can complete a one-click key grant. Read off the
+  // credential plane rather than the inference one, because that is where the
+  // flow lives — the same grant arms both, and asking the surface that owns it
+  // keeps one answer instead of two that could disagree.
+  const [credential, setCredential] = useState<CompanyCredentialStatus | null>(null);
   const [busy, setBusy] = useState<
     "save" | "reset" | "test" | "removeKey" | "restart" | null
   >(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogState>({ kind: "idle" });
+  /**
+   * The last tier → model mapping a *read* catalog implied, kept apart from
+   * `modelCatalog` on purpose: switching the provider select away from
+   * OpenRouter resets that state to `idle`, and `pickProvider` runs before the
+   * effect has had a chance to re-read anything — so a form that reads the
+   * defaults straight off `modelCatalog` would fall back to OpenRouter's ids on
+   * exactly the switch-away-and-back path an operator takes while comparing
+   * providers.
+   *
+   * `null` means **no catalog has been read**, which is a different fact from a
+   * catalog that was read and implies no defaults (`{}`, the `unknown`
+   * vocabulary). `presetFor` needs to tell them apart: treating a confirmed-empty
+   * mapping as "not loaded" repopulated four OpenRouter ids the endpoint had
+   * just been seen not to publish.
+   */
+  const [catalogTierDefaults, setCatalogTierDefaults] = useState<Record<string, string> | null>(
+    null,
+  );
 
   // Switch form.
   const [provider, setProvider] = useState<InferenceProvider>("managed");
@@ -402,9 +511,14 @@ export function InferenceSection({
    * reasoning as `removeKey` below.
    */
   const seedFromStatus = useCallback((next: InferenceStatus) => {
-    const seeded = (
+    const stored = (
       next.provider in PROVIDERS ? next.provider : "openrouter"
     ) as InferenceProvider;
+    // The form is a "switch to" form, so it opens on something the operator can
+    // actually complete. A company on a route this console does not offer has no
+    // provider to reflect here, and resting on an inert row leaves onboarding
+    // with no way forward — the card's header above still reports the real state.
+    const seeded = isOffered(stored) ? stored : PROVIDER_OPTIONS[0];
     const nextBaseUrl = PROVIDERS[seeded].requiresBaseUrl
       ? next.baseUrl
       : presetFor(seeded).baseUrl;
@@ -433,15 +547,135 @@ export function InferenceSection({
     }
   }, [client, company, seedFromStatus]);
 
+  const refreshCredential = useCallback(async () => {
+    try {
+      setCredential(await getCompanyCredential(client, company));
+    } catch {
+      // A host with no credential plane, or one that could not answer. Either
+      // way the button stays hidden and the paste field below is unaffected —
+      // this read decides an addition, never whether the section works.
+      setCredential(null);
+    }
+  }, [client, company]);
+
   useEffect(() => {
     setLoad("loading");
     void refresh();
-  }, [refresh]);
+    void refreshCredential();
+  }, [refresh, refreshCredential]);
+
+  /**
+   * Whether the endpoint `GET …/inference/models` will answer for is the one an
+   * `openrouter` draft would actually reach.
+   *
+   * The route resolves the **saved** config, so this is the only thing that
+   * makes its answer applicable to the form. `managed` is included because the
+   * host treats it as a legacy alias for `openrouter` and resolves it onto the
+   * same platform endpoint, so an unconfigured company — the first-run case —
+   * still gets a real catalog rather than a refusal. `undefined` (status not
+   * loaded yet) is excluded: the effect re-runs when it arrives.
+   */
+  const storedProviderIsOpenRouter =
+    status?.provider === "openrouter" || status?.provider === "managed";
+
+  /**
+   * Whether the **saved** config rides the platform's subscription proxy.
+   *
+   * The same test `wouldSaveProxied` below applies to the draft, minus the key
+   * the operator is currently typing — which is exactly the difference the
+   * catalog effect has to notice. Hoisted here because that effect runs before
+   * `wouldSaveProxied` is computed.
+   */
+  const savedIsProxied = !(status?.provider === "openrouter" && status.keyConfigured);
+
+  /**
+   * Whether typing a key has pointed the draft at a *different endpoint* than
+   * the one the catalog was read from.
+   *
+   * A company on the platform proxy — `managed`, or `openrouter` with no key —
+   * resolves to the platform's own tier-native endpoint, whose catalog
+   * publishes `chat-v1` and friends. The moment an OpenRouter key is typed,
+   * Save would send the config straight to `api.openrouter.ai` instead, and
+   * that endpoint has never heard of `chat-v1` (Codex review on #2045). The
+   * catalog effect does not otherwise depend on the key, so the picker went on
+   * offering the proxy's tier names under a draft that no longer reaches the
+   * proxy; selecting one persisted it as a verbatim override that direct
+   * OpenRouter rejects.
+   *
+   * This is the same class of mistake as the `storedProviderIsOpenRouter`
+   * guard below and gets the same answer: the route can only be asked about the
+   * saved config, so a draft that has moved off it must be told the catalog no
+   * longer applies rather than shown one that does not describe where it is
+   * going.
+   *
+   * On its own this is only half the test — it says the *endpoint* moved, not
+   * that the catalog is unusable there. It is combined with the catalog's own
+   * `tierVocabulary` at the point of use below, because only a tier-native
+   * catalog publishes ids that are categorically wrong at direct OpenRouter.
+   */
+  const draftLeavesSavedEndpoint = savedIsProxied && key.trim().length > 0;
+
+  /**
+   * Whether the *draft's* provider select resolves to OpenRouter.
+   *
+   * Mirrors `storedProviderIsOpenRouter` above, but for the live form value
+   * instead of the saved config: `managed` is a legacy alias the host
+   * resolves onto the same OpenRouter-backed platform endpoint, and — since
+   * `INFERENCE_MANAGED_HIDDEN` stopped silently seeding the form onto
+   * `openrouter` whenever the saved provider was `managed` — a draft can now
+   * genuinely sit on `managed` while a key is typed into it. That key is sent
+   * straight to OpenRouter (`keyKind` above says so), so every guard below
+   * that exists to keep an OpenRouter-only catalog or id shape off a draft
+   * that would reach a *different* endpoint has to treat `managed` the same
+   * way it treats `openrouter`, or a `managed` draft slips through them.
+   *
+   * Gated on `status` having loaded, unlike a plain `provider === "managed"`
+   * check: `provider`'s own initial value *is* `"managed"` — a placeholder
+   * used before `seedFromStatus` seeds the real draft — and counting that
+   * placeholder as an OpenRouter-like window let the strip effect below latch
+   * `strippedForWindow` against empty placeholder models before the real,
+   * seeded ones ever arrived, then skip stripping them once they did, because
+   * the boolean never toggled to give the effect its reset edge. Once `status`
+   * is loaded this is exactly the same test as `storedProviderIsOpenRouter`
+   * above, applied to the live draft instead of the saved config.
+   */
+  const draftProviderIsOpenRouter =
+    provider === "openrouter" || (provider === "managed" && status !== null);
 
   useEffect(() => {
     let current = true;
-    if (provider !== "openrouter") {
+    if (!draftProviderIsOpenRouter) {
       setModelCatalog({ kind: "idle" });
+      return () => {
+        current = false;
+      };
+    }
+
+    // The route answers for the endpoint this company is **saved** against, and
+    // has no way to be asked about an unsaved draft. So a form whose provider
+    // select has been moved somewhere the stored config is not must not present
+    // that catalog as this provider's (Codex review on #2045): switching a saved
+    // Ollama or custom company to OpenRouter used to list the *old* endpoint's
+    // models under an OpenRouter picker, and choosing one saved a foreign model
+    // id against OpenRouter — a configuration that cannot work. Naming the
+    // source endpoint on screen does not stop the picker writing it into the
+    // wrong provider's mapping.
+    //
+    // `managed` counts as OpenRouter here because the host does: it is a legacy
+    // alias (`LEGACY_MANAGED`), and an unconfigured company resolves to the same
+    // platform endpoint an `openrouter` draft with no base URL would reach. That
+    // keeps first-run setup — the common case — showing a real catalog.
+    if (!storedProviderIsOpenRouter) {
+      setModelCatalog({
+        kind: "error",
+        message:
+          "This company is saved against a different endpoint, so its model list is not " +
+          "OpenRouter's. Save the provider first to pick from OpenRouter's catalog, or enter " +
+          "model ids directly.",
+      });
+      // Nothing was read *for this provider*, so the tier prefill must stay on
+      // its pre-catalog fallback rather than inherit the other endpoint's.
+      setCatalogTierDefaults(null);
       return () => {
         current = false;
       };
@@ -451,16 +685,89 @@ export function InferenceSection({
     void listInferenceModels(client, company)
       .then((catalog) => {
         if (!current) return;
-        setModelCatalog(catalog.length ? { kind: "ready", models: catalog } : { kind: "empty" });
+        // The host reports an unreadable catalog as a 200 carrying `error`, so
+        // the console can say what went wrong instead of rendering an empty
+        // picker that reads as "this provider has no models".
+        if (catalog.error) {
+          setModelCatalog({ kind: "error", message: catalog.error });
+          // A previous successful read's mapping must not survive a failure:
+          // leaving it in state let a later `pickProvider` seed the form from
+          // ids this endpoint never confirmed, and Save persisted them
+          // (CodeRabbit review on #2045).
+          //
+          // Cleared to `null` — "no catalog has been read" — and deliberately
+          // not to the `{}` the failing response literally carries. The two are
+          // different facts here for the same reason `tierVocabulary` is `null`
+          // rather than `"unknown"` when the catalog cannot be read: `{}` is a
+          // *confirmed* empty mapping, which `presetFor` honours by prefilling
+          // nothing at all, whereas an endpoint that did not answer has
+          // confirmed nothing. Collapsing the two discards the host's own
+          // `status.defaultTierModels` fallback on any blip, which is what the
+          // `seeds the switch form from status.defaultTierModels` regression in
+          // `inference-model-picker.test.ts` catches.
+          setCatalogTierDefaults(null);
+          return;
+        }
+        // The catalog describes the **saved** endpoint. When a key has been
+        // typed against a company still saved on the platform proxy, Save would
+        // go direct to OpenRouter instead — and a *tier-native* catalog's ids
+        // are precisely the ones that endpoint cannot resolve, because
+        // resolving a tier server-side is what `tiers` means. Offering them
+        // here let an operator pick `chat-v1` and persist it as a verbatim
+        // override direct OpenRouter rejects (Codex review on #2045).
+        //
+        // Narrowed to `tiers` deliberately. A `concrete` or `unknown` catalog
+        // publishes ordinary `<author>/<model>` ids, which are not categorically
+        // invalid at another endpoint and which the operator may well be
+        // choosing on purpose — and withdrawing the picker for those would break
+        // the deliberate flow where typing a key is what makes the catalog
+        // select safe to offer at all (`useFreeText` below, and the two
+        // `inference.spec.ts` cases that encode it). The tier-native case is the
+        // one where the ids are known-wrong for where the draft is going.
+        if (draftLeavesSavedEndpoint && catalog.tierVocabulary === "tiers") {
+          setModelCatalog({
+            kind: "error",
+            message:
+              "A key sends this company straight to OpenRouter, so the subscription endpoint's " +
+              "tier list no longer applies. Save the key first to pick from OpenRouter's " +
+              "catalog, or enter model ids directly.",
+          });
+          // Nothing was read for the endpoint this draft would actually reach,
+          // so the prefill must not inherit the proxy's tier names either.
+          setCatalogTierDefaults(null);
+          return;
+        }
+        setCatalogTierDefaults(catalog.tierDefaults ?? {});
+        setModelCatalog(
+          catalog.models.length
+            ? {
+                kind: "ready",
+                models: catalog.models,
+                baseUrl: catalog.baseUrl,
+                tierDefaults: catalog.tierDefaults ?? {},
+              }
+            : { kind: "empty", baseUrl: catalog.baseUrl },
+        );
       })
       .catch(() => {
-        if (current) setModelCatalog({ kind: "error" });
+        if (current) {
+          setModelCatalog({
+            kind: "error",
+            message: "The provider's model list could not be loaded. Enter model ids directly.",
+          });
+          // A rejected request carries no answer at all — not even the empty
+          // map a 200-with-`error` supplies — so the prefill goes back to "no
+          // catalog has been read", which is what `null` means here. Holding a
+          // previous read's mapping through a failure is how unconfirmed ids
+          // reached Save (CodeRabbit review on #2045).
+          setCatalogTierDefaults(null);
+        }
       });
 
     return () => {
       current = false;
     };
-  }, [client, company, provider]);
+  }, [client, company, provider, storedProviderIsOpenRouter, draftLeavesSavedEndpoint]);
 
   /**
    * Whether saving right now would ride the platform's subscription proxy
@@ -478,8 +785,7 @@ export function InferenceSection({
    * that follows can depend on it — hooks cannot come after a conditional
    * return.
    */
-  const wouldSaveProxied =
-    key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
+  const wouldSaveProxied = key.trim().length === 0 && savedIsProxied;
 
   /**
    * Drop a catalog-shaped tier override the moment the form would save
@@ -551,15 +857,26 @@ export function InferenceSection({
    * `wouldSaveProxied` false again) and a new one opens — which is exactly
    * the set of transitions (`pickProvider`, typing then clearing a key) this
    * effect exists to catch.
+   *
+   * Latched on the **provider identity**, not just whether it is
+   * OpenRouter-like — since `draftProviderIsOpenRouter` folded `managed` in
+   * alongside `openrouter`, "leaves openrouter" above is no longer the only
+   * way to close a window: switching `managed` → `openrouter` (both true
+   * under that boolean) is *also* a new window, because each provider can
+   * carry catalog-derived models the other has never had a chance to check.
+   * A ref that only asked "have I stripped since the boolean last flipped
+   * false" stayed latched true across exactly that switch and skipped
+   * stripping the destination provider's freshly-seeded (and possibly
+   * proxy-incompatible) preset.
    */
-  const strippedForWindow = useRef(false);
+  const strippedForProvider = useRef<InferenceProvider | null>(null);
   useEffect(() => {
-    if (provider !== "openrouter" || !wouldSaveProxied) {
-      strippedForWindow.current = false;
+    if (!draftProviderIsOpenRouter || !wouldSaveProxied) {
+      strippedForProvider.current = null;
       return;
     }
-    if (strippedForWindow.current) return;
-    strippedForWindow.current = true;
+    if (strippedForProvider.current === provider) return;
+    strippedForProvider.current = provider;
     const next = stripProxyIncompatible(models);
     const changedTiers = TIERS.filter((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
     if (changedTiers.length === 0) return;
@@ -571,11 +888,11 @@ export function InferenceSection({
         ...Object.fromEntries(changedTiers.map((tier) => [tier, next[tier]])),
       },
     }));
-  }, [provider, wouldSaveProxied, models]);
+  }, [draftProviderIsOpenRouter, wouldSaveProxied, models, provider]);
 
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
-    const preset = presetFor(next, status?.defaultTierModels);
+    const preset = presetFor(next, status?.defaultTierModels, catalogTierDefaults);
     setBaseUrl(preset.baseUrl);
     setModels(preset.models);
     setBaseline({ baseUrl: preset.baseUrl, models: preset.models });
@@ -644,7 +961,7 @@ export function InferenceSection({
         // catalog id under the proxy even in the window before that effect
         // has run (issue #1838 follow-up).
         const draftModels =
-          provider === "openrouter" && wouldSaveProxied
+          draftProviderIsOpenRouter && wouldSaveProxied
             ? stripProxyIncompatible(models)
             : models;
         const cleanModels = Object.fromEntries(
@@ -855,10 +1172,18 @@ export function InferenceSection({
             {status && (
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">{PROVIDERS[status.provider as InferenceProvider]?.label ?? status.provider}</span>
-                  <Badge variant={status.source === "runtime" ? "outline" : "secondary"}>
-                    {status.source}
-                  </Badge>
+                  <span className="font-medium" data-testid="inference-current-provider">
+                    {providerLabel(status.provider)}
+                  </span>
+                  {/* `source` reads `managed` for a company this console has no
+                      route for, which is the hidden route's own name. The badge
+                      says where a configuration came from, and there is no
+                      configuration to attribute. */}
+                  {isOffered(status.provider) && (
+                    <Badge variant={status.source === "runtime" ? "outline" : "secondary"}>
+                      {status.source}
+                    </Badge>
+                  )}
                   {status.keyConfigured && (
                     <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                       <Check className="size-3" /> key set
@@ -878,10 +1203,12 @@ export function InferenceSection({
                 <p className="text-xs text-muted-foreground">
                   Test sends one real message to this provider using its stored key, and your provider
                   may charge for it; it does not change the saved configuration. A company with no
-                  custom inference configured stays on the managed brain, and Test just reports that
+                  custom inference configured has nothing to send, and Test just reports that
                   instead of sending anything.
                 </p>
-                <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
+                {isOffered(status.provider) && (
+                  <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
+                )}
                 {/* Issue #174: config resolving to a provider does not mean the
                     company booted onto it. Say which cognition path is live and
                     whether its usage is metered, so a zero Usage reading reads as
@@ -996,7 +1323,7 @@ export function InferenceSection({
                 agent's prompts travel to and the key they are billed against
                 (issue #403). */}
             {canManage && (
-              <div className="space-y-3 border-t border-border pt-3">
+              <div className={cn("space-y-3 border-t border-border pt-3", SETTINGS_FIELD_COLUMN)}>
                 <div className="grid gap-2 sm:grid-cols-2 sm:items-end">
                   <div className="space-y-1">
                     <Label htmlFor="inference-provider" className="text-xs">
@@ -1011,17 +1338,27 @@ export function InferenceSection({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => (
+                        {PROVIDER_OPTIONS.map((p) => (
                           <SelectItem key={p} value={p}>
                             {PROVIDERS[p].label}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
-                    <p className="text-xs text-muted-foreground">
-                      Choosing a provider applies its Base URL and model defaults. If you have typed
-                      either, we ask before replacing them; your API key stays in this form.
-                    </p>
+                    {isOffered(status?.provider ?? "") ? (
+                      <p className="text-xs text-muted-foreground">
+                        Choosing a provider applies its Base URL and model defaults. If you have
+                        typed either, we ask before replacing them; your API key stays in this form.
+                      </p>
+                    ) : (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-not-configured"
+                      >
+                        No provider is configured for this company yet. Pick one above and paste its
+                        key below to give its teammates a brain of their own.
+                      </p>
+                    )}
                   </div>
                   {PROVIDERS[provider].requiresBaseUrl && (
                     <div className="space-y-1">
@@ -1038,27 +1375,43 @@ export function InferenceSection({
                   )}
                 </div>
 
-                {provider !== "managed" && (
+                {isOffered(provider) && (
                   <div className="space-y-2">
-                    {provider === "openrouter" && modelCatalog.kind === "error" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "error" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-fallback"
                       >
-                        OpenRouter&apos;s model list could not be loaded. Enter model ids directly.
+                        {modelCatalog.message}
                       </p>
                     )}
-                    {provider === "openrouter" && modelCatalog.kind === "empty" && (
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "empty" && (
                       <p
                         className="text-xs text-muted-foreground"
                         data-testid="inference-model-catalog-empty"
                       >
-                        OpenRouter returned no models. Enter model ids directly.
+                        {modelCatalog.baseUrl} returned no models. Enter model ids directly.
+                      </p>
+                    )}
+                    {/*
+                      Which endpoint these options came from. The list is the
+                      *configured* provider's catalog, not a vendor registry —
+                      and the form's provider select can be pointed somewhere
+                      else than the saved config while an operator is mid-edit,
+                      so naming the endpoint is the difference between a list
+                      the operator can trust and one they have to guess at.
+                    */}
+                    {draftProviderIsOpenRouter && modelCatalog.kind === "ready" && (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-model-catalog-source"
+                      >
+                        Models listed by {modelCatalog.baseUrl}.
                       </p>
                     )}
                     {/*
                       `kind !== "idle"` is a no-op here — the effect above
-                      only ever sets "idle" when `provider !== "openrouter"`,
+                      only ever sets "idle" when `!draftProviderIsOpenRouter`,
                       which the surrounding check already excludes. Left in
                       as a defensive guard against that invariant changing,
                       not a live branch.
@@ -1073,7 +1426,7 @@ export function InferenceSection({
                       still loading was dropped by `stripProxyIncompatible`
                       with no explanation (issue #1838 follow-up).
                     */}
-                    {provider === "openrouter" &&
+                    {draftProviderIsOpenRouter &&
                       modelCatalog.kind !== "idle" &&
                       wouldSaveProxied && (
                         <p
@@ -1095,7 +1448,7 @@ export function InferenceSection({
                         // select this render.
                         const manualEntry = manualEntryTiers.has(tier);
                         const useFreeText =
-                          provider !== "openrouter" ||
+                          !draftProviderIsOpenRouter ||
                           modelCatalog.kind === "error" ||
                           modelCatalog.kind === "empty" ||
                           wouldSaveProxied ||
@@ -1137,7 +1490,7 @@ export function InferenceSection({
                                       })
                                     }
                                   >
-                                    Choose from the OpenRouter catalog instead
+                                    Choose from the provider&apos;s catalog instead
                                   </button>
                                 )}
                               </div>
@@ -1167,7 +1520,7 @@ export function InferenceSection({
                                   <SelectValue
                                     placeholder={
                                       modelCatalog.kind === "loading"
-                                        ? "Loading OpenRouter models…"
+                                        ? "Loading models…"
                                         : "Choose a model"
                                     }
                                   />
@@ -1222,7 +1575,28 @@ export function InferenceSection({
                   always preferred a stored key over the env default on this
                   provider. Ollama is the one provider that takes no bearer.
                 */}
-                {PROVIDERS[provider].acceptsKey && (
+                {/* No key field until a provider is chosen. The descriptor for a
+                    route this console does not offer still carries its `keyKind`
+                    prose, which names that route — and a key typed against a
+                    provider nobody selected has nowhere to be scoped to. */}
+                {/* The managed route is the one a grant can fill in, so the
+                    button belongs to it alone — an OpenRouter or Ollama key is
+                    not something TinyHumans can mint. */}
+                {provider === "managed" && (
+                  <ConnectTinyHumansButton
+                    client={client}
+                    company={company}
+                    available={credential?.hubLink ?? false}
+                    canManage={canManage}
+                    configured={status?.keyConfigured ?? false}
+                    onConnected={() => {
+                      void refresh();
+                      void refreshCredential();
+                    }}
+                  />
+                )}
+
+                {isOffered(provider) && PROVIDERS[provider].acceptsKey && (
                   <div className="space-y-1">
                     <Label htmlFor="inference-key" className="text-xs">
                       API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
@@ -1239,7 +1613,6 @@ export function InferenceSection({
                       Paste {PROVIDERS[provider].keyKind}. This field is scoped to the provider
                       selected above and is stored against it — a key for any other vendor will
                       fail at the first turn, so it is not the place for one.
-                      {provider === "managed" && " Leave it blank to keep running on the platform credential."}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       Whatever you set here is what the company spends against: everyone you invite

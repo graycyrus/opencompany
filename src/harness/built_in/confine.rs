@@ -253,11 +253,11 @@ pub fn confined_persona(company_name: &str, confinement: &Confinement) -> String
 /// Builds the ephemeral agent a confined turn runs on.
 ///
 /// Deliberately **not** [`build_agent`](crate::harness::build::build_agent) with
-/// empty grants: that path wires the intrinsic memory tools and (under the `mcp`
-/// feature) the MCP registry tools onto every agent regardless of grants, which
-/// is exactly the company reach this turn must not have. Nothing is cached — the
-/// agent is built per turn and dropped with it, so a confined turn cannot
-/// accumulate state that a later one reads.
+/// empty grants: that path wires the intrinsic memory tools onto every agent
+/// regardless of grants, and even an empty-grants call still gets the approval,
+/// thread-read, and escalate-to-human tools — reach this turn must not have.
+/// Nothing is cached — the agent is built per turn and dropped with it, so a
+/// confined turn cannot accumulate state that a later one reads.
 pub fn build_confined_agent(
     company: &CompanyId,
     company_name: &str,
@@ -315,7 +315,7 @@ pub fn build_confined_agent(
     let tools: Vec<Box<dyn Tool>> = Vec::new();
 
     AgentBuilder::default()
-        .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
+        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)
@@ -324,7 +324,6 @@ pub fn build_confined_agent(
             confined_persona(company_name, confinement),
             /* omit_identity */ true,
             /* omit_safety_preamble */ false,
-            /* omit_skills_catalog */ true,
         ))
         .model_name(model)
         .workspace_dir(workspace)

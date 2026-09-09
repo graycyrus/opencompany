@@ -1,8 +1,19 @@
 //! The notification feed: `GET`/`PUT {scope}/notifications`.
 //!
-//! The first and so far only consumer is the mention badge. `NotificationStore`
-//! has been wired into the runtime and unused since it was written; this is the
-//! surface that makes it reachable.
+//! The first consumer was the mention badge; the runtime's failure/expiry
+//! producers (`dispatch_failed`, `approval_expired`, `workflow_run_*`) and
+//! the week-1 nudge banner (issue #1845) followed. `NotificationStore` was
+//! wired into the runtime and unused since it was written (issue #749); this
+//! is the surface that makes it reachable.
+//!
+//! No kind allowlist: `notifications()` has exactly one writer set (the
+//! runtime's own notification producers), all of them user-facing, so
+//! filtering by kind server-side would only recreate the "was this reachable
+//! at all" bug the honest-verdicts work exists to close — a durable row
+//! written but never returned to the one client that reads this store. Every
+//! caller gets every unread row and filters to what it cares about
+//! client-side (`pickActiveNudge`, the mention badge's own kind check, …) —
+//! see `a_dispatch_failure_reaches_the_feed_alongside_a_mention` below.
 //!
 //! # Why this exists at all, when there is an SSE feed
 //!
@@ -35,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::AppState;
+use crate::company::week1_nudge;
 use crate::ports::notifications::NotificationView;
 use crate::server::error::ApiError;
 use crate::server::ops::scope::{ScopedCompany, scoped};
@@ -48,7 +60,8 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "camelCase")]
 struct NotificationDto {
     id: String,
-    /// A free-form tag — `"mention"` today.
+    /// A free-form tag — `"mention"`, `"dispatch_failed"`,
+    /// `"approval_expired"`, or `"workflow_run_*"`.
     kind: String,
     /// What it is about: `task` / `run` / `approval` / `workflow` / `message`.
     subject_kind: String,
@@ -134,20 +147,97 @@ async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, crate::server::Re
         .list(company.id(), &user)
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    // This endpoint is the unread-mention badge contract. The store list is
-    // intentionally broader, so filter at the API boundary rather than making
-    // every store implementation know which notification kinds this consumer
-    // wants. Read rows are excluded here because the client only needs the
-    // actionable, unread mention set.
+    // This endpoint is the durable-notification contract for every kind the
+    // runtime appends here — `mention` and, as of the honest-verdicts work,
+    // `dispatch_failed` / `approval_expired` / `workflow_run_*` / the week-1
+    // nudge (issue #1845). There is no kind allowlist: `notifications()` has
+    // exactly one writer set (the runtime's own notification producers), all
+    // of them user-facing, so filtering by kind would only recreate the "was
+    // this reachable at all" bug the honest-verdicts work exists to close —
+    // a durable row written but never returned to the one client that reads
+    // this store. Read rows are still excluded: the client only needs the
+    // actionable, unread set.
     let rows: Vec<_> = rows
         .into_iter()
-        .filter(|view| view.read_at.is_none() && view.notification.kind == "mention")
+        .filter(|view| view.read_at.is_none())
         .collect();
+    // PR #1878 review finding (comment 3879491539): a week-1 nudge row is
+    // filed once by `LifecycleScheduler::tick` and, before this, cleared only
+    // by the one client call site that calls `markNotificationsRead` after a
+    // create — `WorkflowsView`'s own dialog. A workflow created through any
+    // OTHER attributed path (accepting a Tasks proposal, a future second
+    // create surface) left the row unread forever: nothing server-side ever
+    // re-asked whether the fact the row is about had since become true.
+    // Reconciling here, on every read, is what makes the banner self-heal
+    // regardless of which surface satisfied it, rather than requiring every
+    // future create path to remember to clear this one specific row. Scoped
+    // internally to nudge-kind rows — this feed now carries every kind, not
+    // only the nudge, since the kind-scoped `?kind=` query was retired above.
+    let rows = reconcile_stale_nudges(&company, &user, rows).await;
     let unread = rows.len();
     Ok(Json(FeedDto {
         notifications: rows.into_iter().map(NotificationDto::from).collect(),
         unread,
     }))
+}
+
+/// Drops every unread week-1 nudge row out of `rows` — marking each read
+/// server-side — once `user` has saved a workflow through any attributed
+/// path, per `list`'s own call-site comment. Every non-nudge row passes
+/// through untouched regardless of outcome; this only ever acts on the
+/// nudge-kind subset of a feed that otherwise carries every kind.
+///
+/// Best-effort on both reads it makes (the user lookup and
+/// `user_saved_workflow_in_week1`'s journal scan): either failing just
+/// leaves the row(s) showing for one more poll rather than erroring the
+/// whole feed over a reconciliation that can always run again next time —
+/// the same non-fatal posture the client's own `refreshNudge` already takes
+/// on its half of this (see its doc comment). A `mark_read` failure is
+/// swallowed the same way: the row is still excluded from THIS response
+/// (the caller has already learned the underlying fact), and a mark that
+/// truly never lands just gets retried by the next poll's reconciliation.
+async fn reconcile_stale_nudges(
+    company: &ScopedCompany,
+    user: &str,
+    rows: Vec<NotificationView>,
+) -> Vec<NotificationView> {
+    let has_nudge_row = rows
+        .iter()
+        .any(|view| view.notification.kind == week1_nudge::NUDGE_KIND);
+    if !has_nudge_row {
+        return rows;
+    }
+    let Ok(Some(record)) = company.runtime.users().get_user(company.id(), user).await else {
+        // No user record to read a signup instant from (a race with the
+        // account being removed, or a store hiccup) — leave the row(s)
+        // exactly as filed rather than guess.
+        return rows;
+    };
+    let satisfied = week1_nudge::user_saved_workflow_in_week1(
+        company.id(),
+        company.runtime.events(),
+        user,
+        record.created_at_millis,
+        crate::ports::now_millis(),
+    )
+    .await
+    .unwrap_or(false);
+    if !satisfied {
+        return rows;
+    }
+    let stale_ids: Vec<String> = rows
+        .iter()
+        .filter(|view| view.notification.kind == week1_nudge::NUDGE_KIND)
+        .map(|v| v.notification.id.clone())
+        .collect();
+    let _ = company
+        .runtime
+        .notifications()
+        .mark_read(company.id(), user, Some(&stale_ids))
+        .await;
+    rows.into_iter()
+        .filter(|view| view.notification.kind != week1_nudge::NUDGE_KIND)
+        .collect()
 }
 
 async fn mark_read(
@@ -262,6 +352,7 @@ mod tests {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -315,6 +406,13 @@ mod tests {
     }
 
     async fn file(state: &AppState, id: &str, audience: Option<Vec<String>>) {
+        file_kind(state, id, audience, "mention").await;
+    }
+
+    /// Same as [`file`], but lets the caller pick the notification `kind` —
+    /// the runtime's other producers (`dispatch_failed`, `approval_expired`,
+    /// `workflow_run_*`) all go through the same store.
+    async fn file_kind(state: &AppState, id: &str, audience: Option<Vec<String>>, kind: &str) {
         state
             .registry()
             .get(&CompanyId::new("acme"))
@@ -324,19 +422,39 @@ mod tests {
                 &CompanyId::new("acme"),
                 &Notification {
                     id: id.to_string(),
-                    kind: "mention".to_string(),
+                    kind: kind.to_string(),
                     subject: Subject {
                         kind: SubjectKind::Message,
                         id: "42".to_string(),
                     },
                     created_at: 1_000,
-                    title: format!("mention {id}"),
+                    title: format!("{kind} {id}"),
                     audience,
                     context: Some("engineering".to_string()),
                 },
             )
             .await
             .expect("append");
+    }
+
+    /// A signed-in `GET` — the `?kind=` query string is accepted and ignored
+    /// (this module's own doc explains why the server no longer filters by
+    /// kind); kept for parity with the production client, which still sends
+    /// it on the nudge banner's own read.
+    async fn call_kind(state: &AppState, kind: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/company/notifications?kind={kind}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     async fn call(
@@ -486,6 +604,51 @@ mod tests {
         assert_eq!(marked["unread"], 1);
     }
 
+    /// The runtime's failure/expiry producers (`dispatch_failed`,
+    /// `approval_expired`, `workflow_run_failed`, ...) append through the same
+    /// store as a mention. If this endpoint kept filtering to `kind ==
+    /// "mention"`, those durable rows would never reach the client that is the
+    /// store's only consumer — silently unbadged and unread forever.
+    #[tokio::test]
+    async fn a_dispatch_failure_reaches_the_feed_alongside_a_mention() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file_kind(
+            &state,
+            "bounced",
+            Some(vec![mine.clone()]),
+            "dispatch_failed",
+        )
+        .await;
+        file_kind(
+            &state,
+            "expired",
+            Some(vec![mine.clone()]),
+            "approval_expired",
+        )
+        .await;
+        file_kind(
+            &state,
+            "run",
+            Some(vec![mine.clone()]),
+            "workflow_run_failed",
+        )
+        .await;
+        file(&state, "mentioned", Some(vec![mine])).await;
+
+        let (status, feed) = call(&state, "GET", None, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = feed["notifications"].as_array().expect("rows");
+        let kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds.len(), 4, "{kinds:?}");
+        assert!(kinds.contains(&"dispatch_failed"), "{kinds:?}");
+        assert!(kinds.contains(&"approval_expired"), "{kinds:?}");
+        assert!(kinds.contains(&"workflow_run_failed"), "{kinds:?}");
+        assert!(kinds.contains(&"mention"), "{kinds:?}");
+        assert_eq!(feed["unread"], 4);
+    }
+
     #[tokio::test]
     async fn a_caller_with_no_person_behind_it_is_refused() {
         let home = home();
@@ -495,5 +658,135 @@ mod tests {
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{method}");
             assert_eq!(body["code"], "unauthorized", "{method}");
         }
+    }
+
+    // --- issue #1845: the week-1 nudge on the shared, kind-unscoped feed ---
+
+    /// A nudge row rides the same unscoped feed as a mention (see the module
+    /// doc's "no kind allowlist" reasoning, and
+    /// `a_dispatch_failure_reaches_the_feed_alongside_a_mention` above for the
+    /// general case) — both come back from one read, and `?kind=` on the
+    /// request is decoration for the production client, not a server-side
+    /// filter (`call_kind`'s own doc). `pickActiveNudge` on the client is what
+    /// narrows a mixed feed down to the nudge banner's one row.
+    #[tokio::test]
+    async fn a_nudge_row_rides_the_same_feed_as_a_mention() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file(&state, "a-mention", Some(vec![mine.clone()])).await;
+        file_kind(&state, "a-nudge", Some(vec![mine]), "workflow_nudge").await;
+
+        let (status, feed) = call(&state, "GET", None, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = feed["notifications"].as_array().expect("rows");
+        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids.contains(&"a-mention"), "{ids:?}");
+        assert!(ids.contains(&"a-nudge"), "{ids:?}");
+    }
+
+    /// Mark-read already marks by id or "everything visible", so a nudge row
+    /// marked read must disappear from the feed exactly like a mention does.
+    #[tokio::test]
+    async fn marking_a_nudge_read_clears_it_from_the_feed() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file_kind(&state, "a-nudge", Some(vec![mine]), "workflow_nudge").await;
+
+        let (_, marked) = call(&state, "PUT", Some(json!({"ids": ["a-nudge"]})), true).await;
+        assert_eq!(marked["unread"], 0);
+
+        let (_, feed) = call_kind(&state, "workflow_nudge").await;
+        assert!(
+            feed["notifications"].as_array().unwrap().is_empty(),
+            "a read nudge must not still show as unread, {feed}"
+        );
+    }
+
+    /// PR #1878 review finding (comment 3879491539): a workflow created
+    /// through a path OTHER than `WorkflowsView`'s own create dialog — here,
+    /// simulated the way accepting a Tasks proposal would attribute it, by
+    /// journaling `WorkflowCreated { by: Some(Actor { kind: User, id }) }`
+    /// directly rather than going through the dialog's `clearNudge` call —
+    /// must still clear a pending nudge on the next read. Before the
+    /// `reconcile_stale_nudges` fix this asserts, the row stayed unread
+    /// forever: `PUT .../notifications` was the only thing that ever cleared
+    /// it, and nothing on this path calls it.
+    #[tokio::test]
+    async fn a_workflow_created_through_another_surface_clears_the_nudge_on_next_read() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file_kind(
+            &state,
+            "a-nudge",
+            Some(vec![mine.clone()]),
+            "workflow_nudge",
+        )
+        .await;
+
+        // Sanity: unread before the create, same as every other nudge test.
+        let (_, before) = call_kind(&state, "workflow_nudge").await;
+        assert_eq!(before["notifications"].as_array().unwrap().len(), 1);
+
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("company");
+        runtime
+            .events()
+            .append(
+                &CompanyId::new("acme"),
+                crate::ports::types::CompanyEvent::WorkflowCreated {
+                    workflow_id: "wf-from-tasks".to_string(),
+                    name: "From a Tasks proposal".to_string(),
+                    by: Some(crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::User,
+                        id: mine,
+                    }),
+                },
+            )
+            .await
+            .expect("journal the create");
+
+        let (status, feed) = call_kind(&state, "workflow_nudge").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            feed["notifications"].as_array().unwrap().is_empty(),
+            "a satisfied nudge must self-heal on the next read even though \
+             nothing ever called PUT .../notifications for it, {feed}"
+        );
+        assert_eq!(feed["unread"], 0);
+
+        // The reconciliation durably marked it read, not merely omitted it
+        // from this one response — a later default-kind or explicit re-list
+        // must not resurrect it.
+        let (_, again) = call_kind(&state, "workflow_nudge").await;
+        assert!(again["notifications"].as_array().unwrap().is_empty());
+    }
+
+    /// The reconciliation in `reconcile_stale_nudges` must not clear a nudge
+    /// for a user who has NOT yet saved a workflow — otherwise every unread
+    /// nudge would vanish on its very first read regardless of the
+    /// underlying fact, defeating the feature entirely.
+    #[tokio::test]
+    async fn an_unsatisfied_nudge_stays_unread_across_reads() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file_kind(&state, "a-nudge", Some(vec![mine]), "workflow_nudge").await;
+
+        let (_, first) = call_kind(&state, "workflow_nudge").await;
+        assert_eq!(first["notifications"].as_array().unwrap().len(), 1);
+
+        let (_, second) = call_kind(&state, "workflow_nudge").await;
+        assert_eq!(
+            second["notifications"].as_array().unwrap().len(),
+            1,
+            "reconciliation must not clear a nudge nobody has satisfied, {second}"
+        );
+        assert_eq!(second["unread"], 1);
     }
 }

@@ -9,70 +9,186 @@
 //! the filter + projection logic.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::CompanyStore;
 use crate::ports::types::{
-    Actor, ActorKind, Attachment, CompanyEvent, CompanyRecord, EventSeq, Mention, MentionTarget,
-    StoredEvent, TurnStep,
+    Actor, ActorKind, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq, Mention,
+    MentionTarget, StoredEvent, TurnStep,
 };
-use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
+use crate::server::ops::language::DEFAULT_DESK;
 
-/// The console's default/orchestrator thread id
-/// (`frontend/src/lib/threads.ts` `mainThread()`). The console addresses every
-/// send on that thread with `chat: "main"`, so `AgentReply`s answering it are
-/// journaled with `chat_id == "main"` rather than [`GENERAL_DESK`]. `owns`
-/// admits both spellings for the General desk so a transcript is never split
-/// across the two ids depending on which one happened to write it (issue #65).
-pub const MAIN_THREAD_ID: &str = "main";
+// Conversation identity now lives in `tinyhivemind_core::chat`, and these are
+// re-exported so every existing caller keeps its path (issue #65, #435).
+//
+// The move is what lets `ports::types` stop reaching *upward* into
+// `crate::server::` to fold a General spelling: `resolve_desk_id` and
+// `desk_alias_is_ambiguous` call this rule, and a port calling a server module
+// was a layering violation that only a shared crate could remove.
+pub use tinyhivemind_core::chat::{
+    GENERAL_DESK, MAIN_THREAD_ID, is_general_chat, same_conversation,
+};
+
+// `DEFAULT_DESK` is the prosumer glossary string mirroring
+// `frontend/src/lib/language.ts`; `GENERAL_DESK` is the desk's identity. They
+// are different concerns that happen to be the same literal, so neither imports
+// the other — but they must never drift, because a message journaled under the
+// glossary word has to fold into the identity. Pinned here rather than
+// duplicated, and it costs nothing at runtime.
+const _: () = assert!(
+    matches!(DEFAULT_DESK.as_bytes(), b"General") && matches!(GENERAL_DESK.as_bytes(), b"General"),
+    "the operator-facing default desk name and the General desk id must agree",
+);
 
 /// The largest message page either history surface may materialize. Keeping
 /// the limit beside the shared reader prevents a new caller from turning its
 /// `Vec` reservation back into an allocation controlled by the request.
 pub const CHAT_HISTORY_PAGE_LIMIT: usize = 200;
 
-/// Does this stored chat id mean the General desk?
+/// Where this lives, and why it is not beside its first caller.
 ///
-/// **Four spellings, one desk.** The console addresses its default thread as
-/// `"main"`, the chat route stores an unaddressed message as `None`, older
-/// events carry `""`, and the desk's own id/name is `"General"`. [`owns`] has
-/// admitted all four since issue #65, which is what stops a transcript from
-/// splitting across whichever id happened to write each message.
+/// It began in the chat seed, under `src/harness/`, which compiles only
+/// with the `openhuman` feature. Two later callers — the thread index in
+/// [`crate::runtime::cycle`] and `read_thread` — need the same resolution,
+/// and the first of those is in the ungated runtime, so the default build
+/// stopped compiling. Beside [`owns`] is where it belonged anyway: this
+/// module is the one place that answers what a desk id means, and a
+/// second copy is exactly what it exists to prevent.
+/// Resolves an incoming `chat_id` to the `(desk_id, desk_name)` pair
+/// [`owns`] filters on, exactly as the REST history route's
+/// `resolve_desk` does (issue #65).
 ///
-/// Exposed because that equivalence is **not** local to history rendering.
-/// `CompanyRuntime::resolvable_parent` compares a remembered thread root's chat
-/// id against the channel being answered into, and comparing the raw strings
-/// there made a root stored as `None` fail to match the `"General"` it is
-/// rendered under — so a threaded approval rooted in an unaddressed message
-/// silently resumed in the channel, which is the exact symptom issue #435 set
-/// out to remove. Two places deciding "same conversation?" by different rules
-/// is the drift; one function is the fix. See [`same_conversation`].
-pub fn is_general_chat(chat: Option<&str>) -> bool {
-    match chat {
-        None => true,
-        Some(chat) => {
-            chat.is_empty()
-                || chat.eq_ignore_ascii_case(MAIN_THREAD_ID)
-                || chat.eq_ignore_ascii_case(GENERAL_DESK)
-        }
+/// `owns` matches a stored event's chat id against *both* the desk id and the
+/// desk name, because a named desk's messages can be journaled under either
+/// spelling. Passing `(chat_id, chat_id)` for a desk the operator addressed by
+/// id would therefore silently miss any line stored under its name — a seed that
+/// "looks fixed" but is empty. So a non-General selector is resolved against the
+/// manifest's group chats the same way the console resolves it.
+///
+/// * `None` → the synthetic General/operator desk.
+/// * A General spelling (`"main"` / `"general"` / `""`) short-circuits: every
+///   spelling folds together in [`same_conversation`], so no
+///   manifest read is needed and `(chat, chat)` already owns all of them.
+/// * Anything else is matched (case-insensitive, by id or name) against the
+///   manifest's group chats; an unmatched selector passes through as `(id, name)
+///   = (chat, chat)`, so an ad-hoc thread id still finds what was journaled under
+///   that exact string.
+pub async fn resolve_seed_desk(
+    store: &Arc<dyn CompanyStore>,
+    company: &CompanyId,
+    chat_id: Option<&str>,
+) -> (String, String) {
+    let Some(desk) = trivially_resolved(chat_id) else {
+        // Only a named desk needs the manifest, and only then is it read.
+        return match store.load(company).await {
+            Ok(Some(record)) => desk_aliases(&record, chat_id),
+            // A store miss or read error must not fail the turn — fall back to
+            // the verbatim selector, which still owns everything journaled
+            // under that exact string (the common case, where the console
+            // addresses id == name).
+            Ok(None) | Err(_) => {
+                let desk = chat_id.unwrap_or(GENERAL_DESK);
+                (desk.to_string(), desk.to_string())
+            }
+        };
+    };
+    desk
+}
+
+/// [`resolve_seed_desk`] for a caller that already holds the record.
+///
+/// The cycle's briefings do: they are handed a `&CompanyRecord` and were paying
+/// for a `load` per message to answer a question the record in their hand
+/// already answers. Same resolution, no store round-trip — and one body, so the
+/// two cannot drift into disagreeing about what a desk id means.
+pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, String) {
+    if let Some(resolved) = trivially_resolved(chat_id) {
+        return resolved;
+    }
+    let desk = chat_id.unwrap_or(GENERAL_DESK);
+    // **Through `resolve_desk_id`, not a second lookup of its own** (codex +
+    // coderabbit on #1972). That function already answers "which desk is this
+    // key", and it answers two things a one-pass `id == key || name == key`
+    // find gets wrong: an **overlay desk** — one created from the console, which
+    // lives in `overlay_desks` and not in the manifest at all — is a routable
+    // desk, and an **exact id beats a display-name alias**, because desk
+    // creation enforces unique ids but not unique names, so `{id: "ops", name:
+    // "sales"}` can sit ahead of `{id: "sales", …}` and answer for it. Getting
+    // that wrong here does not merely miss lines, it *merges* two desks: `owns`
+    // would then be handed one desk's id and another's name.
+    let Some(id) = record.resolve_desk_id(desk) else {
+        // Not a desk this company declares — an ad-hoc thread id or a DM. It
+        // still owns everything journaled under that exact string, which is
+        // what the verbatim pair says.
+        return (desk.to_string(), desk.to_string());
+    };
+    let name = record
+        .manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == id)
+        .map(|chat| chat.name.clone())
+        .or_else(|| {
+            record
+                .overlay_desks
+                .iter()
+                .find(|overlay| overlay.id == id)
+                .map(|overlay| overlay.name.clone())
+        })
+        .unwrap_or_else(|| id.clone());
+    (id, name)
+}
+
+/// The two selectors that resolve without consulting a manifest at all.
+///
+/// `None` is the General desk — an unaddressed message is *routed* there
+/// (`chat_and_emit`), so treating it as "addressed to nothing" is what left
+/// those turns out of every desk-scoped read. Any other General spelling
+/// short-circuits too: they all fold in [`same_conversation`], so `(chat, chat)`
+/// already owns each other's lines.
+fn trivially_resolved(chat_id: Option<&str>) -> Option<(String, String)> {
+    match chat_id {
+        None => Some((GENERAL_DESK.to_string(), GENERAL_DESK.to_string())),
+        Some(desk) if is_general_chat(Some(desk)) => Some((desk.to_string(), desk.to_string())),
+        Some(_) => None,
     }
 }
 
-/// Do two stored chat ids name the same conversation (issue #435)?
+/// Does a conversation id **stamped onto a record** name `desk`?
 ///
-/// Every spelling of the General desk is one conversation — see
-/// [`is_general_chat`] — and everything else compares verbatim, because a desk
-/// id is an opaque identifier and two desks differing only in case are two
-/// desks. Deliberately **not** a general-purpose case-insensitive compare: the
-/// folding is a fact about one desk's history, not a licence to loosen the
-/// others.
-pub fn same_conversation(a: Option<&str>, b: Option<&str>) -> bool {
-    if is_general_chat(a) || is_general_chat(b) {
-        return is_general_chat(a) && is_general_chat(b);
-    }
-    a == b
+/// The fold is [`same_conversation`]'s — every spelling of General is one
+/// conversation, every other id compares verbatim — with the one difference
+/// this function exists to state:
+///
+/// **`None` is not the General desk.** [`same_conversation`] reads a missing id
+/// as *the id was never addressed*, which for a chat message is right: an
+/// unaddressed post went to the company-wide line, so it folds into General. A
+/// `None` **stamped on a record** means the opposite — *no conversation
+/// produced this*. A blocker parked by the planning pass, a card created on the
+/// board, a scheduler tick: each carries no thread because none of them
+/// happened in a conversation, and folding that into General hands every one of
+/// them to whoever next types in `#general`.
+///
+/// That is not hypothetical. `pending_blocker_groups` matched thread-less
+/// parked blockers against `#general` through [`same_conversation`], so a
+/// founder's first line in the channel was consumed as the *answer* to one of
+/// them: the send settled in milliseconds with no cycle, no run and no reply,
+/// and the console showed a message that read exactly like one being worked on.
+/// `owns` had already carved the same rule out by hand for a
+/// `DeskTaskCompleted` with no origin ("**`None` is not the General desk**",
+/// see its doc) — one carve-out written twice and missed a third time is the
+/// drift; one named predicate is the fix, the same argument
+/// [`same_conversation`] itself was extracted under.
+///
+/// The `desk` side stays a plain `&str` on purpose: a caller asking "is this
+/// record's origin the desk I am reading?" always has a desk, and taking an
+/// `Option` there would re-open the question this answers.
+pub fn stamped_conversation_is(origin: Option<&str>, desk: &str) -> bool {
+    origin.is_some_and(|origin| same_conversation(Some(origin), Some(desk)))
 }
 
 /// Whether a stored event belongs to the desk identified by `desk_id` /
@@ -113,6 +229,13 @@ pub fn same_conversation(a: Option<&str>, b: Option<&str>) -> bool {
 /// line, which is a different bug from the one #377 fixes, so this arm answers
 /// `false` for every desk including General. It is the single most bug-prone
 /// line in this function and has its own test.
+///
+/// That rule is [`stamped_conversation_is`] now. This arm keeps its own
+/// `return false` because it must also skip the shared tail below, but anywhere
+/// *else* asking "does this record's stamped origin name my desk?" calls the
+/// predicate rather than writing the carve-out again — writing it twice and
+/// forgetting it a third time is what let a thread-less parked blocker read as
+/// pending in `#general`.
 pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
     let stored = match event {
         CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.as_str()),
@@ -167,6 +290,24 @@ pub fn dispatch_marker_text(column: &str) -> String {
     format!("finished → {}", crate::ports::tasks::column_label(column))
 }
 
+/// Where a crossing referral came from, folded onto the message it caused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReferredFrom {
+    /// The asking desk, by id — for the link.
+    pub desk_id: String,
+    /// Its display name as captured when the referral was made.
+    pub desk_name: String,
+    /// The agent that asked.
+    pub asker_id: String,
+    /// Its display label as captured when the referral was made.
+    pub asker_label: String,
+    /// The asking message, so the console can link to it.
+    pub sequence: u64,
+    /// Whether this is the answer coming home rather than the outbound ask.
+    /// Carried from the marker; see `CompanyEvent::ReferralEnqueued`.
+    pub returning: bool,
+}
+
 /// Who is reading a desk history. `mine` is relative to this.
 ///
 /// There is no `From<StoredEvent> for MessageView`, and there cannot be:
@@ -219,6 +360,27 @@ pub struct MessageView {
     /// dispatch marker and an agent reply are both `false`: neither was typed by
     /// a person.
     pub by_person: bool,
+    /// Set when a crossing referral caused this message (tinyhivemind P15).
+    ///
+    /// Folded from the `ReferralEnqueued` marker rather than stored on the
+    /// message: the marker is written inside the enqueue transaction, before
+    /// the child turn exists, so the message cannot carry it at write time.
+    pub referred_from: Option<ReferredFrom>,
+    /// Whether this row may reach only administrators (issue #1781 review,
+    /// Codex P1).
+    ///
+    /// `true` for exactly one shape today: an `owner`-destination workflow
+    /// report that fell back to the operator channel because the company has
+    /// no mailbox, or no active admin has an address. The ordinary email
+    /// branch of that same destination reaches active admins only
+    /// (`workflows::delivery::owner_recipients`); this field is what lets the
+    /// channel fallback honour the same restriction rather than silently
+    /// widening the audience to every signed-in company user. The caller
+    /// (`server::operator::chat_history_response`) drops any row with this set
+    /// before returning to a non-admin viewer — see
+    /// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+    /// for how the underlying event is marked.
+    pub admin_only: bool,
     /// The scrubbed processing steps behind a company reply, so a rehydrated
     /// transcript renders the same tool-call timeline the live turn showed.
     /// Empty for operator messages and tool-less replies.
@@ -445,12 +607,15 @@ impl MessageView {
             } => MessageView {
                 id,
                 channel: agent_id.clone(),
+                admin_only: agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR,
                 author: agent_id,
-                text,
+                text: readable_moves(text),
                 at_millis,
                 mine: false,
                 // The runtime wrote this, whichever brain produced it.
                 by_person: false,
+                // Set by the referral fold in `history_for_desk`, never here.
+                referred_from: None,
                 steps,
                 task_id,
                 parent_id: parent.map(|seq| seq.value().to_string()),
@@ -468,29 +633,73 @@ impl MessageView {
                 attachments,
                 ..
             } => {
-                let (author, mine) = match &by {
+                // `voice` is what the console draws the byline from: `senderOf`
+                // reads `channel`, not `author`, and treats the values in its
+                // COMPANY_VOICE set ("operator", "console", …) as "no distinct
+                // speaker — use the room's own name".
+                //
+                // That is right for a message a person sent. It is wrong for a
+                // referral, which arrives authored by a TEAMMATE: falling into
+                // that set made design's channel name the speaker, so an
+                // engineer asking design read as design talking to itself. An
+                // agent-authored line names the agent, exactly as an
+                // `AgentReply` already does one arm below.
+                let (author, mine, by_person, voice) = match &by {
                     // Sent by a signed-in human.
                     Some(actor) if actor.kind == ActorKind::User => {
                         let label = authors
                             .get(&actor.id)
                             .cloned()
                             .unwrap_or_else(|| "someone".to_string());
-                        (label, *viewer == Viewer::User(actor.id.clone()))
+                        (
+                            label,
+                            *viewer == Viewer::User(actor.id.clone()),
+                            true,
+                            "operator".to_string(),
+                        )
+                    }
+                    // A TEAMMATE sent it — a crossing referral arrives on the
+                    // target's desk as a message authored by the agent that
+                    // asked (tinyhivemind P15).
+                    //
+                    // Without this arm it fell to the machine-credential
+                    // fallback below and was projected as `operator`, with
+                    // `mine: true` for the operator's own view — so a question
+                    // engineering asked read as one the person at the console
+                    // had asked. That is the same shape as the `agent: None`
+                    // → `agent_id: "operator"` defect (#885): a fallback that
+                    // means "no person to name" rendered as a specific, wrong
+                    // person. `mine` is emphatically false: nobody typed it.
+                    Some(actor) if actor.kind == ActorKind::Agent => {
+                        (actor.id.clone(), false, false, actor.id.clone())
                     }
                     // Sent with a machine credential, or journaled before
                     // attribution existed. Either way there is no person to
                     // name, and it belongs to whoever holds that credential.
-                    _ => ("operator".to_string(), matches!(viewer, Viewer::Operator)),
+                    _ => (
+                        "operator".to_string(),
+                        matches!(viewer, Viewer::Operator),
+                        true,
+                        "operator".to_string(),
+                    ),
                 };
                 MessageView {
+                    // Set by the referral fold in `history_for_desk`, never here.
+                    referred_from: None,
                     id,
-                    channel: "operator".to_string(),
+                    channel: voice,
+                    admin_only: false,
                     author,
                     text,
                     at_millis,
                     mine,
-                    // A person typed this — the one arm where that is true.
-                    by_person: true,
+                    // Decided with the author above, not assumed: this arm used
+                    // to be "the one arm where a person typed it", which stopped
+                    // being true when a referral began arriving here authored by
+                    // a teammate. `byPerson` gates real behaviour downstream —
+                    // the console's inline-reply promotion reads it — so a
+                    // teammate's line claiming to be a person's is not cosmetic.
+                    by_person,
                     steps: Vec::new(),
                     task_id: None,
                     parent_id: parent.map(|seq| seq.value().to_string()),
@@ -520,21 +729,38 @@ impl MessageView {
             // shared with the GraphQL `Message` projection, and the reuse is
             // what keeps #377 additive on both wire surfaces at once.
             //
-            // No `steps` and no `parent_id`: a marker is not a turn and is
-            // never threaded, so `ThreadPanel` needs nothing from it.
+            // No `steps`: a marker is not a turn, so there is no timeline on it.
+            //
+            // `parent_id` **is** carried, since issue #1890 B. A marker was
+            // never threaded because a card recorded no thread to thread it
+            // into — not because a marker cannot be threaded — so a card raised
+            // inside a thread settled flat in the channel and the thread that
+            // asked for the work never showed it finishing. The card carries
+            // its root now, the terminal captures it, and this is where it
+            // reaches the reader. `None` is still the overwhelmingly common
+            // case: it is every card raised straight into a channel.
             CompanyEvent::DeskTaskCompleted {
-                task_id, column, ..
+                task_id,
+                column,
+                origin_parent,
+                ..
             } => MessageView {
                 id,
                 channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                admin_only: false,
                 author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: dispatch_marker_text(&column),
                 at_millis,
                 mine: false,
                 by_person: false,
+                // Set by the referral fold in `history_for_desk`, never here.
+                referred_from: None,
                 steps: Vec::new(),
                 task_id: Some(task_id),
-                parent_id: None,
+                // Rendered the same way an `OperatorMessage`'s parent is, a few
+                // arms up — the console keys a thread off this string and does
+                // not care which event minted it.
+                parent_id: origin_parent.map(|seq| seq.value().to_string()),
                 reactions: Vec::new(),
                 mentions: Vec::new(),
                 attachments: Vec::new(),
@@ -543,11 +769,14 @@ impl MessageView {
             other => MessageView {
                 id,
                 channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                admin_only: false,
                 author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: format!("{other:?}"),
                 at_millis,
                 mine: false,
                 by_person: false,
+                // Set by the referral fold in `history_for_desk`, never here.
+                referred_from: None,
                 steps: Vec::new(),
                 task_id: None,
                 parent_id: None,
@@ -695,7 +924,7 @@ impl AttributionAudit {
 /// bound; in practice that notice is rare enough not to move it.
 /// Whether a stored `agent_id` names an author we can actually resolve.
 ///
-/// The roster, **plus two ids that are truthful authors without being teammates**.
+/// The roster, **plus three ids that are truthful authors without being teammates**.
 ///
 /// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) (issue #966) is the runtime
 /// speaking for itself — an approval-overflow notice, the `"Acknowledged."`
@@ -711,18 +940,43 @@ impl AttributionAudit {
 /// false positive, and would make the audit's number drift upward on a company
 /// doing nothing wrong.
 ///
+/// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::WORKFLOW_REPLY_AUTHOR) is the same
+/// case as `SYSTEM_AUTHOR`: a delivered workflow report is journaled under it
+/// on purpose, not a destination that leaked into the author field, so it must
+/// not inflate the count either — and unlike `SYSTEM_AUTHOR`, no roster entry
+/// can *ever* shadow it, on this company or any other: the id is hyphenated,
+/// so neither a minted slug nor a manifest-declared one can equal it (see the
+/// constant's doc).
+///
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// is the same case again, one level narrower: it is `WORKFLOW_REPLY_AUTHOR`'s
+/// own admin-only sibling, journaled when an `owner` report has no mailbox to
+/// reach (issue #1781 review, Codex P2) — a legitimate report, deliberately
+/// unmintable for the same reason, and it must not inflate the count either.
+///
 /// This is the single predicate the audit and any presentation of its result
 /// must share; two copies would let the count and the rendering disagree about
 /// which rows are unknown.
 pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
     agent_id == crate::ports::CONFINED_AGENT_ID
         || agent_id == crate::ports::SYSTEM_AUTHOR
+        || agent_id == crate::runtime::WORKFLOW_REPLY_AUTHOR
+        || agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
         || record.resolve_roster_agent_id(agent_id).is_some()
 }
 
+/// `is_admin` gates the same admin-only rows [`history_for_desk`] and
+/// [`history_total_for_desk`] already exclude for a non-admin viewer (issue
+/// #1781 review, Codex P2): an owner-fallback report is invisible on the
+/// transcript and over SSE, but the raw `replies` count previously included
+/// it regardless of caller, so a Member watching the count tick up around an
+/// owner-fallback delivery could infer a hidden admin-only message exists.
+/// Excluded here — before `fold` — so a non-admin's count can never expose
+/// that inference.
 pub async fn channel_attributed_replies(
     runtime: &CompanyRuntime,
     record: &CompanyRecord,
+    is_admin: bool,
 ) -> Result<AttributionAudit, OpenCompanyError> {
     const PAGE: usize = 512;
     let mut audit = AttributionAudit::default();
@@ -736,7 +990,15 @@ pub async fn channel_attributed_replies(
             break;
         }
         let last = page[page.len() - 1].seq;
-        audit.fold(&page, |agent_id| is_known_author(agent_id, record));
+        if is_admin {
+            audit.fold(&page, |agent_id| is_known_author(agent_id, record));
+        } else {
+            let visible: Vec<StoredEvent> = page
+                .into_iter()
+                .filter(|stored| !is_admin_only_event(&stored.event))
+                .collect();
+            audit.fold(&visible, |agent_id| is_known_author(agent_id, record));
+        }
         cursor = EventSeq::new(last.value() + 1);
     }
     Ok(audit)
@@ -770,6 +1032,13 @@ pub async fn author_labels(
 /// messages before it are considered. `first` caps how many of the remaining,
 /// most-recent messages come back.
 ///
+/// `is_admin` gates [`MessageView::admin_only`] rows (issue #1781 review,
+/// Codex P1): a non-admin viewer never sees one, and the exclusion happens
+/// **inside** the paging loop, before a row counts toward `first` — filtering
+/// the returned `Vec` afterward would silently short a non-admin's page by
+/// however many admin-only rows it held, which is a pagination bug, not
+/// merely a display one.
+///
 /// Shared by the GraphQL `Chat.history` resolver and the REST
 /// `GET .../chat/history` route so the two can never disagree about what a
 /// desk's history contains (issue #65).
@@ -780,6 +1049,7 @@ pub async fn history_for_desk(
     viewer: &Viewer,
     before_seq: Option<u64>,
     first: usize,
+    is_admin: bool,
 ) -> Result<Vec<MessageView>, OpenCompanyError> {
     // A page is events rather than messages: a busy company can put unrelated
     // events between two chat turns. Walking backward keeps the newest `first`
@@ -809,7 +1079,38 @@ pub async fn history_for_desk(
         cursor = page.last().map(|event| event.seq);
         for event in page {
             if owns(desk_id, desk_name, &event.event) {
-                messages.push(MessageView::project(event, viewer, &authors));
+                let message = MessageView::project(event, viewer, &authors);
+                // Excluded before it counts toward `first` — see this fn's
+                // doc. A non-admin viewer's page fills with the next visible
+                // row instead of coming back short.
+                if message.admin_only && !is_admin {
+                    continue;
+                }
+                // The room's own bookkeeping, excluded on the same terms and
+                // in the same place, for the same reason: filtered after the
+                // page was built, an episode's closing row silently shortened
+                // every page it appeared on.
+                //
+                // An episode journals every turn as an ordinary reply by the
+                // teammate that took it, and then one closing row under
+                // `HIVE_REPORT_AUTHOR`. The turns are the conversation and
+                // belong on screen. The closing row is the host summarising a
+                // tally whose inputs are those turns — and rendered here it
+                // appeared as a *teammate* in a channel where no such teammate
+                // exists and none can, the id being hyphenated precisely so no
+                // roster id can equal it. The fold already reads it as
+                // `SessionAuthor::System`; this makes the console agree.
+                //
+                // Dropped from the projection, never from the journal: the next
+                // episode folds it as context, the memory note keeps the long
+                // form, and the chat POST still returns it to its caller. A
+                // FAILED turn's notice carries its own reserved id and is not
+                // dropped — the turn it describes does not exist, so there is
+                // no gap for a reader to notice.
+                if message.channel == crate::hivemind::HIVE_REPORT_AUTHOR {
+                    continue;
+                }
+                messages.push(message);
                 if messages.len() == first {
                     break;
                 }
@@ -862,7 +1163,175 @@ pub async fn history_for_desk(
     }
 
     drop_dead_cards(runtime, &mut messages).await?;
+    attach_referral_origins(runtime, desk_id, &mut messages).await?;
     Ok(messages)
+}
+
+/// Fold each `ReferralEnqueued` marker onto the message it caused
+/// (tinyhivemind P15).
+///
+/// # Why a fold and not a field on the message
+///
+/// The marker is written INSIDE the enqueue transaction, which is necessarily
+/// before the child turn exists — that ordering is what makes it an idempotency
+/// marker at all. So the message it causes cannot carry the provenance at write
+/// time, and the projection is the only place the two can meet.
+///
+/// # How they are matched
+///
+/// A marker names the desk the child runs on and the agent that asked. The
+/// child is the first message on that desk, after the marker, authored by that
+/// agent. Both are written by one task with nothing in between, so "first
+/// after" is exact rather than probabilistic — and the match still requires the
+/// author to agree, so an unrelated line landing between them is not adopted.
+///
+/// # The return leg is an INPUT, not a line in the channel
+///
+/// One agent speaks in both rooms, and it is the ASKER. It goes to the other
+/// desk and asks there under its own name; the desk that answers, answers on
+/// its OWN desk and never appears in the room it was asked from. When the asker
+/// judges the answer sufficient, it comes home and reports — in its own words,
+/// under its own name.
+///
+/// So the child of a RETURN marker is not a message anyone should read. It is
+/// the answer being handed back to the asker so the asker can run a turn on it,
+/// and rendering it produced exactly the double the single-accountable-voice
+/// rule exists to prevent: the other desk's agent posting its answer verbatim
+/// into a room it is not part of, immediately followed by the asker summarising
+/// that same answer. The reader saw the same content twice, in two voices, one
+/// of which does not belong there.
+///
+/// The relay is therefore dropped from the projection and its provenance moves
+/// onto the asker's report — which is the line a reader wants the chip on
+/// anyway, because that is the message whose origin is not otherwise visible.
+///
+/// **Only when the report actually exists.** If the asker's turn has not landed
+/// yet, or failed, the relay renders as it did before. A rendered line in the
+/// wrong voice is a cosmetic defect; a dropped one is a lost answer, and this
+/// projection already refuses that trade once (see the orphan arm below).
+async fn attach_referral_origins(
+    runtime: &CompanyRuntime,
+    desk_id: &str,
+    messages: &mut Vec<MessageView>,
+) -> Result<(), OpenCompanyError> {
+    let Some(oldest) = messages
+        .iter()
+        .filter_map(|m| m.id.parse::<u64>().ok())
+        .min()
+    else {
+        return Ok(());
+    };
+    let page = runtime
+        .events()
+        .read_from(runtime.id(), EventSeq::new(oldest.saturating_sub(2)), 4096)
+        .await?;
+    // Relays that a report has superseded, dropped once the scan is done —
+    // removing inside the loop would invalidate the positions it is still using.
+    let mut relayed: Vec<String> = Vec::new();
+    for (index, stored) in page.iter().enumerate() {
+        let CompanyEvent::ReferralEnqueued {
+            from_desk,
+            from_desk_name,
+            asker,
+            asker_label,
+            trigger_sequence,
+            to_desk,
+            target,
+            returning,
+        } = &stored.event
+        else {
+            continue;
+        };
+        if to_desk != desk_id {
+            continue;
+        }
+        let Some(child) = page[index + 1..].iter().find(|later| {
+            matches!(
+                &later.event,
+                CompanyEvent::OperatorMessage { chat, by, .. }
+                    if chat.as_deref() == Some(to_desk.as_str())
+                        && by.as_ref().is_some_and(|actor| actor.id == *asker)
+            )
+        }) else {
+            continue;
+        };
+        let child_id = child.seq.value().to_string();
+        let origin = ReferredFrom {
+            desk_id: from_desk.clone(),
+            desk_name: from_desk_name.clone(),
+            asker_id: asker.clone(),
+            asker_label: asker_label.clone(),
+            sequence: *trigger_sequence,
+            returning: *returning,
+        };
+
+        // On a return, the chip belongs on the ASKER's report — the first thing
+        // they say on this desk after the answer reached them. `target` is who
+        // the referral was routed to, which on a return is the agent that asked
+        // in the first place, so this needs no second notion of "the asker".
+        let report = returning
+            .then(|| {
+                messages
+                    .iter()
+                    .filter(|m| m.id.parse::<u64>().is_ok_and(|seq| seq > child.seq.value()))
+                    .find(|m| m.channel == *target && !m.by_person)
+                    .map(|m| m.id.clone())
+            })
+            .flatten();
+
+        match report {
+            Some(id) => {
+                relayed.push(child_id);
+                if let Some(view) = messages.iter_mut().find(|m| m.id == id) {
+                    view.referred_from = Some(origin);
+                }
+            }
+            None => {
+                if let Some(view) = messages.iter_mut().find(|m| m.id == child_id) {
+                    // Rendering a relay at all is the fallback; rendering the
+                    // note the host appended to it would publish text written
+                    // FOR the asker — "you are the only one who has seen it" —
+                    // in a channel, over the name of an agent that is not even
+                    // on this desk. Only the other desk's own words survive.
+                    if let Some((answer, _)) =
+                        view.text.split_once(crate::ports::types::RELAY_NOTE_MARKER)
+                    {
+                        view.text = answer.to_string();
+                    }
+                    view.referred_from = Some(origin);
+                }
+            }
+        }
+    }
+    messages.retain(|m| !relayed.contains(&m.id));
+    Ok(())
+}
+
+/// Renders a deliberation turn for a person, leaving every other reply alone.
+///
+/// A room's grammar — `!move`, `#topic`, `^N`, `>N` — is addressed to the fold
+/// and was reaching the operator verbatim: `!support #lazy-load ^3 agreed`
+/// rendered as-is in a chat window. Each line that carries a move is rewritten
+/// to a plain-English lead; a line that carries none passes through untouched,
+/// which is every reply on every desk that does not deliberate.
+///
+/// Line by line, because a turn may pair prose with its move, and only the
+/// marked line is grammar.
+///
+/// **The journal keeps the original.** The fold reads markers off the stored
+/// line, so this rewrite lives here and nowhere earlier — a room whose own
+/// transcript had been cleaned could not count itself.
+pub(crate) fn readable_moves(text: String) -> String {
+    if !text
+        .lines()
+        .any(|line| crate::hivemind::line_kind(line).is_some())
+    {
+        return text;
+    }
+    text.lines()
+        .map(|line| crate::hivemind::readable(line).unwrap_or_else(|| line.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Blanks `task_id` on any row naming a card the board no longer has
@@ -934,11 +1403,20 @@ async fn drop_dead_cards(
 /// not. Keep that potentially full journal walk out of [`history_for_desk`],
 /// so bounded transcript readers stop as soon as their requested window is
 /// complete.
+///
+/// `is_admin` excludes an owner-fallback report the same way
+/// [`history_for_desk`]'s `is_admin` param excludes it from `items` (issue
+/// #1781 review, Codex P2): without this, a non-admin querying a GraphQL desk
+/// that holds one — notably a grandfathered real desk at the literal
+/// `operator` id — got a `total` counting a row `items` had already hidden,
+/// which both breaks `Page.total`'s item-count contract and reveals that a
+/// hidden admin report exists.
 pub async fn history_total_for_desk(
     runtime: &CompanyRuntime,
     desk_id: &str,
     desk_name: &str,
     before_seq: Option<u64>,
+    is_admin: bool,
 ) -> Result<i32, OpenCompanyError> {
     const EVENT_PAGE: usize = 512;
 
@@ -956,9 +1434,15 @@ pub async fn history_total_for_desk(
             if before_seq.is_some_and(|before| event.seq.value() >= before) {
                 return Ok(total);
             }
-            if owns(desk_id, desk_name, &event.event) {
-                total = total.saturating_add(1);
+            if !owns(desk_id, desk_name, &event.event) {
+                continue;
             }
+            // Same admin-only exclusion `MessageView::project` applies to
+            // `history_for_desk`'s rows (see `is_admin_only_event`'s doc).
+            if !is_admin && is_admin_only_event(&event.event) {
+                continue;
+            }
+            total = total.saturating_add(1);
         }
         let Some(last) = page.last() else {
             break;
@@ -969,6 +1453,20 @@ pub async fn history_total_for_desk(
         }
     }
     Ok(total)
+}
+
+/// Whether `event` is the owner-fallback report — admin-only on both
+/// [`history_for_desk`] (via [`MessageView::project`]'s `admin_only` field,
+/// which applies the identical `agent_id == OWNER_FALLBACK_REPORT_AUTHOR`
+/// check inline) and [`history_total_for_desk`]'s count (issue #1781 review,
+/// Codex P2), so the two projections of the same journal cannot disagree
+/// about which rows a non-admin is shown.
+fn is_admin_only_event(event: &CompanyEvent) -> bool {
+    matches!(
+        event,
+        CompanyEvent::AgentReply { agent_id, .. }
+            if agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+    )
 }
 
 #[cfg(test)]
@@ -982,6 +1480,7 @@ mod test {
 
     fn agent_reply(chat_id: &str) -> CompanyEvent {
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -1004,6 +1503,50 @@ mod test {
             deliverable: None,
             attachments: Vec::new(),
         }
+    }
+
+    /// The whole difference between the two predicates, in one place.
+    ///
+    /// `same_conversation` folds a missing id into General because an
+    /// unaddressed *message* went to the company-wide line.
+    /// `stamped_conversation_is` refuses to, because a missing id *stamped on a
+    /// record* means no conversation produced it — and handing those to General
+    /// is what let a thread-less parked blocker eat a founder's first line in
+    /// `#general` (B-059).
+    #[test]
+    fn a_stamped_origin_of_none_names_no_conversation_including_general() {
+        for desk in [GENERAL_DESK, MAIN_THREAD_ID, "general", ""] {
+            assert!(
+                same_conversation(None, Some(desk)),
+                "an unaddressed message still folds into General ({desk:?})"
+            );
+            assert!(
+                !stamped_conversation_is(None, desk),
+                "but a record stamped with no conversation belongs to none, {desk:?} included"
+            );
+        }
+        assert!(!stamped_conversation_is(None, "engineering"));
+    }
+
+    /// Everything that *is* stamped compares exactly as `same_conversation`
+    /// does, so the carve-out cannot quietly become "refuse everything".
+    #[test]
+    fn a_stamped_origin_folds_general_and_compares_every_other_desk_verbatim() {
+        for origin in [GENERAL_DESK, MAIN_THREAD_ID, "general", ""] {
+            for desk in [GENERAL_DESK, MAIN_THREAD_ID, "general", ""] {
+                assert!(
+                    stamped_conversation_is(Some(origin), desk),
+                    "every spelling of General is one conversation: {origin:?} vs {desk:?}"
+                );
+            }
+        }
+        assert!(stamped_conversation_is(Some("dm:eng"), "dm:eng"));
+        assert!(!stamped_conversation_is(Some("dm:eng"), "dm:ops"));
+        assert!(!stamped_conversation_is(Some("dm:eng"), GENERAL_DESK));
+        assert!(
+            !stamped_conversation_is(Some("Engineering"), "engineering"),
+            "a desk id is opaque — the General fold is not a licence to loosen the rest"
+        );
     }
 
     #[test]
@@ -1305,6 +1848,7 @@ mod test {
             at(
                 2,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -1506,6 +2050,7 @@ mod test {
             at(
                 13,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: Some(EventSeq::new(4)),
@@ -1549,6 +2094,15 @@ mod test {
     /// an agent id (`engineer`) and never a channel id (`engineering`) — that
     /// difference is the whole reason the origin has to be carried.
     fn desk_task_completed(origin: Option<&str>, column: &str) -> CompanyEvent {
+        threaded_desk_task_completed(origin, None, column)
+    }
+
+    /// The same settle, for a card raised inside a thread (#1890 B).
+    fn threaded_desk_task_completed(
+        origin: Option<&str>,
+        origin_parent: Option<u64>,
+        column: &str,
+    ) -> CompanyEvent {
         CompanyEvent::DeskTaskCompleted {
             task_id: "t-1".to_string(),
             desk: "engineer".to_string(),
@@ -1556,6 +2110,7 @@ mod test {
             column: column.to_string(),
             artifact_ids: Vec::new(),
             origin_chat_id: origin.map(str::to_string),
+            origin_parent: origin_parent.map(EventSeq::new),
         }
     }
 
@@ -1677,8 +2232,43 @@ mod test {
         );
         assert!(!view.mine);
         assert!(view.steps.is_empty(), "a marker is not a turn");
-        assert!(view.parent_id.is_none(), "a marker is never threaded");
+        assert!(
+            view.parent_id.is_none(),
+            "a card raised at channel level settles flat in the channel",
+        );
         assert_eq!(view.id, "21", "the host id the console dedupes a reload on");
+    }
+
+    /// Issue #1890 B — the whole of what this sub-issue repairs.
+    ///
+    /// A card raised inside a thread used to settle flat in the channel, so the
+    /// thread that asked for the work never showed it finishing. The marker
+    /// carries the root now, in the same field and the same rendering an
+    /// operator message's parent takes, so the console files it into the thread
+    /// with no renderer change at all.
+    #[test]
+    fn a_terminal_raised_in_a_thread_projects_into_that_thread() {
+        let view = MessageView::project(
+            at(
+                50,
+                threaded_desk_task_completed(Some("engineering"), Some(41), COLUMN_IN_REVIEW),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(
+            view.parent_id.as_deref(),
+            Some("41"),
+            "the marker hangs off the root the card recorded",
+        );
+        // The channel half is unchanged: routing still runs through `owns` on
+        // the origin channel, and the thread only narrows within it. A marker
+        // that threaded but stopped belonging to its channel would vanish.
+        assert!(owns(
+            "engineering",
+            "Engineering desk",
+            &threaded_desk_task_completed(Some("engineering"), Some(41), COLUMN_IN_REVIEW),
+        ));
     }
 
     /// The run's prose stays out of the marker. It already reaches this same
@@ -1708,6 +2298,7 @@ mod test {
             at(
                 seq,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     chat_id: "engineering".to_string(),
@@ -1763,6 +2354,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             }
         }
 
@@ -1856,6 +2448,121 @@ mod test {
             assert!(!is_known_author("operator", &record));
         }
 
+        /// A delivered workflow report is journaled under
+        /// [`crate::runtime::WORKFLOW_REPLY_AUTHOR`] on purpose — it is the
+        /// workflow speaking, not a teammate's own reply. Counting it would
+        /// flag every delivered report on a company with no roster match for
+        /// "workflow" as damaged, and — worse — a teammate who *did* mint that
+        /// id would have every report silently misattributed to them by
+        /// `senderOf` before this reservation existed.
+        #[test]
+        fn a_workflow_report_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::runtime::WORKFLOW_REPLY_AUTHOR)
+                    .is_none(),
+                "workflow reports resolve through the extra arm, not the roster"
+            );
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, crate::runtime::WORKFLOW_REPLY_AUTHOR),
+                    reply(2, "engineer"),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// Issue #1781 review, Codex P2: an owner-fallback report is journaled
+        /// under [`crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR`] on purpose —
+        /// same reservation as `WORKFLOW_REPLY_AUTHOR`, one arm narrower — so it
+        /// must not inflate the audit either. Before this arm existed, every
+        /// legitimate no-mailbox fallback counted as damaged attribution.
+        #[test]
+        fn an_owner_fallback_report_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+                    .is_none(),
+                "owner-fallback reports resolve through the extra arm, not the roster"
+            );
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR),
+                    reply(2, "engineer"),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// Review on PR #1781 (Codex P2): a company that named an overlay
+        /// teammate "Workflow" before this reservation existed would have
+        /// minted the bare id `workflow` — the id `WORKFLOW_REPLY_AUTHOR`
+        /// itself used to be, until it was reshaped to the unmintable,
+        /// hyphenated `workflow-report`. That persisted teammate is not
+        /// migrated or renamed by this fix — there is nothing to migrate: the
+        /// pseudo-author a workflow report is now journaled under is a
+        /// **different, disjoint id** from the one that teammate holds, so
+        /// the collision this reservation exists to prevent cannot occur for
+        /// it, retroactively as well as going forward. Proven here rather than
+        /// asserted, since the whole point is that the two ids must never
+        /// again be able to resolve to the same author.
+        #[test]
+        fn a_persisted_teammate_named_workflow_does_not_shadow_the_reply_author() {
+            let mut record = record();
+            record
+                .overlay_agents
+                .push(crate::ports::types::OverlayAgent {
+                    id: "workflow".to_string(),
+                    name: "Workflow".to_string(),
+                    role: "Worker".to_string(),
+                    description: None,
+                    tools: Some(Vec::new()),
+                    model: None,
+                    harness: None,
+                });
+
+            assert_ne!(
+                "workflow",
+                crate::runtime::WORKFLOW_REPLY_AUTHOR,
+                "the two ids must be disjoint for the rest of this test to mean anything"
+            );
+            assert!(
+                record.resolve_roster_agent_id("workflow").is_some(),
+                "the pre-existing teammate is still on the roster, unmigrated"
+            );
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::runtime::WORKFLOW_REPLY_AUTHOR)
+                    .is_none(),
+                "the reply-author id does not resolve to that (or any) teammate"
+            );
+
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    // The teammate's own reply — attributed to them, as before.
+                    reply(1, "workflow"),
+                    // A new workflow report, delivered after this fix ships —
+                    // journaled under the disjoint id, not theirs.
+                    reply(2, crate::runtime::WORKFLOW_REPLY_AUTHOR),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(
+                audit.affected, 0,
+                "both rows resolve, to two different authors"
+            );
+        }
+
         #[test]
         fn a_reply_authored_by_a_real_teammate_is_not_counted() {
             let mut audit = AttributionAudit::default();
@@ -1934,6 +2641,7 @@ mod test {
 mod dead_card_test {
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
     use crate::ports::types::CompanyId;
     use crate::runtime::RuntimeBuilder;
@@ -1947,13 +2655,13 @@ mod dead_card_test {
     fn card(id: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: "Draft the launch note".to_string(),
+            title: TaskTitle::authored("Draft the launch note"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: 1,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -1962,12 +2670,15 @@ mod dead_card_test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
         }
     }
 
     /// A reply that opened a card, exactly as the dispatch path journals it.
     fn reply_naming(task_id: &str) -> CompanyEvent {
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -2018,6 +2729,7 @@ mod dead_card_test {
             &Viewer::Operator,
             None,
             50,
+            true,
         )
         .await
         .expect("history");
@@ -2069,6 +2781,7 @@ mod dead_card_test {
             &Viewer::Operator,
             None,
             50,
+            true,
         )
         .await
         .expect("history");
@@ -2100,6 +2813,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2120,11 +2834,1016 @@ mod dead_card_test {
             &Viewer::Operator,
             None,
             50,
+            true,
         )
         .await
         .expect("history");
 
         assert_eq!(history.len(), 1, "{history:?}");
         assert!(history[0].task_id.is_none(), "{history:?}");
+    }
+
+    /// Issue #1781 review (Codex P1): an `owner`-fallback report — marked via
+    /// [`crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR`] — must never reach a
+    /// non-admin viewer, while an ordinary operator-channel report (any other
+    /// author) is unaffected. Pre-fix, `history_for_desk` had no concept of
+    /// `admin_only` at all: every signed-in company user, admin or Member, saw
+    /// every row on a desk they could address, which is exactly the leak this
+    /// test pins shut.
+    #[tokio::test]
+    async fn an_owner_fallback_row_is_hidden_from_a_non_admin_viewer() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only owner report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "ordinary workflow report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+
+        let as_member = history_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            &Viewer::Operator,
+            None,
+            50,
+            false,
+        )
+        .await
+        .expect("history");
+        assert_eq!(
+            as_member.len(),
+            1,
+            "a non-admin must not see the owner-fallback row: {as_member:?}"
+        );
+        assert_eq!(as_member[0].text, "ordinary workflow report");
+        assert!(!as_member[0].admin_only, "{as_member:?}");
+
+        let as_admin = history_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        assert_eq!(
+            as_admin.len(),
+            2,
+            "an admin must see both rows: {as_admin:?}"
+        );
+        assert!(as_admin.iter().any(|m| m.admin_only), "{as_admin:?}");
+    }
+
+    /// The exclusion happens inside the paging loop, before a row counts
+    /// toward `first` (see `history_for_desk`'s doc) — proven by requesting
+    /// exactly one row as a non-admin with an admin-only row sorted newest: a
+    /// post-fetch filter would come back empty here, not with the one visible
+    /// row underneath it.
+    #[tokio::test]
+    async fn a_non_admin_page_fills_past_an_admin_only_row_instead_of_coming_back_short() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        // Oldest first: the visible row, then the admin-only row on top of it.
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "visible report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+
+        let as_member = history_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            &Viewer::Operator,
+            None,
+            1,
+            false,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(
+            as_member.len(),
+            1,
+            "a non-admin's page must fill with the next visible row, not come \
+             back short: {as_member:?}"
+        );
+        assert_eq!(as_member[0].text, "visible report");
+    }
+
+    /// Issue #1781 review (Codex P2): `history_total_for_desk` must agree with
+    /// `history_for_desk` about which rows a non-admin can see. Pre-fix, this
+    /// count had no `is_admin` param at all — a non-admin querying a desk
+    /// holding an owner-fallback row (e.g. a grandfathered real desk at the
+    /// literal `operator` id) got a `total` one higher than `items.len()`
+    /// could ever be, breaking `Page.total`'s item-count contract and
+    /// revealing that a hidden admin report exists.
+    #[tokio::test]
+    async fn total_excludes_the_owner_fallback_row_for_a_non_admin_but_counts_it_for_an_admin() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only owner report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "ordinary workflow report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+
+        let as_member = history_total_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            None,
+            false,
+        )
+        .await
+        .expect("total");
+        assert_eq!(
+            as_member, 1,
+            "a non-admin's total must match what history_for_desk would ever show them"
+        );
+
+        let as_admin = history_total_for_desk(
+            &runtime,
+            crate::runtime::OPERATOR_CHANNEL,
+            crate::runtime::OPERATOR_CHANNEL,
+            None,
+            true,
+        )
+        .await
+        .expect("total");
+        assert_eq!(as_admin, 2, "an admin's total must count both rows");
+    }
+
+    /// Issue #1781 review (Codex P2, follow-up): `channel_attributed_replies`
+    /// must agree with `history_for_desk` / `history_total_for_desk` about
+    /// which rows a non-admin can see. Pre-fix, it had no `is_admin` param at
+    /// all — a Member polling `/chat/attribution-audit` around an
+    /// owner-fallback delivery watched `replies` tick up for a row neither
+    /// the transcript nor SSE ever showed them, confirming a hidden
+    /// admin-only message exists even though its content stayed hidden.
+    #[tokio::test]
+    async fn attribution_audit_excludes_the_owner_fallback_row_for_a_non_admin_but_counts_it_for_an_admin()
+     {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+        let record = runtime
+            .store()
+            .load(&id)
+            .await
+            .expect("load")
+            .expect("record exists");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only owner report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "ordinary workflow report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+
+        let as_member = channel_attributed_replies(&runtime, &record, false)
+            .await
+            .expect("audit");
+        assert_eq!(
+            as_member.replies, 1,
+            "a non-admin's replies count must match what history_for_desk would \
+             ever show them: {as_member:?}"
+        );
+
+        let as_admin = channel_attributed_replies(&runtime, &record, true)
+            .await
+            .expect("audit");
+        assert_eq!(as_admin.replies, 2, "an admin's count must count both rows");
+    }
+}
+
+/// Where a referred line says it came from, and who it says is speaking.
+#[cfg(test)]
+mod referral_origin_test {
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::ports::types::CompanyId;
+    use crate::runtime::RuntimeBuilder;
+
+    fn manifest() -> CompanyManifest {
+        toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+            .expect("parse manifest")
+    }
+
+    async fn runtime(home: &std::path::Path) -> Arc<CompanyRuntime> {
+        Arc::new(
+            RuntimeBuilder::new(home.to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("build a runtime"),
+        )
+    }
+
+    /// Helper: the marker and the agent-authored line it caused, as one leg.
+    fn referral_leg(
+        from_desk: &str,
+        from_desk_name: &str,
+        asker: &str,
+        to_desk: &str,
+        target: &str,
+        returning: bool,
+        text: &str,
+    ) -> [CompanyEvent; 2] {
+        [
+            CompanyEvent::ReferralEnqueued {
+                from_desk: from_desk.to_string(),
+                from_desk_name: from_desk_name.to_string(),
+                asker: asker.to_string(),
+                asker_label: asker.to_string(),
+                trigger_sequence: 1,
+                to_desk: to_desk.to_string(),
+                target: target.to_string(),
+                returning,
+            },
+            CompanyEvent::OperatorMessage {
+                text: text.to_string(),
+                by: Some(Actor {
+                    kind: ActorKind::Agent,
+                    id: asker.to_string(),
+                }),
+                chat: Some(to_desk.to_string()),
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            },
+        ]
+    }
+
+    /// **An episode's turns are the conversation; its closing row is not.**
+    ///
+    /// The room journals every turn as an ordinary reply by the teammate that
+    /// took it, then one summary under `hive-report`. Rendered, that summary
+    /// appeared as a *teammate* — a participant in a channel where no such
+    /// teammate exists and none can, since the id is hyphenated exactly so no
+    /// roster id can equal it. The fold already reads it as `System`; this
+    /// makes the console agree.
+    ///
+    /// The turns must survive: dropping the room and keeping only its summary
+    /// would hide the reasoning, the losing options and every objection — the
+    /// one thing a room produces that a single answer cannot.
+    #[tokio::test]
+    async fn an_episodes_turns_render_but_its_closing_row_does_not() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        for (agent, text) in [
+            (
+                "software_engineer",
+                "!propose #lazy-load defer each section",
+            ),
+            (
+                "junior_engineer",
+                "!object >1 ^1 users bounce between sections",
+            ),
+            (
+                crate::hivemind::HIVE_REPORT_AUTHOR,
+                "The desk settled after 2 turns (#lazy-load, backed by software_engineer): defer each section",
+            ),
+        ] {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: agent.to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+
+        let voices: Vec<&str> = history.iter().map(|m| m.channel.as_str()).collect();
+        assert!(
+            voices.contains(&"software_engineer") && voices.contains(&"junior_engineer"),
+            "every teammate's turn is on screen, the objection included: {voices:?}"
+        );
+        assert!(
+            !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
+            "and the room's own bookkeeping is not a participant in it: {voices:?}"
+        );
+    }
+
+    /// **A suppressed row must not shorten the page.**
+    ///
+    /// Filtered after the page was assembled, an episode's closing row silently
+    /// cost the reader a message: a page asked for `n` came back with `n - 1`,
+    /// and the row that should have taken its place stayed unfetched. The
+    /// admission point already excludes an admin-only row for exactly this
+    /// reason, and says so.
+    #[tokio::test]
+    async fn a_suppressed_report_does_not_shorten_the_page() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        // Four teammate turns with the room's closing row in the middle.
+        for (agent, text) in [
+            ("software_engineer", "first"),
+            ("junior_engineer", "second"),
+            (crate::hivemind::HIVE_REPORT_AUTHOR, "The desk settled."),
+            ("qa_engineer", "third"),
+            ("software_engineer", "fourth"),
+        ] {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: agent.to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+
+        let page = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            4,
+            true,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(
+            page.len(),
+            4,
+            "a page of four is four teammate turns, not three and a hole: {page:?}"
+        );
+        assert!(
+            page.iter()
+                .all(|m| m.channel != crate::hivemind::HIVE_REPORT_AUTHOR),
+            "and none of them is the room's bookkeeping: {page:?}"
+        );
+    }
+
+    /// **A failed turn still shows.** The report restates a tally whose inputs
+    /// are the visible turns, so hiding it costs nothing. A failure notice
+    /// describes a turn that does not exist — there is no gap for a reader to
+    /// notice — so hiding it would leave a transcript with an unaccounted hole.
+    #[tokio::test]
+    async fn a_failed_turn_is_still_reported_to_the_room() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        for (agent, text) in [
+            (
+                crate::hivemind::HIVE_FAILURE_AUTHOR,
+                "qa_engineer was asked and could not answer.",
+            ),
+            (
+                crate::hivemind::HIVE_REPORT_AUTHOR,
+                "The desk settled after 2 turns.",
+            ),
+        ] {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: agent.to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        let voices: Vec<&str> = history.iter().map(|m| m.channel.as_str()).collect();
+
+        assert!(
+            voices.contains(&crate::hivemind::HIVE_FAILURE_AUTHOR),
+            "a seat that could not answer is accounted for: {voices:?}"
+        );
+        assert!(
+            !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
+            "while the closing summary stays out of the room: {voices:?}"
+        );
+    }
+
+    /// **A referred line is the ASKING AGENT speaking, not the desk.**
+    ///
+    /// `senderOf` in the console draws the byline off `channel`, and treats
+    /// "operator" as "no distinct speaker — use the room's own name". That is
+    /// right for a message a person sent and wrong for a referral, which
+    /// arrives authored by a teammate: hardcoding "operator" made design's own
+    /// name the speaker, so an engineer asking design read as design talking to
+    /// itself. An `AgentReply` already names its agent here; this makes the two
+    /// paths agree rather than teaching the console a second rule.
+    #[tokio::test]
+    async fn a_referred_message_is_voiced_by_the_agent_that_asked() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        for event in referral_leg(
+            "engineering",
+            "Engineering",
+            "software_engineer",
+            "design",
+            "product_designer",
+            false,
+            "what would you change about the error messages?",
+        ) {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "design",
+            "design",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        let referred = history
+            .iter()
+            .find(|m| m.referred_from.is_some())
+            .expect("the referred line");
+
+        assert_eq!(
+            referred.channel, "software_engineer",
+            "the byline names the agent, not the desk it landed on: {referred:?}"
+        );
+        assert!(
+            !referred.by_person,
+            "an agent is not a person, whatever the event it rides on"
+        );
+    }
+
+    /// **One agent speaks in both rooms, and it is the asker.**
+    ///
+    /// The asker asks on the other desk under its own name; that desk answers
+    /// on its own desk; the asker comes home and reports. The relay that
+    /// carried the answer back is an input to the asker, not a line anyone
+    /// reads — rendering it put the other desk's agent in a room it is not part
+    /// of, saying the same thing the asker was about to say.
+    #[tokio::test]
+    async fn the_asker_brings_the_answer_home_and_the_other_desk_stays_out_of_the_room() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        let mut events: Vec<CompanyEvent> = referral_leg(
+            "engineering",
+            "Engineering",
+            "software_engineer",
+            "design",
+            "product_designer",
+            false,
+            "what would you change about the error messages?",
+        )
+        .into_iter()
+        .chain(referral_leg(
+            "design",
+            "Design",
+            "product_designer",
+            "engineering",
+            "software_engineer",
+            true,
+            "error messages look like a copy task and are not one",
+        ))
+        .collect();
+        // The asker's report — the only thing #engineering should show.
+        events.push(CompanyEvent::AgentReply {
+            chat_id: "engineering".to_string(),
+            agent_id: "software_engineer".to_string(),
+            text: "design came back: error messages are a design-system problem".to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+            audience: Vec::new(),
+        });
+        for event in events {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+
+        assert!(
+            history.iter().all(|m| m.channel != "product_designer"),
+            "the answering desk never speaks in the room it was asked from: {history:?}"
+        );
+        let referred = history
+            .iter()
+            .find(|m| m.referred_from.is_some())
+            .expect("something carries the provenance");
+        assert_eq!(
+            referred.channel, "software_engineer",
+            "the chip rides the asker's own report: {referred:?}"
+        );
+        let origin = referred.referred_from.as_ref().expect("origin");
+        assert!(origin.returning, "and it reads as an answer, not an ask");
+        assert_eq!(origin.desk_name, "Design");
+    }
+
+    /// **A rendered relay shows the answer and none of the host's note.**
+    ///
+    /// Seen in the console, not reasoned about: the asker's turn died on an
+    /// empty model response, the fallback rendered the relay, and #engineering
+    /// was told "you are the only one who has seen it" by the design desk's
+    /// agent. The note is written FOR the asker and is private to it; the
+    /// fallback exists to preserve the ANSWER, so that is all it may publish.
+    #[tokio::test]
+    async fn a_rendered_relay_keeps_the_answer_and_drops_the_note() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        let answer = "use a skeleton, not a spinner";
+        let note = format!(
+            "{}product_designer on the Design desk answered what you asked them. \
+             This did not appear in your channel — you are the only one who has seen it.",
+            crate::ports::types::RELAY_NOTE_MARKER
+        );
+        // No reply follows, so the fallback renders this relay.
+        for event in referral_leg(
+            "design",
+            "Design",
+            "product_designer",
+            "engineering",
+            "software_engineer",
+            true,
+            &format!("{answer}{note}"),
+        ) {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        let relayed = history
+            .iter()
+            .find(|m| m.referred_from.is_some())
+            .expect("the relay renders, because nothing else carries the answer");
+
+        assert_eq!(
+            relayed.text, answer,
+            "the other desk's own words, and only those"
+        );
+        assert!(
+            !relayed.text.contains("only one who has seen it"),
+            "a note addressed to the asker is not published to the channel"
+        );
+    }
+
+    /// **The fail-safe half: a relay renders while the report is still missing.**
+    ///
+    /// The test below drops the relay once the asker has reported. Until then
+    /// there is nothing else carrying design's answer, and dropping it would
+    /// lose the answer outright — so it renders, in the wrong voice, saying
+    /// truthfully that it is an answer rather than an ask.
+    ///
+    /// **Which leg this is, is the host's to say (the "Answered by" chip).**
+    ///
+    /// Both legs are agent-authored lines on a desk, so every signal the
+    /// console holds reads identically on each — it guessed from `from` and
+    /// called every returning answer an ask. `tinyhivemind` decided it already
+    /// (`ReferralKind`), and the marker carries that decision.
+    #[tokio::test]
+    async fn a_relay_with_no_report_yet_still_renders_and_says_it_is_an_answer() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        for event in referral_leg(
+            "engineering",
+            "Engineering",
+            "software_engineer",
+            "design",
+            "product_designer",
+            false,
+            "what would you change about the error messages?",
+        )
+        .into_iter()
+        .chain(referral_leg(
+            "design",
+            "Design",
+            "product_designer",
+            "engineering",
+            "software_engineer",
+            true,
+            "error messages look like a copy task and are not one",
+        )) {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+
+        for (desk, desk_name, returning) in [
+            ("design", "Engineering", false),
+            ("engineering", "Design", true),
+        ] {
+            let history = history_for_desk(&runtime, desk, desk, &Viewer::Operator, None, 50, true)
+                .await
+                .expect("history");
+            let origin = history
+                .iter()
+                .find_map(|m| m.referred_from.as_ref())
+                .unwrap_or_else(|| panic!("#{desk} carries a referral origin"));
+            assert_eq!(origin.desk_name, desk_name, "on #{desk}");
+            assert_eq!(
+                origin.returning,
+                returning,
+                "#{desk} draws the {} chip",
+                if returning {
+                    "\"Answered by\""
+                } else {
+                    "\"Asked by\""
+                }
+            );
+        }
+    }
+}
+
+/// How a chat selector becomes the `(desk id, desk name)` pair [`owns`] filters
+/// on — the one answer to "which desk is this", shared by the seed, the cycle's
+/// briefings and `read_thread`.
+#[cfg(test)]
+mod desk_resolution_test {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::ports::CompanyStore;
+    use crate::ports::types::{CompanyId, CompanyRecord};
+
+    struct RecordStore(Option<CompanyRecord>);
+
+    #[async_trait]
+    impl CompanyStore for RecordStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(self.0.clone())
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            unreachable!("resolve only reads")
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            unreachable!("resolve only reads")
+        }
+        async fn append_ledger(
+            &self,
+            _id: &CompanyId,
+            _entry: crate::ports::types::LedgerEntry,
+        ) -> crate::Result<()> {
+            unreachable!("resolve only reads")
+        }
+    }
+
+    use crate::ports::types::CompanySummary;
+
+    fn record_with_group_chat(id: &str, name: &str) -> CompanyRecord {
+        let manifest = toml::from_str(&format!(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction."
+
+[[group_chat]]
+id = "{id}"
+name = "{name}"
+"#,
+        ))
+        .expect("valid manifest");
+        CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_tool_grants: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            setup: None,
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        }
+    }
+
+    async fn resolve(store: RecordStore, chat_id: Option<&str>) -> (String, String) {
+        let store: Arc<dyn CompanyStore> = Arc::new(store);
+        resolve_seed_desk(&store, &CompanyId::new("acme"), chat_id).await
+    }
+
+    /// A desk created from the console is a desk.
+    ///
+    /// It lives in `overlay_desks` and never in the manifest, so a lookup that
+    /// reads only `group_chats` fell through to the verbatim selector — and
+    /// every line journaled under the desk's *other* spelling was orphaned from
+    /// the thread index, `read_thread` and the seed alike (coderabbit + codex
+    /// on #1972).
+    #[test]
+    fn an_overlay_desk_resolves_by_either_spelling() {
+        let mut record = record_with_group_chat("growth_desk", "Growth");
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops_desk".to_string(),
+            name: "Operations".to_string(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
+        });
+        for spelling in ["ops_desk", "Operations"] {
+            assert_eq!(
+                desk_aliases(&record, Some(spelling)),
+                ("ops_desk".to_string(), "Operations".to_string()),
+                "{spelling:?} is the console-created desk"
+            );
+        }
+    }
+
+    /// An exact id beats another desk's display name.
+    ///
+    /// Desk creation enforces unique ids but **not** unique names, so
+    /// `{id: "ops_desk", name: "sales"}` is valid and can sit ahead of
+    /// `{id: "sales", …}`. A single pass matching `id == key || name == key`
+    /// answers with whichever came first, so asking for the desk `sales` got
+    /// `ops_desk` — and since this returns a *pair*, the damage is worse than a
+    /// miss: `owns` would be handed one desk's id and another's name, merging
+    /// two conversations that have nothing to do with each other.
+    ///
+    /// The precedence itself is `CompanyRecord::resolve_desk_id`'s, which this
+    /// now defers to rather than keeping a second, laxer copy of.
+    #[test]
+    fn an_exact_id_wins_over_an_earlier_desks_display_name() {
+        let mut record = record_with_group_chat("ops_desk", "sales");
+        record
+            .manifest
+            .group_chats
+            .push(toml::from_str("id = \"sales\"\nname = \"Sales\"").expect("a desk"));
+        assert_eq!(
+            desk_aliases(&record, Some("sales")).0,
+            "sales",
+            "the desk whose id is `sales` owns that key"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_none_is_the_general_desk() {
+        assert_eq!(
+            resolve(RecordStore(None), None).await,
+            (GENERAL_DESK.to_string(), GENERAL_DESK.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_general_spelling_short_circuits_without_a_store_read() {
+        // The store would panic on `save`/`list`, but a General spelling must not
+        // even reach `load` — it returns `(chat, chat)`, which owns folds.
+        assert_eq!(
+            resolve(RecordStore(None), Some("main")).await,
+            ("main".to_string(), "main".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_named_desk_by_id_returns_the_manifest_name() {
+        // Addressed by id; the seed must carry the name too, or a line journaled
+        // under the name would be missed. This is the exact "looks fixed but seeds
+        // nothing" trap the resolution guards against.
+        let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
+        assert_eq!(
+            resolve(store, Some("eng-123")).await,
+            ("eng-123".to_string(), "Engineering".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_unmatched_selector_passes_through_verbatim() {
+        let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
+        assert_eq!(
+            resolve(store, Some("ad-hoc-thread")).await,
+            ("ad-hoc-thread".to_string(), "ad-hoc-thread".to_string())
+        );
     }
 }

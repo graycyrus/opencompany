@@ -259,6 +259,8 @@ async fn harness(
 ) -> (HarnessPool, HarnessDeps, CompanyRecord, Arc<RecordingMeter>) {
     let meter = Arc::new(RecordingMeter::default());
     let deps = HarnessDeps {
+        emergency_gate: None,
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -349,6 +351,7 @@ async fn harness(
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
 
     let pool = HarnessPool::new();

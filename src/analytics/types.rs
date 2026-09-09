@@ -301,10 +301,13 @@ pub fn sample_kind_slug(kind: SampleKind) -> &'static str {
         SampleKind::OauthCall => "oauth-call",
         SampleKind::SearchCall => "search-call",
         SampleKind::PlanningCall => "planning-call",
+        SampleKind::JudgeCall => "judge-call",
         SampleKind::TriageCall => "triage-call",
         SampleKind::SetupCall => "setup-call",
         SampleKind::AuthoringCall => "authoring-call",
         SampleKind::SelectorCall => "selector-call",
+        SampleKind::TitleCall => "title-call",
+        SampleKind::ExtractionCall => "extraction-call",
     }
 }
 
@@ -419,7 +422,8 @@ impl fmt::Debug for OpaqueId {
 /// enumerating candidate tenant slugs and reading customer identity back out.
 ///
 /// A newtype rather than a bare `String`, for the same reason as
-/// [`ProjectToken`](crate::analytics::config::ProjectToken): it derives neither
+/// [`ClientCredentials`](crate::analytics::config::ClientCredentials): it
+/// derives neither
 /// `Debug` nor `Serialize` — the hand-written `Debug` redacts — because
 /// `serde_json::to_value(&some_config)` is exactly how a secret reaches a
 /// payload. Nothing in this module serializes a config struct, and this value
