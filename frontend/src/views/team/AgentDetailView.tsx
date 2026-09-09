@@ -291,6 +291,8 @@ export function AgentDetailView({
    *
    * Empty until the teammate loads — there is nothing to require a value of.
    */
+  const [avatarOpen, setAvatarOpen] = useState(false);
+
   const missing = agent ? missingRequired(draft, (key) => isEditable(agent, key)) : [];
 
   // Issue #1776: read the cognition path while the edit form is open, so the
@@ -1137,11 +1139,6 @@ function Identity({
                 </Badge>
               </a>
             ))}
-            {agent.inboxEnabled && (
-              <Badge variant="outline" className="gap-1">
-                <Mail className="size-3" /> Inbox
-              </Badge>
-            )}
           </div>
         </div>
       </div>
