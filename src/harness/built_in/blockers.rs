@@ -921,4 +921,130 @@ mod tool_test {
             "no notice is owed when nothing was dropped"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_questions_compete_for_the_final_slot_without_silent_loss() {
+        use crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        use std::sync::{Arc, Barrier};
+
+        for round in 0..20 {
+            let queue = ApprovalRequestQueue::default();
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN - 1 {
+                let asked = tool(&queue)
+                    .execute(serde_json::json!({ "question": format!("existing question {i}") }))
+                    .await
+                    .expect("the tool runs");
+                assert!(!asked.is_error, "{}", asked.text());
+            }
+
+            let barrier = Arc::new(Barrier::new(2));
+            let ask = |agent: &str, question: &'static str| {
+                let tool = EscalateToHumanTool::new(queue.clone(), agent.to_string());
+                let barrier = barrier.clone();
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    tokio::runtime::Handle::current()
+                        .block_on(tool.execute(serde_json::json!({ "question": question })))
+                })
+            };
+            let finance = ask("finance", "approve the final budget?");
+            let legal = ask("legal", "approve the final contract?");
+            let results = [
+                (
+                    "approve the final budget?",
+                    finance.await.expect("joins").expect("the tool runs"),
+                ),
+                (
+                    "approve the final contract?",
+                    legal.await.expect("joins").expect("the tool runs"),
+                ),
+            ];
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|(_, result)| !result.is_error)
+                    .count(),
+                1,
+                "round {round}: one remaining blocker slot must have exactly one successful caller"
+            );
+
+            let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(
+                drained.discarded, 0,
+                "no accepted question may be discarded"
+            );
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN - 1 {
+                assert!(
+                    drained
+                        .requests
+                        .iter()
+                        .any(|r| r.reason == format!("existing question {i}"))
+                );
+            }
+            for (question, result) in results {
+                let retained = drained.requests.iter().any(|r| r.reason == question);
+                assert_eq!(retained, !result.is_error, "round {round}: {question}");
+                if result.is_error {
+                    assert!(result.text().contains("not raised"), "{}", result.text());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_run_accepts_its_duplicate_without_consuming_another_runs_capacity() {
+        use crate::harness::built_in::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN};
+
+        let queue = ApprovalRequestQueue::default();
+        let full = queue.claim(ApprovalScope::Run("full".to_string()));
+        let other = queue.claim(ApprovalScope::Run("other".to_string()));
+        let tool = tool(&queue);
+        full.scoped(async {
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+                let asked = tool
+                    .execute(serde_json::json!({ "question": format!("question {i}") }))
+                    .await
+                    .expect("the tool runs");
+                assert!(!asked.is_error, "{}", asked.text());
+            }
+            let duplicate = tool
+                .execute(serde_json::json!({ "question": "question 0" }))
+                .await
+                .expect("the tool runs");
+            assert!(
+                !duplicate.is_error,
+                "the existing question is already queued"
+            );
+            let refused = tool
+                .execute(serde_json::json!({ "question": "new question" }))
+                .await
+                .expect("the tool runs");
+            assert!(
+                refused.is_error,
+                "a new question must be refused at the cap"
+            );
+        })
+        .await;
+
+        let independent = other
+            .scoped(tool.execute(serde_json::json!({ "question": "question 0" })))
+            .await
+            .expect("the tool runs");
+        assert!(
+            !independent.is_error,
+            "a different run has its own capacity"
+        );
+        let full_drain = full
+            .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+            .await;
+        assert_eq!(full_drain.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(full_drain.discarded, 0);
+        let other_drain = other
+            .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+            .await;
+        assert_eq!(other_drain.requests.len(), 1);
+        assert_eq!(other_drain.requests[0].reason, "question 0");
+        assert_eq!(other_drain.discarded, 0);
+    }
 }
