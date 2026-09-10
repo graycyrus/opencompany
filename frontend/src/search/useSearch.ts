@@ -57,8 +57,8 @@ const DEBOUNCE_MS = 160;
  * is reached the older messages are genuinely unsearched — the honest fix for
  * that is a host-side message search, not more pages here.
  */
-const HISTORY_PAGE = 200;
-const HISTORY_PAGES = 5;
+export const HISTORY_PAGE = 200;
+export const HISTORY_PAGES = 5;
 
 /** What the modal needs to draw itself. */
 export interface SearchState {
@@ -162,7 +162,11 @@ export function useSearch(
 
       if (isScopedMessageSearch(query) && scoped) {
         setLoading(true);
-        void readConversation(client, company, scoped.threadId)
+        // `current` goes in as well as being checked on the way out: without
+        // it a query that moved on mid-flight still walked its remaining pages,
+        // so one abandoned scoped search cost up to four more history requests
+        // whose answers were discarded on arrival.
+        void readConversation(client, company, scoped.threadId, current)
           .then((rows) => {
             if (!current()) return;
             setMessages({ context: scoped.context, rows });
@@ -230,15 +234,24 @@ export function useSearch(
  * Walks the `before` cursor, which the host keys on a message's sequence — the
  * bare id it answers with. Stops early on a short page, because that is the
  * start of the conversation and there is nothing behind it.
+ *
+ * `isCurrent` is asked before every page rather than only after the last one.
+ * A generation check that runs on completion drops the answer but not the
+ * requests: the operator types one more character, or shuts the modal, and the
+ * abandoned walk still asks the host for four more pages of a conversation
+ * nobody is going to be shown. Whatever was already read is returned as-is —
+ * the caller discards it on the same generation check.
  */
-async function readConversation(
+export async function readConversation(
   client: OpenCompanyClient,
   company: string | null,
   threadId: string,
+  isCurrent: () => boolean = () => true,
 ): Promise<ChatHistoryMessageDto[]> {
   const all: ChatHistoryMessageDto[] = [];
   let before: string | undefined;
   for (let page = 0; page < HISTORY_PAGES; page += 1) {
+    if (!isCurrent()) break;
     const rows = await client.getChatHistory(threadId, company, {
       before,
       limit: HISTORY_PAGE,
