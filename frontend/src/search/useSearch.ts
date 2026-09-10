@@ -23,7 +23,7 @@ import type { ChatHistoryMessageDto } from "@/api/types";
 import { searchWorkspace, type SearchHit } from "@/api/workspace";
 import type { Desk } from "@/lib/desks";
 import { fromDto, type TeamMember } from "@/lib/team";
-import { deskFromDto, dmChannelId, dmThreadId } from "@/views/room/channels";
+import { deskFromDto, dmChannelId, dmThreadId, withGeneralDesk } from "@/views/room/channels";
 import { isScopedMessageSearch, type SearchQuery } from "./query";
 import { score } from "./rank";
 import {
@@ -134,8 +134,23 @@ export function useSearch(
     };
   }, [client, company, enabled]);
 
+  /**
+   * The desks to search, with the company-wide line among them.
+   *
+   * `GET .../desks` omits `#general` on purpose — it is not a desk — and also
+   * omits the desk `[company].general_desk` names, because that desk *is*
+   * General. Searching the route's answer alone therefore could not find the
+   * one conversation every company has and most operators use most, and
+   * `#general autumn` had nothing to resolve. The rail's own helper is reused
+   * so the two describe the same channel rather than each inventing a row.
+   */
+  const searchable = useMemo(() => withGeneralDesk(desks, members), [desks, members]);
+
   /** The teammate or desk a scope names, or null while it names nobody. */
-  const scoped = useMemo(() => resolveScope(query, desks, members), [query, desks, members]);
+  const scoped = useMemo(
+    () => resolveScope(query, searchable, members),
+    [query, searchable, members],
+  );
 
   useEffect(() => {
     if (!enabled) return;
@@ -213,7 +228,7 @@ export function useSearch(
 
   const groups = useMemo(() => {
     const byKind: Record<string, SearchResult[]> = {
-      channel: channelResults(desks, query),
+      channel: channelResults(searchable, query),
       agent: agentResults(members, query),
       message: messages ? messageResults(messages.rows, query, messages.context) : [],
       file: fileResults(files, query),
@@ -223,7 +238,7 @@ export function useSearch(
       label: RESULT_LABEL[kind],
       results: byKind[kind] ?? [],
     })).filter((group) => group.results.length > 0);
-  }, [desks, members, messages, files, query]);
+  }, [searchable, members, messages, files, query]);
 
   return { groups, loading, members, desks };
 }

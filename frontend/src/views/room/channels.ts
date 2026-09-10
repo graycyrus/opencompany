@@ -124,6 +124,11 @@ export interface ChannelSection {
  * The built-in `#general` channel: the company-wide line, in every company,
  * from first boot (issue #1743).
  *
+ * Described once, as a `Desk`, because more than the rail needs it: `/desks`
+ * never mentions this channel, so every surface built off that route has to add
+ * it back and they must all describe the same thing. {@link generalChannel}
+ * renders it for the rail and {@link withGeneralDesk} folds it into a desk list.
+ *
  * # It is not a desk, and that is the point
  *
  * Every other channel here is a desk, and a desk has a lead and a hierarchy.
@@ -150,18 +155,54 @@ export interface ChannelSection {
  * not answer it leaves every row `undefined`, and the purpose line then simply
  * does not make the claim.
  */
-function generalChannel(members: TeamMember[]): Channel {
+export function generalDesk(members: TeamMember[]): Desk {
   const orchestrator = members.find((m) => m.isOrchestrator);
   return {
     id: MAIN_THREAD_ID,
-    name: GENERAL_CHANNEL,
-    voice: orchestrator?.name ?? "Your company",
-    kind: "channel",
-    purpose: orchestrator
+    channel: GENERAL_CHANNEL,
+    name: orchestrator?.name ?? "Your company",
+    blurb: orchestrator
       ? `Everyone's here. ${orchestrator.name} picks up anything you don't @-mention.`
       : "Everyone's here — the whole company on one line",
-    memberIds: members.map((m) => m.id),
+    members: members.map((m) => m.id),
   };
+}
+
+/**
+ * The built-in channel, in the shape a desk-shaped surface reads.
+ *
+ * The projection is the same one {@link buildChannels} applies to every real
+ * desk below — `channel` is the name a `#` goes in front of, `name` is the
+ * voice, `blurb` is the purpose — so the rail and anything else that lists
+ * desks describe this channel identically rather than each inventing a row.
+ */
+function generalChannel(members: TeamMember[]): Channel {
+  const desk = generalDesk(members);
+  return {
+    id: desk.id,
+    name: desk.channel,
+    voice: desk.name,
+    kind: "channel",
+    purpose: desk.blurb,
+    memberIds: desk.members,
+  };
+}
+
+/**
+ * The desks a surface should list, with `#general` among them.
+ *
+ * `GET .../desks` deliberately omits the company-wide line — it is not a desk,
+ * and `list_desks` (`src/server/operator.rs`) also drops the desk that
+ * `[company].general_desk` names, because that desk *is* General rather than a
+ * second channel beside it. The rail has always added it back
+ * ({@link buildChannels}); anything else built straight off `/desks` — console
+ * search, for one — could not find the company's primary conversation at all.
+ *
+ * Steps aside for a blueprint desk that claims a General spelling, on exactly
+ * the rule and for exactly the reason {@link buildChannels} does.
+ */
+export function withGeneralDesk(desks: readonly Desk[], members: TeamMember[]): Desk[] {
+  return desks.some(deskClaimsGeneralChannel) ? [...desks] : [generalDesk(members), ...desks];
 }
 
 export function buildChannels(
