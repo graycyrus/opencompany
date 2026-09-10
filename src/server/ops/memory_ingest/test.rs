@@ -239,6 +239,89 @@ async fn a_drop_with_no_files_is_refused() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// A body of `prefix` + `payload` zero bytes + `suffix`, streamed in 1 MiB
+/// frames with a yield before each — so the *test* never holds the whole
+/// payload in memory even when it is well past the route's limit. Modeled on
+/// `server::ops::write_test`'s `streamed_multipart`, which exists for the same
+/// reason: a contiguous body would make proving a body-limit rejection cost as
+/// much memory as the rejection is supposed to save.
+fn streamed_multipart(prefix: Vec<u8>, payload: usize, suffix: Vec<u8>) -> Body {
+    const FRAME: usize = 1024 * 1024;
+    let prefix = Arc::new(prefix);
+    let suffix = Arc::new(suffix);
+    let filler = bytes::Bytes::from(vec![0u8; FRAME]);
+    let frames = payload.div_ceil(FRAME);
+
+    let stream = futures::stream::unfold(0usize, move |step| {
+        let prefix = prefix.clone();
+        let suffix = suffix.clone();
+        let filler = filler.clone();
+        async move {
+            tokio::task::yield_now().await;
+            let frame = if step == 0 {
+                bytes::Bytes::from(prefix.as_ref().clone())
+            } else if step <= frames {
+                filler.slice(..(payload - (step - 1) * FRAME).min(FRAME))
+            } else if step == frames + 1 {
+                bytes::Bytes::from(suffix.as_ref().clone())
+            } else {
+                return None;
+            };
+            Some((Ok::<_, std::io::Error>(frame), step + 1))
+        }
+    });
+    Body::from_stream(stream)
+}
+
+/// A whole request over [`INGEST_BODY_LIMIT`](super::INGEST_BODY_LIMIT) is cut
+/// off before anything is read: `multipart_error` names this specifically as a
+/// 413 with a "drop it in smaller batches" remedy, distinct from the plain
+/// malformed-request 400 every other multipart failure gets. Only the per-file
+/// cap (`an_unreadable_file_is_reported_without_failing_the_batch`'s sibling
+/// tests) and the empty-drop 400 were covered before this; the whole-request
+/// ceiling itself never had a request built to trip it.
+#[tokio::test]
+async fn a_request_over_the_body_limit_is_refused_as_413_not_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_at(dir.path()).await;
+
+    let prefix = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"huge.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    )
+    .into_bytes();
+    let suffix = format!("\r\n--{BOUNDARY}--\r\n").into_bytes();
+    // One byte past the 200 MiB ceiling (8 * MAX_DOCUMENT_BYTES).
+    let oversize = 8 * 25 * 1024 * 1024 + 1;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/memory/ingest")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(streamed_multipart(prefix, oversize, suffix))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains("smaller batches"),
+        "the body-limit refusal must name its own remedy, not the generic \
+         malformed-request message: {message}"
+    );
+    assert!(
+        !message.contains("Error parsing"),
+        "an overrun body must not be reported as malformed: {message}"
+    );
+}
+
 /// The server-side request forgery guard: this route makes the *host* fetch a
 /// URL, so the deployment's own network is off limits.
 ///
