@@ -57,12 +57,10 @@ pub fn site_for_api(api_url: &str) -> Option<String> {
         return None;
     }
     let host = rest.split_once(':').map_or(rest, |(host, _)| host);
-    let site = if let Some(bare) = host.strip_prefix("api.") {
-        bare.to_string()
-    } else if let Some(bare) = host.strip_prefix("staging-api.") {
-        format!("staging.{bare}")
-    } else {
-        return None;
+    let site = match (host.strip_prefix("api."), host.strip_prefix("staging-api.")) {
+        (Some(bare), _) => bare.to_string(),
+        (_, Some(bare)) => format!("staging.{bare}"),
+        _ => return None,
     };
     Some(format!("{scheme}://{site}"))
 }
