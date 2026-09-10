@@ -412,8 +412,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["granted"], true);
 
-        let toml_path =
-            crate::store::Bundle::new(home, &CompanyId::new("acme")).company_toml();
+        let toml_path = crate::store::Bundle::new(home, &CompanyId::new("acme")).company_toml();
         tokio::fs::write(&toml_path, b"not valid toml [[[")
             .await
             .expect("corrupt company.toml");

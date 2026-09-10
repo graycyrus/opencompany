@@ -552,8 +552,7 @@ async fn state_with_failing_journal(
 #[tokio::test]
 async fn a_journal_failure_after_the_key_is_stored_still_leaves_the_key_stored() {
     let home_dir = home();
-    let (state, journal) =
-        state_with_failing_journal(home_dir.path(), "acme", GRANTED).await;
+    let (state, journal) = state_with_failing_journal(home_dir.path(), "acme", GRANTED).await;
     let app = router(state.clone());
     let cookie = crate::server::test_support::fixed_cookie("acme");
 
