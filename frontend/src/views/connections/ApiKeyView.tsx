@@ -66,30 +66,48 @@ export function ApiKeyView({ client, company }: Props) {
   const [load, setLoad] = useState<"loading" | "ready" | "error">("loading");
   const [generation, setGeneration] = useState(0);
 
-  // Discards a response whose company is no longer the one on screen — the same
-  // guard the credential card keeps, and for the same reason: switching company
-  // mid-flight would otherwise paint one company's balance under another's name.
-  const wanted = useRef(company);
-  wanted.current = company;
+  // Discards the result of a request that is no longer the latest one asked
+  // for — a monotonic counter rather than "is this still the wanted company",
+  // because a company can stay the same while `client` is reseated to another
+  // host (issue tracked alongside `CompanyCredentialCard`'s identical guard):
+  // comparing only `company` would let the old host's slower response land
+  // last and overwrite the new host's credential status and balance.
+  const requestGeneration = useRef(0);
 
   const refresh = useCallback(async () => {
     setLoad("loading");
-    const asked = company;
+    const asked = ++requestGeneration.current;
     try {
       // Together: the page draws one story out of both, and sequencing them
       // would show a connected company an empty wallet for a frame.
       const [credential, money] = await Promise.all([
         getCompanyCredential(client, company),
         getCompanyBilling(client, company).catch(
-          (): CompanyBilling => ({ configured: false }),
+          (err): CompanyBilling => ({
+            // A rejected billing request is not the same fact as "no key". The
+            // credential result (just resolved above, in the same batch) is
+            // what actually says whether a key exists; a company that has one
+            // must keep seeing the unavailable explanation rather than have
+            // the balance card silently vanish. `configured` is corrected
+            // against the credential result once both have settled below.
+            configured: false,
+            unavailable:
+              err instanceof ApiError
+                ? err.message
+                : "The balance could not be read just now.",
+          }),
         ),
       ]);
-      if (wanted.current !== asked) return;
+      if (asked !== requestGeneration.current) return;
       setStatus(credential);
-      setBilling(money);
+      setBilling(
+        money.unavailable !== undefined
+          ? { ...money, configured: credential.configured }
+          : money,
+      );
       setLoad("ready");
     } catch {
-      if (wanted.current !== asked) return;
+      if (asked !== requestGeneration.current) return;
       setLoad("error");
     }
   }, [client, company]);
