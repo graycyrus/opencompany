@@ -16,8 +16,7 @@ import { toast } from "sonner";
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
-import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
-import { setInboxEnabled } from "@/api/inbox";
+import { turnStateKey } from "@/lib/live-reply";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
@@ -59,7 +58,6 @@ import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./room/AddMemberDialog";
 import { ChannelCreateDialog } from "./room/ChannelCreateDialog";
-import { BudgetDialog } from "./room/BudgetDialog";
 import { ChannelRail } from "./room/ChannelRail";
 import { ChatHeader } from "./room/ChatHeader";
 import { MembersPane } from "./room/MembersPane";
@@ -632,12 +630,6 @@ export function RoomView({
     quorum: number;
     turnBudget: number;
   } | null>(null);
-  // Who set which cap (issue #360, ported from the retired Team page). Only
-  // an admin may read the user directory, so this stays empty for a member —
-  // the attribution line degrades to "an admin" rather than disappearing.
-  const [people, setPeople] = useState<Person[]>([]);
-  // The member whose budget dialog is open, if any.
-  const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
 
   /**
    * Ask the host whether this company can think (issues #1734, #1735).
