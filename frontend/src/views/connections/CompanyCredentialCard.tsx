@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
+import { HubAccountLinks } from "@/views/connections/HubAccountLinks";
 
 interface Props {
   client: OpenCompanyClient;
@@ -205,6 +206,10 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
                 onChanged?.();
               }}
             />
+
+            {/* The two things the button cannot do: revoke what it minted, and
+                pay for what it spends. Both on the hub the host is pointed at. */}
+            <HubAccountLinks account={status?.account} configured={configured} />
 
             {canManage && (
               <>
