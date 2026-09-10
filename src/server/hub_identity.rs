@@ -206,6 +206,43 @@ pub trait HubIdentityExchange: Send + Sync {
     /// Implementations must treat both arguments and the returned key as live
     /// credentials: never log them, never echo them into an error.
     async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String>;
+
+    /// Reads the billing standing of the account a **key** belongs to.
+    ///
+    /// The one call in this trait that presents the company's own credential
+    /// rather than a person's: it answers "how much is left, and on what plan",
+    /// which is a property of the account the key spends from. It is a read and
+    /// nothing else — topping up and changing a plan move money and stay on the
+    /// hub's dashboard behind that person's own sign-in, which is why this has
+    /// no counterpart that writes.
+    ///
+    /// Implementations must treat `key` as a live credential: never log it,
+    /// never echo it into an error.
+    async fn billing_summary(&self, key: &str) -> Result<BillingSummary>;
+}
+
+/// What an account's money is doing, as the console renders it.
+///
+/// A flattened copy of the hub's `GET /payments/summary` rather than a passthrough
+/// of its JSON: the console is a different product on a different release
+/// cadence, and a shape it merely forwards is one that changes under it without
+/// anybody choosing to. Every field here is one the card actually draws.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingSummary {
+    /// Everything spendable, promotional credit and top-up together, in USD.
+    pub balance_usd: f64,
+    /// The plan slug the account is on (`free`, `pro`, …).
+    pub plan: String,
+    /// Whether a paid subscription is live right now.
+    pub active_subscription: bool,
+    /// When the current plan lapses, as the hub stated it. `None` on a plan
+    /// that does not expire.
+    pub plan_expiry: Option<String>,
+    /// Where a person tops the account up, on the hub that issued the key.
+    pub top_up_url: Option<String>,
+    /// Where a person changes the plan.
+    pub manage_url: Option<String>,
 }
 
 /// An in-memory [`HubIdentityExchange`] for offline tests and local demos.
@@ -225,6 +262,8 @@ pub struct MockHubIdentityExchange {
     grants: StdMutex<HashMap<String, (String, String)>>,
     /// A forced transport failure, standing in for "the hub is not answering".
     unreachable: bool,
+    /// What [`HubIdentityExchange::billing_summary`] answers, per key.
+    billing: StdMutex<HashMap<String, BillingSummary>>,
 }
 
 impl MockHubIdentityExchange {
@@ -239,6 +278,15 @@ impl MockHubIdentityExchange {
             .lock()
             .expect("mock poisoned")
             .insert(token.to_string(), email.to_string());
+        self
+    }
+
+    /// Seeds the billing standing one key reads back.
+    pub fn with_billing(self, key: &str, summary: BillingSummary) -> Self {
+        self.billing
+            .lock()
+            .expect("mock poisoned")
+            .insert(key.to_string(), summary);
         self
     }
 
