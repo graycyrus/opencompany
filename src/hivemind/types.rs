@@ -654,7 +654,14 @@ pub fn effective_hive_config(record: &CompanyRecord, desk_id: &str) -> HiveConfi
 #[must_use]
 pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDesk> {
     let chat = chat?;
-    if crate::server::chat_history::is_general_chat(Some(chat)) {
+    // A General spelling opens a room only when the company has named the desk
+    // that owns its line (`[company].general_desk`). Unset, General resolves to
+    // nothing and keeps the single-responder main thread, exactly as before.
+    // The desk it resolves to is never itself called General — `resolve_desk_id`
+    // refuses that — so tinyhivemind's reserved-identity invariant holds.
+    if crate::server::chat_history::is_general_chat(Some(chat))
+        && record.resolve_desk_id(chat).is_none()
+    {
         return None;
     }
     let desk_id = record.resolve_desk_id(chat)?;

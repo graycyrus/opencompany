@@ -296,7 +296,7 @@ pub enum ApprovalScope {
 /// which is the property the issue asks for.
 #[derive(Clone)]
 pub struct ApprovalRequestQueue {
-    inner: Arc<Mutex<BTreeMap<ApprovalScope, Vec<ApprovalRequest>>>>,
+    inner: Arc<Mutex<ApprovalQueueState>>,
     /// The live single-use grants (issue #243), riding along so the whole
     /// approval round-trip travels on one handle.
     ///
@@ -321,6 +321,17 @@ pub struct ApprovalRequestQueue {
     /// same way folding it into `inner` would have. `grants_outlive_a_scope`
     /// pins the #439 half of that alongside `grants_survive_a_queue_clear`.
     grants: GrantSet,
+}
+
+#[derive(Default)]
+struct ApprovalQueueState {
+    buckets: BTreeMap<ApprovalScope, Vec<QueuedApproval>>,
+    next_sequence: u64,
+}
+
+struct QueuedApproval {
+    request: ApprovalRequest,
+    sequence: u64,
 }
 
 /// What one cycle-end drain took, and what it threw away (issue #561).
@@ -473,9 +484,7 @@ tokio::task_local! {
     /// not a new dependency — `with_stop_hooks` is itself a task-local scope on
     /// this exact path.
     static CURRENT_SCOPE: ApprovalScope;
-    /// Whether this one actual agent turn has already executed
-    /// `request_approval`. Unlike `CURRENT_SCOPE`, this resets for every model
-    /// turn inside a shared cycle/workflow bucket.
+    /// Whether this agent turn has asked the operator for approval or an answer.
     static EXPLICIT_REQUEST_PENDING: Cell<bool>;
 }
 
@@ -528,40 +537,58 @@ impl Drop for ApprovalClaim {
 }
 
 impl ApprovalRequestQueue {
-    /// Records a gated call, ignoring one already queued for the same tool and
-    /// arguments.
-    ///
-    /// openhuman blocks the call but lets the turn continue, so a model that
-    /// re-tries the same tool would otherwise park the identical request several
-    /// times over and show the operator a queue of duplicates.
-    /// Records a gated call **in the surrounding claim's scope** (issue #439),
-    /// ignoring one already queued in that same scope for the same tool and
-    /// arguments.
-    ///
-    /// openhuman blocks the call but lets the turn continue, so a model that
-    /// re-tries the same tool would otherwise park the identical request several
-    /// times over and show the operator a queue of duplicates. De-duplication is
-    /// per scope, which is the only reading that makes sense once buckets are
-    /// separate: two different turns asking for the same tool are two requests,
-    /// and collapsing them would hide one turn's ask behind another's.
+    /// Enqueues a gated call in the current scope, deduplicated by effect.
+    /// Overflow is counted and reported by the drain.
     pub fn push(&self, request: ApprovalRequest) {
-        let explicit = request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL;
+        self.push_with_cap(request, usize::MAX);
+    }
+
+    /// Accepts a blocker only within the first eight entries of its drain order.
+    /// Cycle and Unscoped share that order; Run scopes are independent.
+    pub(super) fn push_blocker(&self, request: ApprovalRequest) -> bool {
+        self.push_with_cap(request, MAX_APPROVAL_REQUESTS_PER_TURN)
+    }
+
+    fn push_with_cap(&self, request: ApprovalRequest, cap: usize) -> bool {
+        let explicit = request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL
+            || request.tool == super::blockers::ESCALATE_TO_HUMAN_TOOL;
         if explicit {
-            // The turn boundary is established by making the request, even if
-            // its card is a duplicate of one already queued in this scope.
             let _ = EXPLICIT_REQUEST_PENDING.try_with(|pending| pending.set(true));
         }
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let bucket = guard.entry(scope).or_default();
-        if bucket.iter().any(|q| {
-            q.effect.kind == request.effect.kind
-                && q.effect.payload == request.effect.payload
-                && q.effect.agent == request.effect.agent
+        let shared = match &scope {
+            ApprovalScope::Cycle => guard.buckets.get(&ApprovalScope::Unscoped),
+            ApprovalScope::Unscoped => guard.buckets.get(&ApprovalScope::Cycle),
+            ApprovalScope::Run(_) => None,
+        };
+        let bucket = guard.buckets.get(&scope).map_or(&[][..], Vec::as_slice);
+        if let Some((position, existing)) = bucket.iter().enumerate().find(|(_, q)| {
+            q.request.effect.kind == request.effect.kind
+                && q.request.effect.payload == request.effect.payload
+                && q.request.effect.agent == request.effect.agent
         }) {
-            return;
+            let earlier_shared = shared.map_or(0, |entries| {
+                entries
+                    .iter()
+                    .take_while(|entry| entry.sequence < existing.sequence)
+                    .count()
+            });
+            return position.saturating_add(earlier_shared) < cap;
         }
-        bucket.push(request);
+        if bucket.len().saturating_add(shared.map_or(0, Vec::len)) >= cap {
+            return false;
+        }
+        let sequence = guard.next_sequence;
+        guard.next_sequence = sequence
+            .checked_add(1)
+            .expect("approval queue sequence exhausted");
+        guard
+            .buckets
+            .entry(scope)
+            .or_default()
+            .push(QueuedApproval { request, sequence });
+        true
     }
 
     /// The scope pushes are currently filing into.
@@ -576,10 +603,7 @@ impl ApprovalRequestQueue {
             .unwrap_or_default()
     }
 
-    /// Whether the current turn has already made an explicit approval request.
-    /// Tool execution is serial whenever OpenHuman's tool middleware is wired;
-    /// this lets the policy refuse every later sibling call in a provider
-    /// response after `request_approval` has established the turn boundary.
+    /// Whether the current turn has asked the operator for approval or an answer.
     fn explicit_request_pending(&self) -> bool {
         EXPLICIT_REQUEST_PENDING
             .try_with(Cell::get)
@@ -613,6 +637,7 @@ impl ApprovalRequestQueue {
         self.inner
             .lock()
             .expect("approval request queue")
+            .buckets
             .remove(scope);
     }
 
@@ -627,6 +652,7 @@ impl ApprovalRequestQueue {
         self.inner
             .lock()
             .expect("approval request queue")
+            .buckets
             .get(scope)
             .map_or(0, Vec::len)
     }
@@ -640,45 +666,30 @@ impl ApprovalRequestQueue {
         self.discard(&Self::current_scope());
     }
 
-    /// Drains up to `cap` requests (FIFO) from the **current scope**, discarding
-    /// that scope's remainder, so one turn can never flood the operator's queue.
-    ///
-    /// # Why this returns a struct rather than a `Vec` (issue #561)
-    ///
-    /// The discard is the whole point of the cap and it used to be invisible:
-    /// this method dropped the overflow on the floor and handed back a `Vec`
-    /// that looked exactly like a complete one, so the operator was shown eight
-    /// cards and no indication that five more calls had been gated. `cap`
-    /// travels into the result so the count and the number that produced it
-    /// stay one value — see [`DrainedRequests`].
-    ///
-    /// # What #439 changed, and what it did not
-    ///
-    /// The shape is #561's; only *which* requests it can see is #439's. It used
-    /// to drain one company-wide vector, which is why a concurrent turn's
-    /// entries could be taken by whoever drained first. It now sees the calling
-    /// turn's bucket and nothing else — **which also makes `discarded` mean
-    /// something it could not mean before**. A count taken off a shared vector
-    /// mixed in whatever a concurrent run had appended, so "this turn
-    /// overflowed" was never reliably this turn's fact. Scoped, it is.
-    ///
-    /// From the chat cycle this also drains [`ApprovalScope::Unscoped`], so a
-    /// push from any turn entry point not yet under a claim still reaches the
-    /// operator exactly as it did before — the fallback that makes #439
-    /// non-lossy. A workflow run drains only its own bucket and can no longer
-    /// swallow anyone else's.
+    /// Drains the current scope in enqueue order, counting discarded overflow.
+    /// Cycle also drains Unscoped in their combined enqueue order.
+    /// A cap below [`MAX_APPROVAL_REQUESTS_PER_TURN`] imposes a smaller limit
+    /// than blocker admission; production drains use that constant.
     pub fn drain(&self, cap: usize) -> DrainedRequests {
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let mut queued: Vec<ApprovalRequest> = guard.remove(&scope).unwrap_or_default();
-        // The cycle owns anything nobody claimed. A workflow run must not take
-        // it: that would be the shared-queue theft this issue removes.
+        let mut queued = guard.buckets.remove(&scope).unwrap_or_default();
         if scope == ApprovalScope::Cycle {
-            queued.extend(guard.remove(&ApprovalScope::Unscoped).unwrap_or_default());
+            queued.extend(
+                guard
+                    .buckets
+                    .remove(&ApprovalScope::Unscoped)
+                    .unwrap_or_default(),
+            );
+            queued.sort_unstable_by_key(|entry| entry.sequence);
         }
         let discarded = queued.len().saturating_sub(cap);
         queued.truncate(cap);
-        DrainedRequests::new(queued, discarded, cap)
+        DrainedRequests::new(
+            queued.into_iter().map(|entry| entry.request).collect(),
+            discarded,
+            cap,
+        )
     }
 
     /// Builds a queue whose grant set is one the caller already holds.
@@ -722,6 +733,7 @@ impl ApprovalRequestQueue {
         self.inner
             .lock()
             .expect("approval request queue")
+            .buckets
             .get(&Self::current_scope())
             .map_or(0, Vec::len)
     }
@@ -747,14 +759,14 @@ impl ApprovalRequestQueue {
     pub fn blockers_since(&self, from: usize) -> usize {
         let scope = Self::current_scope();
         let guard = self.inner.lock().expect("approval request queue");
-        let Some(bucket) = guard.get(&scope) else {
+        let Some(bucket) = guard.buckets.get(&scope) else {
             return 0;
         };
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
         bucket
             .iter()
             .skip(from)
-            .filter(|request| request.effect.kind.starts_with(&prefix))
+            .filter(|entry| entry.request.effect.kind.starts_with(&prefix))
             .count()
     }
 
@@ -775,12 +787,12 @@ impl ApprovalRequestQueue {
     pub fn stamp_run(&self, from: usize, run_id: &str) -> usize {
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let Some(bucket) = guard.get_mut(&scope) else {
+        let Some(bucket) = guard.buckets.get_mut(&scope) else {
             return 0;
         };
         let mut stamped = 0;
-        for request in bucket.iter_mut().skip(from) {
-            request.effect.run_id = Some(run_id.to_string());
+        for entry in bucket.iter_mut().skip(from) {
+            entry.request.effect.run_id = Some(run_id.to_string());
             stamped += 1;
         }
         stamped
@@ -1705,14 +1717,9 @@ impl ToolPolicy for ApprovalPolicy {
     async fn check(&self, request: &ToolPolicyRequest) -> ToolPolicyDecision {
         let tool = request.tool_name.as_str();
 
-        // `request_approval` is a real turn boundary, not advice in a tool
-        // result. The hosted profile requests one call per assistant message;
-        // this is the fail-closed second layer for a provider that nevertheless
-        // returns several calls. Once the explicit request tool has queued its
-        // card, every later call in the serial tool fold is refused.
         if self.requests.explicit_request_pending() {
             return ToolPolicyDecision::deny(format!(
-                "'{tool}' was not run because this turn already asked the operator for approval; \
+                "'{tool}' was not run because this turn already asked the operator for approval or an answer; \
                  stop and wait for the decision"
             ));
         }
@@ -4575,70 +4582,312 @@ mod tests {
         );
     }
 
-    /// `escalate_to_human` (issue #1860's agent-question blocker), unlike
-    /// `request_approval`, never sets `EXPLICIT_REQUEST_PENDING` — so nothing
-    /// stops a model from calling it again inside the same turn. A ninth
-    /// distinct question in one turn overflows `MAX_APPROVAL_REQUESTS_PER_TURN`
-    /// and is dropped by the drain cap with no card ever raised for it, even
-    /// though the run may still park believing it asked something.
     #[tokio::test]
-    async fn escalate_to_human_does_not_set_the_turn_boundary_and_can_overflow_the_cap() {
+    async fn escalate_to_human_sets_the_turn_boundary_and_explicitly_refuses_overflow() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
         let queue = ApprovalRequestQueue::default();
-        let blocker_request = |i: usize| ApprovalRequest {
-            tool: crate::harness::built_in::blockers::ESCALATE_TO_HUMAN_TOOL.to_string(),
-            reason: format!("question {i}"),
-            effect: Effect {
-                kind: "blocker.information".to_string(),
-                group: EffectGroup::Other,
-                amount_usd: None,
-                established_thread: false,
-                first_time_counterparty: false,
-                payload: serde_json::json!({ "reason": format!("question {i}") }),
-                agent: None,
-                run_id: None,
-            },
-        };
+        let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
+            queue.clone(),
+            "engineer".to_string(),
+        );
 
         queue
             .turn_scoped(async {
-                for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
-                    queue.push(blocker_request(i));
+                for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+                    let asked = tool
+                        .execute(serde_json::json!({ "question": format!("question {i}") }))
+                        .await
+                        .expect("the tool runs");
+                    assert!(!asked.is_error, "{}", asked.text());
                 }
+                let refused = tool
+                    .execute(serde_json::json!({ "question": "ninth question" }))
+                    .await
+                    .expect("the tool returns its refusal");
                 assert!(
-                    !queue.explicit_request_pending(),
-                    "unlike request_approval, escalate_to_human never establishes the turn \
-                     boundary — nothing in the queue itself stops a model from calling it \
-                     again in the same turn"
+                    refused.is_error,
+                    "the ninth question must be explicitly refused, not reported as raised: {}",
+                    refused.text()
+                );
+                assert!(refused.text().contains("not raised"));
+                assert!(
+                    refused
+                        .text()
+                        .contains(&MAX_APPROVAL_REQUESTS_PER_TURN.to_string())
+                );
+                assert!(
+                    queue.explicit_request_pending(),
+                    "escalation must end the turn"
                 );
             })
             .await;
 
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(
-            drained.discarded, 1,
-            "a ninth question in one turn overflows the cap and is silently dropped — no card \
-             is ever raised for it, though the run may still park expecting an answer"
+            drained.discarded, 0,
+            "a question reported as raised must not be lost at drain"
+        );
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert!(
+            drained
+                .requests
+                .iter()
+                .all(|request| request.reason != "ninth question")
         );
     }
 
-    /// `check`'s fail-closed boundary (the block right above `Deny`ing every
-    /// call once `request_approval` has fired) reads the same task-local as
-    /// `explicit_request_pending`. Since `escalate_to_human` never sets it, a
-    /// sibling gated call queued in the same turn right after a question is
-    /// evaluated on its own terms rather than refused outright the way a
-    /// second `request_approval` would be.
     #[tokio::test]
-    async fn escalate_to_human_does_not_refuse_a_sibling_gated_call_in_the_same_turn() {
+    async fn escalate_to_human_respects_combined_cycle_and_unscoped_capacity() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        for initially_scoped in [false, true] {
+            let queue = ApprovalRequestQueue::default();
+            let claim = queue.claim(ApprovalScope::Cycle);
+            let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
+                queue.clone(),
+                "engineer".to_string(),
+            );
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN - 1 {
+                let args = serde_json::json!({ "question": format!("question {i}") });
+                let asked = if initially_scoped {
+                    claim.scoped(tool.execute(args)).await
+                } else {
+                    tool.execute(args).await
+                }
+                .expect("the tool runs");
+                assert!(!asked.is_error, "{}", asked.text());
+            }
+
+            for (question, refused) in [("last available slot", false), ("overflow", true)] {
+                let args = serde_json::json!({ "question": question });
+                let asked = if initially_scoped {
+                    tool.execute(args).await
+                } else {
+                    claim.scoped(tool.execute(args)).await
+                }
+                .expect("the tool runs");
+                assert_eq!(
+                    asked.is_error,
+                    refused,
+                    "Cycle and Unscoped share one drain cap; initially_scoped={initially_scoped}: {}",
+                    asked.text()
+                );
+            }
+
+            let drained = claim
+                .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+                .await;
+            assert_eq!(
+                drained.discarded, 0,
+                "no accepted question may be discarded"
+            );
+            assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert!(
+                drained
+                    .requests
+                    .iter()
+                    .any(|r| r.reason == "last available slot")
+            );
+            assert!(drained.requests.iter().all(|r| r.reason != "overflow"));
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_blockers_survive_later_ordinary_approvals_across_scopes() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        for blocker_in_cycle in [false, true] {
+            for preceding in [0, MAX_APPROVAL_REQUESTS_PER_TURN - 1] {
+                let (policy, queue) = queued_policy("supervised", &[]);
+                let cycle = queue.claim(ApprovalScope::Cycle);
+                let tool = super::super::blockers::EscalateToHumanTool::new(
+                    queue.clone(),
+                    "engineer".to_string(),
+                );
+                for i in 0..preceding {
+                    let call = request("composio_execute", composio_unclassified_args_numbered(i));
+                    let decision = if blocker_in_cycle {
+                        policy.check(&call).await
+                    } else {
+                        cycle.scoped(policy.check(&call)).await
+                    };
+                    assert!(matches!(
+                        decision,
+                        ToolPolicyDecision::RequireApproval { .. }
+                    ));
+                }
+                let args = serde_json::json!({ "question": "must survive later approvals" });
+                let asked = if blocker_in_cycle {
+                    cycle.scoped(tool.execute(args.clone())).await
+                } else {
+                    tool.execute(args.clone()).await
+                }
+                .expect("the tool runs");
+                assert!(!asked.is_error, "{}", asked.text());
+
+                for i in preceding..preceding + MAX_APPROVAL_REQUESTS_PER_TURN {
+                    let call = request("composio_execute", composio_unclassified_args_numbered(i));
+                    let decision = if blocker_in_cycle {
+                        policy.check(&call).await
+                    } else {
+                        cycle.scoped(policy.check(&call)).await
+                    };
+                    assert!(matches!(
+                        decision,
+                        ToolPolicyDecision::RequireApproval { .. }
+                    ));
+                }
+                let duplicate = if blocker_in_cycle {
+                    cycle.scoped(tool.execute(args)).await
+                } else {
+                    tool.execute(args).await
+                }
+                .expect("the tool runs");
+                assert!(
+                    !duplicate.is_error,
+                    "the accepted duplicate retains its slot"
+                );
+
+                let drained = cycle
+                    .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+                    .await;
+                assert_eq!(
+                    drained
+                        .requests
+                        .iter()
+                        .filter(|r| r.reason == "must survive later approvals")
+                        .count(),
+                    1,
+                    "an accepted blocker must survive later ordinary approvals; blocker_in_cycle={blocker_in_cycle}, preceding={preceding}"
+                );
+                assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+                assert_eq!(drained.discarded, preceding + 1);
+                assert!(drained.overflow_notice().is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blocker_duplicate_outside_the_drain_budget_is_refused() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        let fixture = ApprovalRequestQueue::default();
+        let args = serde_json::json!({ "question": "outside the budget" });
+        super::super::blockers::EscalateToHumanTool::new(fixture.clone(), "engineer".to_string())
+            .execute(args.clone())
+            .await
+            .expect("the fixture tool runs");
+        let existing = fixture
+            .drain(MAX_APPROVAL_REQUESTS_PER_TURN)
+            .requests
+            .remove(0);
+
+        for (existing_in_cycle, ordinary_in_cycle) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let queue = ApprovalRequestQueue::default();
+            let cycle = queue.claim(ApprovalScope::Cycle);
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+                let request = gated(&format!("ordinary.{i}"));
+                if ordinary_in_cycle {
+                    cycle.scoped(async { queue.push(request) }).await;
+                } else {
+                    queue.push(request);
+                }
+            }
+            let tool = super::super::blockers::EscalateToHumanTool::new(
+                queue.clone(),
+                "engineer".to_string(),
+            );
+            let asked = if existing_in_cycle {
+                cycle
+                    .scoped(async {
+                        queue.push(existing.clone());
+                        tool.execute(args.clone()).await
+                    })
+                    .await
+            } else {
+                queue.push(existing.clone());
+                tool.execute(args.clone()).await
+            }
+            .expect("the tool runs");
+            assert!(
+                asked.is_error,
+                "an overflow duplicate must not be reported as raised"
+            );
+            assert!(asked.text().contains("not raised"));
+            let drained = cycle
+                .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+                .await;
+            assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(drained.discarded, 1);
+            assert!(
+                drained
+                    .requests
+                    .iter()
+                    .all(|r| r.reason != "outside the budget")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_scope_drain_preserves_enqueue_order_and_scoped_stamping() {
+        for cap in [0, 3, MAX_APPROVAL_REQUESTS_PER_TURN] {
+            let queue = ApprovalRequestQueue::default();
+            let cycle = queue.claim(ApprovalScope::Cycle);
+            let run = queue.claim(ApprovalScope::Run("independent".to_string()));
+            for i in 0..10 {
+                let request = gated(&format!("ordinary.{i}"));
+                if i % 2 == 0 {
+                    let boundary = queue.queued();
+                    assert_eq!(boundary, i / 2);
+                    queue.push(request);
+                    assert_eq!(queue.stamp_run(boundary, &format!("fallback.{i}")), 1);
+                } else {
+                    cycle
+                        .scoped(async {
+                            let boundary = queue.queued();
+                            assert_eq!(boundary, i / 2);
+                            queue.push(request);
+                            assert_eq!(queue.stamp_run(boundary, &format!("cycle.{i}")), 1);
+                        })
+                        .await;
+                }
+                run.scoped(async { queue.push(gated(&format!("run.{i}"))) })
+                    .await;
+            }
+            let drained = cycle.scoped(async { queue.drain(cap) }).await;
+            assert_eq!(drained.cap(), cap);
+            assert_eq!(drained.discarded, 10 - cap);
+            assert_eq!(drained.requests.len(), cap);
+            for (i, request) in drained.requests.iter().enumerate() {
+                assert_eq!(
+                    request.tool,
+                    format!("ordinary.{i}"),
+                    "merged drains must preserve enqueue order"
+                );
+                let scope = if i % 2 == 0 { "fallback" } else { "cycle" };
+                assert_eq!(request.effect.run_id, Some(format!("{scope}.{i}")));
+            }
+            let independent = run.scoped(async { queue.drain(cap) }).await;
+            assert_eq!(independent.discarded, 10 - cap);
+            assert_eq!(independent.requests.len(), cap);
+            for (i, request) in independent.requests.iter().enumerate() {
+                assert_eq!(request.tool, format!("run.{i}"));
+                assert!(request.effect.run_id.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn escalate_to_human_refuses_a_sibling_gated_call_in_the_same_turn() {
         use openhuman_core::openhuman::tools::traits::Tool as _;
 
         let queue = ApprovalRequestQueue::default();
         let policy = policy("supervised", &[], None).with_requests(queue.clone());
         let claim = queue.claim(ApprovalScope::Cycle);
 
-        // Through the tool, not a hand-built `ApprovalRequest`: the boundary is
-        // established by what `execute` does, so a fixture that pushes the
-        // request itself would keep passing if the tool later began setting the
-        // task-local — the one regression this case exists to catch.
         let tool = crate::harness::built_in::blockers::EscalateToHumanTool::new(
             queue.clone(),
             "engineer".to_string(),
@@ -4657,10 +4906,18 @@ mod tests {
             .await;
 
         assert!(
-            matches!(later_call, ToolPolicyDecision::RequireApproval { .. }),
-            "escalate_to_human must not trip the request_approval turn boundary — the sibling \
-             call should still be gated on its own terms, not refused outright: {later_call:?}"
+            matches!(later_call, ToolPolicyDecision::Deny { .. }),
+            "escalation must refuse later calls in the same turn: {later_call:?}"
         );
+        let next_turn = claim
+            .scoped(
+                queue.turn_scoped(policy.check(&request("composio_execute", composio_send_args()))),
+            )
+            .await;
+        assert!(matches!(
+            next_turn,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
     }
 
     /// A repeated identical question in one turn — a model retrying a call it
