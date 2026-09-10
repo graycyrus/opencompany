@@ -28,6 +28,10 @@ pub struct AppConfig {
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
+    /// TinyHumans **site** base URL, when this deployment states one
+    /// (`TINYHUMANS_WEB_URL`). Read through [`Self::hub_site`], which derives it
+    /// from [`Self::api_url`] when unset — the normal case.
+    pub web_url: Option<String>,
     /// An operator-set display name for this instance
     /// (`OPENCOMPANY_INSTANCE_NAME`), surfaced by `/spec` so a client holding
     /// several connections can show something friendlier than a URL. Purely
@@ -128,6 +132,7 @@ impl Default for AppConfig {
             bind: "127.0.0.1:8080".to_string(),
             openhuman_root: None,
             api_url: crate::app::config::DEFAULT_API_URL.to_string(),
+            web_url: None,
             instance_name: None,
             brain_mode: BrainMode::Hosted,
             tinyplace_api_url: crate::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
@@ -200,6 +205,23 @@ pub fn canonical_tenant(tenant: &str) -> &str {
 }
 
 impl AppConfig {
+    /// The TinyHumans **site** this deployment belongs to: the dashboard whose
+    /// API keys and balance are the ones this host's credential spends.
+    ///
+    /// [`web_url`](Self::web_url) when a deployment states one, else derived
+    /// from [`api_url`](Self::api_url) — so pointing a host at the staging hub
+    /// points its "manage keys" and "top up" links at the staging dashboard
+    /// with nothing else to set, and a host pointed at a backend the convention
+    /// does not describe gets `None` and the console renders no link rather
+    /// than a guess. See [`hub_account`](crate::server::hub_account).
+    pub fn hub_site(&self) -> Option<String> {
+        self.web_url
+            .clone()
+            .map(|url| url.trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .or_else(|| crate::server::hub_account::site_for_api(&self.api_url))
+    }
+
     /// True when hosted cognition can run: hosted brain mode plus a credential
     /// this instance can **obtain** — see [`Self::credential_available`].
     pub fn cycles_available(&self) -> bool {

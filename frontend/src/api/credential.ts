@@ -56,6 +56,27 @@ export interface CompanyCredentialStatus {
    * direction.
    */
   hubLink?: boolean;
+  /**
+   * Where this person looks after the account behind the key — the hub
+   * dashboard's key list, and its top-up page.
+   *
+   * Resolved by the **host**, because only the host knows which hub it was
+   * pointed at: a console talking to staging must link to the staging
+   * dashboard, and a link assembled in the browser would send an operator to
+   * production's billing page. Absent on a host whose backend the naming
+   * convention does not describe (self-hosted, loopback), where there is no
+   * dashboard to link to — the console then renders no link rather than a
+   * guess.
+   */
+  account?: HubAccountLinks;
+}
+
+/** The two hub pages the console links out to. */
+export interface HubAccountLinks {
+  /** The dashboard's API-key list — where a minted key is seen and revoked. */
+  manageKeysUrl: string;
+  /** The dashboard's balance and top-up page. */
+  topUpUrl: string;
 }
 
 /** A mutating response: the resulting status plus a plain-language note. */
@@ -128,4 +149,48 @@ export function finishCredentialLink(
     `${client.scopeFor(company)}/credential/link/finish`,
     { state, code },
   );
+}
+
+/** The account's money, as the API Key page draws it. */
+export interface BillingSummary {
+  /** Everything spendable — promotional credit and top-up together, in USD. */
+  balanceUsd: number;
+  /** The plan slug (`free`, `pro`, …). */
+  plan: string;
+  /** Whether a paid subscription is live right now. */
+  activeSubscription: boolean;
+  /** When the plan lapses, if it does. */
+  planExpiry?: string;
+  /** Where a person tops up, on the hub that issued the key. */
+  topUpUrl?: string;
+  /** Where a person changes the plan. */
+  manageUrl?: string;
+}
+
+/**
+ * The billing panel's whole state, including its two empty cases.
+ *
+ * `configured: false` is "no key, so nothing to ask about" — the page shows the
+ * pitch. `unavailable` is "there is a key but the hub would not answer", which
+ * is deliberately not the same as a zero balance: they look identical on a card
+ * and mean opposite things, one "top up" and one "try again".
+ */
+export interface CompanyBilling {
+  configured: boolean;
+  summary?: BillingSummary;
+  unavailable?: string;
+}
+
+/**
+ * What the account behind this company's key has left to spend.
+ *
+ * Read through the **host**, which presents the key it holds — the console
+ * never sees the credential, so it could not ask the hub itself. A read and
+ * only a read: topping up and changing plans happen signed in on the hub.
+ */
+export function getCompanyBilling(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<CompanyBilling> {
+  return client.get<CompanyBilling>(`${client.scopeFor(company)}/credential/billing`);
 }

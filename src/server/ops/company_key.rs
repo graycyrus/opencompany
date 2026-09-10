@@ -28,9 +28,10 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 
 use crate::AppState;
-use crate::company::company_key::{key_configured, resolve, store_key};
+use crate::company::company_key::{key_configured, load, resolve, store_key};
 use crate::company::credentials::CredentialSource;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
@@ -79,6 +80,7 @@ pub fn router() -> Router<AppState> {
     scoped("/credential", get(get_status).put(set_key))
         .merge(scoped("/credential/link/start", post(start_link)))
         .merge(scoped("/credential/link/finish", post(finish_link)))
+        .merge(scoped("/credential/billing", get(get_billing)))
 }
 
 /// The company's credential status as the console renders it. **Never** carries
@@ -96,6 +98,16 @@ struct CredentialStatusDto {
     /// The consequence of setting this key, stated plainly, or the degraded
     /// state when nothing can be presented at all.
     notice: String,
+    /// Where this person looks after the account behind the key: the hub
+    /// dashboard's key list, and its top-up page.
+    ///
+    /// `None` on a host whose backend the naming convention does not describe
+    /// (a self-hosted or loopback hub), where a derived link would point at an
+    /// origin that need not exist. The console renders no link there rather
+    /// than one that 404s — the same rule `hub_link` follows for the button.
+    /// See [`hub_account`](crate::server::hub_account).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<HubAccountLinks>,
     /// Whether this host can complete a one-click key grant against the hub.
     ///
     /// Reported alongside the status so the console can decide whether to offer
@@ -104,6 +116,22 @@ struct CredentialStatusDto {
     /// console renders exactly what it renders today rather than a button that
     /// would 404.
     hub_link: bool,
+}
+
+/// The two account pages the console links out to.
+///
+/// Both are the hub's, behind that person's own sign-in, and deliberately not
+/// reimplemented here: one ends an instance's access and the other moves money.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HubAccountLinks {
+    /// The dashboard's API-key list — where a key minted by the grant flow can
+    /// be seen, named and revoked.
+    manage_keys_url: String,
+    /// The dashboard's balance and top-up page. What the company's agents spend
+    /// comes off this, so an instance that stops thinking mid-week is usually
+    /// one trip here from working again.
+    top_up_url: String,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -160,6 +188,10 @@ async fn effective_status(
         } else {
             CONSEQUENCE.to_string()
         },
+        account: state.config().hub_site().map(|site| HubAccountLinks {
+            manage_keys_url: crate::server::hub_account::manage_keys_url(&site),
+            top_up_url: crate::server::hub_account::top_up_url(&site),
+        }),
         hub_link: state.hub_identity().is_some(),
     })
 }
@@ -244,6 +276,7 @@ struct FinishLink {
 /// minted rather than pasted changes who types it, not what it does.
 async fn start_link(
     State(state): State<AppState>,
+    headers: HeaderMap,
     company: AdminScopedCompany,
 ) -> Result<Json<StartLinkResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
@@ -262,7 +295,7 @@ async fn start_link(
     // Where the hub returns to. `key=link` is this console's own marker, kept
     // distinct from the `key=auth` the hub appends on a sign-in so the two
     // return legs can never be mistaken for each other in `App.tsx`.
-    let origin = state.config().host_base_url();
+    let origin = callback_origin(&state, &headers);
     let callback_url = format!(
         "{}/?company={}&key=link&state={}",
         origin.trim_end_matches('/'),
@@ -270,14 +303,97 @@ async fn start_link(
         started.state,
     );
 
-    Ok(Json(StartLinkResponse {
-        authorize_url: crate::server::hub_identity::key_grant_url(
-            &state.config().api_url,
-            &callback_url,
-            &started.challenge,
-            &key_name(runtime),
+    // Through the site's `/connect` where there is one, straight at the API
+    // where there is not.
+    //
+    // `GET /auth/key` defaults to `provider=google` and redirects there at
+    // once, so an admin who pressed a button in their own console landed on a
+    // Google account picker that named nobody and offered no other account.
+    // The site page names the instance asking, says what will be created, and
+    // offers the same providers the sign-in screen does — then sends them to
+    // this very endpoint with the provider they picked. The parameters are
+    // built once either way, so the two paths cannot disagree about the
+    // challenge.
+    let query = crate::server::hub_identity::key_grant_query(
+        &callback_url,
+        &started.challenge,
+        &key_name(runtime),
+    );
+    let authorize_url = match state.config().hub_site() {
+        Some(site) => crate::server::hub_account::connect_url(&site, &query),
+        None => format!(
+            "{}/auth/key?{query}",
+            state.config().api_url.trim_end_matches('/')
         ),
-    }))
+    };
+
+    Ok(Json(StartLinkResponse { authorize_url }))
+}
+
+/// Where the hub sends the browser back to.
+///
+/// [`host_base_url`](crate::AppConfig::host_base_url) is the answer wherever a
+/// deployment states one: a hosted tenant is `OPENCOMPANY_PUBLIC_URL`, and that
+/// origin serves the console, so the return leg lands on the page that finishes
+/// the exchange.
+///
+/// Its fallback — `http://{bind}` — is the wrong answer for local development,
+/// and wrong in a way that only shows up at the end of the flow. The console in
+/// dev is a Vite server on another port; the host on `127.0.0.1:8080` serves no
+/// page unless somebody set `OPENCOMPANY_CONSOLE_DIR`. So an operator signed in,
+/// approved, and landed on a 404 holding a spent code — with nothing on that
+/// page able to say what had gone wrong, because there was no page.
+///
+/// So when nothing states an origin, the browser's own is used: whatever
+/// pressed the button is where the answer should come back to, which is exactly
+/// what a dev server on `:5173` needs and needs nobody to configure.
+///
+/// **Only a loopback origin.** A header is attacker-controllable in principle,
+/// and while a stolen code redeems nothing without the verifier this host keeps
+/// (`server::hub_link`), a callback is not somewhere to accept an arbitrary
+/// address on a request's say-so. Anything else falls through to the bind
+/// address, and a deployment that wants a real origin sets `OPENCOMPANY_PUBLIC_URL`
+/// — which wins over this outright.
+fn callback_origin(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(url) = state.config().public_url.as_deref() {
+        let url = url.trim().trim_end_matches('/');
+        if !url.is_empty() {
+            return url.to_string();
+        }
+    }
+
+    headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|origin| is_loopback_origin(origin))
+        .map(|origin| origin.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| state.config().host_base_url())
+}
+
+/// Whether `origin` is an `http://` address on this machine.
+///
+/// Deliberately the same shape the hub's own gate admits without a tenant
+/// registry lookup — `http` to `localhost` or a loopback literal — so an origin
+/// accepted here cannot be one the hub will refuse a moment later.
+fn is_loopback_origin(origin: &str) -> bool {
+    let Some(rest) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    // Host only: a port is expected (that is the whole point), a path is not.
+    if rest.contains('/') {
+        return false;
+    }
+    // A bracketed IPv6 literal carries colons of its own, so the port split has
+    // to start after the bracket or `[::1]:5173` parses as the host `[`.
+    let host = match rest.strip_prefix('[') {
+        Some(inside) => match inside.split_once(']') {
+            Some((host, after)) if after.is_empty() || after.starts_with(':') => host,
+            _ => return false,
+        },
+        None => rest.split_once(':').map_or(rest, |(host, _)| host),
+    };
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 /// `POST …/credential/link/finish` — redeem the code and store what comes back.
@@ -376,3 +492,85 @@ async fn journal(company: &AdminScopedCompany, change: &str) -> Result<(), ApiEr
 
 #[cfg(test)]
 mod test;
+
+/// `GET …/credential/billing` — what the account behind this company's key has
+/// left to spend, and on which plan.
+///
+/// **Read-only, and only a read.** Topping up and changing a plan move money,
+/// which is a decision a person makes signed in to their own account on the
+/// hub — so this reports, and the console links out for the rest. A route here
+/// that could raise a spend limit would make the limit advisory.
+///
+/// Not admin-gated, unlike the write above: a member whose agents stop working
+/// mid-afternoon is the person who most needs to see "the balance is zero",
+/// and telling them only an admin may look at a number they are already
+/// feeling is how a company spends an afternoon guessing. Nothing here names
+/// the credential, only what it can spend.
+///
+/// A company with no credential of its own is not an error: the console draws
+/// the pitch for connecting one instead of a balance card, so this answers with
+/// `configured: false` and no figures rather than a 404 the page has to
+/// interpret.
+async fn get_billing(
+    State(state): State<AppState>,
+    company: ScopedCompany,
+) -> Result<Json<BillingDto>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    // The company's own key only — never the instance's fallback platform
+    // identity. `resolve` would report `configured: true` and query billing
+    // for the shared host identity when the company has set nothing, exposing
+    // that account's balance and plan to any member. `load` never falls
+    // through.
+    let credential = load(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+
+    let Some(key) = credential.current().await.map_err(ApiError)? else {
+        return Ok(Json(BillingDto {
+            configured: false,
+            summary: None,
+            unavailable: None,
+        }));
+    };
+
+    let Some(exchange) = state.hub_identity().cloned() else {
+        // A build or deployment with no hub. There is an account somewhere that
+        // this key belongs to, but nothing here can ask it anything.
+        return Ok(Json(BillingDto {
+            configured: true,
+            summary: None,
+            unavailable: Some("this host is not part of a TinyHumans ecosystem".to_string()),
+        }));
+    };
+
+    match exchange.billing_summary(&key).await {
+        Ok(summary) => Ok(Json(BillingDto {
+            configured: true,
+            summary: Some(summary),
+            unavailable: None,
+        })),
+        // A hub that will not answer is reported as "not known right now", not
+        // as a zero balance. The two look identical on a card and mean opposite
+        // things: one is "top up", the other is "try again".
+        Err(error) => Ok(Json(BillingDto {
+            configured: true,
+            summary: None,
+            unavailable: Some(error.to_string()),
+        })),
+    }
+}
+
+/// The billing panel's whole state, including the two ways it can have no
+/// figures to show.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BillingDto {
+    /// Whether any credential could be resolved to ask with.
+    configured: bool,
+    /// The account's standing, when the hub answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<crate::server::hub_identity::BillingSummary>,
+    /// Why there are no figures, when there are none and a credential exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable: Option<String>,
+}
