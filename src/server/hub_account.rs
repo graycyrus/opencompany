@@ -37,6 +37,10 @@
 //!
 //! [`hub_link`]: crate::server::hub_link
 
+/// The site page that starts a key grant: it names the instance asking, offers
+/// the provider buttons, and hands off to the API's own `GET /auth/key`.
+const CONNECT_PATH: &str = "/connect";
+
 /// The dashboard tab that mints, lists and revokes API keys.
 const KEYS_TAB: &str = "/dashboard?tab=api-keys";
 
@@ -63,6 +67,30 @@ pub fn site_for_api(api_url: &str) -> Option<String> {
         _ => return None,
     };
     Some(format!("{scheme}://{site}"))
+}
+
+/// The site's provider chooser for a key grant, carrying the grant parameters
+/// through to the API.
+///
+/// The API's `GET /auth/key` defaults to `provider=google` and redirects
+/// there immediately, which is the right default for a machine and the wrong
+/// one for a person: an operator who pressed "Connect TinyHumans" in their own
+/// console arrived at a Google account picker, with nothing on the page saying
+/// who had asked or how to sign in with the account they actually use. The
+/// site page says both, and then sends them to the same endpoint with a
+/// `provider` they chose.
+///
+/// The query is built by the caller and appended verbatim: every parameter the
+/// API needs is one the host already assembled for
+/// [`key_grant_url`](crate::server::hub_identity::key_grant_url), and re-deriving
+/// them here would be a second place for the challenge to be wrong.
+pub fn connect_url(site: &str, grant_query: &str) -> String {
+    format!(
+        "{}{}?{}",
+        site.trim_end_matches('/'),
+        CONNECT_PATH,
+        grant_query
+    )
 }
 
 /// Where this person manages the keys their company's credential came from —
@@ -107,6 +135,14 @@ mod test {
     #[test]
     fn a_path_prefixed_hub_derives_nothing() {
         assert_eq!(site_for_api("https://example.com/api"), None);
+    }
+
+    #[test]
+    fn the_connect_page_carries_the_grant_query_through() {
+        assert_eq!(
+            connect_url("https://staging.tinyhumans.ai", "callback_url=x&code_challenge=y"),
+            "https://staging.tinyhumans.ai/connect?callback_url=x&code_challenge=y"
+        );
     }
 
     #[test]
