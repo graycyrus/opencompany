@@ -96,6 +96,16 @@ struct CredentialStatusDto {
     /// The consequence of setting this key, stated plainly, or the degraded
     /// state when nothing can be presented at all.
     notice: String,
+    /// Where this person looks after the account behind the key: the hub
+    /// dashboard's key list, and its top-up page.
+    ///
+    /// `None` on a host whose backend the naming convention does not describe
+    /// (a self-hosted or loopback hub), where a derived link would point at an
+    /// origin that need not exist. The console renders no link there rather
+    /// than one that 404s — the same rule `hub_link` follows for the button.
+    /// See [`hub_account`](crate::server::hub_account).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<HubAccountLinks>,
     /// Whether this host can complete a one-click key grant against the hub.
     ///
     /// Reported alongside the status so the console can decide whether to offer
@@ -104,6 +114,22 @@ struct CredentialStatusDto {
     /// console renders exactly what it renders today rather than a button that
     /// would 404.
     hub_link: bool,
+}
+
+/// The two account pages the console links out to.
+///
+/// Both are the hub's, behind that person's own sign-in, and deliberately not
+/// reimplemented here: one ends an instance's access and the other moves money.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HubAccountLinks {
+    /// The dashboard's API-key list — where a key minted by the grant flow can
+    /// be seen, named and revoked.
+    manage_keys_url: String,
+    /// The dashboard's balance and top-up page. What the company's agents spend
+    /// comes off this, so an instance that stops thinking mid-week is usually
+    /// one trip here from working again.
+    top_up_url: String,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -160,6 +186,10 @@ async fn effective_status(
         } else {
             CONSEQUENCE.to_string()
         },
+        account: state.config().hub_site().map(|site| HubAccountLinks {
+            manage_keys_url: crate::server::hub_account::manage_keys_url(&site),
+            top_up_url: crate::server::hub_account::top_up_url(&site),
+        }),
         hub_link: state.hub_identity().is_some(),
     })
 }
