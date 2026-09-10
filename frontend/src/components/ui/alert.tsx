@@ -43,7 +43,7 @@ const alertVariants = cva(
           // which is exactly what a feature name in a warning must not look
           // like, since it is the part the reader has to act on.
           "[&_code]:bg-status-blocked/15 [&_code]:text-status-blocked-text " +
-          "[&_code]:rounded [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
+          "[&_code]:rounded [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs",
         destructive:
           "bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
       },
