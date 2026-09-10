@@ -573,12 +573,13 @@ impl WorkspaceStore for FixedTree {
     ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
         crate::ports::workspace::read_capped_by_reading(self, company, id, max_bytes).await
     }
-    async fn write(
+    async fn write_with_revision(
         &self,
         _company: &CompanyId,
         _id: &str,
         _content: &str,
         _author: WorkspaceOrigin,
+        _expected_updated_at: Option<u64>,
     ) -> crate::Result<WorkspaceNode> {
         unreachable!("search never writes")
     }

@@ -4390,6 +4390,227 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
     assert!(!ws.delete(&alpha, "root").await.unwrap());
 }
 
+pub async fn assert_workspace_conditional_write(
+    first: Arc<dyn WorkspaceStore>,
+    second: Arc<dyn WorkspaceStore>,
+) {
+    let company = CompanyId::new("conditional-write");
+    let revision = i64::MAX as u64 / 2;
+    let original = WorkspaceNode {
+        id: "note".to_string(),
+        name: "shared.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: revision,
+        created_by: WorkspaceOrigin::Seed,
+        updated_by: WorkspaceOrigin::Seed,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    first
+        .create(&company, &original, Some("original"))
+        .await
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let mut writers = Vec::new();
+    for (store, body) in [(first.clone(), "first"), (second, "second")] {
+        let gate = gate.clone();
+        let company = company.clone();
+        writers.push(tokio::spawn(async move {
+            gate.wait().await;
+            let result = store
+                .write_with_revision(
+                    &company,
+                    "note",
+                    body,
+                    WorkspaceOrigin::Agent {
+                        id: body.to_string(),
+                    },
+                    Some(revision),
+                )
+                .await;
+            (body, result)
+        }));
+    }
+    let mut winners = Vec::new();
+    let mut refused = 0;
+    for writer in writers {
+        let (body, result) = writer.await.unwrap();
+        match result {
+            Ok(node) => {
+                winners.push((body, node));
+            }
+            Err(crate::error::OpenCompanyError::Conflict(message)) => {
+                assert!(message.contains("changed since you read it"), "{message}");
+                refused += 1;
+            }
+            Err(error) => panic!("unexpected conditional-write failure: {error}"),
+        }
+    }
+    assert_eq!(winners.len(), 1, "both writers at one revision succeeded");
+    assert_eq!(refused, 1, "exactly one racing writer must be refused");
+    let (body, node) = winners.pop().unwrap();
+    assert_eq!(node.updated_at_millis, revision + 1);
+    assert_eq!(node.created_by, WorkspaceOrigin::Seed);
+    assert_eq!(
+        node.updated_by,
+        WorkspaceOrigin::Agent {
+            id: body.to_string()
+        }
+    );
+    let stored = first.read(&company, "note").await.unwrap().unwrap();
+    assert_eq!(stored, (node.clone(), body.to_string()));
+    let err = first
+        .write_with_revision(
+            &company,
+            "note",
+            "stale retry",
+            WorkspaceOrigin::Operator,
+            Some(revision),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::error::OpenCompanyError::Conflict(_)));
+    assert_eq!(first.read(&company, "note").await.unwrap().unwrap(), stored);
+    let unconditional = first
+        .write(&company, "note", "operator edit", WorkspaceOrigin::Operator)
+        .await
+        .unwrap();
+    assert_eq!(unconditional.updated_at_millis, revision + 2);
+    let fresh = first
+        .write_with_revision(
+            &company,
+            "note",
+            "rebased edit",
+            WorkspaceOrigin::Operator,
+            Some(unconditional.updated_at_millis),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.updated_at_millis, revision + 3);
+    assert_eq!(
+        first.read(&company, "note").await.unwrap().unwrap().1,
+        "rebased edit"
+    );
+}
+
+pub async fn assert_workspace_revision_mutations(
+    first: Arc<dyn WorkspaceStore>,
+    second: Arc<dyn WorkspaceStore>,
+) {
+    let company = CompanyId::new("revision-mutations");
+    let original = WorkspaceNode {
+        id: "note".to_string(),
+        name: "staged.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: i64::MAX as u64 / 2,
+        created_by: WorkspaceOrigin::Seed,
+        updated_by: WorkspaceOrigin::Seed,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    first
+        .create(&company, &original, Some("original"))
+        .await
+        .unwrap();
+    let written = first
+        .write(&company, "note", "first edit", WorkspaceOrigin::Operator)
+        .await
+        .unwrap();
+    let renamed = second
+        .rename_move(&company, "note", Some("renamed.md"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        renamed.updated_at_millis,
+        written.updated_at_millis + 1,
+        "a rename must advance the current revision, not reset it to wall-clock time"
+    );
+    let stale = first
+        .write_with_revision(
+            &company,
+            "note",
+            "stale edit",
+            WorkspaceOrigin::Operator,
+            Some(written.updated_at_millis),
+        )
+        .await;
+    assert!(matches!(
+        stale,
+        Err(crate::error::OpenCompanyError::Conflict(_))
+    ));
+    assert_eq!(
+        first.read(&company, "note").await.unwrap().unwrap().1,
+        "first edit"
+    );
+    let promoted = first
+        .swap_files(&company, None, "note", "published.md")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        promoted.updated_at_millis,
+        renamed.updated_at_millis + 1,
+        "promotion must not resurrect an old revision"
+    );
+    for iteration in 0..32 {
+        let before = first.read(&company, "note").await.unwrap().unwrap().0;
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let writer = first.clone();
+        let writer_company = company.clone();
+        let writer_gate = gate.clone();
+        let body = format!("edit {iteration}");
+        let expected_body = body.clone();
+        let write = tokio::spawn(async move {
+            writer_gate.wait().await;
+            writer
+                .write(
+                    &writer_company,
+                    "note",
+                    &body,
+                    WorkspaceOrigin::Agent {
+                        id: "writer".to_string(),
+                    },
+                )
+                .await
+                .unwrap()
+        });
+        let renamer = second.clone();
+        let renamer_company = company.clone();
+        let name = format!("renamed-{iteration}.md");
+        let expected_name = name.clone();
+        let rename = tokio::spawn(async move {
+            gate.wait().await;
+            renamer
+                .rename_move(&renamer_company, "note", Some(&name), None)
+                .await
+                .unwrap()
+        });
+        let (written, renamed) = tokio::join!(write, rename);
+        let (written, renamed) = (written.unwrap(), renamed.unwrap());
+        assert_ne!(
+            written.updated_at_millis, renamed.updated_at_millis,
+            "concurrent writes and renames must receive distinct revisions"
+        );
+        let (stored, body) = first.read(&company, "note").await.unwrap().unwrap();
+        assert_eq!(stored.updated_at_millis, before.updated_at_millis + 2);
+        assert_eq!(stored.name, expected_name);
+        assert_eq!(body, expected_body);
+        assert_eq!(stored.created_by, WorkspaceOrigin::Seed);
+        assert_eq!(
+            stored.updated_by,
+            WorkspaceOrigin::Agent {
+                id: "writer".to_string()
+            }
+        );
+    }
+}
+
 /// Collects a [`BlobStream`](crate::ports::workspace::BlobStream) into bytes.
 ///
 /// Only the suite buffers: the port streams so a production download never has

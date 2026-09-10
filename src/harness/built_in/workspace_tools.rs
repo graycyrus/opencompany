@@ -2837,12 +2837,13 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             unreachable!("the ownership gate only reads the tree")
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             _company: &CompanyId,
             _id: &str,
             _content: &str,
             _author: WorkspaceOrigin,
+            _expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the ownership gate only reads the tree")
         }
@@ -4246,12 +4247,13 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             crate::ports::workspace::read_capped_by_reading(self, company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             _company: &CompanyId,
             _id: &str,
             _content: &str,
             _author: WorkspaceOrigin,
+            _expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the listing never writes")
         }
@@ -5071,14 +5073,17 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             self.inner.read_capped(company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
-            self.inner.write(company, id, content, author).await
+            self.inner
+                .write_with_revision(company, id, content, author, expected_updated_at)
+                .await
         }
         async fn create(
             &self,
@@ -6430,17 +6435,20 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             self.inner.read_capped(company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             if let Some(gate) = &self.write_gate {
                 gate.wait().await;
             }
-            self.inner.write(company, id, content, author).await
+            self.inner
+                .write_with_revision(company, id, content, author, expected_updated_at)
+                .await
         }
         async fn create(
             &self,

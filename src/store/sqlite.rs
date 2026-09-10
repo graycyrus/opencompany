@@ -3585,16 +3585,20 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         }
     }
 
-    async fn write(
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: crate::ports::workspace::WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
-        let conn = self.conn();
-        let node_json: Option<String> = conn
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let node_json: Option<String> = tx
             .query_row(
                 "SELECT node_json FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
                 params![company.as_ref(), id],
@@ -3618,11 +3622,12 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
                 crate::ports::workspace::binary_write_refusal(&node.name, mime),
             ));
         }
-        node.updated_at_millis = now_millis();
-        // Authorship rides the same stamp as the timestamp. The node is stored
-        // as opaque JSON, so this needs no column and no migration.
+        node.updated_at_millis = crate::ports::workspace::next_write_revision(
+            node.updated_at_millis,
+            expected_updated_at,
+        )?;
         node.updated_by = author;
-        conn.execute(
+        tx.execute(
             "UPDATE workspace_nodes SET node_json = ?1, content = ?2, updated_ms = ?3 \
              WHERE company_id = ?4 AND id = ?5",
             params![
@@ -3634,6 +3639,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(node)
     }
 
@@ -3940,8 +3946,11 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         parent: Option<Option<&str>>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
-        let conn = self.conn();
-        let nodes = self.workspace_nodes(&conn, company)?;
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
         if !nodes.contains_key(id) {
             return Err(OpenCompanyError::CompanyNotFound(format!(
                 "workspace node {id}"
@@ -3967,8 +3976,9 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         if let Some(parent) = parent {
             node.parent_id = parent.map(str::to_string);
         }
-        node.updated_at_millis = now_millis();
-        conn.execute(
+        node.updated_at_millis =
+            crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
+        tx.execute(
             "UPDATE workspace_nodes SET node_json = ?1, updated_ms = ?2 \
              WHERE company_id = ?3 AND id = ?4",
             params![
@@ -3979,6 +3989,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(node)
     }
 
@@ -4040,7 +4051,8 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
 
         let mut promoted = replacement;
         promoted.name = name.to_string();
-        promoted.updated_at_millis = now_millis();
+        promoted.updated_at_millis =
+            crate::ports::workspace::next_write_revision(promoted.updated_at_millis, None)?;
         // Nothing to retire on a first publish: the name was free, which is
         // exactly what the guard above established.
         if let Some(id) = expected_id {
@@ -4802,6 +4814,28 @@ mod test {
     #[tokio::test]
     async fn conformance_workspace_store() {
         conformance::assert_workspace_store(store()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_conditional_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("conditional.db");
+        conformance::assert_workspace_conditional_write(
+            Arc::new(SqliteStore::open(&path).unwrap()),
+            Arc::new(SqliteStore::open(&path).unwrap()),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_revision_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("revisions.db");
+        conformance::assert_workspace_revision_mutations(
+            Arc::new(SqliteStore::open(&path).unwrap()),
+            Arc::new(SqliteStore::open(&path).unwrap()),
+        )
+        .await;
     }
 
     #[tokio::test]
