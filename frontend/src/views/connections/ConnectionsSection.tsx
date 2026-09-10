@@ -72,8 +72,13 @@ export function ConnectionsSection({ client, company, sub }: Props) {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Remounted per company, the same rule `SkillsView`/`HostingView` below
+          apply: React otherwise preserves `status`, `billing` and `canManage`
+          from the previous company until the new requests resolve, so the
+          page can briefly show the previous company's balance, account links
+          and credential controls under the new company's name. */}
       {page === "api-key" && (
-        <ApiKeyView client={client} company={company} />
+        <ApiKeyView key={company ?? "self"} client={client} company={company} />
       )}
       {page === "apps" && <OAuthView client={client} company={company} />}
       {page === "mcp" && <McpServersView client={client} company={company} />}
