@@ -23,13 +23,22 @@ export function matchRanges(text: string, term: string): MatchRange[] {
   if (!term || !text) return [];
   const haystack = fold(text);
   const needle = fold(term).folded;
+  // A term that folds away entirely — a bare combining mark — asked for
+  // nothing findable. `indexOf("")` answers the cursor it was given, so
+  // without this the loop matches at every position and never advances.
+  if (!needle) return [];
   const ranges: MatchRange[] = [];
   let from = 0;
   for (;;) {
     const at = haystack.folded.indexOf(needle, from);
     if (at === -1) break;
     // Mapped back, so the caller slices the string it will actually render.
-    ranges.push([haystack.at[at], haystack.at[at + needle.length]]);
+    // The end comes from the LAST folded unit the match covers, never from the
+    // start of the one after it: a character that folds to several units —
+    // `"가"`, whose NFD is two Hangul jamo, which are letters and so survive
+    // the mark strip — leaves the following unit still pointing at the same
+    // original character, and `[0, 0]` highlights nothing.
+    ranges.push([haystack.at[at], haystack.end[at + needle.length - 1]]);
     from = at + needle.length;
     // A pathological term (one character, long text) would otherwise build a
     // range per character. Nothing on screen shows more than a few.
@@ -51,13 +60,20 @@ const MAX_RANGES = 20;
  * this first did, instead makes them case-sensitive, so `İstanbul` stops
  * matching `istanbul` altogether.
  *
- * So neither: fold everything, and carry `at[i]` — the original offset that
- * folded character `i` came from. One trailing entry for the end, so a range's
- * exclusive end maps too.
+ * So neither: fold everything, and carry two parallel maps — `at[i]`, the
+ * original offset that folded unit `i` came from, and `end[i]`, the offset just
+ * past that same original character.
+ *
+ * Both are needed because folding is not one-to-one in either direction. A
+ * single `at` map plus "the next entry" works only while every character folds
+ * to exactly one unit; `"가"` decomposes to two Hangul jamo — letters, so
+ * nothing is stripped — and both units then map back to offset 0, which turns a
+ * one-character match into the empty range `[0, 0]`.
  */
-function fold(value: string): { folded: string; at: number[] } {
+function fold(value: string): { folded: string; at: number[]; end: number[] } {
   let folded = "";
   const at: number[] = [];
+  const end: number[] = [];
   let index = 0;
   // By code point, not by unit: a surrogate pair is one character and must not
   // be folded or measured in halves.
@@ -73,12 +89,20 @@ function fold(value: string): { folded: string; at: number[] } {
       .toLowerCase()
       .normalize("NFD")
       .replace(COMBINING_MARKS, "");
-    for (let i = 0; i < normalized.length; i += 1) at.push(index);
+    const after = index + character.length;
+    for (let i = 0; i < normalized.length; i += 1) {
+      at.push(index);
+      end.push(after);
+    }
+    // A character that folds to nothing is a combining mark that decoration
+    // stripped, and it belongs to whatever it decorated — so it extends that
+    // character's range rather than falling outside the highlight, which is
+    // what left a lone accent sitting beyond the `<mark>`.
+    if (normalized.length === 0 && end.length > 0) end[end.length - 1] = after;
     folded += normalized;
     index += character.length;
   }
-  at.push(value.length);
-  return { folded, at };
+  return { folded, at, end };
 }
 
 /**

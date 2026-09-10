@@ -191,3 +191,49 @@ describe("accents, which normalising makes free", () => {
     expect(matches("cafe society", "café")).toBe(true);
   });
 });
+
+/**
+ * Ranges that survive a character folding to more than one unit (#2245 review).
+ *
+ * `fold` maps each folded unit back to the *start* of the original character it
+ * came from. That is right for the start of a range and wrong for its end: when
+ * one character folds to several units, the unit after the match still points
+ * at the same original character, so the exclusive end resolved to the start
+ * and the range highlighted nothing.
+ */
+describe("highlighting a character that folds to several", () => {
+  it("marks the whole syllable a jamo matched", () => {
+    // U+AC00 NFD-decomposes to U+1100 + U+1161. Both are Hangul jamo — letters,
+    // not `\p{M}` — so the mark strip leaves both, and both map back to offset
+    // 0. `[0, 0]` is an empty range: the operator sees no highlight at all.
+    const [range] = matchRanges("가", "ᄀ");
+    expect(range).toEqual([0, 1]);
+    expect("가".slice(range[0], range[1])).toBe("가");
+  });
+
+  it("keeps the syllable's own offsets inside a longer word", () => {
+    const text = "가나다";
+    const [range] = matchRanges(text, "나");
+    expect(text.slice(range[0], range[1])).toBe("나");
+  });
+
+  it("keeps an accent inside the mark, composed or decomposed", () => {
+    // Precomposed U+00E9 folds to one unit and always worked. The decomposed
+    // spelling is the one at risk: its combining mark folds to nothing, so
+    // without extending the previous character's end the accent falls outside
+    // the `<mark>` and floats beside the highlight.
+    const composed = "caf\u00e9";
+    const [one] = matchRanges(composed, "cafe");
+    expect(composed.slice(one[0], one[1])).toBe(composed);
+
+    const decomposed = "cafe\u0301";
+    const [two] = matchRanges(decomposed, "cafe");
+    expect(decomposed.slice(two[0], two[1])).toBe(decomposed);
+  });
+
+  it("answers nothing for a term that folds away entirely", () => {
+    // A bare combining mark asks for nothing findable, and `indexOf("")` would
+    // otherwise match at every position without advancing.
+    expect(matchRanges("cafe", "́")).toEqual([]);
+  });
+});
