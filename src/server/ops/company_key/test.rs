@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
+use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
@@ -424,6 +425,173 @@ async fn setting_and_clearing_are_journaled_with_an_actor() {
             .iter()
             .any(|(change, _)| change == "credential_set" || change == "credential_cleared"),
         "no Composio write happened here, so no Composio audit word may appear: {changes:?}"
+    );
+}
+
+/// An [`EventLog`](crate::ports::events::EventLog) decorator whose `append`
+/// can be switched to fail after setup, so a test can build a real company
+/// through a working log and then drive a route through the journal-refusal
+/// arm. Reads always delegate to a real
+/// [`FsEventLog`](crate::store::fs::FsEventLog), so `build()`'s own boot reads
+/// are never touched by the failure.
+struct FailingAppendLog {
+    inner: crate::store::fs::FsEventLog,
+    fail_appends: std::sync::atomic::AtomicBool,
+}
+
+impl FailingAppendLog {
+    fn new(inner: crate::store::fs::FsEventLog) -> Self {
+        Self {
+            inner,
+            fail_appends: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn fail_appends_from_now_on(&self) {
+        self.fail_appends
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ports::events::EventLog for FailingAppendLog {
+    async fn append(
+        &self,
+        id: &CompanyId,
+        event: crate::ports::types::CompanyEvent,
+    ) -> crate::Result<crate::ports::types::EventSeq> {
+        if self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::error::OpenCompanyError::Config(
+                "the event journal is unwritable".to_string(),
+            ));
+        }
+        self.inner.append(id, event).await
+    }
+
+    async fn read_from(
+        &self,
+        id: &CompanyId,
+        seq: crate::ports::types::EventSeq,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+        self.inner.read_from(id, seq, limit).await
+    }
+
+    fn subscribe(
+        &self,
+        id: &CompanyId,
+    ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
+        self.inner.subscribe(id)
+    }
+}
+
+/// [`state_with_manifest`], with the company's journal swapped for
+/// [`FailingAppendLog`] — armed only after the company finishes booting, so
+/// `RuntimeBuilder::build`'s own event reads/writes see a working log and the
+/// test controls exactly when the journal starts refusing.
+async fn state_with_failing_journal(
+    home: &std::path::Path,
+    company: &str,
+    manifest_toml: &str,
+) -> (AppState, std::sync::Arc<FailingAppendLog>) {
+    use crate::ports::CompanyStore;
+    let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+    let store = FsCompanyStore::new(home.to_path_buf());
+    let id = CompanyId::new(company);
+    store
+        .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        })
+        .await
+        .unwrap();
+    let journal = std::sync::Arc::new(FailingAppendLog::new(crate::store::fs::FsEventLog::new(
+        home.to_path_buf(),
+    )));
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .with_events(journal.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, company).await;
+    (state, journal)
+}
+
+/// Issue #403's discipline, the unhappy half: `set_key`'s own doc comment
+/// says the journal write is propagated rather than swallowed "so a change to
+/// what the company's agents act through is never invisible" — but a
+/// propagated error is not the same as an undone one. `store_key` has already
+/// landed by the time `journal` runs, so a refused audit line leaves the
+/// credential rotated with the caller holding nothing but a 500.
+///
+/// This is the documented trade, not a bug this test is trying to catch —
+/// but until now nothing forced the journal to refuse and checked which side
+/// of "propagates rather than swallows" actually happened.
+#[tokio::test]
+async fn a_journal_failure_after_the_key_is_stored_still_leaves_the_key_stored() {
+    let home_dir = home();
+    let (state, journal) =
+        state_with_failing_journal(home_dir.path(), "acme", GRANTED).await;
+    let app = router(state.clone());
+    let cookie = crate::server::test_support::fixed_cookie("acme");
+
+    journal.fail_appends_from_now_on();
+
+    let (status, _, raw) = send_as(
+        &state,
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+        cookie.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a refused journal write must not be swallowed into a 200: {raw}"
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/company/credential")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let status_body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        status_body["configured"], true,
+        "the key was stored before the journal ever ran, so it stays stored even though the \
+         caller was told the request failed: {status_body}"
     );
 }
 
