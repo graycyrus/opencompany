@@ -2401,6 +2401,46 @@ mod tests {
         );
     }
 
+    /// FAIL-axis: the mapping above is a value the test above already pins,
+    /// but nothing proved what that value does at the one place it is
+    /// actually consumed — `build.rs` feeds `policy.toolbelt_mode()` straight
+    /// into [`crate::harness::built_in::toolbelt::exec_security`], whose
+    /// `require_approval_for_medium_risk` is the last independent brake on a
+    /// shell/code/web call below this policy. This drives that real
+    /// composition, through the production constructor, rather than a
+    /// literal `PolicyMode::Full` — proving the brake really does go dark for
+    /// every non-readonly company once policy HITL is disabled, not just that
+    /// `toolbelt_mode()` returns a value that would imply it.
+    #[test]
+    fn disabled_hitl_also_disarms_the_shell_medium_risk_brake() {
+        use crate::harness::built_in::toolbelt::exec_security;
+
+        let ws = std::path::Path::new("/tmp/oc-policy-toolbelt-wiring");
+        for mode in ["auto", "supervised", "full"] {
+            let p = policy(mode, &[], None).with_policy_hitl_disabled();
+            let security = exec_security(ws, p.toolbelt_mode());
+            assert!(
+                !security.require_approval_for_medium_risk,
+                "{mode} with policy HITL disabled must leave OpenHuman's own medium-risk \
+                 shell gate unarmed, matching the mode this desk actually dispatches with"
+            );
+        }
+
+        // The control: policy HITL enabled (a non-production shape) keeps the
+        // brake exactly as `exec_security_shape_is_workspace_scoped_and_hardened`
+        // and `auto_borrows_supervised_exec_security_rather_than_full` already
+        // pin it — armed for `supervised` and `auto`.
+        for mode in ["auto", "supervised"] {
+            let p = policy(mode, &[], None);
+            let security = exec_security(ws, p.toolbelt_mode());
+            assert!(
+                security.require_approval_for_medium_risk,
+                "{mode} with policy HITL enabled must still arm the brake — the disarming \
+                 above must be the HITL-disabled path's effect, not `exec_security`'s"
+            );
+        }
+    }
+
     /// The brake's other half: it denies now, but it does not consume the
     /// grant. `readonly` is a mode a company sits in temporarily, so the same
     /// approval must still be redeemable once the brake releases — inside its
