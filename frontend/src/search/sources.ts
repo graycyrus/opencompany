@@ -39,6 +39,7 @@ export function channelResults(desks: readonly Desk[], query: SearchQuery): Sear
   if (query.isEmpty) return [];
   if (query.scope && query.scope.kind !== "channel") return [];
   const term = query.scope?.kind === "channel" ? query.scope.name : query.term;
+  const shared = collidingSlugs(desks);
 
   return desks
     .map((desk): SearchResult | null => {
@@ -53,7 +54,14 @@ export function channelResults(desks: readonly Desk[], query: SearchQuery): Sear
           ([from, to]) => [from + 1, to + 1] as const,
         ),
         subtitle: desk.blurb || undefined,
-        scopeName: desk.channel,
+        // The slug where it names one desk, the id where it does not. A slug is
+        // derived from the display name and nothing makes display names unique
+        // — `create_desk` (`src/server/operator.rs`) guards the id and leaves
+        // the name alone — so `Sales US` and `Sales-US` both write `#sales-us`,
+        // and picking the second row searched the first desk's history without
+        // saying so. A desk id is unique by construction and space-free
+        // (`is_valid_desk_id`), so it survives the round trip through the box.
+        scopeName: shared.has(desk.channel.toLowerCase()) ? desk.id : desk.channel,
         href: `#/chat/${encodeURIComponent(desk.id)}`,
         action: `Go to #${desk.channel}`,
         score: value,
@@ -219,6 +227,24 @@ export function fileResults(hits: readonly SearchHit[], query: SearchQuery): Sea
     })
     .sort(byScore)
     .slice(0, PER_GROUP_LIMIT);
+}
+
+/**
+ * The channel slugs that more than one desk answers to.
+ *
+ * Written back into the box, such a slug names two places and resolves to
+ * whichever the ranker reaches first — so the rows that carry it fall back to
+ * their ids instead. Everything else keeps the slug the operator can read.
+ */
+function collidingSlugs(desks: readonly Desk[]): Set<string> {
+  const seen = new Set<string>();
+  const shared = new Set<string>();
+  for (const desk of desks) {
+    const slug = desk.channel.toLowerCase();
+    if (seen.has(slug)) shared.add(slug);
+    else seen.add(slug);
+  }
+  return shared;
 }
 
 /** Highest first; ties keep the order the source gave them. */

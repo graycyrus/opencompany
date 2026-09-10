@@ -268,7 +268,7 @@ export async function readConversation(
 }
 
 /** A resolved scope: which conversation to read, and what to call it. */
-interface ResolvedScope {
+export interface ResolvedScope {
   /** The **host thread** to read history from. */
   threadId: string;
   context: MessageContext;
@@ -283,7 +283,7 @@ interface ResolvedScope {
  * (`views/room/channels.ts`). Reading the wrong one gives an empty history for
  * a DM that plainly has messages.
  */
-function resolveScope(
+export function resolveScope(
   query: SearchQuery,
   desks: readonly Desk[],
   members: readonly TeamMember[],
@@ -292,7 +292,13 @@ function resolveScope(
   if (!scope || !scope.name) return null;
 
   if (scope.kind === "person") {
-    const member = best(members, (m) => Math.max(score(m.name, scope.name), score(m.id, scope.name)));
+    // The exact id first, then the typed alias. `agentResults` writes the id
+    // back into the box when a row is picked, and an id is unique where a
+    // display name is not — so an exact hit is the one thing that cannot mean
+    // somebody else.
+    const member =
+      members.find((m) => m.id.toLowerCase() === scope.name) ??
+      best(members, (m) => Math.max(score(m.name, scope.name), score(m.id, scope.name)));
     if (!member) return null;
     const nameById = new Map(members.map((m) => [m.id, m.name]));
     return {
@@ -305,7 +311,14 @@ function resolveScope(
     };
   }
 
-  const desk = best(desks, (d) => Math.max(score(d.channel, scope.name), score(d.name, scope.name)));
+  // Likewise for a channel, and here it is load-bearing rather than tidy: a
+  // slug is derived from a display name and nothing keeps display names apart,
+  // so `Sales US` and `Sales-US` share `#sales-us`. `channelResults` writes the
+  // desk id back for such a row, and this is what makes the id mean that desk
+  // and not the first one that happens to score as well.
+  const desk =
+    desks.find((d) => d.id.toLowerCase() === scope.name) ??
+    best(desks, (d) => Math.max(score(d.channel, scope.name), score(d.name, scope.name)));
   if (!desk) return null;
   const nameById = new Map(members.map((m) => [m.id, m.name]));
   return {
