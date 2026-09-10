@@ -359,6 +359,23 @@ impl HubIdentityExchange for MockHubIdentityExchange {
             _ => Err(rejected()),
         }
     }
+
+    async fn billing_summary(&self, key: &str) -> Result<BillingSummary> {
+        if self.unreachable {
+            return Err(crate::error::OpenCompanyError::TinyHumans {
+                code: "unreachable".to_string(),
+                message: "connection refused".to_string(),
+            });
+        }
+        // Non-destructive, like `identify` and unlike a grant code: reading a
+        // balance twice is the same read twice.
+        self.billing
+            .lock()
+            .expect("mock poisoned")
+            .get(key)
+            .cloned()
+            .ok_or_else(rejected)
+    }
 }
 
 #[cfg(test)]
