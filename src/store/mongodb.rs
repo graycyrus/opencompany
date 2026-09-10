@@ -6288,6 +6288,13 @@ mod test {
         drop_db(&s).await;
     }
 
+    #[tokio::test]
+    async fn conformance_workspace_create_rejects_an_absent_or_foreign_parent() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_create_rejects_an_absent_or_foreign_parent(s.clone()).await;
+        drop_db(&s).await;
+    }
+
     /// Issue #1839: the adoption lease, on the backend that can only *narrow*
     /// Race 1 — the `$set` an adoption writes is what a later `delete_if_empty`
     /// reads, so the sequential contract (mark, then refuse) still holds even
