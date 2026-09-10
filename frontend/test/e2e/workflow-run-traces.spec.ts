@@ -46,7 +46,7 @@ async function openRunsTab(page: import("@playwright/test").Page) {
     list
       .getByTestId("workflow-run-trace-row")
       .first()
-      .or(list.getByText(/No workflow runs yet/)),
+      .or(list.getByText(/No automation runs yet/)),
   ).toBeVisible({ timeout: 30_000 });
   return list;
 }
@@ -67,7 +67,7 @@ test("the Runs tab lists the company-wide run page, or says there is none yet", 
   const rows = list.getByTestId("workflow-run-trace-row");
   const count = await rows.count();
   if (count === 0) {
-    await expect(list.getByText(/No workflow runs yet/)).toBeVisible();
+    await expect(list.getByText(/No automation runs yet/)).toBeVisible();
   } else {
     // Every row says which workflow, when it fired, and how — the four facts
     // the issue asks for, minus duration (absent on a run with no recorded
