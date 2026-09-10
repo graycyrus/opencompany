@@ -1,16 +1,9 @@
 import type { ReactNode } from "react";
-import { MessageSquare, MoreHorizontal, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PresenceStatus } from "@/lib/awareness";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
@@ -61,12 +54,6 @@ interface Props {
   /** True when the roster came from the host rather than the starter set. */
   fromHost: boolean;
   /**
-   * Give this teammate an inbox, or take it away. Whether they have one is read
-   * from the roster (`member.inboxEnabled`), never guessed client-side, so this
-   * pane and the Inbox page agree on the same host state (issue #173).
-   */
-  onRemove: (id: string) => void;
-  /**
    * Put an agent already on the roster onto this channel's desk (issue #2224).
    * Only ever offered on an "Everyone else" row. Absent has the same meaning
    * `onManageDesk` gives it: no real desk behind this channel, nothing to add
@@ -102,13 +89,13 @@ interface Props {
  * The right-hand member pane — who is in this channel, and the rest of the
  * company under it.
  *
- * This replaces the standalone Team page: everything that page could do lives
- * on a row here — give an agent an inbox, drop them from the roster, put an
- * existing one onto this desk directly from "Everyone else" (issue #2224) —
- * and a row now also opens that teammate's DM, which the page could not do
- * at all. Hiring a brand-new teammate is a different action and lives
- * elsewhere (the empty-desk "Add an agent" prompt, the Team page's own Add
- * agent) — this pane only ever offers an agent already on the roster.
+ * This replaces the standalone Team page for channel-scoped work: put an
+ * agent already on the roster onto this desk directly from "Everyone else"
+ * (issue #2224), and a row now also opens that teammate's DM, which the page
+ * could not do at all. Hiring a brand-new teammate, and dropping one from the
+ * roster entirely, are different actions and live elsewhere (the empty-desk
+ * "Add an agent" prompt and the Team page, respectively) — this pane only
+ * ever offers an agent already on the roster, and never removes one.
  *
  * The two sections exist because those are two different questions. "Who is in
  * this room" is what a channel header is for, and answering it with the whole
@@ -124,7 +111,6 @@ export function MembersPane({
   presence,
   loading,
   fromHost,
-  onRemove,
   onAddExisting,
   onMessage,
   onManageDesk,
@@ -167,7 +153,6 @@ export function MembersPane({
                     <MemberRow
                       member={m}
                       lead={m.id === leadId}
-                      onRemove={() => onRemove(m.id)}
                       onMessage={() => onMessage(m)}
                       onAddToChannel={
                         withAdd && onAddExisting ? () => onAddExisting(m.id) : undefined
@@ -282,14 +267,12 @@ function SectionLabel({ children, className }: { children: ReactNode; className?
 function MemberRow({
   member,
   lead,
-  onRemove,
   onAddToChannel,
   onMessage,
 }: {
   member: TeamMember;
   /** The desk's lead — badged, since this channel routes to them. */
   lead?: boolean;
-  onRemove: () => void;
   /**
    * Present only on an "Everyone else" row when there is a real desk to add
    * to (issue #2224) — `undefined` renders no button at all, not a disabled
@@ -345,30 +328,6 @@ function MemberRow({
           <Plus className="size-4" />
         </Button>
       )}
-
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/member:opacity-100"
-              aria-label={`Actions for ${member.name}`}
-            />
-          }
-        >
-          <MoreHorizontal className="size-4" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={onMessage}>
-            <MessageSquare className="size-4" /> Message
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive" onClick={onRemove}>
-            Remove from roster
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
     </div>
   );
 }

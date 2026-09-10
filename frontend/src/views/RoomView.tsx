@@ -2532,40 +2532,10 @@ export function RoomView({
   }
 
   /**
-   * Drop a teammate from the roster through the host when it has a record of
-   * them. A blueprint teammate is removable too — the host records a tombstone
-   * rather than rewriting `company.toml` — and the only refusal left is the
-   * company's last teammate (409). A starter-roster row has no host record at
-   * all, so it falls back to a local-only removal.
-   */
-  async function removeMember(member: TeamMember) {
-    if (!fromHost) {
-      setMembers((ms) => ms.filter((m) => m.id !== member.id));
-      return;
-    }
-    try {
-      await client.removeTeamMember(member.id, company);
-      setMembers((ms) => ms.filter((m) => m.id !== member.id));
-      // The removed teammate leaves the picker now, not on the next reload.
-      void reloadDirectory();
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        // The only 409 this route still answers: a company must keep at
-        // least one teammate. The host's own message says which teammate and
-        // what to do about it, so it is shown rather than restated.
-        toast.error(
-          error.message || "You can't remove your company's last agent.",
-        );
-      } else {
-        toast.error(error instanceof Error ? error.message : "Couldn't remove agent.");
-      }
-    }
-  }
-
-  /**
    * Put an agent already on the roster onto this channel's desk (issue
-   * #2224) — the counterpart to `removeMember` above, not a variant of
-   * `addMember`, which creates a brand-new teammate. `activeIsDesk` gates
+   * #2224) — not a variant of `addMember`, which creates a brand-new
+   * teammate. Dropping one from the roster entirely is a Team-page action;
+   * `MembersPane` no longer offers it here. `activeIsDesk` gates
    * `MembersPane`'s own "add existing" affordance, so `active.id` is a real
    * desk id by the time this runs; the check here is defensive, not load
    * bearing.
@@ -3117,10 +3087,6 @@ export function RoomView({
                   }
                   loading={loadingTeam}
                   fromHost={fromHost}
-                  onRemove={(id) => {
-                    const member = members.find((m) => m.id === id);
-                    if (member) void removeMember(member);
-                  }}
                   // `activeIsDesk`, not "`channelMembers` is non-null": a DM
                   // has real (non-null) channel membership too — one row,
                   // itself — and is not a desk. `addDeskMember` has no
