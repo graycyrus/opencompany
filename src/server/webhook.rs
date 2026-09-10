@@ -657,12 +657,8 @@ mod test {
         server.abort();
     }
 
-    /// PLAT-050 (LIMIT / BOUND): a receiver that accepts the connection and
-    /// never answers must not hang `deliver` forever — `reqwest::Client::
-    /// new()` alone carries no timeout, so this is the one failure mode
-    /// `emit`'s bounded-attempt retry cannot protect against on its own: an
-    /// The sink the runtime builds carries the deadline, not just one a test
-    /// can construct.
+    /// PLAT-050 (LIMIT / BOUND): the sink the runtime builds carries the
+    /// deadline, not just one a test can construct.
     ///
     /// Exercising a timeout through a sink the case builds itself proves the
     /// mechanism and nothing about the wiring: `new` could stop setting one
@@ -684,8 +680,12 @@ mod test {
         );
     }
 
-    /// attempt that never *returns* at all rather than one that returns
-    /// quickly with an error.
+    /// PLAT-050 (LIMIT / BOUND): a receiver that accepts the connection and
+    /// never answers must not hang `deliver` forever — `reqwest::Client::new()`
+    /// alone carries no timeout, so this is the one failure mode `emit`'s
+    /// bounded-attempt retry cannot protect against on its own: an attempt that
+    /// never *returns* at all rather than one that returns quickly with an
+    /// error.
     #[cfg(feature = "webhooks")]
     #[tokio::test]
     async fn http_webhook_sink_times_out_rather_than_hanging_forever() {
