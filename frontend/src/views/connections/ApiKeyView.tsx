@@ -252,6 +252,7 @@ export function ApiKeyView({ client, company }: Props) {
         company={company}
         canManage={canManage}
         onChanged={() => setGeneration((n) => n + 1)}
+        showConnect={false}
       />
 
       {load === "loading" && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
