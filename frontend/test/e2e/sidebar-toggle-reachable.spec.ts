@@ -252,10 +252,17 @@ test.describe("sidebar toggle reachability", () => {
     const expandedBox = await position();
     const titleBar = await page.getByTestId("window-title-bar").boundingBox();
     expect(titleBar, "the title bar should have a box").not.toBeNull();
+    // Within the row's own vertical bounds on both edges, not merely above
+    // its bottom -- a control that started above the row's top would have
+    // passed a bottom-only check just as happily.
     expect(
       expandedBox.y,
+      "the control does not start above the title row",
+    ).toBeGreaterThanOrEqual(titleBar!.y);
+    expect(
+      expandedBox.y + expandedBox.height,
       "the control sits inside the title row's chrome, not below it",
-    ).toBeLessThan(titleBar!.y + titleBar!.height);
+    ).toBeLessThanOrEqual(titleBar!.y + titleBar!.height);
 
     // Operable from the keyboard, not just under a pointer. An icon-only
     // button is exactly the kind that gets rebuilt as a `div` with an
