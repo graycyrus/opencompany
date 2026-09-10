@@ -2162,6 +2162,14 @@ async fn async_main() -> Result<()> {
                 config_file.as_ref().and_then(|c| c.api_url.clone()),
                 AppConfig::default().api_url,
             )?;
+            // The dashboard an operator is sent to for the two things this
+            // console cannot do — revoke a key, top the account up. Almost
+            // always unset: `AppConfig::hub_site` derives it from `api_url`, so
+            // a staging host links to staging with nothing else to state.
+            let web_url = std::env::var(opencompany::app::config::WEB_URL_ENV)
+                .ok()
+                .or_else(|| config_file.as_ref().and_then(|c| c.web_url.clone()))
+                .filter(|value| !value.trim().is_empty());
             // The listener address, across every layer that may name it. Until
             // issue #425 only the flag reached this struct, so the manager's
             // injected `OPENCOMPANY_BIND` (and any `config.toml` `bind`) moved
@@ -2228,6 +2236,7 @@ async fn async_main() -> Result<()> {
                 default_mcp_servers,
                 openhuman_root,
                 api_url,
+                web_url,
                 tinyplace_api_url,
                 public_url,
                 instance_name,
