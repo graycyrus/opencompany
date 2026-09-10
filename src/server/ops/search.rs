@@ -391,6 +391,46 @@ mod tests {
         );
     }
 
+    /// `status_of`'s own comment says a company record that cannot be loaded
+    /// reports `granted: false` rather than failing the whole status — "the
+    /// operator still needs to see what IS configured, and a settings page
+    /// that 500s tells them nothing." That fallback only runs when
+    /// `store().load()` actually errors, which an absent record does not do
+    /// (`Ok(None)`, not `Err`) — so this corrupts the on-disk manifest after
+    /// the company has already booted, forcing a real `FsCompanyStore::load`
+    /// failure on the route's own re-read rather than mocking the store.
+    #[tokio::test]
+    async fn a_company_that_fails_to_load_reports_ungranted_instead_of_500() {
+        let home_dir = ::tempfile::tempdir().expect("tempdir");
+        let home = home_dir.path();
+        let state = state_with_company(home, true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        // Baseline: the manifest grants `search`, so the route reports it.
+        let (status, body) =
+            call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["granted"], true);
+
+        let toml_path = crate::store::Bundle::new(home, &CompanyId::new("acme")).company_toml();
+        tokio::fs::write(&toml_path, b"not valid toml [[[")
+            .await
+            .expect("corrupt company.toml");
+
+        let (status, body) =
+            call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a store-load failure must still answer with a status, not a 500: {body}"
+        );
+        assert_eq!(
+            body["granted"], false,
+            "an unreadable record must fall back to ungranted rather than keep reporting the \
+             last-known grant: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn a_saved_key_is_reported_as_configured_and_never_returned() {
         let home = ::tempfile::tempdir().expect("tempdir");

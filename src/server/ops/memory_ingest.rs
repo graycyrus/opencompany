@@ -282,10 +282,13 @@ struct ForgottenDto {
 }
 
 /// Classifies a multipart failure the way the workspace upload does: a body
-/// that overran the limit is a 413, anything else a malformed request.
+/// that overran the limit is a 413, anything else a malformed request. The
+/// 413 is raised as [`OpenCompanyError::WorkspaceQuota`] on purpose — the
+/// shared "too big" vocabulary `server::ops::workspace`'s own
+/// `multipart_error` documents, rather than a second one for this route.
 fn multipart_error(error: MultipartError, context: &str) -> ApiError {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        return ApiError(OpenCompanyError::InvalidRequest(format!(
+        return ApiError(OpenCompanyError::WorkspaceQuota(format!(
             "this drop is larger than the {} MiB one request may carry, so it was cut off before \
              anything could be read. Nothing was stored — drop it in smaller batches.",
             INGEST_BODY_LIMIT / (1024 * 1024)
