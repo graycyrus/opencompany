@@ -21,10 +21,29 @@ const alertVariants = cva(
          * "blocked" everywhere else (`--status-blocked`), tinted rather than
          * filled so it still reads as a notice on the page and not an error
          * dialog.
+         *
+         * The text used to be `--foreground` with a `--muted-foreground`
+         * description: neutral grey on an amber wash, which reads as two
+         * components stacked rather than one notice — the tint says "warning"
+         * and the words say "body copy". Both now take `--status-blocked-text`,
+         * which is the amber the icon already used, so the whole alert is one
+         * colour family. It stays legible at both ends: 4.80:1 in light
+         * (`--amber-text` on a 16%-amber wash over the page ground) and
+         * `--amber-bright` in dark, the same pairing every other blocked
+         * surface in the console uses.
          */
         warning:
-          "border-status-blocked/40 bg-status-blocked-soft text-foreground " +
-          "*:data-[slot=alert-description]:text-muted-foreground *:[svg]:text-status-blocked-text",
+          "border-status-blocked/40 bg-status-blocked-soft text-status-blocked-text " +
+          "*:data-[slot=alert-title]:text-status-blocked-text " +
+          "*:data-[slot=alert-description]:text-status-blocked-text " +
+          "*:[svg]:text-status-blocked-text " +
+          // Inline `code` inherits the alert's colour instead of keeping the
+          // page's neutral chip. A grey chip on an amber wash reads as a
+          // fragment of some other component that landed here by accident —
+          // which is exactly what a feature name in a warning must not look
+          // like, since it is the part the reader has to act on.
+          "[&_code]:bg-status-blocked/15 [&_code]:text-status-blocked-text " +
+          "[&_code]:rounded [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs",
         destructive:
           "bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
       },

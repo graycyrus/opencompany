@@ -667,9 +667,13 @@ async fn starting_a_link_sends_the_console_to_the_hub_with_a_challenge_not_a_sec
     assert_eq!(status, StatusCode::OK, "{raw}");
 
     let url = resp["authorizeUrl"].as_str().expect("authorizeUrl");
+    // Through the site's provider chooser, which forwards to the hub's own
+    // `/auth/key` with the provider the person picked. Straight at `/auth/key`
+    // would be the hub's `provider=google` default: an account picker naming
+    // nobody, for somebody who pressed a button in their own console.
     assert!(
-        url.contains("/auth/key?"),
-        "must start the grant flow: {url}"
+        url.contains("/connect?"),
+        "must start the grant flow on the site's chooser: {url}"
     );
     assert!(
         url.contains("code_challenge_method=S256"),
@@ -811,4 +815,185 @@ async fn a_member_cannot_start_or_finish_a_link() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{raw}");
+}
+
+// ---------------------------------------------------------------------------
+// `GET .../credential/billing`
+// ---------------------------------------------------------------------------
+
+/// A company with no key of its own reports `configured: false` and no
+/// figures — never a fallback account's balance.
+///
+/// This is the negative control for a real regression: `get_billing` once
+/// resolved through [`crate::company::company_key::resolve`], which falls
+/// through to this instance's platform identity when the company has set
+/// nothing. That would report `configured: true` and query billing for the
+/// shared host identity — exposing that account's balance and plan to any
+/// company member. The route must load the company's own credential only.
+#[tokio::test]
+async fn a_company_with_no_key_reports_unconfigured_billing_not_a_fallback_balance() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], false, "{raw}");
+    assert!(dto["summary"].is_null(), "{raw}");
+}
+
+/// Once the company sets its own key, billing reads that key's standing from
+/// the hub — the intended path this route exists for.
+#[tokio::test]
+async fn a_companys_own_key_reads_its_own_billing_summary() {
+    use crate::server::hub_identity::{BillingSummary, MockHubIdentityExchange};
+
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "acme", GRANTED)
+        .await
+        .with_hub_identity(std::sync::Arc::new(
+            MockHubIdentityExchange::new().with_billing(
+                KEY,
+                BillingSummary {
+                    balance_usd: 12.5,
+                    plan: "pro".to_string(),
+                    active_subscription: true,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+    let (status, _, raw) = send_as(
+        &state,
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+        crate::server::test_support::fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], true, "{raw}");
+    assert_eq!(dto["summary"]["balanceUsd"], 12.5, "{raw}");
+    assert_eq!(dto["summary"]["plan"], "pro", "{raw}");
+}
+
+/// A member — not just an admin — can read the balance: nobody should have to
+/// ask an admin why their agents stopped working this afternoon.
+#[tokio::test]
+async fn a_member_can_read_billing_without_admin_rights() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+    let member = crate::server::test_support::member_cookie("acme");
+
+    let (status, dto, raw) = send_as(
+        &state,
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+        member,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], false, "{raw}");
+}
+
+// ---------------------------------------------------------------------------
+// Where the grant comes back to
+// ---------------------------------------------------------------------------
+
+mod callback_origin {
+    use super::super::{callback_origin, is_loopback_origin};
+    use crate::{AppConfig, AppState};
+    use axum::http::{HeaderMap, HeaderValue, header::ORIGIN};
+
+    fn state_with(public_url: Option<&str>) -> AppState {
+        AppState::new(AppConfig {
+            bind: "127.0.0.1:8080".to_string(),
+            public_url: public_url.map(str::to_string),
+            ..AppConfig::default()
+        })
+    }
+
+    fn headers_from(origin: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_str(origin).expect("header"));
+        headers
+    }
+
+    #[test]
+    fn a_stated_public_url_wins_over_the_browser() {
+        // A deployment that names its origin has said where its console is, and
+        // that is not something a request gets to move.
+        let state = state_with(Some("https://acme.opencompany.example/"));
+        let origin = callback_origin(&state, &headers_from("http://localhost:5173"));
+        assert_eq!(origin, "https://acme.opencompany.example");
+    }
+
+    #[test]
+    fn the_dev_console_gets_its_own_port_back() {
+        // The failure this exists to stop: with nothing configured, the callback
+        // was `http://127.0.0.1:8080`, where a dev host serves no page — so the
+        // approval landed on a 404 holding a spent code.
+        let state = state_with(None);
+        let origin = callback_origin(&state, &headers_from("http://localhost:5173"));
+        assert_eq!(origin, "http://localhost:5173");
+    }
+
+    #[test]
+    fn a_remote_origin_is_ignored_for_the_bind_address() {
+        // A header is attacker-controllable. A stolen code redeems nothing
+        // without this host's verifier, but a callback is not somewhere to take
+        // an arbitrary address on a request's say-so.
+        let state = state_with(None);
+        let origin = callback_origin(&state, &headers_from("https://evil.example"));
+        assert_eq!(origin, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn no_origin_header_falls_back_to_the_bind_address() {
+        let state = state_with(None);
+        assert_eq!(
+            callback_origin(&state, &HeaderMap::new()),
+            "http://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn an_empty_public_url_is_not_an_origin() {
+        // A launcher that exported the variable with nothing in it has said
+        // nothing, and must not produce a callback of `/?company=…`.
+        let state = state_with(Some("   "));
+        let origin = callback_origin(&state, &headers_from("http://127.0.0.1:5173"));
+        assert_eq!(origin, "http://127.0.0.1:5173");
+    }
+
+    #[test]
+    fn loopback_is_the_hub_gates_own_shape() {
+        // Accepting an origin the hub would refuse would only move the failure
+        // one leg later, into a 400 nobody can act on.
+        assert!(is_loopback_origin("http://localhost:5173"));
+        assert!(is_loopback_origin("http://127.0.0.1:8080"));
+        assert!(is_loopback_origin("http://[::1]:5173"));
+        assert!(!is_loopback_origin("https://localhost:5173"));
+        assert!(!is_loopback_origin("http://localhost.evil.example"));
+        assert!(!is_loopback_origin("http://127.0.0.1:5173/steal"));
+        assert!(!is_loopback_origin("not a url"));
+    }
 }

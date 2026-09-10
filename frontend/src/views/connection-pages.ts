@@ -15,6 +15,7 @@ import {
   Blocks,
   BrainCircuit,
   Globe,
+  KeyRound,
   LayoutGrid,
   Search,
   Sparkles,
@@ -69,6 +70,21 @@ export const CONNECTION_PAGES = [
     label: "Apps",
     icon: LayoutGrid,
     hint: "The apps your agents act through",
+  },
+  {
+    // Second, directly under Apps, because it is what Apps depends on: a company
+    // with no key can neither think nor connect anything, so the page offering
+    // to connect Gmail sits one row above the account that pays for it.
+    //
+    // Not *first*, though it is the more fundamental of the two. The first row
+    // on a rail is what a bare `#/connections` opens (`rowActive`, and
+    // `DEFAULT_CONNECTION_PAGE` agreeing with it), so leading with this page
+    // would quietly change what every existing bookmark to the section lands
+    // on — a bigger change than adding a page, and not one this page needs.
+    id: "api-key",
+    label: "API Key",
+    icon: KeyRound,
+    hint: "The account this company spends through",
   },
   {
     id: "mcp",

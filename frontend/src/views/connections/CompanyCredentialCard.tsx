@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
+import { HubAccountLinks } from "@/views/connections/HubAccountLinks";
 
 interface Props {
   client: OpenCompanyClient;
@@ -29,6 +30,15 @@ interface Props {
   canManage: boolean;
   /** Called after a successful write, so sibling sections re-read their status. */
   onChanged?: () => void;
+  /**
+   * Whether this card carries the one-click button and the account links.
+   *
+   * True everywhere the card stands alone. False on the API Key page, which
+   * leads with both above its own pitch — rendering them again three inches
+   * lower would put two identical primary buttons on one screen and leave a
+   * reader working out whether they do the same thing.
+   */
+  showConnect?: boolean;
 }
 
 /**
@@ -48,7 +58,13 @@ interface Props {
  * on load and "set" is reported by a flag, never by a masked value we would have
  * had to receive.
  */
-export function CompanyCredentialCard({ client, company, canManage, onChanged }: Props) {
+export function CompanyCredentialCard({
+  client,
+  company,
+  canManage,
+  onChanged,
+  showConnect = true,
+}: Props) {
   const [load, setLoad] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<CompanyCredentialStatus | null>(null);
@@ -194,17 +210,25 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
 
             {/* The short path first. The field below it stays for a host with
                 no hub wired, and for anyone who would rather paste. */}
-            <ConnectTinyHumansButton
-              client={client}
-              company={company}
-              available={status?.hubLink ?? false}
-              canManage={canManage}
-              configured={configured}
-              onConnected={() => {
-                void refresh();
-                onChanged?.();
-              }}
-            />
+            {showConnect && (
+              <ConnectTinyHumansButton
+                client={client}
+                company={company}
+                available={status?.hubLink ?? false}
+                canManage={canManage}
+                configured={configured}
+                onConnected={() => {
+                  void refresh();
+                  onChanged?.();
+                }}
+              />
+            )}
+
+            {/* The two things the button cannot do: revoke what it minted, and
+                pay for what it spends. Both on the hub the host is pointed at. */}
+            {showConnect && (
+              <HubAccountLinks account={status?.account} configured={configured} />
+            )}
 
             {canManage && (
               <>

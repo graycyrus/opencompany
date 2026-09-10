@@ -32,6 +32,11 @@ describe("the Connections section", () => {
   it("carries exactly the pages that left the Settings rail, in rail order", () => {
     expect(CONNECTION_PAGES.map((page) => page.id)).toEqual([
       "apps",
+      // Not one of the pages that left Settings — this one was written for the
+      // rail, and sits under Apps because it is the account Apps spends from.
+      // Second rather than first: the first row is what a bare `#/connections`
+      // opens, and moving that would change where every existing bookmark lands.
+      "api-key",
       "mcp",
       "inference",
       "skills",
@@ -114,6 +119,7 @@ describe("the Connections section", () => {
     const connections = NAV_SECTIONS.find((s) => s.view === "connections")!;
     expect(connections.children?.map((child) => [child.label, child.sub])).toEqual([
       ["Apps", "apps"],
+      ["API Key", "api-key"],
       ["MCP Servers", "mcp"],
       ["Inference", "inference"],
       ["Skills", "skills"],

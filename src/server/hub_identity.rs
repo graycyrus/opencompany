@@ -136,8 +136,22 @@ pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> Str
 /// give an application a key without a human copying one between two sites.
 pub fn key_grant_url(api_url: &str, callback_url: &str, challenge: &str, name: &str) -> String {
     format!(
-        "{}/auth/key?callback_url={}&code_challenge={}&code_challenge_method=S256&name={}",
+        "{}/auth/key?{}",
         api_url.trim_end_matches('/'),
+        key_grant_query(callback_url, challenge, name),
+    )
+}
+
+/// The grant parameters as one query string, without the endpoint.
+///
+/// Split out because the same parameters are read by two pages: the API's
+/// `GET /auth/key`, which acts on them, and the site's `/connect`, which shows
+/// a person who is asking and lets them pick a provider before handing off to
+/// exactly that endpoint ([`hub_account::connect_url`](crate::server::hub_account::connect_url)).
+/// Building them once means the challenge cannot differ between the two.
+pub fn key_grant_query(callback_url: &str, challenge: &str, name: &str) -> String {
+    format!(
+        "callback_url={}&code_challenge={}&code_challenge_method=S256&name={}",
         percent_encode(callback_url),
         percent_encode(challenge),
         percent_encode(name),
@@ -192,6 +206,43 @@ pub trait HubIdentityExchange: Send + Sync {
     /// Implementations must treat both arguments and the returned key as live
     /// credentials: never log them, never echo them into an error.
     async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String>;
+
+    /// Reads the billing standing of the account a **key** belongs to.
+    ///
+    /// The one call in this trait that presents the company's own credential
+    /// rather than a person's: it answers "how much is left, and on what plan",
+    /// which is a property of the account the key spends from. It is a read and
+    /// nothing else — topping up and changing a plan move money and stay on the
+    /// hub's dashboard behind that person's own sign-in, which is why this has
+    /// no counterpart that writes.
+    ///
+    /// Implementations must treat `key` as a live credential: never log it,
+    /// never echo it into an error.
+    async fn billing_summary(&self, key: &str) -> Result<BillingSummary>;
+}
+
+/// What an account's money is doing, as the console renders it.
+///
+/// A flattened copy of the hub's `GET /payments/summary` rather than a passthrough
+/// of its JSON: the console is a different product on a different release
+/// cadence, and a shape it merely forwards is one that changes under it without
+/// anybody choosing to. Every field here is one the card actually draws.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingSummary {
+    /// Everything spendable, promotional credit and top-up together, in USD.
+    pub balance_usd: f64,
+    /// The plan slug the account is on (`free`, `pro`, …).
+    pub plan: String,
+    /// Whether a paid subscription is live right now.
+    pub active_subscription: bool,
+    /// When the current plan lapses, as the hub stated it. `None` on a plan
+    /// that does not expire.
+    pub plan_expiry: Option<String>,
+    /// Where a person tops the account up, on the hub that issued the key.
+    pub top_up_url: Option<String>,
+    /// Where a person changes the plan.
+    pub manage_url: Option<String>,
 }
 
 /// An in-memory [`HubIdentityExchange`] for offline tests and local demos.
@@ -211,6 +262,8 @@ pub struct MockHubIdentityExchange {
     grants: StdMutex<HashMap<String, (String, String)>>,
     /// A forced transport failure, standing in for "the hub is not answering".
     unreachable: bool,
+    /// What [`HubIdentityExchange::billing_summary`] answers, per key.
+    billing: StdMutex<HashMap<String, BillingSummary>>,
 }
 
 impl MockHubIdentityExchange {
@@ -225,6 +278,15 @@ impl MockHubIdentityExchange {
             .lock()
             .expect("mock poisoned")
             .insert(token.to_string(), email.to_string());
+        self
+    }
+
+    /// Seeds the billing standing one key reads back.
+    pub fn with_billing(self, key: &str, summary: BillingSummary) -> Self {
+        self.billing
+            .lock()
+            .expect("mock poisoned")
+            .insert(key.to_string(), summary);
         self
     }
 
@@ -297,6 +359,23 @@ impl HubIdentityExchange for MockHubIdentityExchange {
             _ => Err(rejected()),
         }
     }
+
+    async fn billing_summary(&self, key: &str) -> Result<BillingSummary> {
+        if self.unreachable {
+            return Err(crate::error::OpenCompanyError::TinyHumans {
+                code: "unreachable".to_string(),
+                message: "connection refused".to_string(),
+            });
+        }
+        // Non-destructive, like `identify` and unlike a grant code: reading a
+        // balance twice is the same read twice.
+        self.billing
+            .lock()
+            .expect("mock poisoned")
+            .get(key)
+            .cloned()
+            .ok_or_else(rejected)
+    }
 }
 
 #[cfg(test)]
@@ -333,7 +412,7 @@ pub use http::HttpHubIdentityExchange;
 
 #[cfg(feature = "tinyhumans")]
 mod http {
-    use super::{HubIdentity, HubIdentityExchange};
+    use super::{BillingSummary, HubIdentity, HubIdentityExchange};
     use crate::Result;
     use crate::error::OpenCompanyError;
     use async_trait::async_trait;
@@ -360,6 +439,46 @@ mod http {
     struct KeyData {
         /// The plaintext key. The hub emits it exactly once.
         key: String,
+    }
+
+    /// The hub's envelope for `GET /payments/summary`.
+    #[derive(Debug, Deserialize)]
+    struct SummaryResponse {
+        data: SummaryData,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SummaryData {
+        #[serde(default)]
+        credits: SummaryCredits,
+        #[serde(default)]
+        plan: SummaryPlan,
+        #[serde(default)]
+        links: SummaryLinks,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryCredits {
+        #[serde(rename = "totalUsd", default)]
+        total_usd: f64,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryPlan {
+        #[serde(default)]
+        plan: Option<String>,
+        #[serde(rename = "hasActiveSubscription", default)]
+        has_active_subscription: bool,
+        #[serde(rename = "planExpiry", default)]
+        plan_expiry: Option<String>,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryLinks {
+        #[serde(rename = "topUpUrl", default)]
+        top_up_url: Option<String>,
+        #[serde(rename = "manageUrl", default)]
+        manage_url: Option<String>,
     }
 
     /// A [`HubIdentityExchange`] backed by `GET {api_url}/auth/me`.
@@ -463,6 +582,45 @@ mod http {
 
             let parsed: KeyResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
             Ok(parsed.data.key)
+        }
+
+        async fn billing_summary(&self, key: &str) -> Result<BillingSummary> {
+            let url = format!("{}/payments/summary", self.api_url);
+            let (product_header_name, product_header_value) =
+                crate::product::product_identity_header();
+            let resp = self
+                .http
+                .get(&url)
+                .bearer_auth(key)
+                .header(product_header_name, product_header_value)
+                .send()
+                .await
+                .map_err(|e| Self::err("unreachable", e))?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                // The hub's words describe the key's standing — expired, revoked,
+                // wrong scope. The key is in a header, so neither the body nor
+                // `reqwest`'s Display can carry it into this error.
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(Self::err(
+                    &format!("http_{}", status.as_u16()),
+                    truncate(&detail, 200),
+                ));
+            }
+
+            let parsed: SummaryResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
+            Ok(BillingSummary {
+                balance_usd: parsed.data.credits.total_usd,
+                // A hub that names no plan is on the free one — the field is
+                // absent there rather than spelled out, and a card reading
+                // "unknown" would be a worse answer than the true one.
+                plan: parsed.data.plan.plan.unwrap_or_else(|| "free".to_string()),
+                active_subscription: parsed.data.plan.has_active_subscription,
+                plan_expiry: parsed.data.plan.plan_expiry,
+                top_up_url: parsed.data.links.top_up_url,
+                manage_url: parsed.data.links.manage_url,
+            })
         }
     }
 

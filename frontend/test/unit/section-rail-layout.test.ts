@@ -88,6 +88,7 @@ describe("which sections get a rail", () => {
     render("connections", "mcp");
     expect(railRows()).toEqual([
       "Apps",
+      "API Key",
       "MCP Servers",
       "Inference",
       "Skills",

@@ -38,6 +38,16 @@ use crate::ports::types::SecretValue;
 /// Default TinyHumans orchestration API base URL.
 pub const DEFAULT_API_URL: &str = "https://api.tinyhumans.ai";
 
+/// The variable that names the TinyHumans **site** — the dashboard an operator
+/// is sent to for the two things the console deliberately cannot do: revoke a
+/// key, and top the account up.
+///
+/// Almost never set. The site is derived from `api_url` by
+/// [`site_for_api`](crate::server::hub_account::site_for_api), so a deployment
+/// that points at staging moves both together; this exists for a front end the
+/// convention does not describe.
+pub const WEB_URL_ENV: &str = "TINYHUMANS_WEB_URL";
+
 /// Default tiny.place economy API base URL.
 pub const DEFAULT_TINYPLACE_API_URL: &str = "https://api.tiny.place";
 
@@ -295,6 +305,10 @@ pub struct ConfigFile {
     pub tinyhumans_api_key: Option<String>,
     /// TinyHumans orchestration API base URL.
     pub api_url: Option<String>,
+    /// TinyHumans site base URL, when the deployment's front end is not the one
+    /// [`WEB_URL_ENV`] describes deriving. Unset — the normal case — derives it
+    /// from `api_url`.
+    pub web_url: Option<String>,
     /// Brain mode (`hosted` | `sidecar`).
     pub brain_mode: Option<String>,
     /// Auth mode (`email` | `wallet` | `none`), overriding every company's own
@@ -680,6 +694,9 @@ pub struct RuntimeConfig {
     pub data_dir: PathBuf,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
+    /// TinyHumans site base URL, when one is stated. `None` derives it from
+    /// [`Self::api_url`] — see [`WEB_URL_ENV`].
+    pub web_url: Option<String>,
     /// Which brain the runtime drives.
     pub brain_mode: BrainMode,
     /// How humans sign in to this company.
@@ -817,6 +834,22 @@ pub fn resolve(
         },
     )?;
 
+    // No `HostedDefault::Refuse` twin: unset is not a silent production default
+    // here, it is "derive from whichever hub this deployment already named".
+    //
+    // Each candidate is trimmed and blanked out *before* `resolve_opt` picks
+    // between them — trimming only the winner would let a whitespace-only env
+    // value outrank a real TOML one instead of falling through to it.
+    let web_url = resolve_opt(
+        &mut prov,
+        "web_url",
+        env.get(WEB_URL_ENV)
+            .filter(|value| !value.trim().is_empty()),
+        config_toml
+            .and_then(|c| c.web_url.clone())
+            .filter(|value| !value.trim().is_empty()),
+    );
+
     let tinyplace_api_url = resolve_base_url(
         &mut prov,
         "tinyplace_api_url",
@@ -933,6 +966,7 @@ pub fn resolve(
         bind,
         data_dir: PathBuf::from(data_dir),
         api_url,
+        web_url,
         brain_mode,
         auth_mode,
         openhuman_url,
