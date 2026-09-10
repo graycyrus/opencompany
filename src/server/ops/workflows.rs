@@ -4970,6 +4970,95 @@ mod tests {
         assert_eq!(ids, vec!["demo"]);
     }
 
+    /// FAIL-axis: unlike the list route above (which skips a broken graph and
+    /// carries on), addressing the broken one directly is a single-resource
+    /// read on a body that cannot be used, and `OpenCompanyError::DataParse`
+    /// is centrally mapped to `400` (`server/error.rs`). This is the
+    /// single-workflow `GET` driven all the way through the router, not just
+    /// the loader function, so the mapping is proven at the seam the console
+    /// actually calls.
+    #[tokio::test]
+    async fn getting_a_malformed_workflow_by_id_answers_400_data_parse() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        use crate::company::CompanyManifest;
+        use crate::ports::CompanyStore;
+        use crate::ports::types::{CompanyId, CompanyRecord};
+        use crate::runtime::RuntimeBuilder;
+        use crate::server::router;
+        use crate::store::FsCompanyStore;
+        use crate::{AppConfig, AppState};
+
+        let dir = seed_demo();
+        std::fs::write(
+            dir.path().join("workflows").join("broken.toml"),
+            "id = \"broken\"\nname = \n[[node]] oops",
+        )
+        .unwrap();
+
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let store = FsCompanyStore::new(dir.path().to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_seed_dir(dir.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            runtime.source_dir().is_some(),
+            "test setup must give the company a real source tree to read `broken.toml` from"
+        );
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/company/workflows/broken")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"], "data_parse",
+            "the stable error code must name a parse failure, not a generic 500: {body}"
+        );
+    }
+
     // HTTP-level: a hosted tenant has no source directory to scan, so these
     // exercise the manifest-enabled union path end to end via the router.
     mod hosted_mode {
@@ -10039,6 +10128,81 @@ mod tests {
                 .unwrap();
             let graph = json_body(response).await;
             assert_eq!(graph["description"], "Say hi, every morning.");
+        }
+
+        /// CONC-axis: restore inherits `PUT`'s optimistic-concurrency check —
+        /// the doc on [`restore_workflow_revision`] says so — but only `PUT`'s
+        /// own stale-token 409 was ever driven end to end. This drives
+        /// restore's own conflict path: two consoles racing a restore of the
+        /// same revision with the token each read, the second losing.
+        #[tokio::test]
+        async fn a_stale_expected_version_is_a_conflict_on_restore() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let stale = create_then_edit_greeter(&state).await;
+
+            let list = json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let rev_id = list["revisions"][0]["id"].as_str().unwrap().to_string();
+            let before = list["revisions"].as_array().unwrap().len();
+
+            // Console A restores first, carrying the token it read.
+            let first = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
+                    Some(serde_json::json!({ "expectedVersion": stale })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::OK);
+
+            // Console B restores the SAME revision with the SAME token A already
+            // spent — it named the graph before A's write, not after it.
+            let second = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
+                    Some(serde_json::json!({ "expectedVersion": stale })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::CONFLICT);
+            let body = json_body(second).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(message.contains("reload"), "unhelpful 409: {body}");
+
+            // The refused restore must not have captured a second snapshot —
+            // restoring the same revision twice would otherwise look identical
+            // on the live graph (it is the same snapshot both times), so the
+            // history length is what actually distinguishes "refused" from
+            // "silently ran again".
+            let list = json_body(
+                router(state)
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                list["revisions"].as_array().unwrap().len(),
+                before + 1,
+                "only the first restore may have run: {list}"
+            );
         }
 
         /// **The silent-clobber guard, at the front door (issue #1013).** Omitting

@@ -338,6 +338,68 @@ async fn a_search_never_crosses_the_company_boundary() {
     );
 }
 
+// -- agent visibility --------------------------------------------------------
+
+/// [`search_workspace_for_agent`]'s whole reason to exist: the operator-only
+/// `secrets/` subtree must not surface a hit — neither by name nor by body —
+/// while the same query through the operator's own [`search_workspace`] still
+/// finds it. Matching both ways (like
+/// `a_query_matches_both_names_and_bodies` above) so the exclusion is proven
+/// against the same content an operator search would report by either route,
+/// not just the one the fixture happens to hit.
+#[tokio::test]
+async fn agent_search_never_surfaces_the_secrets_subtree() {
+    let (dir, ops, id) = seeded().await;
+    ops.create(&id, &folder("f-secrets", "secrets", None), None)
+        .await
+        .unwrap();
+    ops.create(
+        &id,
+        &file("n-cred", "vendor-credential.md", Some("f-secrets"), 4_000),
+        Some("The rotation password is hunter2."),
+    )
+    .await
+    .unwrap();
+
+    // The operator's own search reaches it, by name and by body.
+    let by_name = search(&ops, &id, "vendor-credential").await;
+    assert_eq!(paths(&by_name), vec!["secrets/vendor-credential.md"]);
+    let by_body = search(&ops, &id, "hunter2").await;
+    assert_eq!(paths(&by_body), vec!["secrets/vendor-credential.md"]);
+
+    // An agent's search must not, by either route.
+    let agent_by_name =
+        search_workspace_for_agent(ops.as_ref(), &id, "vendor-credential", None, limit(20))
+            .await
+            .expect("search");
+    assert!(
+        paths(&agent_by_name).is_empty(),
+        "a name match inside secrets/ must not reach an agent: {:?}",
+        paths(&agent_by_name)
+    );
+    let agent_by_body = search_workspace_for_agent(ops.as_ref(), &id, "hunter2", None, limit(20))
+        .await
+        .expect("search");
+    assert!(
+        paths(&agent_by_body).is_empty(),
+        "a body match inside secrets/ must not reach an agent: {:?}",
+        paths(&agent_by_body)
+    );
+
+    // Control: an agent search still finds ordinary content the fixture seeds,
+    // so the empty results above are the exclusion working, not a broken query.
+    let agent_ordinary =
+        search_workspace_for_agent(ops.as_ref(), &id, "Engineering", None, limit(20))
+            .await
+            .expect("search");
+    assert_eq!(
+        paths(&agent_ordinary),
+        vec!["standards/Engineering standards.md"]
+    );
+
+    drop(dir);
+}
+
 // -- ordering, limits and totals --------------------------------------------
 
 /// Name before content, freshest first inside each group, path as the tie-break.
