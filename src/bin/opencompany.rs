@@ -2166,8 +2166,13 @@ async fn async_main() -> Result<()> {
             // console cannot do — revoke a key, top the account up. Almost
             // always unset: `AppConfig::hub_site` derives it from `api_url`, so
             // a staging host links to staging with nothing else to state.
+            // Trim and blank out the env candidate *before* falling back to
+            // TOML — filtering only the combined result would let a
+            // whitespace-only `WEB_URL_ENV` win over a real `config.toml`
+            // value instead of falling through to it.
             let web_url = std::env::var(opencompany::app::config::WEB_URL_ENV)
                 .ok()
+                .filter(|value| !value.trim().is_empty())
                 .or_else(|| config_file.as_ref().and_then(|c| c.web_url.clone()))
                 .filter(|value| !value.trim().is_empty());
             // The listener address, across every layer that may name it. Until
