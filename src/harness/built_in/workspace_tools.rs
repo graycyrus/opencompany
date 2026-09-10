@@ -1763,14 +1763,6 @@ impl Tool for WorkspaceWriteTool {
             )));
         }
 
-        // Revision guard, best-effort: check-then-act, not an atomic
-        // compare-and-swap. The tree snapshot above is one authority on the
-        // current revision and catches the ordinary case — a note edited in the
-        // console since the agent's read is refused here rather than clobbered.
-        // The residual window (an edit landing between this check and the write
-        // below) is narrowed by re-checking against the live read further down,
-        // and can only be closed for real once the port grows a conditional
-        // write.
         let stale_refusal = |current: u64| {
             ToolResult::error(format!(
                 "Refused: `{path}` changed since you read it — you passed \
@@ -1828,11 +1820,12 @@ impl Tool for WorkspaceWriteTool {
         match self
             .workspace
             .store
-            .write(
+            .write_with_revision(
                 &self.workspace.company,
                 &entry.node.id,
                 content,
                 self.workspace.origin(),
+                Some(expected),
             )
             .await
         {
@@ -2837,12 +2830,13 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             unreachable!("the ownership gate only reads the tree")
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             _company: &CompanyId,
             _id: &str,
             _content: &str,
             _author: WorkspaceOrigin,
+            _expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the ownership gate only reads the tree")
         }
@@ -4246,12 +4240,13 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             crate::ports::workspace::read_capped_by_reading(self, company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             _company: &CompanyId,
             _id: &str,
             _content: &str,
             _author: WorkspaceOrigin,
+            _expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the listing never writes")
         }
@@ -5071,14 +5066,17 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             self.inner.read_capped(company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
-            self.inner.write(company, id, content, author).await
+            self.inner
+                .write_with_revision(company, id, content, author, expected_updated_at)
+                .await
         }
         async fn create(
             &self,
@@ -6430,17 +6428,20 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String, u64)>> {
             self.inner.read_capped(company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> crate::Result<WorkspaceNode> {
             if let Some(gate) = &self.write_gate {
                 gate.wait().await;
             }
-            self.inner.write(company, id, content, author).await
+            self.inner
+                .write_with_revision(company, id, content, author, expected_updated_at)
+                .await
         }
         async fn create(
             &self,
@@ -6516,16 +6517,7 @@ mod tests {
         }
     }
 
-    /// FAIL-axis (HT-033): the revision guard is check-then-act, as this
-    /// module's own comment admits, and `WorkspaceStore::write` takes no
-    /// expected revision — so the check has nothing to hand its decision to.
-    /// Two writers holding the same `expected_updated_at`, released together
-    /// after both have cleared the live re-check, both write and both are told
-    /// they succeeded; one edit is silently gone.
-    ///
-    /// The safe behaviour asserted here needs a conditional write on the port.
     #[tokio::test]
-    #[ignore = "no conditional write on WorkspaceStore: both racing writers are told they succeeded"]
     async fn two_writers_at_the_same_revision_cannot_both_be_told_they_succeeded() {
         let dir = tempfile::tempdir().unwrap();
         let real: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
@@ -6573,6 +6565,20 @@ mod tests {
             text(&ra),
             text(&rb)
         );
+        let (winner, loser, expected_body) = if ra.is_error {
+            (&rb, &ra, "B's edit")
+        } else {
+            (&ra, &rb, "A's edit")
+        };
+        assert!(!winner.is_error, "{}", text(winner));
+        assert!(
+            text(loser).contains("changed since you read it"),
+            "{}",
+            text(loser)
+        );
+        let (stored, body) = real.read(&company, "n-note").await.unwrap().unwrap();
+        assert_eq!(body, expected_body);
+        assert!(stored.updated_at_millis > rev);
     }
 
     /// FAIL-axis (HT-034): `workspace_create`'s duplicate check reads a tree
