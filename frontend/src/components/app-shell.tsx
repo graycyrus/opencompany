@@ -3671,7 +3671,7 @@ export function AppShell({
             />
           </>
         }
-        search={<TitleBarSearch />}
+        search={<TitleBarSearch client={client} company={company} />}
         utilities={
           // The three that were the sidebar's footer, beside Overview in the
           // same group: all four are about the console rather than the page.
