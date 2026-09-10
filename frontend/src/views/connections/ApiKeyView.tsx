@@ -133,6 +133,12 @@ export function ApiKeyView({ client, company }: Props) {
   }, [client, company]);
 
   const configured = status?.configured ?? false;
+  // `configured` is only "this company set its own key" — a host with no
+  // company key can still carry a fallback platform identity (`attested` /
+  // `static`), which already lets agents think and providers connect. Only
+  // `source === "none"` is the genuinely empty state the stronger wording
+  // below is about.
+  const noIdentityAtAll = (status?.source ?? "none") === "none";
   const summary = billing?.summary;
   const money = typeof summary?.balanceUsd === "number" ? summary.balanceUsd : null;
   // Zero is a number worth showing, so the empty test is on `null`, never on
