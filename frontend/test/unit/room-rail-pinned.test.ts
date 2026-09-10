@@ -143,18 +143,19 @@ describe("ChatView, mounted off its own route", () => {
   });
 
   it("closes the Room-only dialogs on the way out, and only those", () => {
-    // Codex P2 on this PR. `AddMemberDialog` and `BudgetDialog` open from the
-    // members pane, which is inside the `routeOpen` gate — but every dialog in
-    // this file sits OUTSIDE that gate, because two of them have triggers
-    // painted in the sidebar. Right for those two, wrong for these: leaving Room
-    // on Back used to unmount the view, and left an "Add teammate" sheet
-    // standing over Company once it stopped doing so. `BudgetDialog` also holds
-    // the member it was opened for, so it would come back still pointing at
-    // them.
+    // Codex P2 on this PR. `AddMemberDialog` opens from the members pane, which
+    // is inside the `routeOpen` gate — but every dialog in this file sits
+    // OUTSIDE that gate, because two of them have triggers painted in the
+    // sidebar. Right for those two, wrong for this one: leaving Room on Back
+    // used to unmount the view, and left an "Add agent" sheet standing over
+    // Company once it stopped doing so.
+    //
+    // `BudgetDialog` was the second one here, and held the member it was opened
+    // for so it came back still pointing at them. Per-agent caps are gone from
+    // the console, and the dialog with them.
     const effect = chatView.slice(chatView.indexOf("if (routeOpen) return;"));
     expect(chatView).toContain("if (routeOpen) return;");
     expect(effect.slice(0, 200)).toContain("setAddOpen(false)");
-    expect(effect.slice(0, 200)).toContain("setBudgetFor(null)");
     // And NOT the two the sidebar opens — closing those on the way out is the
     // whole thing this PR had to keep working from another section.
     expect(effect.slice(0, 200)).not.toContain("setChannelCreateOpen(false)");

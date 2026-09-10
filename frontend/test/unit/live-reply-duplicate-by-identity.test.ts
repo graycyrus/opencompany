@@ -41,11 +41,11 @@ describe("isDuplicateLiveReply", () => {
     // The bug this pins: a second, genuinely distinct B-101 notice (its own
     // seq, its own durable id) must render even though an operator repeating
     // the same `@name` gives it the exact same wording as the first.
-    const tail = [{ id: "h4", from: "system" as const, text: "you meant one of two teammates" }];
+    const tail = [{ id: "h4", from: "system" as const, text: "you meant one of two agents" }];
     expect(
       isDuplicateLiveReply(
         tail,
-        { seq: 9, text: "you meant one of two teammates" },
+        { seq: 9, text: "you meant one of two agents" },
         "system",
       ),
     ).toBe(false);

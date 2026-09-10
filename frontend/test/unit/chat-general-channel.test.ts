@@ -172,7 +172,7 @@ describe("the built-in #general channel", () => {
     expect(channels(ROSTER, [])[0].name).toBe(GENERAL_CHANNEL);
   });
 
-  it("holds the whole roster, derived — a teammate added later is in it", () => {
+  it("holds the whole roster, derived — an agent added later is in it", () => {
     const before = channels(ROSTER, DESKS)[0];
     expect(channelMembers(before, ROSTER)!.map((m) => m.id)).toEqual(["ceo", "eng"]);
 
@@ -227,11 +227,11 @@ describe("resolving a host thread to the general channel", () => {
     expect(channelIdForThread("engineering", DESKS, ROSTER)).toBe("engineering");
   });
 
-  it("still resolves a teammate DM", () => {
+  it("still resolves an agent DM", () => {
     expect(channelIdForThread("eng", DESKS, ROSTER)).toBe("dm:eng");
   });
 
-  it("keeps the line for the company when a teammate's id is a General spelling", () => {
+  it("keeps the line for the company when an agent's id is a General spelling", () => {
     // The host reserves `main` and `general` against newly minted teammates
     // (`RESERVED_AGENT_IDS`), but a manifest can still declare one. This used
     // to answer `dm:main` — the roster was consulted before the fold — and the
@@ -276,7 +276,7 @@ describe("resolving a host thread to the general channel", () => {
    * frames it emits under that key. Asserted here because the comment above has
    * claimed this routing since #1743 while nothing held the sender to it.
    */
-  it("reads back the DM of a teammate whose id is a General spelling", () => {
+  it("reads back the DM of an agent whose id is a General spelling", () => {
     const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
     expect(channelIdForThread("dm:main", DESKS, withMain)).toBe("dm:main");
     // The bare key still belongs to the company, unchanged by the arm above.
@@ -300,7 +300,7 @@ describe("resolving a host thread to the general channel", () => {
    * rejecting an explicit `#/chat/dm:main` link, which is the one address the
    * rest of this change exists to honour.
    */
-  it("offers that teammate as a DM target, now that the address is its own", () => {
+  it("offers that agent as a DM target, now that the address is its own", () => {
     const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
     const ids = directMessageChannels(withMain).map((c) => c.id);
     expect(ids).toContain("dm:main");
@@ -377,7 +377,7 @@ describe("resolving a host thread to the general channel", () => {
   /**
    * The rule itself, rather than the call sites that apply it.
    */
-  it("addresses only the General-spelling teammate prefixed", () => {
+  it("addresses only the General-spelling agent prefixed", () => {
     const mainard = member({ id: "main", name: "Mainard" });
     const eng = member({ id: "eng", name: "Engie" });
     expect(dmThreadId(mainard)).toBe("dm:main");
@@ -636,11 +636,11 @@ describe("resolving a live frame's thread id against the shell's map", () => {
     expect(channelForThread(MAP, "dm:eng")).toBe("dm:eng");
   });
 
-  it("answers null for a dm:-prefixed id naming no teammate in the map", () => {
+  it("answers null for a dm:-prefixed id naming no agent in the map", () => {
     expect(channelForThread(MAP, "dm:ghost")).toBeNull();
   });
 
-  it("folds a dm:-prefixed id's case, the way the host resolves the teammate it names", () => {
+  it("folds a dm:-prefixed id's case, the way the host resolves the agent it names", () => {
     expect(channelForThread(MAP, "dm:ENG")).toBe("dm:eng");
   });
 });

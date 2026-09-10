@@ -121,7 +121,7 @@ export function ConnectTinyHumansButton({
       </Button>
       <p className="text-xs text-muted-foreground">
         Sign in to TinyHumans and this company gets its key automatically — nothing to copy. It
-        covers both the model your teammates think with and the accounts they connect.
+        covers both the model your agents think with and the accounts they connect.
       </p>
     </div>
   );

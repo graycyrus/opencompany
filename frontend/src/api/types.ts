@@ -1803,7 +1803,7 @@ export interface CapabilityStatusDto {
   /**
    * Which provider the company's searches actually reach: `managed` (the
    * platform's own account, metered and daily-capped) or the slug it configured
-   * in Settings → Search.
+   * in Connections → Search.
    *
    * Read beside `searchCredentialConfigured` rather than instead of it: the two
    * disagree in both directions. A host with no platform credential still
@@ -1858,7 +1858,7 @@ export interface CapabilityStatusDto {
    * * `unconfigured` — a harness pool is attached to this company's runtime,
    *   but it resolved no inference source at boot, so it is running the offline
    *   echo brain and replying `"You said: …"` to everything. **Fixable in the
-   *   app**, at Settings → Inference. This is the state a fresh instance starts
+   *   app**, at Connections → Inference. This is the state a fresh instance starts
    *   in.
    * * `unavailable` — no agent harness is reachable on this host, so no
    *   configuration reaches a model. Only a different build or host wiring

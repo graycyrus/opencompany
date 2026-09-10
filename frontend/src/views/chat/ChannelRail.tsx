@@ -98,6 +98,19 @@ export function ChannelRail({
   // Resolved once and threaded down, so the three row shapes cannot come to
   // disagree about what marking the open channel means.
   const activeAria: "page" | "true" = currentPage ? "page" : "true";
+  // The FILL is gated on being the page; the mark is not.
+  //
+  // This rail is pinned in the sidebar on every section since #2130, so on
+  // `#/company/work` the channel you last opened was still painted with the
+  // selected pill — two filled rows on screen, one of them in a column you are
+  // not looking at, both claiming to be where you are. `aria-current` already
+  // drew this distinction (`page` vs `true`) and the pixels did not.
+  //
+  // Off-route the row keeps its weight and loses its fill: still legibly "the
+  // one Room will take you back to", no longer a claim to be the open page.
+  // `active` itself is untouched, so the unread badge stays suppressed on the
+  // channel you have actually read.
+  const onPage = currentPage;
   // Section disclosure lives here rather than inside `Section`, because the
   // collapsed branch below unmounts every `Section`. Held inside them, folding
   // a section and then collapsing the rail would reopen it on expand — the
@@ -119,7 +132,7 @@ export function ChannelRail({
     return (
       <aside
         className={cn(
-          "w-14 shrink-0 flex-col items-center overflow-y-auto border-r bg-sidebar/40 py-3",
+          "w-14 shrink-0 flex-col items-center border-r bg-sidebar/40 py-3",
           className,
         )}
       >
@@ -140,6 +153,7 @@ export function ChannelRail({
               channel={channel}
               active={channel.id === activeId}
               activeAria={activeAria}
+              onPage={onPage}
               unread={unread[channel.id] ?? 0}
               mentions={mentions?.[channel.id] ?? 0}
               onSelect={onSelect}
@@ -153,7 +167,7 @@ export function ChannelRail({
   return (
     <aside
       className={cn(
-        "w-64 shrink-0 flex-col overflow-y-auto border-r bg-sidebar/40 pb-3",
+        "w-64 shrink-0 flex-col border-r bg-sidebar/40 pb-3",
         className,
       )}
     >
@@ -164,6 +178,7 @@ export function ChannelRail({
             channel={section.channels[0]}
             active={section.channels[0]?.id === activeId}
             activeAria={activeAria}
+            onPage={onPage}
             unread={section.channels[0] ? (unread[section.channels[0].id] ?? 0) : 0}
             onSelect={onSelect}
           />
@@ -195,6 +210,7 @@ export function ChannelRail({
             }
             activeId={activeId}
             activeAria={activeAria}
+            onPage={onPage}
             unread={unread}
             mentions={mentions}
             onSelect={onSelect}
@@ -226,12 +242,15 @@ function PinnedOperatorRow({
   channel,
   active,
   activeAria,
+  onPage,
   unread,
   onSelect,
 }: {
   channel: Channel | undefined;
   active: boolean;
   activeAria: "page" | "true";
+  /** Whether this rail's channel is the page on screen — see `onPage`. */
+  onPage: boolean;
   unread: number;
   onSelect: (id: string) => void;
 }) {
@@ -247,7 +266,9 @@ function PinnedOperatorRow({
         className={cn(
           "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
           active
-            ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+            ? onPage
+              ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+              : "font-medium text-foreground"
             : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
           hasUnread && "font-semibold text-foreground",
         )}
@@ -272,6 +293,7 @@ function CompactChannelRow({
   channel,
   active,
   activeAria,
+  onPage,
   unread,
   mentions,
   onSelect,
@@ -279,6 +301,8 @@ function CompactChannelRow({
   channel: Channel;
   active: boolean;
   activeAria: "page" | "true";
+  /** Whether this rail's channel is the page on screen — see `onPage`. */
+  onPage: boolean;
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
@@ -308,7 +332,9 @@ function CompactChannelRow({
       className={cn(
         "relative flex size-9 shrink-0 items-center justify-center rounded-md transition-colors",
         active
-          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          ? onPage
+            ? "bg-sidebar-accent text-sidebar-accent-foreground"
+            : "text-foreground"
           : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
       )}
     >
@@ -372,6 +398,7 @@ function Section({
   section,
   activeId,
   activeAria,
+  onPage,
   unread,
   mentions,
   onSelect,
@@ -382,6 +409,8 @@ function Section({
   section: ChannelSection;
   activeId: string | null;
   activeAria: "page" | "true";
+  /** Whether this rail's channel is the page on screen — see `onPage`. */
+  onPage: boolean;
   unread: Record<string, number>;
   mentions?: Record<string, number>;
   onSelect: (id: string) => void;
@@ -453,6 +482,7 @@ function Section({
                 channel={channel}
                 active={channel.id === activeId}
                 activeAria={activeAria}
+                onPage={onPage}
                 unread={unread[channel.id] ?? 0}
                 mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
@@ -472,6 +502,7 @@ function ChannelRow({
   channel,
   active,
   activeAria,
+  onPage,
   unread,
   mentions,
   onSelect,
@@ -479,6 +510,8 @@ function ChannelRow({
   channel: Channel;
   active: boolean;
   activeAria: "page" | "true";
+  /** Whether this rail's channel is the page on screen — see `onPage`. */
+  onPage: boolean;
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
@@ -500,7 +533,9 @@ function ChannelRow({
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
         active
-          ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+          ? onPage
+            ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+            : "font-medium text-foreground"
           : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
         hasUnread && "font-semibold text-foreground",
       )}

@@ -50,7 +50,7 @@ const OPERATOR: Channel = {
   id: "operator",
   name: "Operator",
   kind: "channel",
-  purpose: "Workflow reports and notifications",
+  purpose: "Automation reports and notifications",
   system: true,
 };
 
@@ -120,7 +120,7 @@ function report(over: Partial<ChatMessage> = {}): ChatMessage {
   return {
     id: "h1",
     from: "company",
-    text: "Workflow **weekly digest** finished.",
+    text: "Automation **weekly digest** finished.",
     at: T0,
     ...over,
   };

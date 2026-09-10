@@ -71,7 +71,7 @@ afterEach(() => {
 });
 
 describe("an agent detail read that fails answers with the right one of three honest states", () => {
-  it("says the teammate is gone when the roster no longer lists it", async () => {
+  it("says the agent is gone when the roster no longer lists it", async () => {
     const client = clientWith({
       getAgent: () => Promise.reject(new ApiError(404, "not_found", "no such agent")),
       listTeam: () => Promise.resolve([{ id: "somebody-else" }]),
@@ -88,7 +88,7 @@ describe("an agent detail read that fails answers with the right one of three ho
     });
     await show(client);
 
-    expect(container.textContent).toContain("can't open a teammate yet");
+    expect(container.textContent).toContain("can't open an agent yet");
   });
 
   it("says the host didn't answer for a transport failure, never blank", async () => {
@@ -97,7 +97,7 @@ describe("an agent detail read that fails answers with the right one of three ho
     });
     await show(client);
 
-    expect(container.textContent).toContain("Couldn't load this teammate");
+    expect(container.textContent).toContain("Couldn't load this agent");
   });
 
   it("treats a genuine access refusal as an honest failure too, not a blank screen", async () => {
@@ -107,11 +107,11 @@ describe("an agent detail read that fails answers with the right one of three ho
     });
     await show(client);
 
-    expect(container.textContent).toContain("Couldn't load this teammate");
+    expect(container.textContent).toContain("Couldn't load this agent");
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it("renders the teammate normally once the read actually succeeds", async () => {
+  it("renders the agent normally once the read actually succeeds", async () => {
     const client = clientWith({ getAgent: () => Promise.resolve(detail()) });
     await show(client);
 

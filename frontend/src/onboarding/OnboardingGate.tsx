@@ -147,14 +147,14 @@ export function OnboardingGate({
     {
       id: "integration",
       label: "Connect an integration",
-      hint: "Gmail, Slack, GitHub — wherever your teammates should reach first.",
+      hint: "Gmail, Slack, GitHub — wherever your agents should reach first.",
       icon: Plug,
       done: status.integrationConnected,
       waived: !status.integrationConnected && isWaived("integration"),
     },
     {
       id: "workflow",
-      label: "Run a workflow",
+      label: "Run an automation",
       hint: "One real run — not a test — proves the company actually works.",
       icon: Workflow,
       done: status.workflowRunSucceeded,

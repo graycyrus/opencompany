@@ -37,6 +37,7 @@ import {
   type TurnStep,
   type TurnStepKind,
 } from "@/api/types";
+import { consoleHref } from "@/lib/console-paths";
 import { cn } from "@/lib/utils";
 
 /**
@@ -362,7 +363,7 @@ export function CardChip({
 }) {
   const link = (
     <a
-      href={`#/tasks/${encodeURIComponent(taskId)}`}
+      href={consoleHref("tasks", taskId)}
       className={cn(
         "flex items-center gap-1 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80",
         onDismiss ? "pl-2 pr-1" : "px-2",

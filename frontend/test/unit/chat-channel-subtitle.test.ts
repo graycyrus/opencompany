@@ -76,7 +76,7 @@ const ROLE_ONLY = member({
 });
 
 describe("channelSubtitle on a DM", () => {
-  it("says what the teammate does, for a teammate the host never named", () => {
+  it("says what the agent does, for an agent the host never named", () => {
     // The #1180 case end to end. The title says who; this says what for, out of
     // the description the roster entry was carrying unused all along.
     expect(channelSubtitle(dmFor(ROLE_ONLY))).toBe("Build and operate the backend and services.");
@@ -91,7 +91,7 @@ describe("channelSubtitle on a DM", () => {
     expect(channelSubtitle(dm)).not.toBe(channelTitle(dm));
   });
 
-  it("keeps the role for a named teammate with no description", () => {
+  it("keeps the role for a named agent with no description", () => {
     // Not a blanket "drop the role": for a teammate the host *did* name, the
     // role is a genuinely different string from the title and worth the space.
     const dm = dmFor(member({ id: "agent_ada", name: "Ada", role: "Backend Engineer" }));
@@ -210,7 +210,7 @@ describe("buildChannels fills a DM's purpose from the description", () => {
     expect(dmFor(ROLE_ONLY).purpose).toBe("Build and operate the backend and services.");
   });
 
-  it("falls back to the role when the teammate has no description", () => {
+  it("falls back to the role when the agent has no description", () => {
     // Still the fallback rather than an empty string: dropping the role here
     // would take the subtitle away from every *named* teammate too, and
     // `channelSubtitle` is the right place to decline a duplicate.

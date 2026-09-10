@@ -39,7 +39,7 @@ describe("PendingSyncPosts.ended reconciles held system frames against the respo
   it("releases a held system frame the settled response never carried", () => {
     const pending = new PendingSyncPosts();
     pending.started("main");
-    const note = { chatId: "main", agentId: "system", text: "you meant one of two teammates" };
+    const note = { chatId: "main", agentId: "system", text: "you meant one of two agents" };
     pending.capture(note);
 
     // The response body carried only the operator's own reply text — never

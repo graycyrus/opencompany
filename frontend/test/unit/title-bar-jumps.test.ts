@@ -166,7 +166,7 @@ describe("the overview jump", () => {
   });
 });
 
-describe("the sidebar no longer carries the count", () => {
+describe("the sidebar carries the count again", () => {
   const shell = readFileSync(
     resolve(process.cwd(), "src/components/app-shell.tsx"),
     "utf8",
@@ -175,26 +175,35 @@ describe("the sidebar no longer carries the count", () => {
     resolve(process.cwd(), "src/components/ui/sidebar.tsx"),
     "utf8",
   );
+  const nav = readFileSync(
+    resolve(process.cwd(), "src/components/sidebar-navigation.tsx"),
+    "utf8",
+  );
 
-  it("renders neither the badge nor the dot", () => {
-    // Two mechanisms for one number is exactly what #1018 had to reconcile.
-    // With the signal in chrome that never collapses, the cheapest way not to
-    // have that problem is not to have two.
-    expect(shell).not.toMatch(/<SidebarMenuBadge/);
-    expect(shell).not.toMatch(/<SidebarMenuDot/);
+  it("renders the badge and the dot together, never one alone", () => {
+    // The pair is the whole point (#1018): `SidebarMenuBadge` hides itself on
+    // the icon rail, so a badge with no dot is a count that vanishes the moment
+    // the sidebar collapses — and a collapsed rail showing nothing is
+    // indistinguishable from all-clear. A dot with no badge is the mirror bug:
+    // an attention mark that never says how many.
+    expect(nav).toMatch(/<SidebarMenuBadge/);
+    expect(nav).toMatch(/<SidebarMenuDot/);
   });
 
-  it("has retired the dot primitive rather than leaving it unused", () => {
-    // An unused export is a third state: not rendered, not deleted, and free to
-    // be re-added by someone who does not know why it existed.
-    expect(sidebar).not.toMatch(/function SidebarMenuDot/);
-    // The reason it went is left where the next person will look for it.
-    expect(sidebar).toContain("SidebarMenuDot` used to live here");
+  it("keeps the dot primitive and its mirror rule together", () => {
+    expect(sidebar).toMatch(/function SidebarMenuDot/);
+    // The badge hides on the rail; the dot shows only there. Neither class is
+    // decoration, and a change to one without the other reopens #1018.
+    expect(sidebar).toContain("group-data-[collapsible=icon]:hidden");
+    expect(sidebar).toContain("group-data-[collapsible=icon]:block");
   });
 
-  it("feeds the title row the same single pending value", () => {
-    // Never re-counted here. `feed.status.pending_approvals` is the one source,
-    // and the contract issue #932 pins is that there is exactly one.
-    expect(shell).toMatch(/<ApprovalsButton\s+pending=\{pending\}/);
+  it("feeds the sidebar the same single pending value", () => {
+    // Never re-counted. `feed.status.pending_approvals` is the one source, and
+    // the contract issue #932 pins is that there is exactly one — which is why
+    // it is passed through rather than derived where it is drawn.
+    expect(shell).toMatch(/<SidebarNavigation[^>]*pending=\{pending\}/);
+    // And the title row no longer carries a second copy of it.
+    expect(shell).not.toMatch(/<ApprovalsButton/);
   });
 });

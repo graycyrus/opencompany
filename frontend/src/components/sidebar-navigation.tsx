@@ -8,16 +8,20 @@ import {
   Network,
   Plug,
   Wallet,
+  ShieldCheck,
   Workflow,
 } from "lucide-react";
 
 import {
   SidebarGroup,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
+  SidebarMenuDot,
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { approvalsCount, approvalsLabel } from "@/components/approvals-button";
 import { RESTING_ROW } from "@/components/sidebar-controls";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { isNavigationActive, type View } from "@/lib/console-routes";
@@ -51,12 +55,27 @@ export interface NavChild {
    */
   hint: string;
   /**
-   * This child's own sub-pages, rendered indented under it while it is the open
-   * row. Finance is the only one, and it nests rather than drawing a rail of its
-   * own because two `w-60` rails in one viewport is issue #1383 — the argument
-   * is on `SectionContentRail`.
+   * This child's own sub-pages, rendered indented under it. Finance is the only
+   * one, and it nests rather than drawing a rail of its own because two `w-60`
+   * rails in one viewport is issue #1383 — the argument is on
+   * `SectionContentRail`.
    */
   children?: NavChild[];
+  /**
+   * Render this child as a **caption over its pages**, not as a row you press.
+   *
+   * A row with children is a destination that also opens: you click it, it
+   * navigates, and its pages appear under it. A `group` is not a destination at
+   * all — it is a heading, its pages are always listed beneath it, and there is
+   * nothing to press on the heading itself. The Settings rail has had exactly
+   * this shape all along (`SETTINGS_PAGE_GROUPS`), which is what makes it the
+   * pattern to match rather than a third thing to learn.
+   *
+   * A `group` therefore needs no `view`/`sub` of its own that anyone lands on —
+   * it keeps them only so the table stays one type, and the rail never calls
+   * its `onSelect`.
+   */
+  group?: boolean;
 }
 
 /**
@@ -77,16 +96,17 @@ export interface NavSection {
 }
 
 /**
- * The console's four sections.
+ * The console's five sections.
  *
  * ## Why four rows and not ten
  *
  * Ten flat rows is not a list an operator scans, it is a wall — the same
  * judgement `docs/spec/runtime/ledgers-console-ia.md` made when it rejected a
- * row per declared list. What replaces it is four things you can name without
- * reading: the room you talk in, the company you are running, what it is
- * connected to, and the work it repeats. Everything else is filed under one of
- * them, in the sidebar, visible while you are in that section.
+ * row per declared list. What replaces it is a handful of things you can name
+ * without reading: the room you talk in, the company you are running, what it
+ * is connected to, the work it repeats, and what is waiting on you. Everything
+ * else is filed under one of them, in the sidebar, visible while you are in
+ * that section.
  *
  * ## Labels and view ids are allowed to differ
  *
@@ -100,7 +120,7 @@ export interface NavSection {
  * ## Sub-navigation lives in the CONTENT area, not here
  *
  * This table feeds two surfaces now, and only one of them is the sidebar. The
- * four rows above are the sidebar's; every `children` list below is read by
+ * top-level rows above are the sidebar's; every `children` list below is read by
  * `components/section-rail.tsx` and drawn as the first column of the content
  * area, the way Settings has always drawn its own.
  *
@@ -159,24 +179,50 @@ export const NAV_SECTIONS: NavSection[] = [
       // Today's Company page, renamed. "Company > Company" said the word twice
       // and told you nothing; what the page actually is, is the roster and the
       // org chart — the agents.
-      { view: "company", label: "Agents", icon: Network, hint: "Who is in this company" },
+      { view: "company", sub: "agents", label: "Agents", icon: Network, hint: "Who is in this company" },
       // Tasks by default; every other list the company declared is one click
       // away through the switcher on `LedgersView`'s own title. See
       // `docs/spec/runtime/ledgers-console-ia.md` Rule 2 for why this is one
       // row and not one per list.
       { view: "ledgers", label: "Work", icon: BookText, hint: "Tasks, and every list it declared" },
       { view: "workspace", label: "Workspace", icon: FolderClosed, hint: "The files it keeps" },
+      // One row, not a three-row caption group. Brain's Overview, Upload and
+      // Settings are tabs in the page's own header now
+      // (`views/memory/brain-pages.ts` argues why): one subject looked at three
+      // ways, rather than three destinations worth three of the sidebar's
+      // scarce rows. The addresses are unchanged — the row still opens
+      // `#/company/brain`, and `#/company/brain/upload` still opens Upload.
       { view: "brain", label: "Brain", icon: Brain, hint: "What it remembers" },
-      // The one row with sub-pages of its own. They are nested here rather than
-      // left as a second rail inside the Finance page: Company already draws a
-      // `w-60` rail, and a second one beside it is issue #1383 at every width
-      // rather than only at 768–1023px. `FinanceSection` is dispatch-only as a
-      // result, which is the shape `ConnectionsSection` already had.
+      // A row under Company, with sub-pages of its own — the table's one
+      // grandchild list.
+      //
+      // It was briefly a top-level section beside Company and Connections, on
+      // the argument that being two levels down made its pages reachable
+      // differently from everybody else's. What that missed is what the row is
+      // *about*: what a company earns and spends is one of the facts Company
+      // enumerates, alongside who is in it and what it remembers — a section of
+      // its own put a peer of Connections next to it and said this is a
+      // different subject, which it is not.
+      //
+      // Nested rather than left as a second rail inside the Finance page:
+      // Company already draws a `w-60` rail, and a second one beside it is
+      // issue #1383 at every width rather than only at 768–1023px.
+      // `FinanceSection` is dispatch-only as a result, which is the shape
+      // `ConnectionsSection` already had.
       {
         view: "finances",
         label: "Finance",
         icon: Wallet,
         hint: "What it earns and spends",
+        // A caption over its three pages, not a row that reveals them.
+        //
+        // As a row it was the odd one out twice over: the only entry on this
+        // rail whose pages were hidden until you pressed it, and — because a
+        // row is an icon and a word — a glyph that looked like a destination
+        // and behaved like a disclosure. Overview, Invoicing and Wallet are
+        // now simply listed, the way Settings lists the pages under
+        // "Identity & lifecycle".
+        group: true,
         children: FINANCE_PAGES.map((page) => ({
           view: "finances" as const,
           sub: page.id,
@@ -215,16 +261,30 @@ export const NAV_SECTIONS: NavSection[] = [
   // whose state is persisted client-side rather than carried by the address
   // (`WorkflowsView`'s `indexTab`), so it is not a pair of routes and promoting
   // it to a rail would be inventing sub-pages rather than relocating any.
-  { view: "workflows", label: "Flows", icon: Workflow },
-  // Overview and Approvals are NOT here, and neither is Observatory. All three
-  // are Rule-6 calls, made explicitly in
-  // `docs/spec/runtime/ledgers-console-ia.md`:
+  { view: "workflows", label: "Automations", icon: Workflow },
+  // What is waiting on you.
   //
-  //   - Overview and Approvals moved UP, into the window's title row, where
-  //     they are chrome rather than destinations — a place you jump to from
-  //     anywhere, and a count that has to be visible from every page including
-  //     the collapsed rail (issue #1018). Discoverable elsewhere, in Rule 6's
-  //     first sense.
+  // It spent a release as an icon in the window's title row, on the argument
+  // that a count has to be visible from every page including the collapsed
+  // rail (issue #1018) and that chrome is the only place that is true of. The
+  // count is the part that argument was really about, and it is answered here
+  // by the badge/dot pair below rather than by the row's location: the badge
+  // shows the number in the column, the dot survives the 3rem rail, and
+  // `SidebarMenuDot` exists again for exactly that reason.
+  //
+  // What the title row could not give it is what it is: a place you GO. It sat
+  // between an Overview glyph and an autonomy pill as one unlabelled square,
+  // so the one surface in the console that asks the operator to do something
+  // was the hardest of the five to name. A row with the word on it, in the
+  // list of places, is the plainer answer.
+  { view: "approvals", label: "Approvals", icon: ShieldCheck },
+  // Overview is NOT here, and neither is Observatory. Both are Rule-6 calls,
+  // made explicitly in `docs/spec/runtime/ledgers-console-ia.md`:
+  //
+  //   - Overview moved UP, into the window's title row, where it is chrome
+  //     rather than a destination — a place you jump to from anywhere.
+  //     Discoverable elsewhere, in Rule 6's first sense. Approvals went with
+  //     it and has come back; see the row above.
   //   - Observatory moved DOWN, into Settings (`settings-pages.ts`), as a rail
   //     row. The rewrite runs the other way from the one you would guess:
   //     `#/settings/observatory` is rewritten onto `#/observatory`, NOT the
@@ -388,9 +448,16 @@ export function childAnchor(section: NavSection, child: NavChild): string | unde
 export function SidebarNavigation({
   view,
   onNavigate,
+  pending,
 }: {
   view: View;
   onNavigate: (view: View, sub?: string) => void;
+  /**
+   * How many approvals are waiting — `feed.status.pending_approvals`, passed
+   * through unchanged. Zero is an ordinary state: the row stays and neither
+   * the badge nor the dot appears.
+   */
+  pending: number;
 }) {
   const { isMobile, setOpenMobile } = useSidebar();
   const { setElement } = useRoomRailSlot();
@@ -415,13 +482,41 @@ export function SidebarNavigation({
             <SidebarMenuItem key={section.view} data-tour={`nav-${section.view}`}>
               <SidebarMenuButton
                 isActive={section === active}
-                tooltip={section.label}
+                // The count belongs in the tooltip too. On the 3rem rail the
+                // label is gone and the dot says only "something", so without
+                // this the collapsed state can report that approvals are
+                // waiting and offer no way to learn how many short of
+                // navigating. `approvalsLabel` is the same sentence the title
+                // row's button used, kept so the two never drift.
+                tooltip={
+                  section.view === "approvals" ? approvalsLabel(pending) : section.label
+                }
                 onClick={() => navigate(section.view, section.sub)}
                 className={RESTING_ROW}
               >
                 <section.icon />
                 <span>{section.label}</span>
               </SidebarMenuButton>
+              {section.view === "approvals" && pending > 0 && (
+                <>
+                  {/* Read off the row without opening anything, and without
+                      depending on the badge's text — which is capped at
+                      `99+` and therefore is not the number. */}
+                  <SidebarMenuBadge
+                    data-testid="sidebar-approvals-count"
+                    data-pending={pending}
+                    // The row's only piece of colour, deliberately: it is the
+                    // one thing in this column that ever asks for attention.
+                    className="bg-status-blocked-soft text-status-blocked-text"
+                  >
+                    {approvalsCount(pending)}
+                  </SidebarMenuBadge>
+                  {/* The badge's mirror on the icon rail, where the badge
+                      hides itself. Exactly one of the two is ever on screen —
+                      see `SidebarMenuDot`. */}
+                  <SidebarMenuDot data-testid="sidebar-approvals-dot" />
+                </>
+              )}
             </SidebarMenuItem>
           ))}
         </SidebarMenu>
@@ -437,10 +532,14 @@ export function SidebarNavigation({
           footer either, so a rule here would also have been the only one in the
           column.
 
-          `pt-5` rather than the group's own `py-1`: deliberate, and large enough
-          that the break is legible at a glance rather than a row gap that reads
-          as an accident. Together with the fixed block's `pb-1` that is 24px of
-          air against an 8px rhythm.
+          The gap is the column's own rhythm, and no more: the fixed block's
+          `pb-1` plus `SidebarContent`'s `gap-1` is 8px, which is the same step
+          between any two rows in the column. This carried a `pt-5` on top of
+          that — 24px against an 8px rhythm — on the argument that the break had
+          to be legible at a glance. It read instead as the channel list having
+          come loose from the four rows above it, which is the one thing this
+          column should never suggest: they are one navigation surface, and the
+          section caption below already names where the second half starts.
 
           `min-h-0 flex-1`, so a long channel list scrolls INSIDE itself rather
           than pushing the four rows or the footer off the column. A flex item's
@@ -449,7 +548,12 @@ export function SidebarNavigation({
           scrolls. */}
       <SidebarGroup
         className={cn(
-          "min-h-0 flex-1 pt-5",
+          // No `min-h-0 flex-1` any more. It used to claim the column's
+          // leftover height so a long channel list scrolled INSIDE itself
+          // rather than pushing the rows above it away; the whole column is one
+          // scroller now (`sidebar-inner`), so the list grows to its content
+          // and the column scrolls past it.
+          "",
           // On the 3rem rail this group's own `px-2` is the difference between
           // fitting and not. The rail is 48px; the gutter leaves a 32px content
           // box, and `ChannelRail`'s compact rows are `size-9` (36px) with their
@@ -476,7 +580,11 @@ export function SidebarNavigation({
         <div
           ref={setElement}
           data-testid="room-rail-slot"
-          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
+          // Grows to the list it holds. It scrolled itself while the column
+          // had a fixed-height middle; with one scroller on `sidebar-inner`
+          // a second one here would trap the channel list in a box inside a
+          // page that also scrolls.
+          className="flex min-w-0 flex-col"
         />
       </SidebarGroup>
     </>

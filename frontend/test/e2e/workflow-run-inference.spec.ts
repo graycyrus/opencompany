@@ -54,7 +54,7 @@ test("a run refused for a missing inference provider shows a persistent, linked 
       contentType: "application/json",
       body: JSON.stringify({
         error:
-          "workflow execution needs an inference source, and none is configured " +
+          "automation execution needs an inference source, and none is configured " +
           "for this company. Set a provider in Settings → Inference, then run again.",
         code: "inference_required",
       }),

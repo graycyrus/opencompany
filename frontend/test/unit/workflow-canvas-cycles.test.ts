@@ -70,7 +70,7 @@ function issueToPr(): WorkflowGraph {
 const xOf = (nodes: ReturnType<typeof layout>["nodes"], id: string) =>
   nodes.find((n) => n.id === id)!.position.x;
 
-describe("cyclic workflow layout", () => {
+describe("cyclic automation layout", () => {
   it("breaks the loop's return edge, not an edge on the way in", () => {
     const broken = [...backEdges(issueToPr())].map((e) => `${e.from}->${e.to}`).sort();
     // Exactly the two returns. Breaking `read_and_plan->review_plan` instead

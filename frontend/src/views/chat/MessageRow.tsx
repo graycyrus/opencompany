@@ -6,6 +6,7 @@ import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-pro
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
+import { consoleHref } from "@/lib/console-paths";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { isBudgetPauseNotice } from "@/hooks/use-events";
@@ -582,8 +583,8 @@ function SystemPill({
     <div className="flex flex-wrap items-center justify-center gap-2 px-4 py-1">
       {taskId ? (
         <a
-          href={`#/tasks/${encodeURIComponent(taskId)}`}
-          className={cn(className, "transition-opacity hover:opacity-80 hover:underline")}
+          href={consoleHref("tasks", taskId)}
+          className={cn(className, "transition-opacity hover:opacity-80")}
         >
           {message.text}
         </a>
@@ -628,7 +629,7 @@ function AuthorLine({
     <button
       type="button"
       onClick={() => openProfile(agentId)}
-      className="truncate rounded-sm text-sm font-semibold tracking-tight hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="truncate rounded-sm text-sm font-semibold tracking-tight focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring transition-opacity hover:opacity-80"
     >
       {sender.name}
     </button>

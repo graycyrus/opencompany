@@ -13,11 +13,10 @@ import { createPortal } from "react-dom";
 import { TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
-import { listPeople, me as fetchMe, type Person } from "@/api/auth";
+import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
-import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
@@ -48,20 +47,18 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
-import { settingsHref } from "@/views/settings-pages";
+import { connectionsHref } from "@/views/connection-pages";
 import {
   addMemberFailure,
   reportAddMember,
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
-import { usd } from "@/lib/money";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
-import { personAvatar, personName } from "@/lib/person";
+import { personAvatar } from "@/lib/person";
 import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
-import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
@@ -211,6 +208,13 @@ interface Props {
    * presence route, or when nobody else is connected to this replica.
    */
   presence?: ReadonlyMap<string, { status: "online" | "away" | "offline" }>;
+  /**
+   * The autonomy control, rendered on the composer's toolbar row.
+   *
+   * A node, not the policy: `AppShell` owns the tier and the admin check, and
+   * handing the rendered pill down keeps every fact about policy in one place.
+   */
+  autonomy?: ReactNode;
   /**
    * The company's people, for the members pane's People section.
    *
@@ -456,6 +460,7 @@ export function ChatView({
   routeOpen = true,
   onNavigate,
   onOpenAgent,
+  autonomy,
   onReply,
   transcripts,
   setTranscripts,
@@ -517,7 +522,7 @@ export function ChatView({
    * The cognition read is in the set too, and it was not at first: it already
    * refreshes on `visibilitychange`, which sounded like enough and is not. That
    * event is about the *tab*, not the route — an admin who follows the Room
-   * warning to Settings → Inference, configures a provider and comes back has
+   * warning to Connections → Inference, configures a provider and comes back has
    * never hidden the tab, so the stale warning and its echo placeholders would
    * have stayed (Codex P2 review).
    */
@@ -634,15 +639,8 @@ export function ChatView({
   const [railOpenSections, setRailOpenSections] = useState<Record<string, boolean>>({});
   const toggleRailSection = (id: string) =>
     setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
-  const [isAdmin, setIsAdmin] = useState(false);
   /** Your own avatar reference, once `loadViewer` has resolved who you are. */
   const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
-  // Who set which cap (issue #360, ported from the retired Team page). Only
-  // an admin may read the user directory, so this stays empty for a member —
-  // the attribution line degrades to "an admin" rather than disappearing.
-  const [people, setPeople] = useState<Person[]>([]);
-  // The member whose budget dialog is open, if any.
-  const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
 
   /**
    * Ask the host whether this company can think (issues #1734, #1735).
@@ -662,7 +660,7 @@ export function ChatView({
    * answer can go stale under a console that is doing nothing at all: another
    * admin, or this operator in a second window, can configure inference and
    * rebuild the runtime while this chat sits open (codex, PR #1740). The
-   * operator's *own* trip to Settings → Inference already re-reads — the shell
+   * operator's *own* trip to Connections → Inference already re-reads — the shell
    * mounts and unmounts `ChatView` per route, so coming back remounts it — but
    * nothing covered the cross-session case, and a standing banner insisting
    * that a company which now thinks perfectly well cannot is the same class of
@@ -801,42 +799,27 @@ export function ChatView({
    * prevents.
    */
   // Only the newest load may write, exactly as `loadDesks` guards its own runs.
-  // `fetchMe` and `listPeople` can overlap — a scope change while a request is
-  // merely slow — and a stale answer landing last would wear the previous
-  // company's face on your own lines. The face is cleared *before* the fetch so
-  // a slow request can never pin an old avatar across a scope change; the
-  // timeline falls back to the name-seeded mascot meanwhile.
+  // A scope change while a request is merely slow would otherwise let a stale
+  // answer land last and wear the previous company's face on your own lines.
+  // The face is cleared *before* the fetch so a slow request can never pin an
+  // old avatar across a scope change; the timeline falls back to the
+  // name-seeded mascot meanwhile.
+  //
+  // It used to read the user directory too, to attribute who set a teammate's
+  // daily cap. There are no caps in the console any more, so the second request
+  // went with them and this is one call again.
   const viewerRun = useRef(0);
   const loadViewer = useCallback(async () => {
     const run = ++viewerRun.current;
     setYouAvatar(undefined);
-    let admin = false;
     try {
       const who = await fetchMe(client, company);
       if (run !== viewerRun.current) return;
-      admin = who.role === "admin";
       // Your own face, so your lines in a busy channel are yours at a glance.
-      // Read from the same call that resolves your role — there is no second
-      // round trip for it, and no way for the two to disagree about who you are.
       setYouAvatar(personAvatar(who));
     } catch {
-      if (run !== viewerRun.current) return;
-      // No user plane on this host, or not signed in — treat as non-admin, and
-      // leave the composer's own lines on the name-seeded fallback.
-    }
-    setIsAdmin(admin);
-    if (!admin) {
-      setPeople([]);
-      return;
-    }
-    try {
-      const people = await listPeople(client, company);
-      if (run !== viewerRun.current) return;
-      setPeople(people);
-    } catch {
-      if (run !== viewerRun.current) return;
-      // Attribution falls back to "an admin"; not worth a toast.
-      setPeople([]);
+      // No user plane on this host, or not signed in — leave the composer's
+      // own lines on the name-seeded fallback.
     }
   }, [client, company, roomVisits]);
 
@@ -846,50 +829,10 @@ export function ChatView({
     void loadViewer();
   }, [boot, loadViewer]);
 
-  /** A human label for whoever set a cap — never a raw user id. */
-  function whoSet(userId: string): string {
-    const person = people.find((p) => p.id === userId);
-    return person ? personName(person) : "an admin";
-  }
 
-  const budgetError = (error: unknown, fallback: string): string => {
-    if (error instanceof ApiError) {
-      if (error.status === 404) return "This host doesn't support console budgets yet.";
-      return error.message;
-    }
-    return error instanceof Error ? error.message : fallback;
-  };
 
-  /**
-   * Set, change, or remove a teammate's daily cap.
-   *
-   * `cap` is `null` to remove the cap and a number to set one — `0` included,
-   * which caps the teammate at nothing. The two are different states on the
-   * host and must stay different here, which is why this takes `number |
-   * null` and never an optional.
-   */
-  async function applyBudget(member: TeamMember, cap: number | null) {
-    try {
-      const row = await client.setTeamBudget(member.id, cap, company);
-      // Update the one card from the host's answer rather than refetching the
-      // roster: the response IS the new state, so a refetch could only disagree.
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't change the daily cap."));
-    }
-  }
 
-  /** Drop the override so the company's own default applies again. */
-  async function resetBudget(member: TeamMember) {
-    try {
-      const row = await client.clearTeamBudgetOverride(member.id, company);
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success("Reset to the company default.");
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't reset the daily cap."));
-    }
-  }
+
 
   // Only the newest load may write. Two loads can be in flight at once — a
   // company switch, or a Retry over a request that is merely slow rather than
@@ -938,20 +881,43 @@ export function ChatView({
    * broken `/desks` permanently show `#general` while the URL claimed a real
    * desk (issue #370). Those surface as an error the operator can retry.
    */
+  /**
+   * The `(client, company)` the desks on screen were loaded for.
+   *
+   * What decides whether a reload may blank the list. See `loadDesks`.
+   */
+  const desksLoadedFor = useRef<{ client: unknown; company: string | null } | null>(null);
+
   const loadDesks = useCallback(async () => {
     const run = ++desksRun.current;
-    setDesks(null);
+    // Blank the list only when the SCOPE changed — a different host or a
+    // different company, where the desks on screen belong to somebody else and
+    // showing them for another moment would be a lie.
+    //
+    // A plain revisit is the other caller, and it must not blank anything.
+    // `roomVisits` re-runs this every time an operator returns to Room, and
+    // `setDesks(null)` sent `ChatView` down its `if (!desks)` branch — which
+    // renders a loading pane and, crucially, no rail. The rail is portalled
+    // into the app sidebar, so a refetch of data the operator already had tore
+    // the channel list out of the sidebar and put it back a frame later,
+    // resetting the sidebar's scroll position to the top every time they walked
+    // back into Room. The list is re-rendered from the answer either way; what
+    // is removed here is the empty frame in between.
+    const scope = desksLoadedFor.current;
+    if (!scope || scope.client !== client || scope.company !== company) setDesks(null);
     setDesksError(null);
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
       // An answered read is never the fallback set, empty or not.
       desksAreFallback.current = false;
+      desksLoadedFor.current = { client, company };
       setDesks(dtos.map(deskFromDto));
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
         desksAreFallback.current = true;
+        desksLoadedFor.current = { client, company };
         setDesks(defaultDesks());
         return;
       }
@@ -1685,7 +1651,6 @@ export function ChatView({
   useEffect(() => {
     if (routeOpen) return;
     setAddOpen(false);
-    setBudgetFor(null);
     // And the thread panel, which used to close because leaving Room unmounted
     // the whole view. Clearing the marker with it makes the next arrival an
     // arrival, so Room opens on the channel rather than on a panel the operator
@@ -1789,8 +1754,8 @@ export function ChatView({
         {header}
         <EmptyPane
           title="No channels yet"
-          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a teammate and their direct message shows up here."
-          action={{ label: "Add a teammate", onClick: () => setAddOpen(true) }}
+          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add an agent and their direct message shows up here."
+          action={{ label: "Add an agent", onClick: () => setAddOpen(true) }}
           after={
             <AddMemberDialog
               open={addOpen}
@@ -2008,8 +1973,8 @@ export function ChatView({
       if (outside.length) {
         toast.warning(
           outside.length === 1
-            ? "A teammate you @-mentioned is not on this channel — they won't see the message."
-            : `${outside.length} teammates you @-mentioned are not on this channel — they won't see the message.`,
+            ? "An agent you @-mentioned is not on this channel — they won't see the message."
+            : `${outside.length} agents you @-mentioned are not on this channel — they won't see the message.`,
         );
       }
     }
@@ -2499,38 +2464,6 @@ export function ChatView({
     }
   }
 
-  /**
-   * Give a teammate an inbox, or take it away, on the host — keyed by the
-   * roster **agent id**, which is the `InboxStore` key the Inbox page reads and
-   * the ingest webhook files mail under. Nothing is persisted client-side: if
-   * the write fails the switch goes back, so the console never claims an inbox
-   * the host doesn't have (issue #173).
-   *
-   * Starter-roster rows are locally-invented placeholders, not host records, so
-   * their ids are not real inbox keys — refuse rather than file mail under one.
-   */
-  async function toggleMemberInbox(member: TeamMember) {
-    if (!fromHost) {
-      toast.error("Add this teammate to your company first — an inbox needs a saved teammate.");
-      return;
-    }
-    const next = !member.inboxEnabled;
-    const apply = (enabled: boolean) =>
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, inboxEnabled: enabled } : m)));
-    apply(next);
-    try {
-      await setInboxEnabled(client, company, member.id, next);
-    } catch (error) {
-      apply(!next);
-      toast.error(
-        error instanceof ApiError && error.status === 404
-          ? "This host doesn't offer teammate inboxes yet."
-          : error instanceof Error
-            ? error.message
-            : "Couldn't change the inbox.",
-      );
-    }
-  }
 
   /**
    * Persist a new teammate through the host (issue #360's Team-page add path),
@@ -2580,35 +2513,12 @@ export function ChatView({
       void reloadDirectory();
       // A successful host add proves the write plane exists, even for a
       // company that opened on the starter roster (fromHost still false from
-      // `boot`) — flip it so this and later actions (inbox, budget) target
-      // the host instead of refusing on a now-stale local-only guard.
+      // `boot`) — flip it so this and later actions target the host instead of
+      // refusing on a now-stale local-only guard.
       setFromHost(true);
       outcome = { kind: "added", name: fields.name };
-      // A host-backed add has a real agent id, so the inbox request can go
-      // straight through rather than waiting for a second save.
-      if (fields.inbox) {
-        try {
-          await setInboxEnabled(client, company, member.id, true);
-          setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, inboxEnabled: true } : m)));
-        } catch {
-          outcome = {
-            kind: "partial",
-            name: fields.name,
-            missed: "their inbox couldn't be switched on.",
-            fix: "Add it from the teammate's actions menu.",
-          };
-        }
-      }
     } else {
-      // A locally-added teammate has no host record yet, so there is no agent
-      // id to hang an inbox off — say so rather than silently dropping it.
-      outcome = {
-        kind: "console-only",
-        name: fields.name,
-        note: fields.inbox
-          ? "Save them on the host before giving them an inbox."
-          : undefined,
-      };
+      outcome = { kind: "console-only", name: fields.name };
     }
     setAddOpen(false);
     reportAddMember(outcome);
@@ -2644,10 +2554,10 @@ export function ChatView({
         // least one teammate. The host's own message says which teammate and
         // what to do about it, so it is shown rather than restated.
         toast.error(
-          error.message || "You can't remove your company's last teammate.",
+          error.message || "You can't remove your company's last agent.",
         );
       } else {
-        toast.error(error instanceof Error ? error.message : "Couldn't remove teammate.");
+        toast.error(error instanceof Error ? error.message : "Couldn't remove agent.");
       }
     }
   }
@@ -2850,7 +2760,7 @@ export function ChatView({
                     <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                     <span className="min-w-0">
                       <span className="font-medium text-foreground">{consoleOnlyMember}</span> only
-                      exists in this console — the company has no such teammate, so nobody answers
+                      exists in this console — the company has no such agent, so nobody answers
                       here. The transcript is still saved and survives a reload.
                     </span>
                   </p>
@@ -2863,7 +2773,7 @@ export function ChatView({
                     <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                     <span className="min-w-0">
                       The <span className="font-medium text-foreground">Operator</span> channel is a
-                      read-only feed of workflow reports and notifications — a scannable “what
+                      read-only feed of automation reports and notifications — a scannable “what
                       happened” view. There is nothing to reply to here.
                     </span>
                   </p>
@@ -2871,7 +2781,7 @@ export function ChatView({
                 <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
                 {/* Issues #1734 / #1735, repositioned. Directly above the composer,
                     not above the transcript: what the notice warns about — a reply
-                    that comes from the echo brain rather than the teammate it appears
+                    that comes from the echo brain rather than the agent it appears
                     under — is the consequence of pressing Send, and a caveat at the
                     other end of the page from the control it qualifies is one the
                     operator reads before it means anything and has forgotten by the
@@ -2894,22 +2804,22 @@ export function ChatView({
                     there, so a caveat about what sending produces has nothing left to
                     qualify. But the sentence is not about sending — every state below
                     says the replies in this conversation come from the echo brain
-                    rather than the teammate they appear under, which is a claim about
+                    rather than the agent they appear under, which is a claim about
                     the messages already on screen. `readOnly` is
                     `Boolean(channel?.system)`, i.e. the `#Operator` feed.
 
-                    Its rows are NOT under a roster teammate, and the difference
+                    Its rows are NOT under a roster agent, and the difference
                     matters (codex review on #2159). `DurableOperatorChannel` journals
-                    them under the reserved authors `workflow-report` and
+                    them under the reserved authors `automation-report` and
                     `owner-fallback-report` (`runtime/channel.rs`), which `senderOf`
-                    titleizes into "Workflow Report" and "Owner Fallback Report" —
+                    titleizes into "Automation Report" and "Owner Fallback Report" —
                     author lines naming no person at all. That makes the case for the
                     strip stronger, not weaker: `MessageRow` still marks every one of
                     those rows, because `project` sets `by_person: false` on an
                     `AgentReply` whichever brain produced it, and the marker they get
                     is `EchoPlaceholder` — a non-focusable `<span>` whose entire
                     explanation is a `title`, reaching neither keyboard, touch nor
-                    screen reader, and reading "Workflow Report did not write this".
+                    screen reader, and reading "Automation Report did not write this".
                     Without this strip the operator is left with a "Placeholder" pill
                     against a name that is not a person, on a feed that takes no
                     replies, and nothing anywhere saying what did write it.
@@ -2925,27 +2835,54 @@ export function ChatView({
                     `role="status"` (not `alert`) for the reason
                     `components/ui/alert.tsx` gives — a notice present on mount should
                     not interrupt a screen reader. */}
+                {/* The composer and the notice that floats over it.
+
+                    `relative` so the banner below can anchor to this box rather
+                    than to the pane: it is `absolute bottom-full`, which puts it
+                    immediately above the composer wherever the composer happens
+                    to be, with no second number to keep in step. */}
+                <div className="relative shrink-0">
                 {echoing && (
                   <p
                     role="status"
                     data-testid="chat-cognition-banner"
-                    className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+                    // Hovering over the composer, not stacked above it.
+                    //
+                    // It was a full-bleed strip in the flow — `border-t`, square
+                    // corners, edge to edge — which made it look like a
+                    // permanent part of the composer's chrome, so an operator
+                    // read it once as furniture and stopped seeing it. It is a
+                    // *condition*, and conditions in this console are cards that
+                    // sit on top of things.
+                    //
+                    // `bottom-full mb-2` lifts it clear of the composer's top
+                    // edge; `inset-x-3` insets it from both sides so it reads as
+                    // an object on the pane rather than another band across it.
+                    // It overlaps the last line of the transcript rather than
+                    // displacing it — which is the trade, and the right one: the
+                    // transcript can be scrolled, and this cannot be missed.
+                    //
+                    // `pointer-events-none` on the box with `pointer-events-auto`
+                    // back on the link inside it, so hovering the strip does not
+                    // steal a click meant for the message underneath while the
+                    // one thing here that IS clickable still works.
+                    className="pointer-events-none absolute inset-x-3 bottom-full z-10 mb-2 flex items-start gap-1.5 rounded-lg border border-chrome-border bg-popover px-3 py-2 text-xs text-muted-foreground shadow-md [&_a]:pointer-events-auto"
                   >
                     <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
                     <span className="min-w-0">
                       {cognition === "unconfigured" && (
                         <>
                           <span className="font-medium text-foreground">
-                            Teammates can&apos;t think yet.
+                            Agents can&apos;t think yet.
                           </span>{" "}
                           This company has no model configured, so the replies in this
-                          conversation come from the offline echo brain rather than the teammate
+                          conversation come from the offline echo brain rather than the agent
                           they appear under. Choose a provider in{" "}
                           <a
-                            className="font-medium text-foreground underline-offset-4 hover:underline"
-                            href={settingsHref("inference")}
+                            className="font-medium text-foreground transition-opacity hover:opacity-80"
+                            href={connectionsHref("inference")}
                           >
-                            Settings → Inference
+                            Connections → Inference
                           </a>
                           .
                         </>
@@ -2960,17 +2897,17 @@ export function ChatView({
                       {cognition === "restart-required" && (
                         <>
                           <span className="font-medium text-foreground">
-                            Teammates can&apos;t think yet — the model isn&apos;t live.
+                            Agents can&apos;t think yet — the model isn&apos;t live.
                           </span>{" "}
                           A provider is configured, but this company&apos;s runtime was built before
                           it was saved, so the replies in this conversation still come from the
-                          offline echo brain rather than the teammate they appear under. Finish
+                          offline echo brain rather than the agent they appear under. Finish
                           the switch in{" "}
                           <a
-                            className="font-medium text-foreground underline-offset-4 hover:underline"
-                            href={settingsHref("inference")}
+                            className="font-medium text-foreground transition-opacity hover:opacity-80"
+                            href={connectionsHref("inference")}
                           >
-                            Settings → Inference
+                            Connections → Inference
                           </a>
                           .
                         </>
@@ -2981,7 +2918,7 @@ export function ChatView({
                             This host cannot reach a model — no agent harness is available.
                           </span>{" "}
                           The replies in this conversation come from the offline echo brain
-                          rather than the teammate they appear under. No setting changes that:
+                          rather than the agent they appear under. No setting changes that:
                           it takes a host built and started with the harness.
                         </>
                       )}
@@ -2989,16 +2926,16 @@ export function ChatView({
                           not read this company's inference configuration. Names no
                           remedy on purpose — an unreadable config is no evidence
                           that saving one would help, which is the same #266
-                          doctrine that stops the workflow-run route answering
+                          doctrine that stops the automation-run route answering
                           `inference_required` in this state. A settings link here
                           would be the switch that does nothing, one more time. */}
                       {cognition === "undetermined" && (
                         <>
                           <span className="font-medium text-foreground">
-                            Teammates can&apos;t think, and this host can&apos;t say why.
+                            Agents can&apos;t think, and this host can&apos;t say why.
                           </span>{" "}
                           Its inference configuration could not be read, so the replies in this
-                          conversation come from the offline echo brain rather than the teammate
+                          conversation come from the offline echo brain rather than the agent
                           they appear under. Until the host can read that configuration, saving a
                           provider is not known to help.
                         </>
@@ -3042,6 +2979,10 @@ export function ChatView({
                   />
                 )}
                 <MessageComposer
+                  // Passed straight through from `AppShell` — see the prop's
+                  // note on `MessageComposer`. This view learns nothing about
+                  // policy; it only knows where the control goes.
+                  autonomy={autonomy}
                   suppressed={readOnly}
                   placeholder={`Message ${channelTitle(channel)}`}
                   disabled={sending}
@@ -3072,6 +3013,7 @@ export function ChatView({
                   mentionables={mentionables}
                   channelMemberIds={inChannel?.map((m) => m.id)}
                 />
+                </div>
               </div>
 
               {parent && (
@@ -3139,7 +3081,6 @@ export function ChatView({
                   }
                   loading={loadingTeam}
                   fromHost={fromHost}
-                  onToggleInbox={(m) => void toggleMemberInbox(m)}
                   onRemove={(id) => {
                     const member = members.find((m) => m.id === id);
                     if (member) void removeMember(member);
@@ -3168,11 +3109,6 @@ export function ChatView({
                         }
                       : undefined
                   }
-                  canEditBudget={isAdmin && fromHost}
-                  onEditBudget={setBudgetFor}
-                  onRemoveCap={(m) => void applyBudget(m, null)}
-                  onResetBudget={(m) => void resetBudget(m)}
-                  setByLabel={(m) => (m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined)}
                 />
               )}
             </div>
@@ -3207,17 +3143,6 @@ export function ChatView({
           setDesks((prev) => (desksAreFallback.current ? [desk] : [...(prev ?? []), desk]));
           desksAreFallback.current = false;
           selectChannel(desk.id);
-        }}
-      />
-      <BudgetDialog
-        member={budgetFor}
-        onOpenChange={(open) => {
-          if (!open) setBudgetFor(null);
-        }}
-        onSave={(cap) => {
-          const target = budgetFor;
-          setBudgetFor(null);
-          if (target) void applyBudget(target, cap);
         }}
       />
     </>

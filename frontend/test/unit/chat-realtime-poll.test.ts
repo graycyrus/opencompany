@@ -80,9 +80,9 @@ describe("chat channel history polling", () => {
   });
 
   it("folds a first history read in and never duplicates it on a later tick", () => {
-    const hydrated = fromHistory([dto("1686", "The workflow finished.")]);
+    const hydrated = fromHistory([dto("1686", "The automation finished.")]);
     const first = mergeHistoryInOrder([], hydrated);
-    expect(first.map((message) => message.text)).toEqual(["The workflow finished."]);
+    expect(first.map((message) => message.text)).toEqual(["The automation finished."]);
 
     // Same durable row on the next tick is id-seen: the identical array
     // reference comes back, so a caller can skip the state write (and React

@@ -15,6 +15,8 @@ import {
 } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
+import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
@@ -67,7 +69,30 @@ type Load = "loading" | "ready" | "unavailable";
  * is the engine the provider list runs on, and splitting them would separate a
  * credential from what it unlocks.
  */
+/**
+ * The two questions this page answers, which are not the same question.
+ *
+ * **Providers** is what the company is signed in to — the catalog, what is
+ * connected, and which account teammates act as. **Credentials** is what
+ * authorises all of it: the one platform key and the Composio escape hatch.
+ *
+ * They were one column, credentials on top, so the page opened on a key form
+ * an operator sets once and scrolled past it every time to reach the list they
+ * came for. Tabs rather than two pages because a credential exists only to
+ * make a provider connectable: one subject, two views.
+ */
+const APP_TABS = [
+  { id: "providers", label: "Providers" },
+  { id: "credentials", label: "Credentials" },
+] as const satisfies readonly PageTab<string>[];
+
+type AppTab = (typeof APP_TABS)[number]["id"];
+
 export function OAuthView({ client, company }: Props) {
+  const [tab, setTab] = useHashTab<AppTab>(
+    APP_TABS.map((t) => t.id),
+    "providers",
+  );
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
   // The Composio connection objects behind those booleans, keyed by normalized
@@ -527,7 +552,7 @@ export function OAuthView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Apps"
-        width="5xl"
+        width="full"
         description={
           <>
             The third-party accounts your company signs in to and acts through. It only uses
@@ -539,8 +564,17 @@ export function OAuthView({ client, company }: Props) {
             <Badge variant="secondary">{connectedCount} connected</Badge>
           ) : null
         }
+        tabs={
+          <PageTabs
+            tabs={APP_TABS}
+            value={tab}
+            onChange={setTab}
+            idBase="apps"
+            aria-label="App views"
+          />
+        }
       />
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {load === "unavailable" && (
           <Alert>
             <Info className="size-4" />
@@ -569,13 +603,14 @@ export function OAuthView({ client, company }: Props) {
             <Info className="size-4" />
             <AlertTitle>Only an admin can change what this company connects through</AlertTitle>
             <AlertDescription>
-              A connection belongs to the company — it is the account your teammates act
+              A connection belongs to the company — it is the account your agents act
               through — so an admin manages it. You can see everything that is wired here; ask an
               admin to add, change or remove one.
             </AlertDescription>
           </Alert>
         )}
 
+        <PageTabPanel idBase="apps" id="credentials" value={tab} className="space-y-6">
         {/* The general answer above the Composio-specific one: one key
             authorizing every brokered surface, with the Composio credential as
             the escape hatch (issue #586).
@@ -609,7 +644,9 @@ export function OAuthView({ client, company }: Props) {
           canManage={canManage}
           onChanged={() => setCredentialGeneration((n) => n + 1)}
         />
+        </PageTabPanel>
 
+        <PageTabPanel idBase="apps" id="providers" value={tab} className="space-y-6">
         {/* The page's one provider list (issue #582). It used to be two — this
             grid and a categorised grid of eleven hardcoded tiles below it — and
             they disagreed by construction, so a provider could show as connected
@@ -649,7 +686,7 @@ export function OAuthView({ client, company }: Props) {
         />
 
         {/* Only renders for a provider this company holds two or more accounts
-            for — the one case where "which account do teammates act as" is a
+            for — the one case where "which account do agents act as" is a
             question the product can answer (issue #820). */}
         <AccountChoiceSection
           client={client}
@@ -671,6 +708,7 @@ export function OAuthView({ client, company }: Props) {
           busy={busy !== null}
           onClose={() => setOpened(null)}
         />
+        </PageTabPanel>
       </div>
     </div>
   );

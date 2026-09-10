@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { NAV_SECTIONS } from "@/components/sidebar-navigation";
 import { TOUR } from "@/tour/steps";
+import { SETTINGS_PAGES } from "@/views/settings-pages";
 import {
   CONNECTION_PAGES,
   connectionsHref,
@@ -28,19 +29,30 @@ const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf
  * nav row that now leads there.
  */
 describe("the Connections section", () => {
-  it("carries exactly the two pages that left the Settings rail", () => {
-    expect(CONNECTION_PAGES.map((page) => page.id)).toEqual(["apps", "mcp"]);
+  it("carries exactly the pages that left the Settings rail, in rail order", () => {
+    expect(CONNECTION_PAGES.map((page) => page.id)).toEqual([
+      "apps",
+      "mcp",
+      "inference",
+      "skills",
+      "hosting",
+      "search",
+    ]);
   });
 
-  it("does not take the three credential forms with them", () => {
-    // Inference, Hosting and Search stayed in Settings on purpose: a credential
-    // form belongs beside the one thing it unlocks. Asserted from this side as
-    // well as from `settings-navigation.test.ts`, because "Connections grew a
-    // fourth page" and "Settings lost a page" are the same mistake seen from
-    // two directions, and only one of the two files would fail.
+  it("leaves Settings nothing with an outside service at the other end of it", () => {
+    // The other direction of the same fact, and worth asserting from here as
+    // well: "Connections grew a page" and "Settings lost one" are the same
+    // mistake seen from two sides, and only one of the two files would fail.
+    // Inference, Skills, Hosting and Search were each argued to belong on the
+    // settings rail ("a credential form belongs beside what it unlocks") until
+    // it was noticed that what each unlocks IS the connection.
     const ids = CONNECTION_PAGES.map((page) => page.id as string);
-    for (const stayed of ["inference", "hosting", "search"]) {
-      expect(ids, `${stayed} belongs beside what it unlocks`).not.toContain(stayed);
+    for (const moved of ["inference", "skills", "hosting", "search"]) {
+      expect(ids, `${moved} names an outside service`).toContain(moved);
+    }
+    for (const stayed of SETTINGS_PAGES.map((page) => page.id as string)) {
+      expect(ids, `${stayed} is Settings' own`).not.toContain(stayed);
     }
   });
 
@@ -103,6 +115,10 @@ describe("the Connections section", () => {
     expect(connections.children?.map((child) => [child.label, child.sub])).toEqual([
       ["Apps", "apps"],
       ["MCP Servers", "mcp"],
+      ["Inference", "inference"],
+      ["Skills", "skills"],
+      ["Hosting", "hosting"],
+      ["Search", "search"],
     ]);
   });
 

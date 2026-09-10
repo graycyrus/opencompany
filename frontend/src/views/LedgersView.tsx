@@ -1206,7 +1206,7 @@ export function LedgersView({
               <DialogTitle>Delete {confirmDelete.id}?</DialogTitle>
               <DialogDescription>
                 This removes the row and everything ever recorded against it.
-                Nothing can bring it back, and no teammate can do this — they
+                Nothing can bring it back, and no agent can do this — they
                 close a row instead, which keeps the reason. Close it rather
                 than delete it unless it should never have existed.
               </DialogDescription>
@@ -1462,7 +1462,7 @@ function EntryCard({
           {onOpen ? (
             <a
               href={detailHref}
-              className="min-w-0 flex-1 text-left font-medium hover:underline"
+              className="min-w-0 flex-1 text-left font-medium transition-opacity hover:opacity-80"
               data-testid="ledger-entry-title"
             >
               {entry.title}

@@ -373,7 +373,7 @@ export function ApprovalsView({
       if (mayHaveLanded(err, Date.now() - startedAt)) {
         const line =
           verdict === "approve"
-            ? "Approved — the host didn't answer in time, but your decision was recorded. The teammate may still be working; no need to approve again."
+            ? "Approved — the host didn't answer in time, but your decision was recorded. The agent may still be working; no need to approve again."
             : "Declined — the host didn't answer in time, but your decision was recorded. No need to decline again.";
         onResolved(line);
         // Neither a success nor an error: the verdict is durable, the
@@ -464,7 +464,7 @@ export function ApprovalsView({
     const n = bulkRows.length;
     const question =
       verdict === "approve"
-        ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the teammate, so this may start several tasks at once.`
+        ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the agent, so this may start several tasks at once.`
         : `Decline ${n} ${n === 1 ? "request" : "requests"}? This is final; the work behind them moves on without them.`;
     if (!window.confirm(question)) return;
     setBulkInFlight(true);
@@ -480,7 +480,7 @@ export function ApprovalsView({
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-4 py-6">
+      <div className="w-full px-4 py-6">
         {/* The queue's own count heading below only renders once loaded, so
             it can't be the page's one `h1` — this stays present through
             loading, error and empty states alike (issue #1221). */}
@@ -495,7 +495,7 @@ export function ApprovalsView({
             </span>
             <a
               href="#/approvals"
-              className="shrink-0 font-medium underline-offset-2 hover:underline"
+              className="shrink-0 font-medium transition-opacity hover:opacity-80"
             >
               Show all
             </a>
@@ -831,10 +831,10 @@ export function StandingPermissions({
                   size="sm"
                   /* The subject, not just the grant: two teammates holding the
                      same tool and scope read identically in grantHeadline — and
-                     a workflow grant carries no agent at all — so button-only
+                     an automation grant carries no agent at all — so button-only
                      navigation would hear identical "Remove" buttons and could
                      take back the wrong one (#1411). `grantSubject` resolves
-                     the workflow subject for that second kind. The accessible
+                     the automation subject for that second kind. The accessible
                      name leads with the visible "Remove" verb so speech-input
                      users can say the control's label (WCAG 2.5.3 label in
                      name). */
@@ -1026,7 +1026,7 @@ export function ApprovalCard({
           status={
             deciding
               ? deciding === "approve"
-                ? "Waiting for the teammate…"
+                ? "Waiting for the agent…"
                 : "Recording…"
               : batchTotal > 1
                 ? // Deliberately a count and not a link: the row is decided
@@ -1119,7 +1119,7 @@ export function ApprovalCard({
             aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — ${
               scope.kind === "tool"
                 ? `let this ${
-                    a.workflow_id ? "workflow" : "teammate"
+                    a.workflow_id ? "automation" : "agent"
                   } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
                 : "just this once"
             }${a.contents_hidden ? "" : ` — request ${a.at_millis}`}${

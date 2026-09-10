@@ -262,7 +262,7 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
-test("the workflow canvas fills the card and keeps its minimap inside it", async ({ page }) => {
+test("the automation canvas fills the card and keeps its minimap inside it", async ({ page }) => {
   await open(page, "light", "/#/workflows");
   await openFirstWorkflow(page);
 

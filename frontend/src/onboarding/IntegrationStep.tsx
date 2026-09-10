@@ -279,7 +279,7 @@ export function IntegrationStep({
       {hasCredential ? (
         <div className="space-y-2 text-sm text-muted-foreground" data-testid="gate-integration-has-credential">
           <p>
-            Teammates reach Gmail, Slack and GitHub through a connected account. This
+            Agents reach Gmail, Slack and GitHub through a connected account. This
             company already has a credential to connect one with — Apps is where you pick
             a provider and connect it.
           </p>
@@ -294,7 +294,7 @@ export function IntegrationStep({
       ) : (
         <div className="space-y-2 text-sm text-muted-foreground">
           <p>
-            Teammates reach Gmail, Slack and GitHub through a connected account. Before any
+            Agents reach Gmail, Slack and GitHub through a connected account. Before any
             provider can be connected, this company needs a credential to connect it with —{" "}
             {/* `COMPOSIO_MANAGED_HIDDEN` took the OpenHuman-managed route out of Apps
                 (`OAuthView` hides `CompanyCredentialCard` behind the same flag), so

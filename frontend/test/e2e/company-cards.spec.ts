@@ -123,7 +123,7 @@ async function mockApi(page: Page) {
     const agent = path.match(/\/team\/([^/]+)$/);
     if (agent) {
       const found = ROSTER.find((m) => m.id === agent[1]);
-      if (!found) return json({ error: "no such teammate" }, 404);
+      if (!found) return json({ error: "no such agent" }, 404);
       return json({
         ...found,
         source: "overlay",
@@ -158,7 +158,7 @@ async function mockApi(page: Page) {
 const card = (page: Page, name: string) =>
   page.getByTestId("team-card").filter({ hasText: name }).first();
 
-test("#1141 the Company nav lands on the teammates, not on the desks", async ({ page }) => {
+test("#1141 the Company nav lands on the agents, not on the desks", async ({ page }) => {
   await mockApi(page);
 
   // Start elsewhere, so arriving is a real navigation rather than the page the
@@ -208,7 +208,7 @@ test("#1141 a card carries the description, the status and the open count", asyn
   await expect(priya.getByTestId("team-card-tasks")).toHaveText("0 open tasks");
 });
 
-test("#1436 the roster can search names, show working teammates, and identify the baseline", async ({
+test("#1436 the roster can search names, show working agents, and identify the baseline", async ({
   page,
 }) => {
   await mockApi(page);
@@ -369,7 +369,7 @@ test("#1193 desk management survives — a desk can still be created and reached
     timeout: 30_000,
   });
   await expect(page.getByRole("button", { name: "New desk" })).toBeEnabled({ timeout: 30_000 });
-  await expect(page.getByRole("button", { name: "Add teammate" }).first()).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Add agent" }).first()).toBeEnabled();
 });
 
 test("#485 a desk address still opens the chart at that desk", async ({ page }) => {
@@ -428,7 +428,7 @@ test("#1181 the card and the detail header wear the same mascot", async ({ page 
   await expect(onDetail).toHaveAttribute("src", cardSrc ?? "");
 });
 
-test("#1190 the card carries no switch; the inbox lives on the teammate", async ({ page }) => {
+test("#1190 the card carries no switch; the inbox lives on the agent", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
   await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
@@ -458,7 +458,7 @@ test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await expect.poll(() => page.url()).not.toContain("#/team");
 });
 
-test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }) => {
+test("#1141 a card opens an agent, breadcrumbed and editable", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
   await card(page, "Maya").getByTestId("team-card-open").click();
@@ -504,7 +504,7 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await expect.poll(() => page.url()).toContain("#/company");
 });
 
-test("#1433 switching teammates drops the previous one's open tasks", async ({ page }) => {
+test("#1433 switching agents drops the previous one's open tasks", async ({ page }) => {
   await mockApi(page);
 
   // The board read, under the test's control. `AgentDetailView` stays mounted

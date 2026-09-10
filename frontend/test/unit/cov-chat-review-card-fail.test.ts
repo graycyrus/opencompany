@@ -42,7 +42,7 @@ function clientAs(reviewCard: () => Promise<never>): OpenCompanyClient {
     scopeFor: () => "/api/v1/companies/acme",
     listDesks: () => Promise.resolve([DESK_DTO]),
     getOperatorChannel: () =>
-      Promise.resolve({ id: "operator", name: "Operator", description: "Workflow reports and notifications" }),
+      Promise.resolve({ id: "operator", name: "Operator", description: "Automation reports and notifications" }),
     reviewCard: vi.fn(reviewCard),
   };
   return new Proxy(named, {

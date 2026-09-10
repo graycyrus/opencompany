@@ -416,7 +416,25 @@ export function InferenceSection({
   client,
   company,
   canManage,
+  view = "all",
 }: {
+  /**
+   * Which half of the form to draw. `all` is the whole thing, and the default,
+   * so a caller that has no tabs is unchanged.
+   *
+   * **This gates rendering only — never state.** Provider, base URL, key and
+   * the tier→model map are one draft written by one Save, so the component
+   * stays mounted across a tab change and simply shows less of itself. Putting
+   * the two halves in separate panels that mount and unmount would discard
+   * whichever half you were not looking at the moment you looked away, and the
+   * Save button would then write the discarded half's defaults over what the
+   * operator had typed.
+   *
+   * That is also why Save, Reset and Remove key are drawn on **both** views:
+   * they act on the whole configuration, and a Save reachable from only one
+   * tab would strand edits made on the other.
+   */
+  view?: "all" | "connect" | "routing";
   client: OpenCompanyClient;
   company: string | null;
   /**
@@ -427,6 +445,10 @@ export function InferenceSection({
    */
   canManage: boolean;
 }) {
+  // Which halves this render draws. `all` draws both, which is what a caller
+  // without tabs gets.
+  const showConnect = view === "all" || view === "connect";
+  const showRouting = view === "all" || view === "routing";
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   // Whether this host can complete a one-click key grant. Read off the
@@ -983,11 +1005,11 @@ export function InferenceSection({
       // promise the runtime could not keep for exactly the transition an
       // operator makes first. Follow the response instead of asserting.
       if (result.status.restartRequired) {
-        toast.warning("Inference saved — restart the company for teammates to use it.", {
+        toast.warning("Inference saved — restart the company for agents to use it.", {
           description: result.note,
         });
       } else {
-        toast.success("Inference updated. Teammates use it on their next turn.");
+        toast.success("Inference updated. Agents use it on their next turn.");
       }
       setKey("");
       setTest({ kind: "idle" });
@@ -1041,7 +1063,7 @@ export function InferenceSection({
         models: carriedModels,
         key: "",
       });
-      toast.success("Removed the company key. Teammates fall back on their next turn.");
+      toast.success("Removed the company key. Agents fall back on their next turn.");
       setKey("");
       setTest({ kind: "idle" });
       await refresh();
@@ -1079,7 +1101,7 @@ export function InferenceSection({
         // host's note, which names the process restart that would work.
         toast.warning("Still needs a restart.", { description: result.note });
       } else {
-        toast.success("Restarted. Teammates think with the new provider from their next turn.");
+        toast.success("Restarted. Agents think with the new provider from their next turn.");
       }
       setStatus(result.status);
     } catch (err) {
@@ -1150,13 +1172,13 @@ export function InferenceSection({
             so each says in one line which it is — the distinction is otherwise
             only in a module doc no operator reads (#637). */}
         <span className="text-xs text-muted-foreground">
-          the key your teammates think with — not the company account key
+          the key your agents think with — not the company account key
         </span>
       </div>
       <p className="text-sm text-muted-foreground">
-        Choose which model provider your teammates think with. Bring your own key for OpenRouter, a
+        Choose which model provider your agents think with. Bring your own key for OpenRouter, a
         custom OpenAI-compatible endpoint, or a local Ollama server — the key is stored securely and
-        never shown again. Switching provider or model takes effect on the teammates' next turn.
+        never shown again. Switching provider or model takes effect on the agents' next turn.
         Giving inference to a company that started without any does not: the brain is chosen at
         startup, so that first setup needs a restart.
       </p>
@@ -1232,8 +1254,8 @@ export function InferenceSection({
                       <span>
                         <span className="font-medium">Restart required.</span> This company started
                         with no inference source, so it is running the offline echo brain and its
-                        scheduled workflows cannot fire. The brain is chosen at startup — this
-                        configuration is saved, but teammates keep echoing until the company is
+                        scheduled automations cannot fire. The brain is chosen at startup — this
+                        configuration is saved, but agents keep echoing until the company is
                         restarted.
                       </span>
                       {/* The action, not just the diagnosis. Telling a hosted
@@ -1324,6 +1346,7 @@ export function InferenceSection({
                 (issue #403). */}
             {canManage && (
               <div className={cn("space-y-3 border-t border-border pt-3", SETTINGS_FIELD_COLUMN)}>
+                {showConnect && (
                 <div className="grid gap-2 sm:grid-cols-2 sm:items-end">
                   <div className="space-y-1">
                     <Label htmlFor="inference-provider" className="text-xs">
@@ -1356,7 +1379,7 @@ export function InferenceSection({
                         data-testid="inference-not-configured"
                       >
                         No provider is configured for this company yet. Pick one above and paste its
-                        key below to give its teammates a brain of their own.
+                        key below to give its agents a brain of their own.
                       </p>
                     )}
                   </div>
@@ -1374,8 +1397,9 @@ export function InferenceSection({
                     </div>
                   )}
                 </div>
+                )}
 
-                {isOffered(provider) && (
+                {showRouting && isOffered(provider) && (
                   <div className="space-y-2">
                     {draftProviderIsOpenRouter && modelCatalog.kind === "error" && (
                       <p
@@ -1480,7 +1504,7 @@ export function InferenceSection({
                                 {manualEntry && modelCatalog.kind === "ready" && (
                                   <button
                                     type="button"
-                                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                                    className="text-xs text-muted-foreground transition-opacity hover:opacity-80"
                                     data-testid={`inference-model-back-to-catalog-${tier}`}
                                     onClick={() =>
                                       setManualEntryTiers((prev) => {
@@ -1582,7 +1606,7 @@ export function InferenceSection({
                 {/* The managed route is the one a grant can fill in, so the
                     button belongs to it alone — an OpenRouter or Ollama key is
                     not something TinyHumans can mint. */}
-                {provider === "managed" && (
+                {showConnect && provider === "managed" && (
                   <ConnectTinyHumansButton
                     client={client}
                     company={company}
@@ -1596,7 +1620,7 @@ export function InferenceSection({
                   />
                 )}
 
-                {isOffered(provider) && PROVIDERS[provider].acceptsKey && (
+                {showConnect && isOffered(provider) && PROVIDERS[provider].acceptsKey && (
                   <div className="space-y-1">
                     <Label htmlFor="inference-key" className="text-xs">
                       API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
@@ -1659,7 +1683,7 @@ export function InferenceSection({
                   key, then falls back to the committed manifest configuration — or the platform
                   default when the manifest declares none. Remove key keeps the displayed
                   provider, endpoint, and models as a runtime override, but clears only its stored key.
-                  Both changes apply on teammates&apos; next turn unless this card says a restart is required.
+                  Both changes apply on agents&apos; next turn unless this card says a restart is required.
                 </p>
               </div>
             )}
