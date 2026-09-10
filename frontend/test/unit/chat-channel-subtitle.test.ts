@@ -23,7 +23,7 @@ import {
  * string. The title is the teammate's name, and `fromDto` falls back
  * `dto.name?.trim() || dto.role`; the slot used to read the role directly. A
  * company that declares roles and never names people — which is every agent in
- * `companies/agentic_software_company` — makes those the same string for every
+ * `companies/software_company` — makes those the same string for every
  * teammate it employs.
  *
  * So two things are pinned here. `buildChannels` must fill a DM's `purpose`

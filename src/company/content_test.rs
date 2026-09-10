@@ -104,25 +104,25 @@ fn every_company_skill_and_workspace_parses() {
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
 const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
-    "agentic_accounting_firm",
-    "agentic_consultation_firm",
-    "agentic_customer_support",
-    "agentic_design_studio",
-    "agentic_enterprise_sales",
-    "agentic_game_business",
-    "agentic_game_studio",
-    "agentic_influencer_business",
-    "agentic_law_firm",
-    "agentic_marketing_agency",
-    "agentic_media_company",
-    "agentic_pharma_startup",
-    "agentic_product_team",
-    "agentic_realestate_company",
-    "agentic_recruiting_company",
-    "agentic_research_lab",
-    "agentic_software_company",
-    "agentic_venture_capital",
-    "agentic_venture_studio",
+    "accounting_firm",
+    "consultation_firm",
+    "customer_support",
+    "design_studio",
+    "enterprise_sales",
+    "game_business",
+    "game_studio",
+    "influencer_business",
+    "law_firm",
+    "marketing_agency",
+    "media_company",
+    "pharma_startup",
+    "product_team",
+    "realestate_company",
+    "recruiting_company",
+    "research_lab",
+    "software_company",
+    "venture_capital",
+    "venture_studio",
     "signals_opportunity_studio",
     "startup_accelerator",
 ];
@@ -130,7 +130,7 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
 /// Templates that must NEVER reach the metered search backend: `e2e_harness` and
 /// `e2e_setup` are deterministic fixtures (a priced network call would make them
 /// non-hermetic and flaky), `openhuman_demo` is a walkthrough nobody opted
-/// into spend for, and `agentic_math_lab` is denied for a reason of its own —
+/// into spend for, and `math_lab` is denied for a reason of its own —
 /// its whole claim (and `hive_math_lab`'s, the same lab on one deliberating desk) is that it *computes* an exact answer, and a lab that can
 /// search can look one up. A run that looked the answer up passes the lab's
 /// end-to-end spec while proving nothing about whether the roster can solve
@@ -143,7 +143,7 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
 /// instead of about these eight. Withholding the network is what makes a decision
 /// there attributable to the fleet it was made about.
 const SEARCH_DENIED_COMPANIES: [&str; 7] = [
-    "agentic_math_lab",
+    "math_lab",
     "hive_math_lab",
     "e2e_harness",
     "e2e_setup",
@@ -174,7 +174,7 @@ const SEARCH_DENIED_COMPANIES: [&str; 7] = [
 ///
 /// This list exists so the posture is a *partition* rather than an allow-list.
 /// An allow-list asserts a decision someone remembered, so it cannot notice a
-/// company nobody remembered: `agentic_software_company` shipped with nine
+/// company nobody remembered: `software_company` shipped with nine
 /// agents and no search grant, and the suite stayed green for it (issue #878).
 /// [`every_company_declares_a_search_posture`] asserts this list plus the other
 /// two covers `companies/` exactly, so a new template fails CI until whoever
@@ -184,10 +184,10 @@ const SEARCH_UNGRANTED_COMPANIES: [&str; 0] = [];
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
 /// excluded: it overrides the default down to a research-only belt on purpose,
-/// and `agentic_research_lab` is excluded for the same reason — its belt is
+/// and `research_lab` is excluded for the same reason — its belt is
 /// `["*", "search"]`, dropping `media` and `composio`, because a research lab
 /// has no use for image generation or third-party OAuth side effects and both
-/// are opt-in spend. `agentic_product_team` is excluded on that same
+/// are opt-in spend. `product_team` is excluded on that same
 /// research-lab argument: it produces documents and ledger rows, so it drops
 /// both opt-in namespaces too.
 const FULL_BELT_PLUS_SEARCH: [&str; 8] = [
@@ -196,14 +196,14 @@ const FULL_BELT_PLUS_SEARCH: [&str; 8] = [
     // this list actually guards — that an extended `allow` did not silently
     // drop an inherited entry — which is independent of *which* namespace the
     // template extended it with.
-    "agentic_accounting_firm",
-    "agentic_consultation_firm",
-    "agentic_design_studio",
-    "agentic_law_firm",
-    "agentic_marketing_agency",
-    "agentic_media_company",
-    "agentic_software_company",
-    "agentic_venture_studio",
+    "accounting_firm",
+    "consultation_firm",
+    "design_studio",
+    "law_firm",
+    "marketing_agency",
+    "media_company",
+    "software_company",
+    "venture_studio",
 ];
 
 fn load_company(name: &str) -> CompanyManifest {
@@ -285,7 +285,7 @@ fn fixture_templates_never_grant_search() {
 ///
 /// The guard #312 left behind was allow-list shaped: it checked that the six
 /// companies someone listed do grant `search`, and said nothing about the
-/// fifteen it did not list. `agentic_software_company` therefore shipped nine
+/// fifteen it did not list. `software_company` therefore shipped nine
 /// agents whose `web_search` was never wired, with a green suite. An allow-list
 /// can only ever assert a decision somebody remembered.
 ///
@@ -549,10 +549,10 @@ fn a_deskless_teammate_minted_with_no_scope_never_inherits_billing() {
     use super::{CreationGrant, creation_default_grants};
 
     for company in [
-        "agentic_marketing_agency",
-        "agentic_accounting_firm",
-        "agentic_venture_studio",
-        "agentic_software_company",
+        "marketing_agency",
+        "accounting_firm",
+        "venture_studio",
+        "software_company",
     ] {
         let manifest = load_company(company);
         // The state that makes the escalation reachable: a minter scoped only by
@@ -752,8 +752,7 @@ fn every_bundled_workflow_is_runnable_against_its_roster() {
 fn the_marketing_campaign_preset_is_runnable() {
     use crate::workflows::translate;
 
-    let path =
-        repo_root().join("companies/agentic_marketing_agency/workflows/campaign_pipeline.toml");
+    let path = repo_root().join("companies/marketing_agency/workflows/campaign_pipeline.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     let graph = translate(&parse_workflow(&text).expect("campaign parses"));
     let node = |id: &str| {
@@ -786,7 +785,7 @@ fn the_marketing_campaign_preset_is_runnable() {
 /// the stripping.
 #[test]
 fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
-    let manifest = load_company("agentic_marketing_agency");
+    let manifest = load_company("marketing_agency");
     let creative = manifest
         .group_chats
         .iter()
@@ -846,7 +845,7 @@ fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
 /// that names it.
 #[test]
 fn a_marketing_biller_can_be_named_from_the_console() {
-    let manifest = load_company("agentic_marketing_agency");
+    let manifest = load_company("marketing_agency");
 
     // The desks this PR touched state no ceiling — the exclusion must not live
     // on an unwidenable layer.
@@ -928,7 +927,7 @@ fn a_marketing_biller_can_be_named_from_the_console() {
 /// ceiling exists, and no shipped teammate resolves to holding it.
 #[test]
 fn the_software_company_ships_billing_that_reaches_nobody_yet() {
-    let manifest = load_company("agentic_software_company");
+    let manifest = load_company("software_company");
 
     assert!(
         grants_chargebee_explicit(&manifest.tools.allow),
@@ -1001,7 +1000,7 @@ fn the_software_company_ships_billing_that_reaches_nobody_yet() {
 /// alone. Pinned through the same three-level narrowing the roster build uses.
 #[test]
 fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
-    let manifest = load_company("agentic_marketing_agency");
+    let manifest = load_company("marketing_agency");
     let strategy = manifest
         .group_chats
         .iter()
@@ -1059,12 +1058,12 @@ fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
 ///     output. The single exception is named below so removing any other
 ///     destination fails rather than passing as "well, some have none".
 ///
-/// `agentic_research_lab` explains in its own manifest why it has no desk: its
+/// `research_lab` explains in its own manifest why it has no desk: its
 /// workflow is the proving ground for collapsing desk coordination into the
 /// graph itself.
 #[test]
 fn every_seeded_output_destination_resolves_against_its_own_manifest() {
-    const DESKLESS_WORKFLOW_TEMPLATE: &str = "agentic_research_lab";
+    const DESKLESS_WORKFLOW_TEMPLATE: &str = "research_lab";
 
     let mut checked = 0;
     let mut with_destination = 0;
@@ -1334,26 +1333,26 @@ fn every_company_ledger_can_be_closed_and_says_why() {
 /// is empty because whoever added this bundle forgot" are indistinguishable
 /// afterwards.
 const SETUP_SEEDED_COMPANIES: [&str; 24] = [
-    "agentic_accounting_firm",
-    "agentic_consultation_firm",
-    "agentic_customer_support",
-    "agentic_design_studio",
-    "agentic_enterprise_sales",
-    "agentic_game_business",
-    "agentic_game_studio",
-    "agentic_influencer_business",
-    "agentic_law_firm",
-    "agentic_marketing_agency",
-    "agentic_math_lab",
-    "agentic_media_company",
-    "agentic_pharma_startup",
-    "agentic_product_team",
-    "agentic_realestate_company",
-    "agentic_recruiting_company",
-    "agentic_research_lab",
-    "agentic_software_company",
-    "agentic_venture_capital",
-    "agentic_venture_studio",
+    "accounting_firm",
+    "consultation_firm",
+    "customer_support",
+    "design_studio",
+    "enterprise_sales",
+    "game_business",
+    "game_studio",
+    "influencer_business",
+    "law_firm",
+    "marketing_agency",
+    "math_lab",
+    "media_company",
+    "pharma_startup",
+    "product_team",
+    "realestate_company",
+    "recruiting_company",
+    "research_lab",
+    "software_company",
+    "venture_capital",
+    "venture_studio",
     "hive_math_lab",
     "signals_opportunity_studio",
     "startup_accelerator",

@@ -8146,9 +8146,9 @@ mod test {
     fn overlay_blob_carries_template_provenance() {
         let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
         record.template_provenance = Some(TemplateProvenance {
-            source_id: "agentic_law_firm".to_string(),
+            source_id: "law_firm".to_string(),
             version: Some("2.0.0".to_string()),
-            path: Some("companies/agentic_law_firm".to_string()),
+            path: Some("companies/law_firm".to_string()),
         });
         let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
         let blob = OverlayBlob::parse(&json).expect("reparse");

@@ -185,8 +185,8 @@ describe("finishing setup with no companies on the host", () => {
       clientWith(
         status({
           templates: [
-            { id: "agentic_software_company", name: "Agentic Software Company", agent_count: 5, output: "Software" },
-            { id: "agentic_law_firm", name: "Agentic Law Firm", agent_count: 4, output: "Legal work" },
+            { id: "software_company", name: "Agentic Software Company", agent_count: 5, output: "Software" },
+            { id: "law_firm", name: "Agentic Law Firm", agent_count: 4, output: "Legal work" },
           ],
         }),
       ),
@@ -202,7 +202,7 @@ describe("finishing setup with no companies on the host", () => {
     );
 
     await act(async () => {
-      picker.value = "agentic_software_company";
+      picker.value = "software_company";
       picker.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(

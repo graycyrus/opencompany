@@ -1358,7 +1358,7 @@ pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> Path
 ///
 /// The sandbox is the other half of "the agent's workspace", and it carried the
 /// company id and the roster id verbatim — so a company browsing its own data
-/// directory found `agentic_law_firm/page_builder/` next to a note tree whose
+/// directory found `law_firm/page_builder/` next to a note tree whose
 /// every name is lowercase and dashed. One rule for both
 /// ([`crate::company::workspace_names`]) is the point.
 ///
@@ -1439,7 +1439,7 @@ pub fn ensure_agent_workspace(
 /// Move a pre-lowercase-dashed sandbox onto its canonical path, once.
 ///
 /// The tree used to be named by the company and roster ids verbatim
-/// (`agentic_law_firm/page_builder/`), and an agent upgraded into the new
+/// (`law_firm/page_builder/`), and an agent upgraded into the new
 /// naming would otherwise start in an empty directory with its half-finished
 /// work still on disk under the old name — present, unreachable, and reported
 /// by nothing.

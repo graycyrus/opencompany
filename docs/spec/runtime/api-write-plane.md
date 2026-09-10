@@ -375,8 +375,8 @@ the console's Steps panel uses; `integrationConnected` requires a live Composio
 connection **and** an explicit `composio` grant in `[tools].allow` — except in
 two cases, where the step is waived rather than permanently blocking
 activation. First, when the manifest can never grant that namespace at all
-(several bundled companies drop `composio` on purpose, e.g. `agentic_math_lab`,
-`agentic_product_team`). Second, when the running binary was built without the
+(several bundled companies drop `composio` on purpose, e.g. `math_lab`,
+`product_team`). Second, when the running binary was built without the
 `composio` feature — including the documented default `cargo run --bin
 opencompany -- serve` — because that build has no client with which to hold a
 connection, so no company running under it could ever satisfy the step. In

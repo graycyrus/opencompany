@@ -169,7 +169,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /data
 # The switch: which example company this container runs. Override at deploy time.
 # `OPENCOMPANY_CONSOLE_DIR` points the host at the baked console bundle so a
 # hosted tenant serves its own UI at `/` instead of 404ing.
-ENV OPENCOMPANY_COMPANY=agentic_marketing_agency \
+ENV OPENCOMPANY_COMPANY=marketing_agency \
     OPENCOMPANY_BIND=0.0.0.0:8080 \
     OPENCOMPANY_DATA_DIR=/data \
     OPENCOMPANY_DISCOVERABLE=false \

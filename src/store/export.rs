@@ -1784,9 +1784,9 @@ mod test {
         let id = CompanyId::new("prov-co");
 
         let provenance = TemplateProvenance {
-            source_id: "agentic_law_firm".into(),
+            source_id: "law_firm".into(),
             version: None,
-            path: Some("agentic_law_firm".into()),
+            path: Some("law_firm".into()),
         };
 
         // Register a company carrying template provenance in the source home.

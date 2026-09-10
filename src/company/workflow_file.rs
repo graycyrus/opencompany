@@ -2589,7 +2589,7 @@ mod tests {
 
     const CAMPAIGN: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/companies/agentic_marketing_agency/workflows/campaign_pipeline.toml"
+        "/companies/marketing_agency/workflows/campaign_pipeline.toml"
     ));
 
     #[test]
@@ -4002,7 +4002,7 @@ mod tests {
     fn the_shipped_guarded_loop_preset_is_valid() {
         const GAME: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/companies/agentic_game_studio/workflows/game_build_pipeline.toml"
+            "/companies/game_studio/workflows/game_build_pipeline.toml"
         ));
         parse_workflow(GAME).expect("the game-studio guarded loop is valid");
     }

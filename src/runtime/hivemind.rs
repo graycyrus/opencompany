@@ -715,7 +715,7 @@ mod test {
     }
     // -----------------------------------------------------------------------
     // SPIKE: the two cross-desk referral journeys, decided against a real
-    // `agentic_software_company`-shaped topology.
+    // `software_company`-shaped topology.
     //
     // These exercise the PURE decision only — `referral()` performs no I/O and
     // enqueues nothing. What a host still owes before either journey can run is

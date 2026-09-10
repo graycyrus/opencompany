@@ -516,7 +516,7 @@ async fn applying_seeds_the_chosen_template() {
 
     let (status, body) = post_setup(
         state.clone(),
-        serde_json::json!({ "fields": {}, "template": "agentic_law_firm" }),
+        serde_json::json!({ "fields": {}, "template": "law_firm" }),
     )
     .await;
 
@@ -538,7 +538,7 @@ async fn applying_seeds_the_chosen_template() {
             .template_provenance
             .as_ref()
             .map(|p| p.source_id.as_str()),
-        Some("agentic_law_firm"),
+        Some("law_firm"),
         "provenance must record which template this install started from"
     );
 }
@@ -559,7 +559,7 @@ async fn choosing_no_sign_in_applies_to_the_company_it_seeds() {
         state.clone(),
         serde_json::json!({
             "fields": { "auth_mode": "none" },
-            "template": "agentic_law_firm",
+            "template": "law_firm",
         }),
     )
     .await;
@@ -758,7 +758,7 @@ async fn applying_does_not_seed_when_a_company_already_exists() {
 
     let (status, body) = post_setup(
         state.clone(),
-        serde_json::json!({ "fields": {}, "template": "agentic_law_firm" }),
+        serde_json::json!({ "fields": {}, "template": "law_firm" }),
     )
     .await;
 
@@ -872,7 +872,7 @@ async fn a_failed_write_leaves_no_live_state_behind() {
         state.clone(),
         serde_json::json!({
             "fields": { "auth_mode": "wallet" },
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
         }),
     )
     .await;
@@ -1143,7 +1143,7 @@ async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, s
 async fn a_picked_template_proposes_its_own_roster() {
     let home_dir = home();
     let state = fresh_state(home_dir.path());
-    let expected = crate::desktop::preset("agentic_marketing_agency")
+    let expected = crate::desktop::preset("marketing_agency")
         .expect("a bundled template")
         .manifest_parsed()
         .expect("it parses")
@@ -1152,7 +1152,7 @@ async fn a_picked_template_proposes_its_own_roster() {
     let (status, body) = post_roster(
         state,
         serde_json::json!({
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
             "industry": "",
             "teamHint": "",
             "automate": "campaign briefs and weekly reporting",
@@ -1226,7 +1226,7 @@ async fn applying_a_template_seeds_it_under_the_name_the_operator_chose() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
             "name": "Northwind Studio",
         }),
     )
@@ -1257,7 +1257,7 @@ async fn applying_a_template_seeds_it_under_the_name_the_operator_chose() {
     // company's stored manifest also carries the roster `globals/` contributes,
     // so an equality here would be asserting the size of something this change
     // has nothing to do with.
-    let template_roles: Vec<String> = crate::desktop::preset("agentic_marketing_agency")
+    let template_roles: Vec<String> = crate::desktop::preset("marketing_agency")
         .unwrap()
         .manifest_parsed()
         .unwrap()
@@ -1291,7 +1291,7 @@ async fn a_template_seed_names_the_operator_as_its_admin() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_law_firm",
+            "template": "law_firm",
             "admin_email": "ada@example.com",
         }),
     )
@@ -1333,7 +1333,7 @@ async fn a_very_long_name_is_bounded_before_it_becomes_an_id() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_law_firm",
+            "template": "law_firm",
             "name": long,
         }),
     )
@@ -1379,7 +1379,7 @@ async fn a_blank_name_falls_back_to_the_templates_own() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_law_firm",
+            "template": "law_firm",
             "name": "   ",
         }),
     )
@@ -1688,7 +1688,7 @@ async fn a_designed_company_wins_over_a_template() {
     let (status, body) = post_setup(
         state.clone(),
         serde_json::json!({
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
             "company": designed_company(None),
         }),
     )

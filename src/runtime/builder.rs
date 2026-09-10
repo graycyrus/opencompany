@@ -7307,7 +7307,7 @@ needs_reason = true
     ///
     /// The other seeding tests build their bundle in a tempdir, so they prove
     /// the mechanism and not the content. This one boots
-    /// `companies/agentic_law_firm` exactly as an operator would and asserts
+    /// `companies/law_firm` exactly as an operator would and asserts
     /// that the axes that vertical is *about* — its matter list, its deadlines —
     /// are actually there, which is the whole point of the feature and the one
     /// thing a tempdir fixture cannot check.
@@ -7316,7 +7316,7 @@ needs_reason = true
         let home_dir = tmp_home("oc-ledger-shipped-");
         let bundle = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("companies")
-            .join("agentic_law_firm");
+            .join("law_firm");
         let manifest = CompanyManifest::from_path(&bundle).expect("the shipped bundle parses");
         let id = CompanyId::new("firm");
         let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
@@ -7511,9 +7511,9 @@ needs_reason = true
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
         let provenance = TemplateProvenance {
-            source_id: "agentic_law_firm".to_string(),
+            source_id: "law_firm".to_string(),
             version: None,
-            path: Some("companies/agentic_law_firm".to_string()),
+            path: Some("companies/law_firm".to_string()),
         };
 
         // First launch from a template: provenance is stamped onto the record.

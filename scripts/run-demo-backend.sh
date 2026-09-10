@@ -2,7 +2,7 @@
 # Invoked by cargo-watch inside the development container.
 set -eu
 
-company=${OPENCOMPANY_COMPANY:-agentic_marketing_agency}
+company=${OPENCOMPANY_COMPANY:-marketing_agency}
 
 set -- run --bin opencompany
 if [ -n "${OPENCOMPANY_FEATURES:-}" ]; then
