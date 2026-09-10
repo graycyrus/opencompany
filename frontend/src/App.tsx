@@ -59,11 +59,28 @@ import { cn } from "@/lib/utils";
  * dropping the code and the company. Clearing is a side effect, so it lives in
  * an effect: see `clearMagicLinkFromUrl`.
  */
-function readMagicLink(): { company: string | null; code: string } | null {
-  const params = new URLSearchParams(window.location.search);
+export function readMagicLinkFrom(search: string): { company: string | null; code: string } | null {
+  const params = new URLSearchParams(search);
   const code = params.get("code");
   if (!code) return null;
+  // `?code=` alone is not enough to say what kind of code it is. The key-grant
+  // return leg lands here as `?company=…&key=link&state=…&code=…`, and this
+  // read predates that marker: it took the grant code for a magic link and
+  // posted it to `/auth/verify`, which answers 409 on a company with no
+  // sign-in and "that sign-in didn't complete" on every other kind — for a
+  // round trip that had in fact succeeded, whose real code was sitting in
+  // `pending-key-link` waiting for the card that asked for it.
+  //
+  // So a marked landing belongs to whoever marked it. `key=auth` is the hub's
+  // sign-in return (`readHubToken`) and `key=link` is this console's own grant
+  // return (`readKeyLink`); a magic link carries no marker at all.
+  const marker = params.get("key");
+  if (marker === "link" || marker === "auth") return null;
   return { company: params.get("company"), code };
+}
+
+function readMagicLink(): { company: string | null; code: string } | null {
+  return readMagicLinkFrom(window.location.search);
 }
 
 /**
