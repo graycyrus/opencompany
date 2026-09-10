@@ -646,3 +646,87 @@ async fn a_member_cannot_start_or_finish_a_link() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{raw}");
 }
+
+// ---------------------------------------------------------------------------
+// Where the grant comes back to
+// ---------------------------------------------------------------------------
+
+mod callback_origin {
+    use super::super::{callback_origin, is_loopback_origin};
+    use crate::{AppConfig, AppState};
+    use axum::http::{HeaderMap, HeaderValue, header::ORIGIN};
+
+    fn state_with(public_url: Option<&str>) -> AppState {
+        AppState::new(AppConfig {
+            bind: "127.0.0.1:8080".to_string(),
+            public_url: public_url.map(str::to_string),
+            ..AppConfig::default()
+        })
+    }
+
+    fn headers_from(origin: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_str(origin).expect("header"));
+        headers
+    }
+
+    #[test]
+    fn a_stated_public_url_wins_over_the_browser() {
+        // A deployment that names its origin has said where its console is, and
+        // that is not something a request gets to move.
+        let state = state_with(Some("https://acme.opencompany.example/"));
+        let origin = callback_origin(&state, &headers_from("http://localhost:5173"));
+        assert_eq!(origin, "https://acme.opencompany.example");
+    }
+
+    #[test]
+    fn the_dev_console_gets_its_own_port_back() {
+        // The failure this exists to stop: with nothing configured, the callback
+        // was `http://127.0.0.1:8080`, where a dev host serves no page — so the
+        // approval landed on a 404 holding a spent code.
+        let state = state_with(None);
+        let origin = callback_origin(&state, &headers_from("http://localhost:5173"));
+        assert_eq!(origin, "http://localhost:5173");
+    }
+
+    #[test]
+    fn a_remote_origin_is_ignored_for_the_bind_address() {
+        // A header is attacker-controllable. A stolen code redeems nothing
+        // without this host's verifier, but a callback is not somewhere to take
+        // an arbitrary address on a request's say-so.
+        let state = state_with(None);
+        let origin = callback_origin(&state, &headers_from("https://evil.example"));
+        assert_eq!(origin, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn no_origin_header_falls_back_to_the_bind_address() {
+        let state = state_with(None);
+        assert_eq!(
+            callback_origin(&state, &HeaderMap::new()),
+            "http://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn an_empty_public_url_is_not_an_origin() {
+        // A launcher that exported the variable with nothing in it has said
+        // nothing, and must not produce a callback of `/?company=…`.
+        let state = state_with(Some("   "));
+        let origin = callback_origin(&state, &headers_from("http://127.0.0.1:5173"));
+        assert_eq!(origin, "http://127.0.0.1:5173");
+    }
+
+    #[test]
+    fn loopback_is_the_hub_gates_own_shape() {
+        // Accepting an origin the hub would refuse would only move the failure
+        // one leg later, into a 400 nobody can act on.
+        assert!(is_loopback_origin("http://localhost:5173"));
+        assert!(is_loopback_origin("http://127.0.0.1:8080"));
+        assert!(is_loopback_origin("http://[::1]:5173"));
+        assert!(!is_loopback_origin("https://localhost:5173"));
+        assert!(!is_loopback_origin("http://localhost.evil.example"));
+        assert!(!is_loopback_origin("http://127.0.0.1:5173/steal"));
+        assert!(!is_loopback_origin("not a url"));
+    }
+}
