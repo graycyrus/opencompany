@@ -10962,7 +10962,7 @@ name = "Morning"
                 kind: "channel".into(),
                 target: Some("operator".into()),
                 status: crate::ports::DeliveryStatus::Failed,
-                detail: "`operator` is not an automation delivery channel — this runtime has:                          engineering"
+                detail: "`operator` is not a workflow delivery channel — this runtime has:                          engineering"
                     .into(),
                 reason: crate::ports::DeliveryReason::ChannelNotWired,
             }],
