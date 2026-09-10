@@ -207,26 +207,26 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                 .iter()
                 .filter(move |chat| general_desk.as_deref() != Some(chat.id.as_str()))
                 .map(|chat| {
-                let members = record.effective_desk_members(&chat.id);
-                // The overlay subset: effective members not declared in the
-                // manifest for this desk.
-                let overlay_members = members
-                    .iter()
-                    .filter(|m| !chat.members.contains(m))
-                    .cloned()
-                    .collect();
-                DeskDto {
-                    id: chat.id.clone(),
-                    name: chat.name.clone(),
-                    description: chat.description.clone(),
-                    members,
-                    overlay_members,
-                    // Manifest desks are always lead-routed — the blueprint
-                    // syntax carries no responder field (issue #1835).
-                    responder: ResponderMode::Lead,
-                    overlay_created: false,
-                }
-            });
+                    let members = record.effective_desk_members(&chat.id);
+                    // The overlay subset: effective members not declared in the
+                    // manifest for this desk.
+                    let overlay_members = members
+                        .iter()
+                        .filter(|m| !chat.members.contains(m))
+                        .cloned()
+                        .collect();
+                    DeskDto {
+                        id: chat.id.clone(),
+                        name: chat.name.clone(),
+                        description: chat.description.clone(),
+                        members,
+                        overlay_members,
+                        // Manifest desks are always lead-routed — the blueprint
+                        // syntax carries no responder field (issue #1835).
+                        responder: ResponderMode::Lead,
+                        overlay_created: false,
+                    }
+                });
             // An overlay desk whose own **id** is a General spelling is not
             // projected (issue #1781 review, Codex P2) — the grandfathered
             // shape `POST .../desks` accepted `general` / `main` ids under
