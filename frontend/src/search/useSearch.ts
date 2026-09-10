@@ -87,6 +87,17 @@ export function useSearch(
     const scope = loadedFor.current;
     if (scope && scope.client === client && scope.company === company) return;
 
+    // Emptied before the new company's read, never left standing during it:
+    // `groups` is computed from whatever is held, so the previous company's
+    // channels and agents would otherwise be listed — and activatable — under
+    // the new one's query.
+    if (scope) {
+      setDesks([]);
+      setMembers([]);
+      setFiles([]);
+      setMessages(null);
+    }
+
     let cancelled = false;
     void Promise.allSettled([client.listDesks(company), client.listTeam(company)]).then(
       ([deskResult, teamResult]) => {
@@ -119,6 +130,12 @@ export function useSearch(
       setLoading(false);
       return;
     }
+
+    // Cleared as the query changes rather than when its replacement lands: a
+    // result list that keeps answering the previous question through the
+    // debounce is one an operator can click, and it opens the wrong thing.
+    setFiles([]);
+    setMessages(null);
 
     const timer = setTimeout(() => {
       if (!current()) return;

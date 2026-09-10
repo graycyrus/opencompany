@@ -21,8 +21,8 @@ import type { MatchRange } from "./types";
  */
 export function matchRanges(text: string, term: string): MatchRange[] {
   if (!term || !text) return [];
-  const haystack = text.toLowerCase();
-  const needle = term.toLowerCase();
+  const haystack = fold(text);
+  const needle = fold(term);
   const ranges: MatchRange[] = [];
   let from = 0;
   for (;;) {
@@ -39,6 +39,26 @@ export function matchRanges(text: string, term: string): MatchRange[] {
 
 /** Enough to highlight a line; past this the extra marks say nothing. */
 const MAX_RANGES = 20;
+
+/**
+ * Case folded **without changing length**, so an offset into the result is an
+ * offset into the original.
+ *
+ * `String.prototype.toLowerCase` is not length-preserving: `"İ".toLowerCase()`
+ * is two code units, so every index after one drifts by one and a highlight
+ * lands a character late — `İstanbul box` highlighting `ox`. Folding a unit at
+ * a time and keeping any that does not fold to exactly one unit costs those
+ * few characters their case-insensitivity, which is a far smaller wrong than
+ * marking the wrong letters.
+ */
+function fold(value: string): string {
+  let folded = "";
+  for (const unit of value) {
+    const lower = unit.toLowerCase();
+    folded += lower.length === unit.length ? lower : unit;
+  }
+  return folded;
+}
 
 /** Whether `text` contains `term` at all, case-insensitively. */
 export function matches(text: string, term: string): boolean {
@@ -65,8 +85,8 @@ export function matches(text: string, term: string): boolean {
  */
 export function score(text: string, term: string): number {
   if (!term) return 1;
-  const haystack = text.toLowerCase();
-  const needle = term.toLowerCase();
+  const haystack = fold(text);
+  const needle = fold(term);
   const at = haystack.indexOf(needle);
   if (at === -1) return 0;
 
@@ -111,6 +131,10 @@ export function excerptAround(
   width = 160,
 ): { excerpt: string; ranges: MatchRange[] } {
   const collapsed = text.replace(/\s+/g, " ").trim();
+  // The term is collapsed too, or a query carrying a double space matches in
+  // `score` (which sees the raw text) and then cannot be found here, leaving an
+  // unrelated leading excerpt with nothing marked in it.
+  term = term.replace(/\s+/g, " ").trim();
   if (!term) {
     return {
       excerpt: collapsed.length > width ? `${collapsed.slice(0, width)}…` : collapsed,
@@ -118,7 +142,7 @@ export function excerptAround(
     };
   }
 
-  const at = collapsed.toLowerCase().indexOf(term.toLowerCase());
+  const at = fold(collapsed).indexOf(fold(term));
   if (at === -1) {
     return {
       excerpt: collapsed.length > width ? `${collapsed.slice(0, width)}…` : collapsed,

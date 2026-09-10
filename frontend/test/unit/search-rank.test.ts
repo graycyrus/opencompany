@@ -103,3 +103,35 @@ describe("the snippet shown for a body match", () => {
     expect(excerptAround("short enough", "")).toEqual({ excerpt: "short enough", ranges: [] });
   });
 });
+
+/**
+ * Case folding that changes length is how a highlight lands on the wrong
+ * letters (Codex P2 on #2245).
+ */
+describe("matching text that does not fold to the same length", () => {
+  it("keeps offsets pointing at the match in the original string", () => {
+    // `"İ".toLowerCase()` is two code units. Lowercasing the haystack shifts
+    // every index after it by one, and the highlight slides off the match.
+    const text = "İstanbul box";
+    const [range] = matchRanges(text, "box");
+    expect(text.slice(range[0], range[1])).toBe("box");
+  });
+
+  it("windows the excerpt on the match, not one character past it", () => {
+    const { excerpt, ranges } = excerptAround("İstanbul box of candles", "box");
+    const [range] = ranges;
+    expect(excerpt.slice(range[0], range[1])).toBe("box");
+  });
+});
+
+describe("a query whose spacing does not match the text's", () => {
+  it("still finds and marks the term the score said was there", () => {
+    // `score` sees the raw text and matches; the excerpt collapses whitespace,
+    // so without collapsing the term too the snippet came back unmarked and
+    // windowed from the start.
+    const { excerpt, ranges } = excerptAround("keep the  foo  bar together", "foo  bar");
+    expect(ranges.length).toBeGreaterThan(0);
+    const [range] = ranges;
+    expect(excerpt.slice(range[0], range[1])).toBe("foo bar");
+  });
+});

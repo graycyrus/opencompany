@@ -55,6 +55,16 @@ export interface SearchResult {
    * of what they typed.
    */
   action: string;
+  /**
+   * The token to write into the box when this result is *picked* as a scope,
+   * where that differs from what the row reads.
+   *
+   * An agent's display name is not a token: "User Researcher" written back as
+   * `@User Researcher ` parses as the scope `user` plus the term `researcher`,
+   * which searches a different agent's DM for a word nobody typed. The id is
+   * one word by construction, so it survives the round trip.
+   */
+  scopeName?: string;
   /** Higher sorts first within its group. Never compared across groups. */
   score: number;
 }

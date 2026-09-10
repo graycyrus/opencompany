@@ -298,6 +298,10 @@ export function MessageRow({
 
   if (sender.kind === "system") {
     return (
+      // Wrapped only to carry the anchor: the pill renders instead of the
+      // `<article>` below, so a system line had no `data-message-id` and a
+      // search result naming one scrolled to nothing.
+      <div data-message-id={message.id} className="data-[found]:bg-primary/10">
       <SystemPill
         message={message}
         reviewInFlight={message.taskId !== undefined && (reviewingCardIds?.has(message.taskId) ?? false)}
@@ -308,6 +312,7 @@ export function MessageRow({
         redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
         latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
       />
+      </div>
     );
   }
 

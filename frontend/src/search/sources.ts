@@ -44,6 +44,7 @@ export function channelResults(desks: readonly Desk[], query: SearchQuery): Sear
           ([from, to]) => [from + 1, to + 1] as const,
         ),
         subtitle: desk.blurb || undefined,
+        scopeName: desk.channel,
         href: `#/chat/${encodeURIComponent(desk.id)}`,
         action: `Go to #${desk.channel}`,
         score: value,
@@ -72,6 +73,8 @@ export function agentResults(members: readonly TeamMember[], query: SearchQuery)
         title: member.name,
         titleMatches: matchRanges(member.name, term),
         subtitle: member.role || undefined,
+        // The id, never the display name — see `SearchResult.scopeName`.
+        scopeName: member.id,
         // The console-local channel id, which is what the hash router routes.
         // NOT `dmThreadId` — that is the host thread this DM is addressed on,
         // and the two differ for a teammate whose id spells General.
@@ -112,6 +115,11 @@ export function messageResults(
   const term = query.term;
   if (!term) return [];
 
+  // When each hit was sent, kept beside the results rather than on them: it is
+  // a sort key, not something a row says, and `SearchResult` is what the modal
+  // renders.
+  const recency = new Map(messages.map((message) => [`message:${message.id}`, message.atMillis]));
+
   return messages
     .map((message): SearchResult | null => {
       const value = score(message.text, term);
@@ -130,16 +138,38 @@ export function messageResults(
         // journaled line under an `h`-prefixed console id, and that is what
         // `data-message-id` carries. Linking the bare one lands on the channel
         // and then finds nothing to scroll to.
-        href: `#/chat/${encodeURIComponent(context.channelId)}?m=${encodeURIComponent(hostMessageId(message.id))}`,
+        //
+        // A reply is folded into its thread and is not in the main timeline at
+        // all, so its link names the parent too — `RoomView` opens the panel
+        // and then finds the line inside it. Without that the link lands in the
+        // conversation and quietly gives up.
+        href: messageHref(context.channelId, message),
         action: `Open in ${context.label}`,
         score: value,
       };
     })
     .filter((hit): hit is SearchResult => hit !== null)
-    // Most recent first among equally good matches: in a conversation, later is
-    // usually the one being looked for.
-    .sort((a, b) => b.score - a.score)
+    // Most recent first among equally good matches: in a conversation later is
+    // usually the one being looked for, and the history route answers
+    // oldest-first — so without the second key a search for a word as common as
+    // "yes" fills the limit with the oldest six and hides today's.
+    .sort((a, b) => b.score - a.score || (recency.get(b.id) ?? 0) - (recency.get(a.id) ?? 0))
     .slice(0, PER_GROUP_LIMIT);
+}
+
+/**
+ * Where a message result opens.
+ *
+ * A reply lives in its thread rather than in the timeline, so its address
+ * names the thread as well — `RoomView` consumes `?thread=` first and the
+ * line is then on screen to be found.
+ */
+function messageHref(channelId: string, message: ChatHistoryMessageDto): string {
+  const anchor = `m=${encodeURIComponent(hostMessageId(message.id))}`;
+  const parent = message.parentId
+    ? `thread=${encodeURIComponent(hostMessageId(message.parentId))}&`
+    : "";
+  return `#/chat/${encodeURIComponent(channelId)}?${parent}${anchor}`;
 }
 
 /**
@@ -152,7 +182,10 @@ export function fileResults(hits: readonly SearchHit[], query: SearchQuery): Sea
   if (query.scope && query.scope.kind !== "file") return [];
   const term = query.scope?.kind === "file" ? query.scope.name : query.term;
 
-  return hits.slice(0, PER_GROUP_LIMIT).map((hit): SearchResult => {
+  // Ranked THEN limited. Slicing first drops a name match sitting behind six
+  // body matches — the one hit most likely to be the answer.
+  return hits
+    .map((hit): SearchResult => {
     const excerpt = hit.excerpt ? excerptAround(hit.excerpt, term) : null;
     return {
       kind: "file" as const,
@@ -166,7 +199,9 @@ export function fileResults(hits: readonly SearchHit[], query: SearchQuery): Sea
       action: `Open ${hit.name}`,
       score: hit.matched === "name" ? 800 : 500,
     };
-  });
+    })
+    .sort(byScore)
+    .slice(0, PER_GROUP_LIMIT);
 }
 
 /** Highest first; ties keep the order the source gave them. */
@@ -183,9 +218,16 @@ function byScore(a: SearchResult, b: SearchResult): number {
  */
 export function formatWhen(atMillis: number, now = Date.now()): string {
   const when = new Date(atMillis);
+  const today = new Date(now);
   const elapsed = now - atMillis;
   const DAY = 24 * 60 * 60 * 1000;
-  if (elapsed < DAY) {
+  // The local calendar day, not the last 24 hours: 23:00 yesterday read at
+  // 10:00 today is not "today", and rendering it as a bare time says it is.
+  const sameDay =
+    when.getFullYear() === today.getFullYear() &&
+    when.getMonth() === today.getMonth() &&
+    when.getDate() === today.getDate();
+  if (sameDay) {
     return when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   }
   if (elapsed < 7 * DAY) {

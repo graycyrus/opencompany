@@ -67,7 +67,11 @@ export function SearchDialog({
     // A picked agent or channel with no term yet is a *choice*, not a
     // destination: it fills the scope in and waits for what to search for.
     if (query.scope && !query.term && (result.kind === "agent" || result.kind === "channel")) {
-      const name = result.kind === "agent" ? result.title : result.title.replace(/^#/, "");
+      // `scopeName`, not the row's label: a display name with a space in it —
+      // "User Researcher" — written back as `@User Researcher ` re-parses as
+      // the scope `user` and the term `researcher`, and searches somebody
+      // else's DM for a word nobody typed.
+      const name = result.scopeName ?? result.title.replace(/^#/, "");
       setRaw(withScopeName(query, name));
       inputRef.current?.focus();
       return;

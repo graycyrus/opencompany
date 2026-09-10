@@ -200,3 +200,98 @@ describe("the file scope", () => {
     expect(agentResults(members, parseSearchQuery("/priya"))).toEqual([]);
   });
 });
+
+/**
+ * The things review found could be offered but not reached, or ranked but not
+ * ordered (#2245).
+ */
+describe("results that have to survive the round trip", () => {
+  const multiWord = [member({ id: "user_researcher", name: "User Researcher", role: "Research" })];
+
+  it("hands back a one-word token for an agent whose name has a space", () => {
+    // `@User Researcher ` would re-parse as the scope `user` and the term
+    // `researcher`, searching a different agent's DM for a word nobody typed.
+    const [hit] = agentResults(multiWord, parseSearchQuery("@user"));
+    expect(hit.scopeName).toBe("user_researcher");
+    expect(parseSearchQuery(`@${hit.scopeName} box`).scope).toEqual({
+      kind: "person",
+      name: "user_researcher",
+    });
+  });
+
+  it("hands back the channel's own slug, not the # the row draws", () => {
+    const [hit] = channelResults(desks, parseSearchQuery("#autumn"));
+    expect(hit.scopeName).toBe("autumn-launch");
+  });
+});
+
+describe("ordering that the limit would otherwise decide", () => {
+  const context = {
+    channelId: "dm:priya",
+    label: "Priya",
+    nameFor: () => "Priya",
+  };
+
+  it("breaks an equal-score tie by recency, so the limit keeps the newest", () => {
+    // History answers oldest-first, and a common word scores identically on
+    // every hit — so without the second key the six oldest fill the list.
+    const messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m${index}`,
+      channel: "dm:priya",
+      author: "priya",
+      text: "yes",
+      atMillis: index + 1,
+      mine: false,
+    }));
+    const hits = messageResults(messages, parseSearchQuery("@priya yes"), context);
+    expect(hits).toHaveLength(6);
+    expect(hits[0].id).toBe("message:m7");
+  });
+
+  it("ranks files before applying the limit, so a name match is not dropped", () => {
+    const many = [
+      ...Array.from({ length: 6 }, (_, index) =>
+        hit({ id: `body${index}`, name: `Note ${index}.md`, path: `Note ${index}.md`, matched: "content" }),
+      ),
+      hit({ id: "named", name: "Autumn.md", path: "Autumn.md", matched: "name" }),
+    ];
+    const results = fileResults(many, parseSearchQuery("autumn"));
+    expect(results[0].id, "the name match should lead, not be sliced away").toBe("file:named");
+  });
+});
+
+describe("links that have somewhere to land", () => {
+  const context = { channelId: "dm:priya", label: "Priya", nameFor: () => "Priya" };
+
+  it("names the parent thread for a folded reply", () => {
+    // A reply renders in `ThreadPanel` and not in the timeline at all, so the
+    // address has to open the panel before there is a line to scroll to.
+    const reply = {
+      id: "r1",
+      parentId: "p1",
+      channel: "dm:priya",
+      author: "priya",
+      text: "the candle ships friday",
+      atMillis: 1,
+      mine: false,
+    };
+    const [result] = messageResults([reply], parseSearchQuery("@priya candle"), context);
+    expect(result.href).toContain("thread=hp1");
+    expect(result.href).toContain("m=hr1");
+  });
+});
+
+describe("when a message was sent, by the calendar", () => {
+  it("does not call yesterday evening today because it is inside 24 hours", () => {
+    const yesterdayEvening = new Date(2026, 8, 9, 23, 0).getTime();
+    const thisMorning = new Date(2026, 8, 10, 10, 0).getTime();
+    // 11 hours ago, and still not today.
+    expect(formatWhen(yesterdayEvening, thisMorning)).not.toMatch(/^\d{1,2}[:.]/);
+  });
+
+  it("gives a bare time for a message from earlier the same day", () => {
+    const earlier = new Date(2026, 8, 10, 9, 0).getTime();
+    const later = new Date(2026, 8, 10, 17, 0).getTime();
+    expect(formatWhen(earlier, later)).toMatch(/\d/);
+  });
+});
