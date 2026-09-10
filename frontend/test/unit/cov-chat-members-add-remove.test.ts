@@ -10,15 +10,12 @@ import { AddMemberDialog } from "@/views/room/AddMemberDialog";
 import { MembersPane } from "@/views/room/MembersPane";
 
 /**
- * Add/remove a teammate from chat's member pane. `POST {scope}/team`
- * (`add_member`) and `DELETE {scope}/team/{agent_id}` (`remove_member`) are
- * both `scoped(…)` — any company member, not admin-only (a `budget_usd_daily`
- * at creation is the one thing that needs an admin, and the chat dialog never
- * collects one — `NewMemberFields` has no such field). `MembersPane` carries
- * no role check around "Add teammate" or "Remove from roster" the way it
- * does around the budget menu (`canEditBudget`, `cov-chat-members-budget-
- * auth.test.ts`) — this pins both stay live for a plain member, and that a
- * refused add is not silently swallowed.
+ * Put an existing agent onto a channel's desk from the chat member pane
+ * (issue #2224). `MembersPane` no longer creates or removes a teammate
+ * itself — hiring lives on the empty-desk prompt and the Team page, and
+ * dropping one from the roster entirely is a Team-page-only action now —
+ * this pane's only mutation is `onAddExisting`, offered solely on an
+ * "Everyone else" row when there is a real desk to add into.
  */
 
 const MEMBER: TeamMember = {
@@ -35,20 +32,13 @@ const MEMBER: TeamMember = {
 
 function paneProps(overrides: Record<string, unknown> = {}) {
   return {
-    channelMembers: null,
+    channelMembers: [],
     others: [MEMBER],
     people: [],
     loading: false,
     fromHost: true,
-    onToggleInbox: vi.fn(),
-    onRemove: vi.fn(),
-    onAdd: vi.fn(),
     onMessage: vi.fn(),
-    canEditBudget: false,
-    onEditBudget: vi.fn(),
-    onRemoveCap: vi.fn(),
-    onResetBudget: vi.fn(),
-    setByLabel: () => undefined,
+    onAddExisting: vi.fn(),
     ...overrides,
   };
 }
@@ -69,62 +59,48 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function openMemberMenu() {
-  const trigger = container.querySelector('[aria-label="Actions for Ada"]') as HTMLButtonElement;
-  await act(async () => trigger.click());
-}
-
-function menuItem(text: string): HTMLElement | undefined {
-  return Array.from(document.body.querySelectorAll('[role="menuitem"]')).find((el) =>
-    (el.textContent ?? "").includes(text),
-  ) as HTMLElement | undefined;
-}
-
-describe("MembersPane's Add/Remove, for a plain member (canEditBudget: false)", () => {
-  it("still offers Add agent — no admin gate on this control", async () => {
+describe("MembersPane's add-existing action, on an Everyone-else row", () => {
+  it("offers a + for Ada when there is a real desk to add her to", async () => {
     await act(async () => {
       root.render(createElement(MembersPane, paneProps()));
     });
 
-    const add = container.querySelector('[aria-label="Add agent"]') as HTMLButtonElement;
+    const add = container.querySelector('[aria-label="Add Ada to this channel"]') as HTMLButtonElement;
     expect(add).not.toBeNull();
-    expect(add.disabled).toBe(false);
-
-    await act(async () => add.click());
-    expect(paneProps().onAdd).not.toBeUndefined(); // sanity: prop exists
   });
 
-  it("wires the Add trigger straight to onAdd", async () => {
-    const onAdd = vi.fn();
+  it("wires the + straight to onAddExisting with the member's id", async () => {
+    const onAddExisting = vi.fn();
     await act(async () => {
-      root.render(createElement(MembersPane, paneProps({ onAdd })));
+      root.render(createElement(MembersPane, paneProps({ onAddExisting })));
     });
 
-    const add = container.querySelector('[aria-label="Add agent"]') as HTMLButtonElement;
+    const add = container.querySelector('[aria-label="Add Ada to this channel"]') as HTMLButtonElement;
     await act(async () => add.click());
 
-    expect(onAdd).toHaveBeenCalled();
+    expect(onAddExisting).toHaveBeenCalledWith("m1");
   });
 
-  it("still offers Remove from roster, beside a budget menu that stays absent", async () => {
+  it("offers no + at all when the caller has no channel to add into (onAddExisting absent)", async () => {
     await act(async () => {
-      root.render(createElement(MembersPane, paneProps()));
+      root.render(createElement(MembersPane, paneProps({ onAddExisting: undefined })));
     });
-    await openMemberMenu();
 
-    expect(menuItem("Remove from roster")).not.toBeUndefined();
-    expect(menuItem("Set daily budget")).toBeUndefined();
+    expect(container.querySelector('[aria-label="Add Ada to this channel"]')).toBeNull();
   });
 
-  it("wires Remove straight to onRemove with the member's id", async () => {
-    const onRemove = vi.fn();
+  it("offers no + on a DM — real, non-null channelMembers that is not a desk", async () => {
+    const onAddExisting = vi.fn();
     await act(async () => {
-      root.render(createElement(MembersPane, paneProps({ onRemove })));
+      // The caller (RoomView) gates `onAddExisting` on `activeIsDesk`, never on
+      // `channelMembers` alone: a DM has real, non-null membership too (issue
+      // #2224's DM regression). This pane must not re-derive that signal —
+      // an absent `onAddExisting` renders no + no matter what channelMembers is.
+      root.render(createElement(MembersPane, paneProps({ onAddExisting: undefined, channelMembers: [MEMBER] })));
     });
-    await openMemberMenu();
-    await act(async () => menuItem("Remove from roster")?.click());
 
-    expect(onRemove).toHaveBeenCalledWith("m1");
+    expect(container.querySelector('[aria-label="Add Ada to this channel"]')).toBeNull();
+    expect(onAddExisting).not.toHaveBeenCalled();
   });
 });
 

@@ -15,16 +15,18 @@ import type { TaskStatus } from "@/api/tasks";
 
 /**
  * `RoomView` wires several inline actions with their own host round trip and
- * their own catch block — dismissing a card, removing a teammate, redeeming a
- * budget pause. Every one of those catch blocks was written and never driven
- * end to end: this file mounts the real view, triggers each control, and has
- * the client refuse the write the way the host actually does, then asserts
- * the screen says something true instead of a false success or a silent
- * nothing.
+ * their own catch block — dismissing a card, redeeming a budget pause. Every
+ * one of those catch blocks was written and never driven end to end: this
+ * file mounts the real view, triggers each control, and has the client
+ * refuse the write the way the host actually does, then asserts the screen
+ * says something true instead of a false success or a silent nothing.
  *
  * (Send, reactions and the settle-pill Approve get the same treatment in
  * `cov-chat-composer-send-fail.test.ts`, `cov-chat-reaction-404-rollback.test.ts`
- * and `cov-chat-review-card-fail.test.ts`.)
+ * and `cov-chat-review-card-fail.test.ts`. Removing a teammate used to be
+ * covered here too — `RoomView`'s member pane dropped that action entirely
+ * in issue #2224; the equivalent refusal handling now lives only in
+ * `TeamView.removeMember`, which has no refusal-path coverage of its own yet.)
  */
 
 const toasts = vi.hoisted(() => ({
@@ -48,7 +50,6 @@ const OPERATOR_DTO = { id: "operator", name: "Operator", description: "Automatio
 const MEMBER_DTO = { id: "m1", name: "Ada", role: "engineer" };
 
 interface Overrides {
-  removeTeamMember?: () => Promise<unknown>;
   del?: () => Promise<unknown>;
   redeemBudgetPause?: () => Promise<unknown>;
 }
@@ -67,7 +68,6 @@ function clientAs(overrides: Overrides): OpenCompanyClient {
     mentionables: () => Promise.resolve([]),
     getOperatorChannel: () => Promise.resolve(OPERATOR_DTO),
     capabilityStatus: () => Promise.resolve({ cognition: null }),
-    removeTeamMember: vi.fn(overrides.removeTeamMember ?? (() => Promise.resolve())),
     del: vi.fn(overrides.del ?? (() => Promise.resolve())),
     getBudgetPause: vi.fn(() => Promise.resolve(null)),
     redeemBudgetPause: vi.fn(overrides.redeemBudgetPause ?? (() => Promise.resolve())),
@@ -169,13 +169,6 @@ function bodyButton(text: string): HTMLButtonElement | undefined {
     | undefined;
 }
 
-/** A dropdown/menu item — base-ui renders these as `[role="menuitem"]`, not `<button>`. */
-function bodyMenuItem(text: string): HTMLElement | undefined {
-  return [...document.body.querySelectorAll('[role="menuitem"]')].find((b) =>
-    (b.textContent ?? "").includes(text),
-  ) as HTMLElement | undefined;
-}
-
 /**
  * `dismissCard` is deliberately NOT optimistic — the chip must stay
  * exactly where it was on a refusal, unlike `react`'s rollback, because a chip
@@ -217,52 +210,6 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
 
     expect(toasts.success).toHaveBeenCalledWith("That card was already gone — chip cleared.");
     expect(container.querySelector('a[href="#/company/tasks/task-1"]')).toBeNull();
-  });
-});
-
-/**
- * `POST/DELETE …/team` are `ScopedCompany` — any signed-in member
- * may add or remove a teammate — so there is no role gate to pin here. What
- * had no coverage was the one refusal the host still enforces (a company's
- * last teammate) and an ordinary write failure, neither silently swallowed.
- */
-describe("removing an agent from the chat member pane", () => {
-  async function openRemove() {
-    const toggle = [...container.querySelectorAll("button")].find((b) =>
-      (b.textContent ?? "").includes("agent"),
-    ) as HTMLButtonElement;
-    expect(toggle, "the members-pane toggle").not.toBeUndefined();
-    await act(async () => toggle.click());
-    await flush();
-    const actions = container.querySelector('[aria-label="Actions for Ada"]') as HTMLButtonElement;
-    expect(actions, "the row's actions trigger").not.toBeNull();
-    await act(async () => actions.click());
-    await flush();
-    const remove = bodyMenuItem("Remove from roster");
-    expect(remove, "the Remove from roster item").not.toBeUndefined();
-    await act(async () => remove?.click());
-    await flush();
-  }
-
-  it("names the host's last-agent refusal (AUTH — a removal the host will not allow)", async () => {
-    const client = clientAs({
-      removeTeamMember: () =>
-        Promise.reject(new ApiError(409, "conflict", "You can't remove your company's last agent.")),
-    });
-    await mount(client);
-    await openRemove();
-
-    expect(toasts.error).toHaveBeenCalledWith("You can't remove your company's last agent.");
-  });
-
-  it("reports an ordinary failure rather than leaving the row untouched with no explanation (FAIL)", async () => {
-    const client = clientAs({
-      removeTeamMember: () => Promise.reject(new ApiError(500, "server_error", "temporarily unavailable")),
-    });
-    await mount(client);
-    await openRemove();
-
-    expect(toasts.error).toHaveBeenCalledWith("temporarily unavailable");
   });
 });
 

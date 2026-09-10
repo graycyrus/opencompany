@@ -2552,15 +2552,33 @@ export function RoomView({
    */
   async function addExistingMember(agentId: string) {
     if (!activeIsDesk) return;
+    // Same rule `send` above follows: if the operator switches company or
+    // connection while the POST is in flight, every UI-visible effect of it —
+    // refresh or toast — belongs to a scope nobody is looking at anymore, so
+    // it is dropped rather than landing on whatever they switched to.
+    const scopeAtAdd = { connection: scope.connection, company: scope.company, client };
+    const stale = () => {
+      const latestScope = scopeRef.current;
+      return (
+        latestScope !== null &&
+        (scopeAtAdd.connection !== latestScope.connection ||
+          scopeAtAdd.company !== latestScope.company ||
+          scopeAtAdd.client !== latestScope.client)
+      );
+    };
     try {
       await client.addDeskMember(active.id, agentId, company);
+      if (stale()) return;
       void reloadDirectory();
       void loadDesks();
     } catch (error) {
+      if (stale()) return;
       if (error instanceof ApiError && error.status === 409) {
         // The one 409 this route answers: already a member. Reached only by
-        // a race with another tab or operator — the row that triggered this
-        // is already gone from "Everyone else" on the next reload.
+        // a race with another tab or operator — refresh now so the row
+        // leaves "Everyone else" immediately rather than on an unrelated
+        // reload.
+        void loadDesks();
         toast.error("Already on this channel.");
       } else {
         toast.error(error instanceof Error ? error.message : "Couldn't add agent.");
