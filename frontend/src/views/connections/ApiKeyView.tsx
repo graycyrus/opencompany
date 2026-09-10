@@ -172,7 +172,9 @@ export function ApiKeyView({ client, company }: Props) {
               <p className="text-muted-foreground">
                 {configured
                   ? "This company has its own key. Every teammate's turns and every connected app are charged to the account it belongs to."
-                  : "Until one is set, agents cannot think and no provider can be connected. Connecting takes a sign-in — nothing to copy."}
+                  : noIdentityAtAll
+                    ? "Until one is set, agents cannot think and no provider can be connected. Connecting takes a sign-in — nothing to copy."
+                    : "This instance's own platform identity covers agents and connected providers for now. Connect the company's own key to bill this company's account instead of the shared one."}
               </p>
             </div>
           </div>
