@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { MessageSquare, MoreHorizontal, Plus, UserPlus } from "lucide-react";
+import { MessageSquare, MoreHorizontal, Plus } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -66,15 +66,13 @@ interface Props {
    * pane and the Inbox page agree on the same host state (issue #173).
    */
   onRemove: (id: string) => void;
-  onAdd: () => void;
   /**
    * Put an agent already on the roster onto this channel's desk (issue #2224).
-   * Only ever offered on an "Everyone else" row, and only when `channelMembers`
-   * is non-null — there is no desk id to add into otherwise. Deliberately
-   * separate from `onAdd`: that opens the create-a-new-teammate dialog, this
-   * adds an existing one, and the two are not the same action wearing one
-   * button. Absent has the same meaning `onManageDesk` gives it: no desk here,
-   * nothing to add to.
+   * Only ever offered on an "Everyone else" row. Absent has the same meaning
+   * `onManageDesk` gives it: no real desk behind this channel, nothing to add
+   * to — the caller gates this on `activeIsDesk`, not on anything this pane
+   * can see for itself, because a DM has real (non-null) channel membership
+   * too and is not a desk.
    */
   onAddExisting?: (id: string) => void;
   onMessage: (member: TeamMember) => void;
@@ -105,12 +103,12 @@ interface Props {
  * company under it.
  *
  * This replaces the standalone Team page: everything that page could do lives
- * on a row here (give an agent an inbox, drop them from the roster) or on the
- * Add button, and a row now also opens that teammate's DM, which the page
- * could not do at all. An "Everyone else" row can also put that agent onto
- * this desk directly (issue #2224) — putting an existing teammate on a
- * channel and hiring a new one are different actions, so that stays separate
- * from the Add button, which still opens the create-a-teammate dialog.
+ * on a row here — give an agent an inbox, drop them from the roster, put an
+ * existing one onto this desk directly from "Everyone else" (issue #2224) —
+ * and a row now also opens that teammate's DM, which the page could not do
+ * at all. Hiring a brand-new teammate is a different action and lives
+ * elsewhere (the empty-desk "Add an agent" prompt, the Team page's own Add
+ * agent) — this pane only ever offers an agent already on the roster.
  *
  * The two sections exist because those are two different questions. "Who is in
  * this room" is what a channel header is for, and answering it with the whole
@@ -127,7 +125,6 @@ export function MembersPane({
   loading,
   fromHost,
   onRemove,
-  onAdd,
   onAddExisting,
   onMessage,
   onManageDesk,
@@ -148,16 +145,6 @@ export function MembersPane({
           <h2 className="text-sm font-semibold tracking-tight">Team</h2>
           <p className="truncate text-xs text-muted-foreground">{loading ? "Loading…" : subtitle}</p>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8"
-          onClick={onAdd}
-          aria-label="Add agent"
-          title="Add agent"
-        >
-          <UserPlus className="size-4" />
-        </Button>
       </header>
 
       <div className="flex-1 overflow-y-auto p-2">

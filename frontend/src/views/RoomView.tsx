@@ -3121,7 +3121,6 @@ export function RoomView({
                     const member = members.find((m) => m.id === id);
                     if (member) void removeMember(member);
                   }}
-                  onAdd={() => setAddOpen(true)}
                   // `activeIsDesk`, not "`channelMembers` is non-null": a DM
                   // has real (non-null) channel membership too — one row,
                   // itself — and is not a desk. `addDeskMember` has no
