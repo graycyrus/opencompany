@@ -105,12 +105,15 @@ test("a company agent opens from its card and shows what it is", async ({ page }
 
   // The instructions it was defined with — the "AGENT.md for that agent" the
   // issue asks for, which the manifest always carried and the console never
-  // showed after creation.
+  // showed after creation. Lives on the Instructions tab, not the Overview
+  // tab this arrival opens on.
+  await page.getByRole("tab", { name: "Instructions" }).click();
   await expect(page.getByTestId("agent-description")).toContainText("Sets direction");
 
   // The effective tool grants. Every one of these is an intersection of the
   // agent's own `tools` line with the company allow-list, and none of it was
-  // readable anywhere before this issue.
+  // readable anywhere before this issue — reported on its own Tools tab.
+  await page.getByRole("tab", { name: "Tools" }).click();
   const tools = page.getByTestId("agent-tools");
   await expect(tools).toContainText("workspace.read");
   await expect(tools).toContainText("composio");
@@ -125,7 +128,9 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   // action behind it for a hosted tenant that has no checkout to edit and no
   // redeploy to make. A manifest teammate is editable now, through an overlay
   // layered on the record rather than a rewrite of the blueprint, so the button
-  // is live and the read-only note is gone.
+  // is live and the read-only note is gone. Back on Instructions, where Edit
+  // lives.
+  await page.getByRole("tab", { name: "Instructions" }).click();
   await expect(page.getByTestId("agent-edit")).toBeEnabled();
   await expect(page.getByTestId("agent-readonly-note")).toHaveCount(0);
 

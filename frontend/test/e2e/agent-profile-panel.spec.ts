@@ -74,14 +74,17 @@ test("the panel hands off to the agent's own page, with the form open", async ({
 });
 
 test("Back closes the editor and leaves the agent's page standing", async ({ page }) => {
-  await page.goto("/#/company/agent/engineer");
+  // Edit lives on the Instructions tab, not the Overview tab a plain
+  // (non-`?edit`) arrival opens on — named in the address up front so the
+  // click below is the one history entry this test means to undo.
+  await page.goto("/#/company/agent/engineer?tab=instructions");
   await page.getByTestId("agent-edit").click();
-  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?edit$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?tab=instructions&edit$/);
   await expect(page.getByTestId("agent-save")).toBeVisible({ timeout: 30_000 });
 
   await page.goBack();
 
-  await expect(page).toHaveURL(/#\/company\/agent\/engineer$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?tab=instructions$/);
   await expect(page.getByTestId("agent-save")).toHaveCount(0);
   await expect(page.getByTestId("agent-edit")).toBeVisible();
 });
