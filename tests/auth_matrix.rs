@@ -1688,7 +1688,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         336,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 2_975);
+    assert_eq!(render_snapshot().lines().count(), 2_989);
     assert_eq!(
         all_routes()
             .map(|route| {
