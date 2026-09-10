@@ -1067,6 +1067,45 @@ const OPERATOR_AUTHORITY_ROUTES: &[Route] = &[
         red_cells: RedCells::None,
     },
     Route {
+        method: Verb::Get,
+        path: "/desks/{desk_id}/hive",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Members may read the move grammar in force on a desk.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Put,
+        path: "/desks/{desk_id}/hive",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Json(r#"{}"#),
+        note: "Members may install or replace a desk's move grammar.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Delete,
+        path: "/desks/{desk_id}/hive",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Members may drop a desk's installed grammar and fall back to the manifest.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
         method: Verb::Put,
         path: "/desks/{desk_id}/order",
         address: Address::Dual,
@@ -1623,13 +1662,13 @@ fn table_counts_and_intentional_widenings_are_explicit() {
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 4);
     assert_eq!(OVERLAPPING_EXTERNAL_ROUTES.len(), 1);
-    assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 13);
+    assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 16);
     assert_eq!(OPERATOR_DIRECT_ROUTES.len(), 11);
     assert_eq!(
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        419,
+        425,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1637,10 +1676,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        332,
+        334,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 2_933);
+    assert_eq!(render_snapshot().lines().count(), 2_975);
     assert_eq!(
         all_routes()
             .map(|route| {
