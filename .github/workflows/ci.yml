@@ -1449,6 +1449,14 @@ jobs:
       - name: Test (tinyplace)
         run: cargo test --locked --features tinyplace --lib
 
+      # `webhooks` gates `HttpWebhookSink` and its HMAC signer, and its tests
+      # were compiled by `Check (--all-features)` and run by nothing. Scoped to
+      # the module rather than the whole lib: this is a sixth feature
+      # resolution, and the rest of the suite is already covered by the lanes
+      # above. `--locked` per issue #251, as for every graph-resolving call.
+      - name: Test (webhooks)
+        run: cargo test --locked --features webhooks --lib server::webhook
+
   # Issue #1118. The gated host binary the `Console E2E (live brain)` job needs
   # is built HERE rather than as the last step of `Rust (openhuman, tinymemory)`
   # above, and the move is a wall-clock change, not a tidy-up.
