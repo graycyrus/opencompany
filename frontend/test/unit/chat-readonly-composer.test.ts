@@ -8,7 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { isGeneralChannel } from "@/lib/chat";
 import { TOUR } from "@/tour/steps";
-import { ChatView } from "@/views/ChatView";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * The channel composer answers a read-only channel by not existing, and the
