@@ -516,14 +516,14 @@ async fn get_billing(
     company: ScopedCompany,
 ) -> Result<Json<BillingDto>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let env = crate::app::config::ProcessEnv;
-    let credential = resolve(
-        runtime.id(),
-        runtime.secrets().as_ref(),
-        crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
-    )
-    .await
-    .map_err(ApiError)?;
+    // The company's own key only — never the instance's fallback platform
+    // identity. `resolve` would report `configured: true` and query billing
+    // for the shared host identity when the company has set nothing, exposing
+    // that account's balance and plan to any member. `load` never falls
+    // through.
+    let credential = load(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
 
     let Some(key) = credential.current().await.map_err(ApiError)? else {
         return Ok(Json(BillingDto {
