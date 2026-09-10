@@ -238,6 +238,10 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
  * the leaf the bare route renders. Both sweeps read this table now.
  */
 export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
+  // The account every other page on this rail depends on, and the only one that
+  // lives under `connections/` rather than beside the section — it was written
+  // for this rail rather than re-parented onto it.
+  "api-key": "connections/ApiKeyView.tsx",
   apps: "OAuthView.tsx",
   mcp: "McpServersView.tsx",
   // The four that followed them off the settings rail. Each view is
