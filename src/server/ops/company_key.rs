@@ -79,6 +79,7 @@ pub fn router() -> Router<AppState> {
     scoped("/credential", get(get_status).put(set_key))
         .merge(scoped("/credential/link/start", post(start_link)))
         .merge(scoped("/credential/link/finish", post(finish_link)))
+        .merge(scoped("/credential/billing", get(get_billing)))
 }
 
 /// The company's credential status as the console renders it. **Never** carries
@@ -423,3 +424,85 @@ async fn journal(company: &AdminScopedCompany, change: &str) -> Result<(), ApiEr
 
 #[cfg(test)]
 mod test;
+
+/// `GET …/credential/billing` — what the account behind this company's key has
+/// left to spend, and on which plan.
+///
+/// **Read-only, and only a read.** Topping up and changing a plan move money,
+/// which is a decision a person makes signed in to their own account on the
+/// hub — so this reports, and the console links out for the rest. A route here
+/// that could raise a spend limit would make the limit advisory.
+///
+/// Not admin-gated, unlike the write above: a member whose agents stop working
+/// mid-afternoon is the person who most needs to see "the balance is zero",
+/// and telling them only an admin may look at a number they are already
+/// feeling is how a company spends an afternoon guessing. Nothing here names
+/// the credential, only what it can spend.
+///
+/// A company with no credential of its own is not an error: the console draws
+/// the pitch for connecting one instead of a balance card, so this answers with
+/// `configured: false` and no figures rather than a 404 the page has to
+/// interpret.
+async fn get_billing(
+    State(state): State<AppState>,
+    company: ScopedCompany,
+) -> Result<Json<BillingDto>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let env = crate::app::config::ProcessEnv;
+    let credential = resolve(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
+    )
+    .await
+    .map_err(ApiError)?;
+
+    let Some(key) = credential.current().await.map_err(ApiError)? else {
+        return Ok(Json(BillingDto {
+            configured: false,
+            summary: None,
+            unavailable: None,
+        }));
+    };
+
+    let Some(exchange) = state.hub_identity().cloned() else {
+        // A build or deployment with no hub. There is an account somewhere that
+        // this key belongs to, but nothing here can ask it anything.
+        return Ok(Json(BillingDto {
+            configured: true,
+            summary: None,
+            unavailable: Some("this host is not part of a TinyHumans ecosystem".to_string()),
+        }));
+    };
+
+    match exchange.billing_summary(&key).await {
+        Ok(summary) => Ok(Json(BillingDto {
+            configured: true,
+            summary: Some(summary),
+            unavailable: None,
+        })),
+        // A hub that will not answer is reported as "not known right now", not
+        // as a zero balance. The two look identical on a card and mean opposite
+        // things: one is "top up", the other is "try again".
+        Err(error) => Ok(Json(BillingDto {
+            configured: true,
+            summary: None,
+            unavailable: Some(error.to_string()),
+        })),
+    }
+}
+
+/// The billing panel's whole state, including the two ways it can have no
+/// figures to show.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BillingDto {
+    /// Whether any credential could be resolved to ask with.
+    configured: bool,
+    /// The account's standing, when the hub answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<crate::server::hub_identity::BillingSummary>,
+    /// Why there are no figures, when there are none and a credential exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable: Option<String>,
+}
