@@ -295,3 +295,46 @@ describe("when a message was sent, by the calendar", () => {
     expect(formatWhen(earlier, later)).toMatch(/\d/);
   });
 });
+
+/**
+ * What `⌘K` shows before a key is pressed (#2245 review).
+ *
+ * `score(text, "")` answers 1 — "nothing was asked", not "everything matched" —
+ * so the `value === 0` filter dropped nothing and every desk and every teammate
+ * came back for the empty query. `groups` was then non-empty the moment the
+ * roster landed, `SearchDialog` never reached its resting state, and opening
+ * the palette listed the whole company instead of the `@`/`#` hint.
+ */
+describe("the empty query", () => {
+  it("offers no channels before anything is typed", () => {
+    expect(channelResults(desks, parseSearchQuery(""))).toEqual([]);
+    // Whitespace is still nothing typed.
+    expect(channelResults(desks, parseSearchQuery("   "))).toEqual([]);
+  });
+
+  it("offers no agents before anything is typed", () => {
+    expect(agentResults(members, parseSearchQuery(""))).toEqual([]);
+    expect(agentResults(members, parseSearchQuery("   "))).toEqual([]);
+  });
+
+  it("offers no files before anything is typed", () => {
+    const hits = [hit({ id: "n1", name: "Autumn brief.md", path: "Autumn brief.md", matched: "name" })];
+    expect(fileResults(hits, parseSearchQuery(""))).toEqual([]);
+  });
+
+  it("still lists everything for a bare @ or #, which is what opens the picker", () => {
+    // The guard is on `isEmpty`, never on an empty term: `parseSearchQuery("@")`
+    // is a person scope with an empty name and `isEmpty === false`. Tightening
+    // this to `!term` would empty the picker, so it is pinned here.
+    expect(parseSearchQuery("@").isEmpty).toBe(false);
+    expect(agentResults(members, parseSearchQuery("@")).map((r) => r.title)).toEqual([
+      "Priya",
+      "Nadia",
+    ]);
+    expect(parseSearchQuery("#").isEmpty).toBe(false);
+    expect(channelResults(desks, parseSearchQuery("#")).map((r) => r.title)).toEqual([
+      "#general",
+      "#autumn-launch",
+    ]);
+  });
+});

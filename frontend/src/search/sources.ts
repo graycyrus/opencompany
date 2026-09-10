@@ -28,6 +28,15 @@ export const PER_GROUP_LIMIT = 6;
  * typed is not something an operator should have to do.
  */
 export function channelResults(desks: readonly Desk[], query: SearchQuery): SearchResult[] {
+  // Nothing typed at all, so nothing is offered. `score` answers 1 for an empty
+  // term — "no question asked" rather than "everything matched" — and every
+  // desk therefore survived the `value === 0` filter, which made opening the
+  // palette a flat dump of the whole company instead of the `@`/`#` hint.
+  //
+  // Deliberately `isEmpty` and not an empty `term`: `#` alone parses to a
+  // channel scope with an empty name and `isEmpty === false`, and the picker
+  // that opens on that keystroke needs every channel back.
+  if (query.isEmpty) return [];
   if (query.scope && query.scope.kind !== "channel") return [];
   const term = query.scope?.kind === "channel" ? query.scope.name : query.term;
 
@@ -60,6 +69,9 @@ export function channelResults(desks: readonly Desk[], query: SearchQuery): Sear
  * name is the half you have forgotten.
  */
 export function agentResults(members: readonly TeamMember[], query: SearchQuery): SearchResult[] {
+  // See `channelResults`: nothing typed offers nothing, while `@` alone is a
+  // named-nothing scope and still opens the picker over the whole roster.
+  if (query.isEmpty) return [];
   if (query.scope && query.scope.kind !== "person") return [];
   const term = query.scope?.kind === "person" ? query.scope.name : query.term;
 
@@ -179,6 +191,11 @@ function messageHref(channelId: string, message: ChatHistoryMessageDto): string 
  * work and says whether it was the name or the body, so this only shapes it.
  */
 export function fileResults(hits: readonly SearchHit[], query: SearchQuery): SearchResult[] {
+  // The same guard as its two neighbours, for the frame between the query
+  // being cleared and the effect that clears `files` running: the hits are
+  // still held, and without this they are all listed under a query that asked
+  // for nothing.
+  if (query.isEmpty) return [];
   if (query.scope && query.scope.kind !== "file") return [];
   const term = query.scope?.kind === "file" ? query.scope.name : query.term;
 
