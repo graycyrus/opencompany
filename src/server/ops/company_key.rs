@@ -31,7 +31,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 
 use crate::AppState;
-use crate::company::company_key::{key_configured, resolve, store_key};
+use crate::company::company_key::{key_configured, load, resolve, store_key};
 use crate::company::credentials::CredentialSource;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
