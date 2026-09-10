@@ -241,7 +241,14 @@ class Host:
         nothing. The count catches the other shape: a single-responder desk, or
         a referral answering on a channel with no room at all.
         """
-        status, body = self.call("GET", f"{self.scope}/chat/history?chat={urllib.parse.quote(desk)}")
+        # `desk=`, not `chat=`. The handler's query struct is `#[serde(default)]`,
+        # so an unknown parameter is dropped in silence and `desk` falls back to
+        # the General line: `?chat=anything`, including a desk that does not
+        # exist, returns General's transcript with a 200. This loop was polling
+        # General on every tick while claiming to watch the desk it settles on.
+        status, body = self.call(
+            "GET", f"{self.scope}/chat/history?desk={urllib.parse.quote(desk)}"
+        )
         if status != 200 or not isinstance(body, list):
             return (0, False)
         closed = any((m.get("channel") or m.get("from") or "") == "hive-report" for m in body)
