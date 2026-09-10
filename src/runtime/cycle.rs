@@ -7136,6 +7136,114 @@ members = ["writer"]
         );
     }
 
+    /// The boot-time twin of `grants_replay_on_boot_but_a_spent_one_does_not`:
+    /// this is what happens when the restart lands **before** the cycle's own
+    /// drain journals the consumption, rather than after. Two different
+    /// agents' tool calls are running when the crash hits — a routine shape
+    /// under real traffic, not a corner case — and neither had reached the
+    /// drain yet. Both must re-arm on replay, both must keep their **original**
+    /// mint time rather than being handed a fresh TTL by the restart (so the
+    /// duplication window this leaves stays bounded by the grant's own
+    /// [`GRANT_TTL_MILLIS`], not extended indefinitely by however many times
+    /// the process happens to restart), and both must re-admit their exact
+    /// original call a second time — the concrete, exploitable shape of the
+    /// window TOOL-005 documents, now proven at the boot path GRANT-004 names
+    /// rather than only at the bare journal file.
+    #[tokio::test]
+    async fn two_undrained_consumptions_both_re_arm_and_re_admit_after_a_restart() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home.clone(),
+            harness_effect(
+                "finance",
+                "composio_execute",
+                serde_json::json!({ "to": "a@b.test" }),
+            ),
+        )
+        .await;
+        rt.resolve_approval(&ids[0], Verdict::Approve, operator())
+            .await
+            .unwrap();
+        rt.resolve_approval(&ids[1], Verdict::Approve, operator())
+            .await
+            .unwrap();
+        assert_eq!(rt.grants.live_count(), 2, "both tool calls were granted");
+        let original_at_millis: Vec<u64> = ids
+            .iter()
+            .map(|id| rt.grants.peek(id).unwrap().at_millis)
+            .collect();
+
+        // Both tools run at roughly the same moment — a real race between the
+        // two `consume` calls, on real OS threads, neither drained before the
+        // crash this test models.
+        let args = serde_json::json!({ "to": "a@b.test" });
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let grants = rt.grants.clone();
+                let args = args.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    grants
+                        .consume("finance", "composio_execute", &args)
+                        .is_some()
+                })
+            })
+            .collect();
+        for h in handles {
+            assert!(
+                h.join().expect("thread"),
+                "both concurrent tool calls were admitted"
+            );
+        }
+        assert_eq!(rt.grants.live_count(), 0, "both grants were redeemed");
+        // Neither drain ran — nothing journals the consumption before the
+        // crash this test models.
+        drop(rt);
+
+        let restarted = Arc::new(
+            RuntimeBuilder::fs_defaults(home, manifest("supervised"))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            restarted.grants.live_count(),
+            2,
+            "both undrained consumptions must re-arm on the next boot"
+        );
+        for (id, expected_at_millis) in ids.iter().zip(original_at_millis) {
+            let replayed = restarted
+                .grants
+                .peek(id)
+                .expect("each grant replays as live");
+            assert_eq!(
+                replayed.at_millis, expected_at_millis,
+                "a restart must not reset a re-armed grant's clock — its TTL exposure stays \
+                 bounded by the ORIGINAL mint time, not extended by the crash"
+            );
+        }
+
+        // The exploitable shape: the identical call each agent already made
+        // once is admitted again, with no new approval anywhere in between.
+        assert!(
+            restarted
+                .grants
+                .consume("finance", "composio_execute", &args)
+                .is_some(),
+            "the first re-armed grant re-admits its already-executed call"
+        );
+        assert!(
+            restarted
+                .grants
+                .consume("finance", "composio_execute", &args)
+                .is_some(),
+            "the second re-armed grant re-admits its already-executed call too"
+        );
+        assert_eq!(restarted.grants.live_count(), 0);
+    }
+
     /// Issue #243: a grant the agent never redeemed expires, is journaled, and
     /// the operator is TOLD.
     ///
@@ -7664,6 +7772,232 @@ members = ["writer"]
         );
     }
 
+    // ── Issue #243: the agent/native fork in `settle_approved_effect` ────────
+
+    /// `settle_approved_effect`'s whole job is a fork on [`Effect::agent`]: a
+    /// harness tool call (`Some`) is never executed, only granted; a native
+    /// effect (`None`) is never granted, only executed. Both directions are
+    /// driven off the same `resolve_approval` entry point that the operator
+    /// actually calls, for two different actors, so a regression that made
+    /// either fork perform the other's action is caught at the seam a real
+    /// approval goes through rather than by calling the private fork directly.
+    #[tokio::test]
+    async fn settle_approved_effect_mints_for_a_tool_call_and_executes_a_native_effect() {
+        let home_dir = tmp_home();
+
+        // A harness tool call: `agent` is `Some`, so approving it must mint a
+        // single-use grant and must NOT run `execute_effect_once` — a real
+        // `amount_usd` on the effect is what proves that: `perform_effect`
+        // would ledger it if the native path ran by mistake.
+        let tool_effect = harness_effect("finance", "composio_execute", serde_json::json!({}));
+        let (rt, id) = park_one(home_dir.path().to_path_buf(), tool_effect).await;
+        let board_member = Actor {
+            kind: ActorKind::Operator,
+            id: "board-member".into(),
+        };
+        rt.resolve_approval(&id, Verdict::Approve, board_member)
+            .await
+            .expect("approving a tool call succeeds");
+        assert!(
+            rt.grants.peek(&id).is_some(),
+            "a harness tool call must be granted, not executed"
+        );
+        assert!(
+            !rt.journal.is_executed(&format!("approval:{id}")),
+            "the native execution path must never run for an agent-tagged effect"
+        );
+        assert_eq!(
+            rt.store()
+                .load(rt.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .ledger
+                .len(),
+            0,
+            "granting a tool call must not ledger the spend the tool itself would have"
+        );
+
+        // A native effect: `agent` is `None`, so approving it must execute it
+        // exactly once and must NOT mint a grant nobody can ever redeem.
+        let home_dir2 = tmp_home();
+        let native_effect = Effect {
+            kind: "filing.submit".into(),
+            group: EffectGroup::Sign,
+            amount_usd: Some(42.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let (rt2, id2) = park_one(home_dir2.path().to_path_buf(), native_effect).await;
+        let finance_lead = Actor {
+            kind: ActorKind::Operator,
+            id: "finance-lead".into(),
+        };
+        rt2.resolve_approval(&id2, Verdict::Approve, finance_lead)
+            .await
+            .expect("approving a native effect succeeds");
+        assert!(
+            rt2.grants.peek(&id2).is_none(),
+            "a native effect has no agent to grant to and must not mint one"
+        );
+        assert!(
+            rt2.journal.is_executed(&format!("approval:{id2}")),
+            "a native effect must actually be executed once approved"
+        );
+    }
+
+    /// Issue #1863: a parked blocker's effect is inert — it carries a question,
+    /// not a tool call — and `agent` is `None` on it exactly like a native
+    /// effect. Without the `is_blocker_effect` guard at the top of
+    /// `settle_approved_effect`, an approving verdict on a blocker would fall
+    /// through to the native `agent.is_none()` arm and hand the blocker's
+    /// payload to `execute_effect_once`, ledgering a phantom spend and marking
+    /// the key executed while the question was never actually answered by
+    /// anything that could act on it.
+    #[tokio::test]
+    async fn an_inert_blocker_effect_is_never_handed_to_the_native_execution_path() {
+        let home_dir = tmp_home();
+        let blocker_effect = Effect {
+            kind: format!(
+                "{}.information",
+                crate::ports::blockers::BLOCKER_EFFECT_PREFIX
+            ),
+            group: EffectGroup::Other,
+            // A real spend amount, deliberately: it is what would prove a
+            // misrouted blocker WAS executed if the guard were missing.
+            amount_usd: Some(7.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "question": "which environment?" }),
+            agent: None,
+            run_id: None,
+        };
+        let (rt, id) = park_one(home_dir.path().to_path_buf(), blocker_effect).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .expect("resolving a blocker's parked effect succeeds");
+
+        assert!(
+            rt.grants.peek(&id).is_none(),
+            "a blocker's inert effect must never be mistaken for redeemable authority"
+        );
+        assert!(
+            !rt.journal.is_executed(&format!("approval:{id}")),
+            "a blocker's inert effect must never reach execute_effect_once"
+        );
+    }
+
+    // ── Issue #374: journal-before-live-set ordering on a standing/single-use mint ──
+
+    /// `mint_grant` journals `ApprovalGranted` and only then arms the grant in
+    /// the live `GrantSet` — never the other order. A crash that lands between
+    /// those two steps must therefore replay as **granted** on the next boot,
+    /// not lose the operator's decision: the durable record already exists,
+    /// only the in-memory arm never ran.
+    ///
+    /// Modelled by writing the journal record the way `mint_grant` does but
+    /// deliberately skipping the in-memory `grants.grant` call — the exact
+    /// state a process death between the two lines would leave on disk — then
+    /// rebuilding the runtime from that journal the way a real restart does.
+    /// This drives the claim through `RuntimeBuilder`'s own rehydrate path
+    /// rather than the bare `JournalStore`, so it proves what the running
+    /// system actually does on boot, not just what the journal file contains.
+    #[tokio::test]
+    async fn a_grant_journaled_but_not_yet_armed_in_memory_still_replays_as_live() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let grant = GrantedCall {
+            approval_id: ApprovalId::new("appr-crash-window"),
+            agent: "finance".into(),
+            tool: "composio_execute".into(),
+            args: serde_json::json!({ "to": "a@b.test" }),
+            at_millis: now_millis(),
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+        };
+        // The durable half of `mint_grant`, run alone: the journal record
+        // lands, but — modelling the crash — `self.rt.grants.grant(grant)`
+        // never runs, so the live set never learns about it.
+        rt.journal.record_granted(&grant).await.unwrap();
+        assert_eq!(
+            rt.grants.live_count(),
+            0,
+            "the in-memory arm deliberately did not run, modelling the crash window"
+        );
+        drop(rt);
+
+        let restarted = RuntimeBuilder::fs_defaults(home, manifest("supervised"))
+            .await
+            .unwrap();
+        assert!(
+            restarted
+                .grants
+                .peek(&ApprovalId::new("appr-crash-window"))
+                .is_some(),
+            "a crash between the journal append and the live-set insert must replay as \
+             granted, re-arming the permission the operator already gave rather than losing it"
+        );
+    }
+
+    /// Two operators resolving two different tool calls at the same moment —
+    /// a routine shape, not an edge case — must each durably mint their own
+    /// grant without one's journal-then-arm sequence clobbering the other's.
+    /// Driven with `tokio::join!` on a multi-thread runtime so the two
+    /// `mint_grant` calls genuinely overlap rather than merely being awaited
+    /// back to back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_mints_of_different_tool_calls_both_survive_a_restart() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        // Two different teammates, not one effect cloned: an approval carries
+        // the agent it was raised for, so a pair that names the same agent
+        // races one subject's mint against itself and never reaches the
+        // cross-agent case a company with more than one teammate produces.
+        let (rt, ids) = park_two_blocked_tool_calls_for(
+            home.clone(),
+            [
+                harness_effect("finance", "composio_execute", serde_json::json!({})),
+                harness_effect("legal", "composio_execute", serde_json::json!({})),
+            ],
+        )
+        .await;
+        let (a, b) = tokio::join!(
+            rt.resolve_approval(&ids[0], Verdict::Approve, operator()),
+            rt.resolve_approval(&ids[1], Verdict::Approve, operator()),
+        );
+        a.expect("the first concurrent mint succeeds");
+        b.expect("the second concurrent mint succeeds");
+        assert_eq!(rt.grants.live_count(), 2, "both mints armed in memory");
+        drop(rt);
+
+        let restarted = RuntimeBuilder::fs_defaults(home, manifest("supervised"))
+            .await
+            .unwrap();
+        assert_eq!(
+            restarted.grants.live_count(),
+            2,
+            "both concurrent mints must have journaled durably — neither append may be lost \
+             to the other running at the same time"
+        );
+        for id in ids {
+            assert!(
+                restarted.grants.peek(&id).is_some(),
+                "grant {id} must survive the restart"
+            );
+        }
+    }
+
     // ── Issue #174: the generic cycle seam meters inference usage ────────────
 
     /// A brain that reports a fixed [`TokenUsage`] for every cycle — the shape
@@ -7813,6 +8147,103 @@ members = ["writer"]
             "the spend is real; it is just parked under the company-wide bucket instead of \
              the teammate whose turn it was"
         );
+    }
+
+    /// The sibling test above pins the single-agent shape; this is the wider
+    /// one the docstring on `record_cycle_usage` describes as still worse: a
+    /// multi-agent roster, several cycles deep, and two concurrent cycles
+    /// landing at once — none of which the existing test's one-agent,
+    /// one-cycle, one-call shape could distinguish from a coincidence.
+    ///
+    /// Every real teammate's `usd_spent_by_agent` sum stays at exactly zero
+    /// for the whole run while the pooled `UNATTRIBUTED_AGENT` bucket
+    /// accumulates every dollar — including past the point where a
+    /// `budget_usd_daily` cap set on either teammate would, if it saw its own
+    /// spend, have tripped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn per_cycle_spend_stays_invisible_across_a_multi_agent_roster_and_concurrent_cycles() {
+        let toml_src = r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [[agent]]
+            id = "cfo"
+            role = "Finance"
+
+            [policy]
+            mode = "full"
+            "#;
+        let manifest: CompanyManifest = toml::from_str(toml_src).expect("parse manifest");
+        let home_dir = tmp_home();
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(4.0))))
+            .build()
+            .await
+            .unwrap();
+
+        // Addressed to a teammate rather than left company-wide: an
+        // unaddressed turn resolves to no single agent, so `run_bracketed`
+        // takes the company serial lock and the two cycles queue behind each
+        // other. Their metering writes would then never overlap, and a lost
+        // update between them would go unnoticed by the very case meant to
+        // catch it.
+        let turn = |text: &'static str, chat: Option<&'static str>| {
+            rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: text.into(),
+                by: None,
+                chat: chat.map(str::to_string),
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+        };
+        let (a, b) = tokio::join!(turn("first", Some("ceo")), turn("second", Some("cfo")));
+        a.expect("the first concurrent cycle completes");
+        b.expect("the second concurrent cycle completes");
+        // A third, sequential cycle — STATE across more than one moment in
+        // time, not just concurrency at one moment.
+        turn("third", Some("ceo"))
+            .await
+            .expect("the third cycle completes");
+
+        let samples = rt.usage().query(rt.id(), 0).await.unwrap();
+        assert_eq!(samples.len(), 3, "one sample per cycle, all three landed");
+
+        for real_agent in ["ceo", "cfo"] {
+            assert_eq!(
+                crate::metering::daily_budget::usd_spent_by_agent(&samples, real_agent),
+                0.0,
+                "`{real_agent}` must see none of this roster's PerCycle spend, however many \
+                 cycles ran or how many landed at once"
+            );
+        }
+        let pooled = crate::metering::daily_budget::usd_spent_by_agent(
+            &samples,
+            crate::metering::UNATTRIBUTED_AGENT,
+        );
+        assert_eq!(
+            pooled, 12.0,
+            "all three cycles' spend pools under the company-wide bucket, undiminished"
+        );
+        // BOUND: a `budget_usd_daily` cap set below the pooled total — an
+        // ordinary, sane cap for either teammate — is a threshold this
+        // roster's real spend has already crossed, and neither teammate's
+        // own sum ever saw it cross.
+        let plausible_daily_cap_usd = 10.0;
+        assert!(pooled > plausible_daily_cap_usd);
+        for real_agent in ["ceo", "cfo"] {
+            assert!(
+                crate::metering::daily_budget::usd_spent_by_agent(&samples, real_agent)
+                    < plausible_daily_cap_usd,
+                "`{real_agent}`'s own attributed sum must stay under a cap the company's real \
+                 spend already exceeded"
+            );
+        }
     }
 
     /// A stopped company does not take the turn at all — not "takes it and
@@ -10534,6 +10965,77 @@ members = ["writer"]
     /// tests need both cards parked before either is resolved, because once a
     /// standing deny is live the identical call is denied inline and never
     /// parks again.
+    /// [`park_two_blocked_tool_calls`], with a distinct effect per cycle.
+    ///
+    /// The original parks one effect twice, which is right for the cases that
+    /// only need two approval ids. A case about two *agents* needs the two
+    /// parks to differ, or it races one subject against itself.
+    async fn park_two_blocked_tool_calls_for(
+        home: std::path::PathBuf,
+        effects: [Effect; 2],
+    ) -> (Arc<CompanyRuntime>, Vec<ApprovalId>) {
+        struct PerCycleParkingBrain {
+            queued: std::sync::Mutex<Vec<Effect>>,
+        }
+
+        #[async_trait]
+        impl Brain for PerCycleParkingBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                host: &dyn CycleHost,
+            ) -> Result<CycleResult> {
+                for event in &req.events {
+                    if let CompanyEvent::OperatorMessage { .. } = event {
+                        let effect = {
+                            let mut queued = self.queued.lock().expect("parking queue");
+                            if queued.len() > 1 {
+                                queued.remove(0)
+                            } else {
+                                queued[0].clone()
+                            }
+                        };
+                        host.park_effect(effect).await?;
+                    }
+                }
+                Ok(CycleResult {
+                    channel_responses: Vec::new(),
+                    new_traces: vec![CompressedTrace::now(&req.cycle_id, "parking cycle")],
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(Arc::new(PerCycleParkingBrain {
+                    queued: std::sync::Mutex::new(effects.into_iter().collect()),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+        (rt, ids)
+    }
+
     async fn park_two_blocked_tool_calls(
         home: std::path::PathBuf,
         effect: Effect,
@@ -10914,6 +11416,128 @@ members = ["writer"]
     }
 
     /// A [`JournalStore`](crate::ports::journal::JournalStore) that fails
+    /// every `StandingGrantRevoked` append, passing every other line straight
+    /// through to an in-memory backend.
+    struct FailStandingRevokeStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    impl FailStandingRevokeStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::ports::journal::MemoryJournalStore::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for FailStandingRevokeStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> Result<()> {
+            if line.contains("StandingGrantRevoked") {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "FailStandingRevokeStore: forced failure on the revoke".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// The other half of the same non-atomic sequence: when the **revoke's**
+    /// own journal append fails — the first of the two steps, not the
+    /// second — nothing about the old policy may change and the new mint
+    /// must never be attempted at all. The `?` on `record_standing_revoked`
+    /// (before `revoke_standing` ever runs in memory) is what is supposed to
+    /// guarantee this; nothing before this test drove that specific ordering
+    /// through a real failure, only the mint-side failure the sibling test
+    /// above pins.
+    #[tokio::test]
+    async fn a_failed_revoke_journal_append_leaves_the_old_policy_untouched() {
+        let home_dir = tmp_home();
+        let store = std::sync::Arc::new(FailStandingRevokeStore::new());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(Arc::new(ParkingBrain {
+                    effect: grantable_effect(
+                        "ops",
+                        crate::policy::consequence::WEB_FETCH,
+                        serde_json::json!({ "url": "https://docs.rs/x" }),
+                    ),
+                }))
+                .with_journal_store(store)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+
+        rt.resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope())
+            .await
+            .expect("the first mint has nothing to revoke, so it succeeds");
+        assert_eq!(rt.standing_grants().len(), 1);
+        let original = rt.standing_grants()[0].id.clone();
+
+        // The reconcile's revoke append is forced to fail before the second
+        // mint is ever attempted.
+        let second = rt
+            .resolve_approval_spawned(&ids[1], Verdict::Approve, operator(), tool_scope())
+            .await;
+        assert!(
+            second.is_err(),
+            "the forced failure on the revoke must surface, not be swallowed"
+        );
+
+        let listed = rt.standing_grants();
+        assert_eq!(
+            listed.len(),
+            1,
+            "a failed revoke must leave exactly the original policy in place: {listed:?}"
+        );
+        assert_eq!(
+            listed[0].id, original,
+            "the surviving policy must be the untouched original, not a partial write"
+        );
+        assert_eq!(
+            listed[0].verdict,
+            Verdict::Deny,
+            "its polarity must be unchanged"
+        );
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that fails
     /// every `ApprovalGranted` append, passing every other line straight
     /// through to an in-memory backend.
     struct FailGrantedMintStore {
@@ -11110,6 +11734,143 @@ members = ["writer"]
         }
     }
 
+    /// Issue #444: `may_be_granted_standing` is what makes an agent's standing
+    /// ALLOW unmintable in production, but the only coverage of it lived on
+    /// the pure function in isolation. This drives the refusal through a real
+    /// park-then-resolve for the three genuinely different mechanisms a live
+    /// company can produce an ungrantable card from: a Composio action the
+    /// provider's own catalogue classifies as a send, a bare `shell` command
+    /// (declared, not argument-graded), and an MCP bridge call (argument-graded
+    /// on its own server/tool pair rather than the Composio catalogue). Each is
+    /// a distinct code path inside `consequence_of`, so a regression in any one
+    /// of them would not be caught by testing only one.
+    ///
+    /// A grantable tool rides along as the boundary: the same verdict, scope
+    /// and card shape, differing only in the one fact that decides the
+    /// outcome, must succeed rather than refuse.
+    #[tokio::test]
+    async fn the_three_reachable_ungrantable_kinds_refuse_a_standing_approve() {
+        for (label, effect) in [
+            (
+                "composio send action",
+                harness_effect(
+                    "ops",
+                    "composio_execute",
+                    crate::policy::test_support::composio_send_args(),
+                ),
+            ),
+            (
+                "shell command",
+                harness_effect(
+                    "ops",
+                    crate::policy::consequence::SHELL,
+                    serde_json::json!({ "command": "rm -rf build/" }),
+                ),
+            ),
+            (
+                "mcp bridge call",
+                harness_effect(
+                    "ops",
+                    crate::policy::consequence::MCP_CALL_TOOL,
+                    serde_json::json!({ "server": "jira", "tool": "get_issue", "arguments": {} }),
+                ),
+            ),
+        ] {
+            let home_dir = tmp_home();
+            let (rt, id) = park_one_blocked_tool_call(home_dir.path().to_path_buf(), effect).await;
+
+            let err = rt
+                .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+                .await
+                .expect_err(&format!("{label} must refuse a standing approve"));
+            assert!(
+                matches!(err, OpenCompanyError::InvalidRequest(_)),
+                "{label}: refusal must be a bad-request, not a server fault: {err:?}"
+            );
+            assert_eq!(
+                rt.pending_approvals().len(),
+                1,
+                "{label}: the card stays parked for a per-call decision"
+            );
+            assert_eq!(
+                rt.grants.standing_count(),
+                0,
+                "{label}: no standing grant minted"
+            );
+            assert_eq!(
+                rt.grants.live_count(),
+                0,
+                "{label}: no single-use grant minted either"
+            );
+        }
+
+        // The boundary: a tool the catalogue classifies as grantable, offered
+        // the identical verdict and scope, must succeed rather than refuse.
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+        rt.resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+            .await
+            .expect("a grantable tool must not be refused by the same check");
+        assert_eq!(rt.grants.standing_count(), 1);
+    }
+
+    /// The refusal above is specific to the tool's own consequence, not to
+    /// which subject the card names — a workflow gate wrapping an ungrantable
+    /// inner call must refuse a standing approve exactly the same way an
+    /// agent's own call does, via the identical `gate_inner_call` read
+    /// `may_be_granted_standing` already uses. Nothing before this test drove
+    /// a workflow-subject card through this specific refusal; the only
+    /// workflow-subject coverage on `check_broadly_scoped` was the DENY-side
+    /// refusal (`a_standing_deny_on_a_workflow_gate_is_refused_and_mints_nothing`),
+    /// a different branch of the same function.
+    #[tokio::test]
+    async fn a_workflow_gate_wrapping_an_ungrantable_inner_call_refuses_a_standing_approve_too() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sports_digest",
+                    "node_id": "run_shell",
+                    "tool": "shell",
+                    "args": { "command": "echo hi" },
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let err = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), tool_scope())
+            .await
+            .expect_err("a workflow gate wrapping an ungrantable inner call must refuse too");
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg.contains("cannot be granted for a period")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(rt.pending_approvals().len(), 1);
+        assert_eq!(rt.grants.standing_count(), 0);
+        assert_eq!(rt.grants.live_count(), 0);
+    }
+
     /// Issue #1458: a standing **denial** for a workflow is refused at the
     /// edge — the workflow gate does not enforce a `Deny` verdict
     /// (`src/workflows/gate.rs`), so a time-bounded refusal would be a control
@@ -11169,6 +11930,99 @@ members = ["writer"]
             .await
             .unwrap();
         assert!(rt.pending_approvals().is_empty());
+    }
+
+    /// INPUT: the existing pin of this refusal drives exactly one inner tool
+    /// (`web_fetch`) through the wrapper. The refusal is read off
+    /// `subject_of` alone — it does not look at which tool the gate wraps —
+    /// so a regression that quietly narrowed it to `web_fetch` specifically
+    /// (a hardcoded name check instead of the subject check) would still
+    /// pass the existing test. A different inner tool, routed through
+    /// `gate_inner_call` the identical way, closes that gap.
+    #[tokio::test]
+    async fn a_workflow_gate_wrapping_a_different_inner_tool_is_also_refused_a_standing_deny() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sales_digest",
+                    "node_id": "notify_finance",
+                    "tool": "composio_execute",
+                    "args": crate::policy::test_support::composio_send_args(),
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let err = rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+            .expect_err(
+                "a workflow gate wrapping ANY inner tool must refuse a standing deny, not just \
+                 web_fetch",
+            );
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg.contains("'composio_execute' is a workflow call")
+                        && msg.contains("does not enforce a standing refusal")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(rt.grants.standing_count(), 0);
+        assert_eq!(rt.pending_approvals().len(), 1);
+    }
+
+    /// AUTH: the refusal is driven by [`subject_of`], and `subject_of` reads
+    /// only `effect.kind == WORKFLOW_APPROVE_KIND` — it never inspects
+    /// whether the payload's inner call actually parses. A gate whose
+    /// `gate_inner_call` cannot resolve a tool (a malformed or partial
+    /// payload) must still be recognised as a workflow subject and refused,
+    /// naming the wrapper kind itself rather than silently falling through
+    /// to the agent-subject path and minting a refusal that governs nobody's
+    /// real call.
+    #[tokio::test]
+    async fn a_workflow_gate_with_an_unparseable_inner_call_is_still_refused_a_standing_deny() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                // No `tool`/`args` keys at all — `gate_inner_call` cannot
+                // resolve an inner call from this payload.
+                payload: serde_json::json!({
+                    "workflow_id": "sales_digest",
+                    "node_id": "notify_finance",
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let err = rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+            .expect_err("subject_of does not require gate_inner_call to succeed");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert_eq!(rt.grants.standing_count(), 0);
+        assert_eq!(rt.pending_approvals().len(), 1);
     }
 
     /// Issue #1458, the console half: a workflow-gate card must not offer a
