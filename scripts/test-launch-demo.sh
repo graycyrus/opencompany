@@ -26,7 +26,7 @@ run_launcher() {
 
 up_output=$(run_launcher marketing up)
 printf '%s\n' "$up_output" | grep -F "company=marketing_agency" >/dev/null
-printf '%s\n' "$up_output" | grep -F -- "--project-name opencompany-agentic-marketing-agency" >/dev/null
+printf '%s\n' "$up_output" | grep -F -- "--project-name opencompany-marketing-agency" >/dev/null
 printf '%s\n' "$up_output" | grep -F -- "--file ${REPO_ROOT}/docker-compose.dev.yml" >/dev/null
 printf '%s\n' "$up_output" | grep -F "up --build" >/dev/null
 if printf '%s\n' "$up_output" | grep -F -- " -d" >/dev/null; then
