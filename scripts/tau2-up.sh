@@ -161,7 +161,9 @@ echo "  stop:        scripts/tau2-up.sh down"
 if [ -n "$TASK" ]; then
   echo
   say "task $TASK"
-  python3 "$REPO/scripts/tau2-sim.py" --domain "$DOMAIN" --tasks "$TASK" --turns 2 --settle 600 \
+  # No --turns here: the runner's own default is the max, and a cap set from
+  # this side silently fails every task whose policy wants a confirmation.
+  python3 "$REPO/scripts/tau2-sim.py" --domain "$DOMAIN" --tasks "$TASK" --settle 600 --quiet 90 \
     --base "http://127.0.0.1:$BASE_PORT" --tau2 "$TAU2" --out "$LOGS/run.json"
   echo "  record: $LOGS/run.json"
 fi
