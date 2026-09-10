@@ -836,13 +836,19 @@ pub fn resolve(
 
     // No `HostedDefault::Refuse` twin: unset is not a silent production default
     // here, it is "derive from whichever hub this deployment already named".
+    //
+    // Each candidate is trimmed and blanked out *before* `resolve_opt` picks
+    // between them — trimming only the winner would let a whitespace-only env
+    // value outrank a real TOML one instead of falling through to it.
     let web_url = resolve_opt(
         &mut prov,
         "web_url",
-        env.get(WEB_URL_ENV),
-        config_toml.and_then(|c| c.web_url.clone()),
-    )
-    .filter(|value| !value.trim().is_empty());
+        env.get(WEB_URL_ENV)
+            .filter(|value| !value.trim().is_empty()),
+        config_toml
+            .and_then(|c| c.web_url.clone())
+            .filter(|value| !value.trim().is_empty()),
+    );
 
     let tinyplace_api_url = resolve_base_url(
         &mut prov,
