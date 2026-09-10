@@ -67,11 +67,11 @@ from typing import Any
 DOMAINS = {
     "retail": {
         "company": "retail-co",
-        # The company's own `general` channel is the front door. There is no
-        # `triage` desk — `triage` is an agent, and a desk holding one seat is
-        # not a room. The responder ladder picks it because reading the order is
-        # what it is for.
-        "entry": "general",
+        # Enter at the desk that owns delivered orders: two seats holding
+        # competing remedies. Small enough to read, and it still has to
+        # reach outside itself for what only another seat can answer —
+        # which is the crossing worth watching.
+        "entry": "returns",
         "state": ".state/retail.json",
         # seat -> (port, tools in scope, of which mutating). The counts are the
         # contract this whole design rests on: `triage` holding a write tool, or
@@ -231,6 +231,21 @@ class Host:
         return self.call(
             "POST", f"{self.scope}/mcp/servers", {"name": name, "endpoint": endpoint}
         )
+
+    def activity(self, desk: str) -> tuple[int, bool]:
+        """How many rows this channel holds, and whether a room has closed on it.
+
+        The settle loop's event source. A closing report is journaled under the
+        reserved `hive-report` author when an episode ends — whatever it ended
+        as — so its arrival means the room is done and further waiting buys
+        nothing. The count catches the other shape: a single-responder desk, or
+        a referral answering on a channel with no room at all.
+        """
+        status, body = self.call("GET", f"{self.scope}/chat/history?chat={urllib.parse.quote(desk)}")
+        if status != 200 or not isinstance(body, list):
+            return (0, False)
+        closed = any((m.get("channel") or m.get("from") or "") == "hive-report" for m in body)
+        return (len(body), closed)
 
     def say(self, desk: str, text: str, timeout: float = 3600):
         """Put one message to `desk`, holding the POST open for the turn."""
@@ -480,9 +495,16 @@ def main() -> int:
                     help="seconds to wait after each turn for a detached referral "
                          "to land before grading (the far desk runs after the POST "
                          "returns)")
-    ap.add_argument("--turns", type=int, default=2,
-                    help="max turns per task; turn 2+ sends the canned confirmation "
-                         "(a stand-in for tau2's user simulator)")
+    ap.add_argument("--quiet", type=float, default=60,
+                    help="stop settling once the channel has been silent this "
+                         "long — the work is not coming")
+    ap.add_argument("--turns", type=int, default=8,
+                    help="MAX turns per task, not a target — the loop stops as soon "
+                         "as the end state matches. Turn 2+ sends the canned "
+                         "confirmation (a stand-in for tau2's user simulator). A "
+                         "low cap silently fails every task whose policy demands "
+                         "confirmation before a write, which is most of them: the "
+                         "desk asks, nobody answers, and it reads as a refusal to act")
     ap.add_argument("--timeout", type=float, default=3600, help="seconds to hold one turn open")
     args = ap.parse_args()
 
@@ -543,14 +565,34 @@ def main() -> int:
             # A referral is DETACHED — `spawn_referred_turn` puts the question on
             # the other desk's channel and returns; the POST answering here does
             # not wait for that room to finish. Grading the instant the POST
-            # returns therefore races the work it is grading. Poll until the
-            # state settles or the budget runs out.
+            # returns therefore races the work it is grading.
+            #
+            # Event-driven rather than a fixed wait. Sitting out the whole
+            # `--settle` budget is only correct when the work is still coming;
+            # when it is not, it is dead time, and it dominated the wall clock
+            # of every failing run — two turns of a 600s budget is twenty
+            # minutes spent waiting for something that already was not going to
+            # happen. So stop on the first of: the state matching, the room
+            # closing (a `hive-report` row), or the channel going quiet.
             ok, why = False, "no state yet"
             deadline = time.monotonic() + args.settle
+            last_seen, quiet_since = None, time.monotonic()
             while True:
                 state = json.loads(state_path.read_text()) if state_path.exists() else {}
                 ok, why = grade(task, state, spec)
-                if ok or time.monotonic() >= deadline:
+                if ok:
+                    break
+                rows, closed = host.activity(spec["entry"])
+                if rows != last_seen:
+                    last_seen, quiet_since = rows, time.monotonic()
+                if closed:
+                    why += " (the room closed)"
+                    break
+                if time.monotonic() - quiet_since >= args.quiet:
+                    why += f" (nothing journaled for {args.quiet:.0f}s)"
+                    break
+                if time.monotonic() >= deadline:
+                    why += " (settle budget spent)"
                     break
                 time.sleep(5)
             if ok:

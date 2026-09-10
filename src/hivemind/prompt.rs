@@ -89,6 +89,38 @@ fn move_line(kind: &str) -> Option<&'static str> {
 const FIRST_PERSON_RULE: &str = "Lines marked `(you)` in the transcript are your own. Write about \
 yourself in the first person — never by your own id — and name colleagues by their id as usual.";
 
+/// **A turn is work, then one line — not one line instead of work.**
+///
+/// The move grammar describes the LINE a turn ends with, and a seat reading only
+/// that treats the whole turn as speech: it reasons from whatever facts happen to
+/// be in the transcript, and when there are none it asks the room instead of
+/// looking. Observed, with the tools sitting in its own belt: a two-seat desk
+/// spent all eight turns asking each other who held which tool and exhausted its
+/// budget without a single read; a seat wrote "I hold the tool and can produce the
+/// answer this turn" and then produced a line about the answer rather than the
+/// answer. The one time a seat did call a tool, the operator's message had
+/// literally told it to.
+///
+/// Nothing was blocking those calls. `speak()` runs the ordinary turn machinery,
+/// the belt is built the same way, and the same agent on the same desk calls the
+/// same tools freely when it answers outside a room. What was missing is that
+/// nobody asked it to: the prompt requested a position and it gave one.
+///
+/// So the one-line contract stays exactly as it was — the fold reads the final
+/// line and nothing else — and this says what the turn is allowed to do BEFORE
+/// that line, which is everything an ordinary turn may do.
+const WORK_BEFORE_LINE: &str = "\
+Before you write that line, USE YOUR TOOLS. A turn is work and then one line, \
+not one line instead of work. Look up what you need — the order, the item, the \
+product's variants, the customer — rather than asking the room for a fact you \
+can fetch yourself, and rather than reasoning from what happens to be in the \
+transcript already. A seat that asks its colleagues what it could have read \
+costs the room a turn and adds nothing.\n\
+And when the room has already carried an option that YOUR tool performs, \
+perform it in this turn, then write the line saying you did. Deciding is not \
+doing: no step after the room closes will carry out what it settled on, so an \
+action nobody performs never happens, however clearly it was agreed.";
+
 const DELIBERATE_RULES: &str = "\
 The # on a topic and the ^ on a citation are part of the grammar: `!propose \
 #canary ...` names an option, `!propose canary ...` names nothing and is \
@@ -427,6 +459,8 @@ impl<'a> EpisodePrompt<'a> {
         );
         let head = "Reply with ONE line only, beginning with exactly one of these markers:";
         let mut tail = DELIBERATE_RULES.to_owned();
+        tail.push('\n');
+        tail.push_str(WORK_BEFORE_LINE);
         tail.push('\n');
         tail.push_str(FIRST_PERSON_RULE);
         if self.quorum.require_evidential {

@@ -4785,6 +4785,43 @@ impl CompanyRecord {
     /// them. With no order override the base order is returned unchanged, so the
     /// first declared member stays the lead by default.
     pub fn effective_desk_members(&self, desk_id: &str) -> Vec<String> {
+        // **The general desk seats the whole roster, and keeps doing so.**
+        //
+        // It is a desk like any other except in one respect: who belongs to it
+        // is not a list somebody maintains, it is "everyone who works here".
+        // `POST {scope}/team` adds a teammate and touches no desk at all, so a
+        // fixed `members = [...]` would be right on the day it was written and
+        // wrong from the next hire onward — the newest teammate would be the one
+        // person unable to speak on the company's own line.
+        //
+        // Deriving it from the roster makes that unmaintainable-by-construction
+        // rather than merely maintained, and it is what `[company].general_desk`
+        // is for: the manifest names WHICH desk owns the line, and the runtime
+        // keeps its membership current.
+        if self
+            .manifest
+            .company
+            .general_desk
+            .as_deref()
+            .is_some_and(|named| named == desk_id)
+        {
+            // The same two sources `is_roster_agent` consults, manifest before
+            // overlay, so who the room seats and who the roster says works here
+            // cannot drift.
+            let mut all: Vec<String> = Vec::new();
+            for id in self
+                .manifest
+                .agents
+                .iter()
+                .map(|a| a.id.clone())
+                .chain(self.overlay_agents.iter().map(|a| a.id.clone()))
+            {
+                if !self.is_retired(&id) && !all.contains(&id) {
+                    all.push(id);
+                }
+            }
+            return all;
+        }
         let mut members: Vec<String> = self
             .manifest
             .group_chats

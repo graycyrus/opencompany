@@ -36,18 +36,29 @@ human_role = "Read the transcript and say whether the desks did what the retail 
 # no desk and a message there falls to a root agent picked by filename order.
 # The target is deliberately NOT called General: tinyhivemind refuses an
 # episode on a desk whose id or name is a General spelling.
-general_desk = "all_hands"
+general_desk = "company_line"
 
 [brain]
 mode = "hosted"
 max_passes = 12
 
 [policy]
-# `supervised`: acting on the customer's order IS the job, and tau2 scores the
-# end state of the database, so parking every write for a human would make every
-# task unscoreable. The limits here are structural instead — they are in which
-# tools each server registers, not in an approval queue.
-mode = "supervised"
+# `full`: tools run without approval. Acting on the customer's order IS the job
+# here, and tau2 scores the end state of the database, so a write parked for a
+# human makes the task unscoreable rather than safe.
+#
+# `supervised` was worse than unscoreable — it was invisible. An external-effect
+# tool parks for approval, and openhuman then feeds the model a REFUSAL and lets
+# it carry on, so a seat that tried to write finished its turn writing prose
+# about the write instead. `exchanges` closed a room with "I'll perform the
+# exchange now" having called nothing, and the transcript read like a model that
+# simply declined to act.
+#
+# The limits that matter here are structural anyway, and they are unaffected:
+# each seat's MCP server registers only its own role's tools, so `triage` cannot
+# cancel an order however autonomous the policy is. Scope is enforced below the
+# model; approval was only ever enforced above it.
+mode = "full"
 
 [users]
 admins = ["harness-e2e@tinyhumans.ai"]
@@ -124,9 +135,11 @@ vision-v1 = "deepseek/deepseek-v4-flash"
 # ---------------------------------------------------------------------------
 
 [[group_chat]]
-id = "all_hands"
-name = "All Hands"
+id = "company_line"
+name = "Company Line"
 description = "The company's own line. Everybody who works here."
+# Documentation only — the runtime seats the live roster here, so a
+# teammate created tomorrow is in this room without anybody editing
 members = ["triage", "exchanges", "refunds", "cancellations", "amendments"]
 
 [group_chat.hive]
