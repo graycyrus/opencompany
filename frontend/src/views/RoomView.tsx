@@ -58,13 +58,13 @@ import { personAvatar } from "@/lib/person";
 import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./room/AddMemberDialog";
-import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
-import { ChannelRail } from "./chat/ChannelRail";
-import { ChatHeader } from "./chat/ChatHeader";
-import { MembersPane } from "./chat/MembersPane";
-import { TypingLine } from "./chat/TypingLine";
-import { InflightRunBar } from "./chat/InflightRunBar";
-import { MessageComposer } from "./chat/MessageComposer";
+import { ChannelCreateDialog } from "./room/ChannelCreateDialog";
+import { ChannelRail } from "./room/ChannelRail";
+import { ChatHeader } from "./room/ChatHeader";
+import { MembersPane } from "./room/MembersPane";
+import { TypingLine } from "./room/TypingLine";
+import { InflightRunBar } from "./room/InflightRunBar";
+import { MessageComposer } from "./room/MessageComposer";
 import {
   mentionablesFor,
   sameTarget,
@@ -72,11 +72,11 @@ import {
   utf8ByteLength,
   type Mention,
   type Mentionable,
-} from "./chat/mentions";
-import { echoCause } from "./chat/EchoPlaceholder";
-import { MessageTimeline } from "./chat/MessageTimeline";
-import type { ChatReceipt } from "./chat/ChatLiveReceipt";
-import { ThreadPanel } from "./chat/ThreadPanel";
+} from "./room/mentions";
+import { echoCause } from "./room/EchoPlaceholder";
+import { MessageTimeline } from "./room/MessageTimeline";
+import type { ChatReceipt } from "./room/ChatLiveReceipt";
+import { ThreadPanel } from "./room/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import {
   buildChannels,
@@ -111,7 +111,7 @@ import {
   type DecidedApproval,
   type HistoryHydration,
   type Transcripts,
-} from "./chat/model";
+} from "./room/model";
 
 /**
  * The stable empty transcript fallback.
