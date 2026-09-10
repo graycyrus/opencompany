@@ -37,5 +37,5 @@ test("the host switcher's Manage hosts item opens the manage-hosts page", async 
   await trigger.click();
 
   await page.getByTestId("host-switcher-manage").click();
-  await expect(page.getByTestId("manage-hosts-page")).toBeVisible();
+  await expect(page.getByTestId("manage-hosts")).toBeVisible();
 });

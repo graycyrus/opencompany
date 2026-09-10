@@ -42,5 +42,5 @@ test("the host switcher's Add a host item opens the add-a-host screen", async ({
   await trigger.click();
 
   await page.getByTestId("host-switcher-add").click();
-  await expect(page.getByTestId("add-host-page")).toBeVisible();
+  await expect(page.getByTestId("add-host")).toBeVisible();
 });
