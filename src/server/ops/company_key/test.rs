@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
-use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
