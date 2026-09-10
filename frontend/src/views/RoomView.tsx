@@ -1644,6 +1644,69 @@ export function RoomView({
     if (arrived) setOpenThreadId(null);
   }, [routeOpen, channel?.id, threadQuery]);
 
+  /**
+   * `?m=<messageId>` — the line a search result names, brought into view.
+   *
+   * Carried with a nonce for the same reason `?thread=` is: consuming strips it
+   * from the address, so opening the same message twice is a real hash change
+   * whose parsed value is the one already held, and React would bail out of the
+   * re-render.
+   *
+   * The id is the **console** id (`hostMessageId`, `h`-prefixed), which is what
+   * `MessageRow` puts in `data-message-id`. The bare host id the history route
+   * answers with matches no row.
+   */
+  const [messageQuery, setMessageQuery] = useState<{ value: string | null; nonce: number }>({
+    value: null,
+    nonce: 0,
+  });
+  useEffect(() => {
+    const read = () => {
+      const [, query = ""] = window.location.hash.split("?");
+      return new URLSearchParams(query).get("m");
+    };
+    const apply = () => setMessageQuery((prev) => ({ value: read(), nonce: prev.nonce + 1 }));
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
+  }, []);
+
+  const consumedMessageNonce = useRef(0);
+  useEffect(() => {
+    const wanted = messageQuery.value;
+    if (!wanted || consumedMessageNonce.current === messageQuery.nonce) return;
+
+    // The transcript for a channel just arrived at is still loading, and the row
+    // cannot be scrolled to before it exists. Poll briefly rather than waiting
+    // on a load signal this effect has no access to, and give up rather than
+    // spin: a message that never appears is one the history did not carry.
+    let attempts = 0;
+    const find = () =>
+      document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(wanted)}"]`);
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      const row = find();
+      if (!row && attempts < 40) return;
+      window.clearInterval(timer);
+      if (!row) return;
+
+      consumedMessageNonce.current = messageQuery.nonce;
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      // Marked on the element rather than in React state: the transcript owns
+      // that state and re-renders on every arriving message, and a highlight
+      // that survives one is a highlight that has to be cleared by something.
+      row.setAttribute("data-found", "true");
+      window.setTimeout(() => row.removeAttribute("data-found"), 2600);
+
+      const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+      const params = new URLSearchParams(query);
+      params.delete("m");
+      const qs = params.toString();
+      window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [messageQuery, channel?.id]);
+
   // Whoever owns the unread counts needs to know what is actually being looked
   // at. Re-runs as the open channel's transcript grows, not only on a switch:
   // a reply that lands while you are reading the channel is read, and should

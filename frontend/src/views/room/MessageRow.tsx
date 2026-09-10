@@ -298,6 +298,10 @@ export function MessageRow({
 
   if (sender.kind === "system") {
     return (
+      // Wrapped only to carry the anchor: the pill renders instead of the
+      // `<article>` below, so a system line had no `data-message-id` and a
+      // search result naming one scrolled to nothing.
+      <div data-message-id={message.id} className="data-[found]:bg-primary/10">
       <SystemPill
         message={message}
         reviewInFlight={message.taskId !== undefined && (reviewingCardIds?.has(message.taskId) ?? false)}
@@ -308,6 +312,7 @@ export function MessageRow({
         redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
         latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
       />
+      </div>
     );
   }
 
@@ -318,6 +323,11 @@ export function MessageRow({
         "group/message relative flex gap-2.5 px-4 transition-colors hover:bg-muted/40",
         continuation ? "py-0.5" : "pb-0.5 pt-2",
         threadOpen && "bg-muted/60",
+        // Set by `RoomView` for a moment when a search result scrolls this line
+        // into view, then removed. An attribute rather than a prop: the
+        // transcript re-renders on every arriving message, and this is about
+        // *the arrival* rather than about the message.
+        "data-[found]:bg-primary/10",
       )}
     >
       <div className="w-9 shrink-0">
