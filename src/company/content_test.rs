@@ -142,13 +142,20 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
 /// a desk that could reach the web would answer about vending machines in general
 /// instead of about these eight. Withholding the network is what makes a decision
 /// there attributable to the fleet it was made about.
-const SEARCH_DENIED_COMPANIES: [&str; 6] = [
+const SEARCH_DENIED_COMPANIES: [&str; 7] = [
     "agentic_math_lab",
     "hive_math_lab",
     "e2e_harness",
     "e2e_setup",
     "openhuman_demo",
     "vending_machine_co",
+    // Denied on exactly `vending_machine_co`'s argument. Every fact this bundle
+    // reasons from — what is on the order, which variants are in stock, what the
+    // customer paid — is a tool call against the shared tau2 retail state, and a
+    // desk that could reach the web would answer about online retail in general
+    // instead of about THIS order. It is also scored against that state, so a
+    // fact from outside it is not merely off-topic, it is unattributable.
+    "retail_co",
 ];
 
 /// Templates that simply do not grant `search` today. Unlike
@@ -1359,7 +1366,16 @@ const SETUP_SEEDED_COMPANIES: [&str; 24] = [
 /// and `openhuman_demo` also declare their own `[[mcp_server]]` inline — so
 /// seeded cards and a second declaration of `deepwiki` would both perturb what
 /// they exist to pin down.
-const FIXTURE_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhuman_demo"];
+const FIXTURE_COMPANIES: [&str; 4] = [
+    "e2e_harness",
+    "e2e_setup",
+    "openhuman_demo",
+    // A benchmark fixture: it proves a mechanism and is asserted against
+    // exactly, by tau2's own `evaluation_criteria`. Seeded cards would be
+    // work nobody asked for sitting in a company whose only job is to answer
+    // one replayed task and be scored on the end state.
+    "retail_co",
+];
 
 /// Every company is either a vertical that ships setup content or a fixture that
 /// deliberately does not — and the classification is re-derived from the files

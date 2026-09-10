@@ -32,6 +32,22 @@ called the right tool — not whether an *organisation* routed the work to the
 seat that owns it. Here a task only completes if the case reaches the right
 desk and that desk settles which remedy applies.
 
+## The servers this bundle declares
+
+Five, one per seat, each `enabled: false` in `mcp.json` until a runtime
+registration points it at a reachable endpoint:
+
+| server | seat | what it can change |
+|---|---|---|
+| `tau2-retail-triage` | triage | nothing — nine read tools, zero mutating |
+| `tau2-retail-exchanges` | exchanges | `exchange_delivered_order_items` |
+| `tau2-retail-refunds` | refunds | `return_delivered_order_items` |
+| `tau2-retail-cancellations` | cancellations | `cancel_pending_order` |
+| `tau2-retail-amendments` | amendments | `modify_pending_order_items` / `_address` / `_payment` |
+
+Each is granted to exactly one seat, so the write a seat can perform is the
+whole of what it may do to the business.
+
 ## The servers are not in this repo
 
 They live in `opencompany-tau2`, which vendors tau2-bench (~850 MB, mostly
