@@ -652,6 +652,101 @@ async fn a_member_cannot_start_or_finish_a_link() {
 }
 
 // ---------------------------------------------------------------------------
+// `GET .../credential/billing`
+// ---------------------------------------------------------------------------
+
+/// A company with no key of its own reports `configured: false` and no
+/// figures — never a fallback account's balance.
+///
+/// This is the negative control for a real regression: `get_billing` once
+/// resolved through [`crate::company::company_key::resolve`], which falls
+/// through to this instance's platform identity when the company has set
+/// nothing. That would report `configured: true` and query billing for the
+/// shared host identity — exposing that account's balance and plan to any
+/// company member. The route must load the company's own credential only.
+#[tokio::test]
+async fn a_company_with_no_key_reports_unconfigured_billing_not_a_fallback_balance() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], false, "{raw}");
+    assert!(dto["summary"].is_null(), "{raw}");
+}
+
+/// Once the company sets its own key, billing reads that key's standing from
+/// the hub — the intended path this route exists for.
+#[tokio::test]
+async fn a_companys_own_key_reads_its_own_billing_summary() {
+    use crate::server::hub_identity::{BillingSummary, MockHubIdentityExchange};
+
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "acme", GRANTED)
+        .await
+        .with_hub_identity(std::sync::Arc::new(MockHubIdentityExchange::new().with_billing(
+            KEY,
+            BillingSummary {
+                balance_usd: 12.5,
+                plan: "pro".to_string(),
+                active_subscription: true,
+                ..Default::default()
+            },
+        )));
+
+    let (status, _, raw) = send_as(
+        &state,
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+        crate::server::test_support::fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], true, "{raw}");
+    assert_eq!(dto["summary"]["balanceUsd"], 12.5, "{raw}");
+    assert_eq!(dto["summary"]["plan"], "pro", "{raw}");
+}
+
+/// A member — not just an admin — can read the balance: nobody should have to
+/// ask an admin why their agents stopped working this afternoon.
+#[tokio::test]
+async fn a_member_can_read_billing_without_admin_rights() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+    let member = crate::server::test_support::member_cookie("acme");
+
+    let (status, dto, raw) = send_as(
+        &state,
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+        member,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], false, "{raw}");
+}
+
+// ---------------------------------------------------------------------------
 // Where the grant comes back to
 // ---------------------------------------------------------------------------
 
