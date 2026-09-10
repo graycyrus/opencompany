@@ -210,6 +210,21 @@ export function fileResults(hits: readonly SearchHit[], query: SearchQuery): Sea
   // Ranked THEN limited. Slicing first drops a name match sitting behind six
   // body matches — the one hit most likely to be the answer.
   return hits
+    // Files only. The host's workspace search matches folder names too
+    // (`search_workspace`, `src/company/workspace_search.rs`), but every row
+    // here offers "Open" and the only address this console has for a workspace
+    // node — `#/workspace/<id>` — means *open the note pane on it*. There is no
+    // note pane for a folder: `WorkspaceView`'s own search carries a separate
+    // branch that reveals one in the tree instead (`openHit`), and the host
+    // 404s a text read of a folder id outright. Routed through the deep link a
+    // folder hit hid the explorer, failed the read, and left a blank workspace.
+    //
+    // Excluded rather than routed, deliberately: preserving the hit's kind
+    // through navigation means teaching the `#/workspace/<id>` route to reveal
+    // rather than open, and that route opens before the tree has loaded (issue
+    // #1371) — so it cannot yet tell a folder from a note. Offering nothing is
+    // honest; offering a row that lands on an empty pane is not.
+    .filter((hit) => hit.kind !== "folder")
     .map((hit): SearchResult => {
     const excerpt = hit.excerpt ? excerptAround(hit.excerpt, term) : null;
     return {

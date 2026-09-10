@@ -338,3 +338,28 @@ describe("the empty query", () => {
     ]);
   });
 });
+
+/**
+ * Rows that land somewhere real (#2245 review).
+ *
+ * The host's workspace search matches folder names as well as file names, and
+ * a folder row was offered an "Open" through `#/workspace/<id>` — a route that
+ * means "open the note pane on this node". A folder has no note pane:
+ * `WorkspaceView` hid the explorer, the text read 404'd, and the operator was
+ * left looking at a blank workspace.
+ */
+describe("folders from the workspace search", () => {
+  const mixed = [
+    hit({ id: "d1", name: "Autumn", path: "Autumn", matched: "name", kind: "folder" }),
+    hit({ id: "n1", name: "Autumn brief.md", path: "Autumn/Autumn brief.md", matched: "name" }),
+  ];
+
+  it("offers only the file, since a folder has nothing to open", () => {
+    expect(fileResults(mixed, parseSearchQuery("autumn")).map((r) => r.id)).toEqual(["file:n1"]);
+  });
+
+  it("says nothing rather than something unreachable when only folders match", () => {
+    const folders = [hit({ id: "d1", name: "Autumn", path: "Autumn", matched: "name", kind: "folder" })];
+    expect(fileResults(folders, parseSearchQuery("/autumn"))).toEqual([]);
+  });
+});
