@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CreditCard, ExternalLink, Loader2, Sparkles, Wallet } from "lucide-react";
 
+import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getCompanyBilling,
