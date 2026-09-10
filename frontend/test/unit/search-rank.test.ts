@@ -52,6 +52,16 @@ describe("which hit deserves to be first", () => {
     expect(score("a box here", "box")).toBeGreaterThan(score("a much longer line box", "box"));
   });
 
+  it("prefers the shorter text when the match sits in the same place", () => {
+    // Pinned because a reviewer read this tier's arithmetic backwards
+    // (tinysweeper on #2245): the length term is subtracted, so a shorter text
+    // subtracts less and ends up ahead. Position is held equal here so the only
+    // thing under test is the length tie-break.
+    const short = `${"x".repeat(10)}box`;
+    const long = `${"x".repeat(10)}box${"y".repeat(300)}`;
+    expect(score(short, "box")).toBeGreaterThan(score(long, "box"));
+  });
+
   it("scores no match as zero, so callers can drop it", () => {
     expect(score("autumn", "candle")).toBe(0);
   });
