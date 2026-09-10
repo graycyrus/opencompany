@@ -2189,6 +2189,34 @@ pub async fn assert_login_code_store(codes: Arc<dyn LoginCodeStore>) {
     // An unknown hash is indistinguishable from a spent one.
     assert!(codes.consume(&alpha, "nope", 10).await.unwrap().is_none());
 
+    // CONC: the SINGLE USE assertion above is sequential — it cannot tell an
+    // atomic check-and-mark from a check-then-mark race, because nothing makes
+    // the two redemptions overlap. This drives two requests genuinely racing
+    // the same code, the way two tabs opening the same magic link would.
+    //
+    // Expiry is set well past every `purge_expired` cutoff this function later
+    // asserts against (the highest is 100), so this fixture cannot silently
+    // change an unrelated purge count.
+    codes
+        .create(
+            &alpha,
+            &code("racer", "hash-race", "racer@example.com", 100_000),
+        )
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        codes.consume(&alpha, "hash-race", 10),
+        codes.consume(&alpha, "hash-race", 10)
+    );
+    let winners = [first.unwrap(), second.unwrap()]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+    assert_eq!(
+        winners, 1,
+        "exactly one of two concurrent redemptions of the same code may mint a session"
+    );
+
     // --- latest_for_email: what the resend throttle asks ---
     // Isolation holds here too.
     assert!(
