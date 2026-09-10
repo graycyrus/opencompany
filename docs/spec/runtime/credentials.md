@@ -72,6 +72,39 @@ The paste field stays. A host with no hub wired reports `hubLink: false` on
 `GET …/credential`, the console renders no button, and the screen is exactly
 what it was before this existed.
 
+### Which hub, and the two pages the console does not reimplement
+
+Everything above happens against whichever hub `TINYHUMANS_API_URL` names — the
+production one by default, `https://staging-api.tinyhumans.ai` for a console
+working against staging. Nothing else has to be set to move the flow: the
+authorize URL is built from that value (`server::hub_identity::key_grant_url`),
+and so is the callback, from `OPENCOMPANY_PUBLIC_URL`.
+
+Two things the grant deliberately cannot do are **revoke** the key it minted and
+**pay** for what that key spends. Both end an errand somewhere this console has
+no business being — one withdraws an instance's access, the other moves money —
+so both are links out to the hub's own dashboard, behind that person's own
+sign-in:
+
+| Page | Path |
+|---|---|
+| Manage API keys — see, name, revoke | `{site}/dashboard?tab=api-keys` |
+| Top up the balance those keys spend | `{site}/dashboard?tab=billing` |
+
+`GET …/credential` carries them as `account.manageKeysUrl` and
+`account.topUpUrl`, resolved on the **host**. The console never assembles them,
+because only the host knows which hub it was pointed at: a link built in the
+browser would send an operator working on staging to production's billing page,
+where the top-up would arrive in the wrong account and look like it had simply
+not arrived.
+
+`{site}` is derived from `api_url` by the ecosystem's naming convention
+(`server::hub_account`): `api.tinyhumans.ai` → `tinyhumans.ai`,
+`staging-api.tinyhumans.ai` → `staging.tinyhumans.ai`. A backend the convention
+does not describe — self-hosted, loopback — derives nothing, `account` is absent,
+and the console renders no link rather than one pointing at a host that need not
+exist. `TINYHUMANS_WEB_URL` states the site outright where that is wrong.
+
 ## Where a connection lives
 
 On the backend, keyed by the account the bearer resolves to — under this model,
