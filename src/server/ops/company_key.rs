@@ -384,8 +384,16 @@ fn is_loopback_origin(origin: &str) -> bool {
     if rest.contains('/') {
         return false;
     }
-    let host = rest.split_once(':').map_or(rest, |(host, _)| host);
-    host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
+    // A bracketed IPv6 literal carries colons of its own, so the port split has
+    // to start after the bracket or `[::1]:5173` parses as the host `[`.
+    let host = match rest.strip_prefix('[') {
+        Some(inside) => match inside.split_once(']') {
+            Some((host, after)) if after.is_empty() || after.starts_with(':') => host,
+            _ => return false,
+        },
+        None => rest.split_once(':').map_or(rest, |(host, _)| host),
+    };
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 /// `POST …/credential/link/finish` — redeem the code and store what comes back.

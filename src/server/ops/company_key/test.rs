@@ -501,9 +501,13 @@ async fn starting_a_link_sends_the_console_to_the_hub_with_a_challenge_not_a_sec
     assert_eq!(status, StatusCode::OK, "{raw}");
 
     let url = resp["authorizeUrl"].as_str().expect("authorizeUrl");
+    // Through the site's provider chooser, which forwards to the hub's own
+    // `/auth/key` with the provider the person picked. Straight at `/auth/key`
+    // would be the hub's `provider=google` default: an account picker naming
+    // nobody, for somebody who pressed a button in their own console.
     assert!(
-        url.contains("/auth/key?"),
-        "must start the grant flow: {url}"
+        url.contains("/connect?"),
+        "must start the grant flow on the site's chooser: {url}"
     );
     assert!(
         url.contains("code_challenge_method=S256"),
