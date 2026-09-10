@@ -17,6 +17,7 @@ pub mod feedback;
 pub mod feedback_board;
 pub mod graphql;
 pub mod hooks_chargebee;
+pub mod hub_account;
 pub mod hub_identity;
 pub mod hub_link;
 pub(crate) mod inference_models;
