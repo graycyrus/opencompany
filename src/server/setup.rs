@@ -1113,6 +1113,16 @@ pub struct SetupRosterRequest {
     inference_provider: Option<String>,
     inference_base_url: Option<String>,
     inference_model: Option<String>,
+    /// The operator answered the model step with "no model", and means it.
+    ///
+    /// Distinct from *sending no credential*, which this route reads as "use
+    /// whatever the host already has" — and a host usually has something:
+    /// `RosterBuilder::for_setup` falls through to `harness_inference_from_env`,
+    /// so a hosted tenant with an injected credential would design a roster
+    /// with a model the operator had just declined. The screen promises a
+    /// standard team for their industry; this is what makes that true rather
+    /// than true-unless-the-host-happens-to-have-a-key.
+    force_curated: bool,
 }
 
 /// One proposed teammate, shaped for the wizard's review step.
@@ -1421,14 +1431,22 @@ async fn propose_roster(
         team_hint: req.team_hint,
         automate: req.automate,
     };
-    let proposal = propose_for_setup(
-        &answers,
-        req.inference_provider.as_deref(),
-        req.inference_base_url.as_deref(),
-        req.inference_key.as_deref(),
-        req.inference_model.as_deref(),
-    )
-    .await;
+    let proposal = if req.force_curated {
+        // Asked for and answered: no model runs, whatever this host holds.
+        crate::company::setup::template_proposal(
+            &answers,
+            crate::company::setup::FallbackReason::NoModel,
+        )
+    } else {
+        propose_for_setup(
+            &answers,
+            req.inference_provider.as_deref(),
+            req.inference_base_url.as_deref(),
+            req.inference_key.as_deref(),
+            req.inference_model.as_deref(),
+        )
+        .await
+    };
 
     // A picked template outranks the matched one when no model designed
     // anything.

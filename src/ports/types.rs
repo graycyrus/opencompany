@@ -4785,6 +4785,43 @@ impl CompanyRecord {
     /// them. With no order override the base order is returned unchanged, so the
     /// first declared member stays the lead by default.
     pub fn effective_desk_members(&self, desk_id: &str) -> Vec<String> {
+        // **The general desk seats the whole roster, and keeps doing so.**
+        //
+        // It is a desk like any other except in one respect: who belongs to it
+        // is not a list somebody maintains, it is "everyone who works here".
+        // `POST {scope}/team` adds a teammate and touches no desk at all, so a
+        // fixed `members = [...]` would be right on the day it was written and
+        // wrong from the next hire onward — the newest teammate would be the one
+        // person unable to speak on the company's own line.
+        //
+        // Deriving it from the roster makes that unmaintainable-by-construction
+        // rather than merely maintained, and it is what `[company].general_desk`
+        // is for: the manifest names WHICH desk owns the line, and the runtime
+        // keeps its membership current.
+        if self
+            .manifest
+            .company
+            .general_desk
+            .as_deref()
+            .is_some_and(|named| named == desk_id)
+        {
+            // The same two sources `is_roster_agent` consults, manifest before
+            // overlay, so who the room seats and who the roster says works here
+            // cannot drift.
+            let mut all: Vec<String> = Vec::new();
+            for id in self
+                .manifest
+                .agents
+                .iter()
+                .map(|a| a.id.clone())
+                .chain(self.overlay_agents.iter().map(|a| a.id.clone()))
+            {
+                if !self.is_retired(&id) && !all.contains(&id) {
+                    all.push(id);
+                }
+            }
+            return all;
+        }
         let mut members: Vec<String> = self
             .manifest
             .group_chats
@@ -4915,6 +4952,34 @@ impl CompanyRecord {
         // order and the General guards exactly as they were.
         if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
             return Some(exact.id.clone());
+        }
+        // **The company's own line, pointed at a desk that owns it.**
+        //
+        // Without this, General resolves to nothing: the desk selector bails
+        // out and the message falls to a *root* agent picked off the fallback
+        // ladder — in practice whichever agent file sorts first. Observed: a
+        // delivered-order case answered by the pending-order seat, holding
+        // three write tools and no tool for the job.
+        //
+        // The target is required to exist and is required NOT to be a General
+        // spelling itself. tinyhivemind refuses an episode on a desk whose id
+        // or name is one, so resolving General onto such a desk would trade a
+        // message answered by the wrong agent for a message that fails
+        // outright. Silently declining leaves the historical behaviour, which
+        // is the same thing every other rung of this function does.
+        if tinyhivemind_core::chat::is_general_chat(Some(key))
+            && let Some(target) = self.manifest.company.general_desk.as_deref()
+            && let Some(desk) = self
+                .manifest
+                .group_chats
+                .iter()
+                .find(|c| c.id == target)
+                .filter(|c| {
+                    !tinyhivemind_core::chat::is_general_chat(Some(&c.id))
+                        && !tinyhivemind_core::chat::is_general_chat(Some(&c.name))
+                })
+        {
+            return Some(desk.id.clone());
         }
         if !tinyhivemind_core::chat::is_general_chat(Some(key))
             && let Some(exact) = self

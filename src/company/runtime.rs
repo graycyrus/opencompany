@@ -2995,18 +2995,22 @@ impl CompanyRuntime {
                     self.resume_task_card(task_id, resolution, thread, origin_parent)
                         .await
                 } else {
-                    self.cancel_task_card(task_id, thread).await
+                    self.cancel_task_card(task_id, thread, origin_parent).await
                 }
             }
             Some(BlockerStep::Node { run_id, node_id }) => {
-                self.resume_node_blocker(run_id, node_id, resolution, thread)
+                self.resume_node_blocker(run_id, node_id, resolution, thread, origin_parent)
                     .await
             }
             // A question with no card or node behind it — carrying the answer
             // back into its DM is the whole of the resume.
             None => {
-                self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
-                    .await
+                self.post_blocker_resume_note(
+                    thread,
+                    origin_parent,
+                    &blocker_resume_note(resolution),
+                )
+                .await
             }
         }
     }
@@ -3064,6 +3068,7 @@ impl CompanyRuntime {
             return self
                 .post_blocker_resume_note(
                     thread,
+                    origin_parent,
                     "That card is no longer on the board, so there's nothing to pick back up.",
                 )
                 .await;
@@ -3087,7 +3092,7 @@ impl CompanyRuntime {
         card.updated_at_millis = now_millis();
         self.upsert_task(&card).await?;
         drop(_serialized);
-        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+        self.post_blocker_resume_note(thread, origin_parent, &blocker_resume_note(resolution))
             .await
     }
 
@@ -3099,7 +3104,12 @@ impl CompanyRuntime {
     /// bounce chip marks it as not-fresh for a board scan, exactly as the expiry
     /// mover marks a card nobody answered.
     #[cfg(feature = "openhuman")]
-    async fn cancel_task_card(self: &Arc<Self>, task_id: &str, thread: Option<&str>) -> Result<()> {
+    async fn cancel_task_card(
+        self: &Arc<Self>,
+        task_id: &str,
+        thread: Option<&str>,
+        origin_parent: Option<EventSeq>,
+    ) -> Result<()> {
         // Held for the same read-modify-write reason, and in the same order, as
         // [`resume_task_card`](Self::resume_task_card).
         let _serialized = self.task_writes.lock().await;
@@ -3128,6 +3138,7 @@ impl CompanyRuntime {
         drop(_serialized);
         self.post_blocker_resume_note(
             thread,
+            origin_parent,
             "Okay — I've cancelled that. It's back in To-do if you want to pick it up later.",
         )
         .await
@@ -3179,6 +3190,7 @@ impl CompanyRuntime {
         node_id: &str,
         resolution: &crate::ports::blockers::BlockerResolution,
         thread: Option<&str>,
+        origin_parent: Option<EventSeq>,
     ) -> Result<()> {
         let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, node_id);
         if !resolution.resumes() {
@@ -3198,7 +3210,11 @@ impl CompanyRuntime {
                 .await;
             self.retire_blocked_stash(&turn).await;
             return self
-                .post_blocker_resume_note(thread, "Okay — I've cancelled that workflow step.")
+                .post_blocker_resume_note(
+                    thread,
+                    origin_parent,
+                    "Okay — I've cancelled that workflow step.",
+                )
                 .await;
         }
         // A continuation already launched for this node — by the gated-call
@@ -3220,7 +3236,7 @@ impl CompanyRuntime {
             );
             self.retire_blocked_stash(&turn).await;
             return self
-                .post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+                .post_blocker_resume_note(thread, origin_parent, &blocker_resume_note(resolution))
                 .await;
         }
         // Read without taking: the spawn below can still fail, and retiring the
@@ -3230,6 +3246,7 @@ impl CompanyRuntime {
         let Some(stashed) = self.blocked_nodes.peek(&turn) else {
             self.post_blocker_resume_note(
                 thread,
+                origin_parent,
                 "I have your answer, but this host no longer holds that workflow run — re-run \
                  the workflow to pick it back up.",
             )
@@ -3264,6 +3281,7 @@ impl CompanyRuntime {
             // did not land.
             self.post_blocker_resume_note(
                 thread,
+                origin_parent,
                 &format!(
                     "I have your answer, but that workflow step could not be restarted right \
                      now: {error}"
@@ -3273,7 +3291,7 @@ impl CompanyRuntime {
             return Err(error);
         }
         self.retire_blocked_stash(&turn).await;
-        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+        self.post_blocker_resume_note(thread, origin_parent, &blocker_resume_note(resolution))
             .await
     }
 
@@ -3284,11 +3302,16 @@ impl CompanyRuntime {
     /// and reloads like any transcript line. A no-op when the blocker was raised
     /// in no conversation.
     #[cfg(feature = "openhuman")]
-    async fn post_blocker_resume_note(&self, thread: Option<&str>, text: &str) -> Result<()> {
+    async fn post_blocker_resume_note(
+        &self,
+        thread: Option<&str>,
+        parent: Option<EventSeq>,
+        text: &str,
+    ) -> Result<()> {
         let Some(thread) = thread else {
             return Ok(());
         };
-        self.post_blocker_prompt(thread, text).await
+        self.post_blocker_prompt(thread, parent, text).await
     }
 
     /// Durably banks a blocked-node approval the moment its verdict is known,
@@ -6950,15 +6973,28 @@ impl CompanyRuntime {
     /// Posts the ask-which question back into the DM (issue #1862) as a durable
     /// reply, so it survives a reload the way any transcript line does. Attributed
     /// to the teammate whose DM this is — the `dm:<agent>` thread names them.
+    ///
+    /// `parent` is the root the caller resolved for the message this reply
+    /// answers, re-resolved here through
+    /// [`resolvable_parent`](Self::resolvable_parent): a blocker's anchor can be
+    /// days old by the time it is answered, and a root that is gone threads
+    /// nothing. Required rather than defaulted so a caller holding an anchor
+    /// has to decide about it.
     #[cfg(feature = "openhuman")]
-    pub(crate) async fn post_blocker_prompt(&self, thread: &str, prompt: &str) -> Result<()> {
+    pub(crate) async fn post_blocker_prompt(
+        &self,
+        thread: &str,
+        parent: Option<EventSeq>,
+        prompt: &str,
+    ) -> Result<()> {
         let agent_id = thread.strip_prefix("dm:").unwrap_or(thread).to_string();
+        let parent = self.resolvable_parent(parent, thread).await;
         self.events
             .append(
                 &self.id,
                 CompanyEvent::AgentReply {
                     audience: Vec::new(),
-                    parent: None,
+                    parent,
                     chat_id: thread.to_string(),
                     agent_id,
                     text: prompt.to_string(),
@@ -14189,6 +14225,52 @@ mod tests {
                 .collect()
         }
 
+        /// Journals an operator line in the teammate's DM and hands back its
+        /// sequence, the root a reply in that DM threads off.
+        async fn asked_in_dm(runtime: &Arc<CompanyRuntime>) -> crate::ports::types::EventSeq {
+            runtime
+                .events
+                .append(
+                    &runtime.id,
+                    crate::ports::types::CompanyEvent::OperatorMessage {
+                        text: "which brief is current?".to_string(),
+                        chat: Some("dm:eng".to_string()),
+                        parent: None,
+                        by: None,
+                        deliverable: None,
+                        mentions: Vec::new(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal the question")
+        }
+
+        async fn dm_replies(
+            runtime: &Arc<CompanyRuntime>,
+        ) -> Vec<(String, Option<crate::ports::types::EventSeq>)> {
+            runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    crate::ports::types::CompanyEvent::AgentReply {
+                        chat_id,
+                        text,
+                        parent,
+                        ..
+                    } if chat_id == "dm:eng" => Some((text, parent)),
+                    _ => None,
+                })
+                .collect()
+        }
+
         fn agent_question() -> BlockerPayload {
             BlockerPayload {
                 kind: BlockerKind::Information,
@@ -14378,6 +14460,96 @@ mod tests {
                     |note| note == "Thanks — using that and carrying on from where it stopped."
                 ),
                 "the answer must reach the conversation it was asked in; posted: {notes:?}"
+            );
+        }
+
+        /// Every resume acknowledgement lands in the thread the question was
+        /// asked in, not at the channel root.
+        ///
+        /// The anchor is the one the approval recorded when it parked, and it
+        /// reaches all three resumes — a card re-entered, a card cancelled, and
+        /// a workflow node. Driven directly because `park_blocker` records no
+        /// parent of its own: only an `escalate_to_human` park carries one, and
+        /// what is under test is that each resume passes on the anchor it is
+        /// handed rather than dropping it.
+        #[tokio::test]
+        async fn a_resume_note_threads_off_the_question_it_answers() {
+            use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
+
+            for (verdict, expected) in [
+                (BlockerVerdict::Retry, "Got it — picking that back up now."),
+                (
+                    BlockerVerdict::Cancel,
+                    "Okay — I've cancelled that. It's back in To-do if you want to pick it up \
+                     later.",
+                ),
+            ] {
+                let (runtime, _home) = runtime().await;
+                seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+                let root = asked_in_dm(&runtime).await;
+                let resolution = BlockerResolution {
+                    verdict,
+                    answer: String::new(),
+                    step: None,
+                };
+
+                if verdict == BlockerVerdict::Cancel {
+                    runtime
+                        .cancel_task_card("t-1", Some("dm:eng"), Some(root))
+                        .await
+                        .expect("cancels");
+                } else {
+                    runtime
+                        .resume_task_card("t-1", &resolution, Some("dm:eng"), Some(root))
+                        .await
+                        .expect("resumes");
+                }
+
+                let threaded: Vec<Option<crate::ports::types::EventSeq>> = dm_replies(&runtime)
+                    .await
+                    .into_iter()
+                    .filter(|(text, _)| text == expected)
+                    .map(|(_, parent)| parent)
+                    .collect();
+                assert_eq!(
+                    threaded,
+                    vec![Some(root)],
+                    "the {verdict:?} acknowledgement must hang off the question it answers"
+                );
+            }
+        }
+
+        /// A resume whose recorded anchor no longer exists still answers, in
+        /// the channel. A root that is gone threads nothing, and the
+        /// acknowledgement is owed either way.
+        #[tokio::test]
+        async fn a_resume_note_whose_anchor_is_gone_still_answers() {
+            use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
+
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            let resolution = BlockerResolution {
+                verdict: BlockerVerdict::Retry,
+                answer: String::new(),
+                step: None,
+            };
+
+            runtime
+                .resume_task_card(
+                    "t-1",
+                    &resolution,
+                    Some("dm:eng"),
+                    Some(crate::ports::types::EventSeq::new(9_999)),
+                )
+                .await
+                .expect("resumes");
+
+            let posted = dm_replies(&runtime).await;
+            assert_eq!(
+                posted,
+                vec![("Got it — picking that back up now.".to_string(), None)],
+                "an anchor that is gone falls back to the channel rather than swallowing the \
+                 acknowledgement"
             );
         }
 

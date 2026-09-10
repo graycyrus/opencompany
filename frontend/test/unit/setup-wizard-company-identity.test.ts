@@ -160,8 +160,13 @@ async function walkToReview(client: OpenCompanyClient, template: string | null) 
   await act(async () => {
     root.render(createElement(SetupWizard, { client, onDone: () => {} }));
   });
+  // "No model" — the picker's last option, whose popup base-ui portals onto
+  // `document.body` and only mounts once the trigger opens it.
   await act(async () => {
-    (container.querySelector('[data-testid="setup-skip-model"]') as HTMLElement).click();
+    (container.querySelector('[data-testid="setup-provider-select"]') as HTMLElement).click();
+  });
+  await act(async () => {
+    (document.body.querySelector('[data-testid="setup-provider-none"]') as HTMLElement).click();
   });
   await next(); // -> business
   if (template) await pickTemplate(template);
