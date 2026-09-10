@@ -1683,14 +1683,37 @@ export function RoomView({
     let attempts = 0;
     const find = () =>
       document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(wanted)}"]`);
+    /** Drop the consumed `m=` so nothing re-arms this on the next hash change. */
+    const stripFromAddress = () => {
+      const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+      const params = new URLSearchParams(query);
+      params.delete("m");
+      const qs = params.toString();
+      window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+    };
     const timer = window.setInterval(() => {
       attempts += 1;
       const row = find();
       if (!row && attempts < 40) return;
       window.clearInterval(timer);
-      if (!row) return;
-
       consumedMessageNonce.current = messageQuery.nonce;
+      if (!row) {
+        // Said rather than swallowed (#2245 review). Console search reads up to
+        // five pages of history of its own, while the transcript rendered here
+        // is hydrated separately from the newest page alone — so a genuine hit
+        // from further back opens the conversation and then has no row to find.
+        // Giving up in silence looks exactly like a link that did nothing, and
+        // an operator cannot tell that from a console that is broken.
+        //
+        // Loading the missing pages on demand is the real fix and is not this
+        // one: it means a backwards, target-aware fetch merged into the shell's
+        // transcript, which is a change to how a transcript is hydrated rather
+        // than to this handler.
+        toast.warning("Couldn't jump to that message — it isn't in the history loaded here.");
+        stripFromAddress();
+        return;
+      }
+
       row.scrollIntoView({ block: "center", behavior: "smooth" });
       // Marked on the element rather than in React state: the transcript owns
       // that state and re-renders on every arriving message, and a highlight
@@ -1698,11 +1721,7 @@ export function RoomView({
       row.setAttribute("data-found", "true");
       window.setTimeout(() => row.removeAttribute("data-found"), 2600);
 
-      const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
-      const params = new URLSearchParams(query);
-      params.delete("m");
-      const qs = params.toString();
-      window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+      stripFromAddress();
     }, 100);
     return () => window.clearInterval(timer);
   }, [messageQuery, channel?.id]);
