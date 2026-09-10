@@ -4916,6 +4916,34 @@ impl CompanyRecord {
         if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
             return Some(exact.id.clone());
         }
+        // **The company's own line, pointed at a desk that owns it.**
+        //
+        // Without this, General resolves to nothing: the desk selector bails
+        // out and the message falls to a *root* agent picked off the fallback
+        // ladder — in practice whichever agent file sorts first. Observed: a
+        // delivered-order case answered by the pending-order seat, holding
+        // three write tools and no tool for the job.
+        //
+        // The target is required to exist and is required NOT to be a General
+        // spelling itself. tinyhivemind refuses an episode on a desk whose id
+        // or name is one, so resolving General onto such a desk would trade a
+        // message answered by the wrong agent for a message that fails
+        // outright. Silently declining leaves the historical behaviour, which
+        // is the same thing every other rung of this function does.
+        if tinyhivemind_core::chat::is_general_chat(Some(key))
+            && let Some(target) = self.manifest.company.general_desk.as_deref()
+            && let Some(desk) = self
+                .manifest
+                .group_chats
+                .iter()
+                .find(|c| c.id == target)
+                .filter(|c| {
+                    !tinyhivemind_core::chat::is_general_chat(Some(&c.id))
+                        && !tinyhivemind_core::chat::is_general_chat(Some(&c.name))
+                })
+        {
+            return Some(desk.id.clone());
+        }
         if !tinyhivemind_core::chat::is_general_chat(Some(key))
             && let Some(exact) = self
                 .overlay_desks
