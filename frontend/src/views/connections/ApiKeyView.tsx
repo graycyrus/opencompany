@@ -17,8 +17,6 @@ import { HubAccountLinks } from "@/views/connections/HubAccountLinks";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
-  /** Whether the signed-in operator may set the company's credential. */
-  canManage: boolean;
 }
 
 /**
@@ -50,7 +48,16 @@ interface Props {
  * a person signed in to their own TinyHumans account — so those are links out,
  * to whichever hub this host is pointed at.
  */
-export function ApiKeyView({ client, company, canManage }: Props) {
+export function ApiKeyView({ client, company }: Props) {
+  // Resolved here rather than taken as a prop, the same way `OAuthView` does
+  // it: the section is a dispatcher and has no user plane of its own, and a
+  // page that asked its parent for authority would be trusting a value nothing
+  // on this rail is responsible for keeping true.
+  //
+  // Courtesy, not enforcement — the host refuses a non-admin's write whatever
+  // this says. What it prevents is offering somebody a credential field whose
+  // submit could only ever 403.
+  const [canManage, setCanManage] = useState(false);
   const [status, setStatus] = useState<CompanyCredentialStatus | null>(null);
   const [billing, setBilling] = useState<CompanyBilling | null>(null);
   const [load, setLoad] = useState<"loading" | "ready" | "error">("loading");
@@ -87,6 +94,22 @@ export function ApiKeyView({ client, company, canManage }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh, generation]);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
 
   const configured = status?.configured ?? false;
   const summary = billing?.summary;
