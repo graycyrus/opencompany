@@ -945,6 +945,18 @@ function ComponentSection() {
                 Two runs are waiting on your approval.
               </AlertDescription>
             </Alert>
+            {/* The variant that had no sample here, which is part of how its
+                text drifted out of its own colour family: nothing on this page
+                showed the two together. It carries inline `code` because a
+                warning naming a build feature or a flag is the common case. */}
+            <Alert variant="warning">
+              <TriangleAlert className="size-4" />
+              <AlertTitle>Stored, but inert</AlertTitle>
+              <AlertDescription>
+                This host was built without the agent tools, so these settings will be stored
+                and have no effect. Rebuild with the <code>openhuman</code> feature.
+              </AlertDescription>
+            </Alert>
             <Alert variant="destructive">
               <AlertTitle>Run failed</AlertTitle>
               <AlertDescription>
