@@ -1725,6 +1725,7 @@ mode = "none"
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
@@ -1832,11 +1833,24 @@ mode = "none"
         let result = prompt_result(report);
         assert_eq!(result["stopReason"], "end_turn");
         let updates = result["updates"].as_array().expect("updates array");
+        // Counting alone would pass on two chunks and no notification, which is
+        // the shape this case exists to refuse.
+        let approvals: Vec<&str> = updates
+            .iter()
+            .filter_map(|u| u["_meta"]["opencompany/approval"]["id"].as_str())
+            .collect();
         assert_eq!(
-            updates.len(),
-            2,
-            "one reply chunk plus one approval notification"
+            approvals,
+            vec!["appr-1"],
+            "the parked approval must carry its own notification: {updates:?}"
         );
+        assert!(
+            updates.iter().any(|u| u["content"]["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("here's what I found"))),
+            "the reply chunk must survive alongside it: {updates:?}"
+        );
+        assert_eq!(updates.len(), 2, "and nothing else: {updates:?}");
     }
 
     /// PLAT-062 (BOUND): several parked approvals in one turn each get their
@@ -1859,13 +1873,17 @@ mode = "none"
         assert_eq!(result["stopReason"], "end_turn");
         let updates = result["updates"].as_array().expect("updates array");
         assert_eq!(updates.len(), 5);
-        let ids: std::collections::HashSet<&str> = updates
+        // Five *unique* ids is not the claim — five ids that are the ones we
+        // parked is. A set of unrelated ids satisfies the former.
+        let mut ids: Vec<&str> = updates
             .iter()
             .map(|u| u["_meta"]["opencompany/approval"]["id"].as_str().unwrap())
             .collect();
+        ids.sort_unstable();
+        let mut expected: Vec<&str> = parked.iter().map(|id| id.as_ref()).collect();
+        expected.sort_unstable();
         assert_eq!(
-            ids.len(),
-            5,
+            ids, expected,
             "every parked id must appear exactly once: {updates:?}"
         );
     }
