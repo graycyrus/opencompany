@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { getCompanyCredential, type CompanyCredentialStatus } from "@/api/credential";
 import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
+import { HubAccountLinks } from "@/views/connections/HubAccountLinks";
 import {
   getInferenceStatus,
   listInferenceModels,
@@ -1617,6 +1618,16 @@ export function InferenceSection({
                       void refresh();
                       void refreshCredential();
                     }}
+                  />
+                )}
+
+                {/* Where the balance those turns bill against is topped up, and
+                    where the key itself is revoked. Managed only: the other
+                    providers bill their own accounts, not this one. */}
+                {provider === "managed" && (
+                  <HubAccountLinks
+                    account={credential?.account}
+                    configured={status?.keyConfigured ?? false}
                   />
                 )}
 
