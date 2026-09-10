@@ -691,15 +691,17 @@ async fn a_companys_own_key_reads_its_own_billing_summary() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), "acme", GRANTED)
         .await
-        .with_hub_identity(std::sync::Arc::new(MockHubIdentityExchange::new().with_billing(
-            KEY,
-            BillingSummary {
-                balance_usd: 12.5,
-                plan: "pro".to_string(),
-                active_subscription: true,
-                ..Default::default()
-            },
-        )));
+        .with_hub_identity(std::sync::Arc::new(
+            MockHubIdentityExchange::new().with_billing(
+                KEY,
+                BillingSummary {
+                    balance_usd: 12.5,
+                    plan: "pro".to_string(),
+                    active_subscription: true,
+                    ..Default::default()
+                },
+            ),
+        ));
 
     let (status, _, raw) = send_as(
         &state,
