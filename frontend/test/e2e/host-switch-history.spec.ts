@@ -31,9 +31,9 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("there is no host to switch to, so no switch to undo", async ({ page }) => {
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
 
   await expectHostMenuGone(page);
   // The address keeps naming the page, not a host — nothing scoped it to one.
-  await expect(page).toHaveURL(/#\/ledgers\/tasks/);
+  await expect(page).toHaveURL(/#\/company\/work\/tasks/);
 });

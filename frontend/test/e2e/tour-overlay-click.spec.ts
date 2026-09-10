@@ -169,6 +169,6 @@ test("with the tour dismissed the same card still opens the agent", async ({
   await goToRoster(page);
   await opener(page).click();
 
-  await expect(page).toHaveURL(/#\/team\/ceo$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/ceo$/);
   await expect(page.getByTestId("agent-name")).toHaveText(TEAMMATE);
 });

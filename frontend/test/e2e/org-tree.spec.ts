@@ -99,7 +99,7 @@ let desks: Desk[] = [];
  * names the right person. The full form is the surface a real no-model company
  * gets, it is what those walks were written against, and it is the one that
  * stays on the chart long enough to assert a tree — the reduced dialog leaves
- * for `#/team/<id>?edit` by design, so a desk assertion after it would be an
+ * for `#/company/agent/<id>?edit` by design, so a desk assertion after it would be an
  * assertion about a page the operator is no longer on.
  *
  * The reduced dialog gets a test of its own below, which sets this to `harness`
@@ -673,7 +673,7 @@ test("#1989 the reduced dialog derives a role and lands on the agent's page", as
 
   // `?edit` opens the edit form on arrival, which is where the copilot is. Land
   // on the read-only profile instead and the reduction is fields taken away.
-  await expect(page).toHaveURL(/#\/team\/new-5\?edit/, { timeout: 30_000 });
+  await expect(page).toHaveURL(/#\/company\/agent\/new-5\?edit/, { timeout: 30_000 });
 
   // The sentence reached the design pass whole — not split, not cut, not
   // pre-chewed on the console side.
@@ -1315,9 +1315,9 @@ test("#1102 an agent on the chart opens their detail page", async ({
     .locator('[role="treeitem"][aria-level="3"]')
     .first()
     .getByRole("link", { name: "Grace" });
-  await expect(grace).toHaveAttribute("href", "#/team/grace");
+  await expect(grace).toHaveAttribute("href", "#/company/agent/grace");
   await grace.click();
-  await expect.poll(() => page.url()).toContain("#/team/grace");
+  await expect.poll(() => page.url()).toContain("#/company/agent/grace");
   await expect(page.getByTestId("agent-breadcrumb-company")).toBeVisible({
     timeout: 30_000,
   });
@@ -1331,9 +1331,9 @@ test("#1102 an agent on the chart opens their detail page", async ({
     })
     .last();
   const turing = unplaced.getByRole("link", { name: "Turing" });
-  await expect(turing).toHaveAttribute("href", "#/team/turing");
+  await expect(turing).toHaveAttribute("href", "#/company/agent/turing");
   await turing.click();
-  await expect.poll(() => page.url()).toContain("#/team/turing");
+  await expect.poll(() => page.url()).toContain("#/company/agent/turing");
 });
 
 test("#1102 a seat naming nobody on the roster is not offered as a link", async ({
@@ -1344,7 +1344,7 @@ test("#1102 a seat naming nobody on the roster is not offered as a link", async 
   await mockApi(page);
   await openChart(page);
 
-  // `#/team/ghost` is a dead end that only repeats the badge beside the name,
+  // `#/company/agent/ghost` is a dead end that only repeats the badge beside the name,
   // so the ghost seat stays text. The link on the seat above it is the teeth:
   // without it this would pass on a chart that linked nothing at all.
   const seats = deskNode(page, "Engineering").locator(

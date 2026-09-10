@@ -133,7 +133,7 @@ test("a company agent opens from its card and shows what it is", async ({ page }
 
   // A sub-page, not a modal: the agent is addressable, so it survives a
   // refresh and Back returns to the roster.
-  await expect(page).toHaveURL(/#\/team\/ceo$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/ceo$/);
 
   await expect(page.getByTestId("agent-name")).toHaveText("Chief Executive");
 
@@ -190,7 +190,7 @@ test("a company agent opens from its card and shows what it is", async ({ page }
 test("desk membership is on the agent, and an agent is reachable by link", async ({ page }) => {
   // Deep link straight to an agent: the detail view resolves the id against the
   // host rather than falling back to the roster.
-  await page.goto("/#/team/engineer");
+  await page.goto("/#/company/agent/engineer");
   await dismissOnboarding(page);
 
   await expect(page.getByTestId("agent-name")).toHaveText("Engineer", { timeout: 30_000 });
@@ -233,7 +233,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
         .fill("Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm.");
       await dialog.getByRole("button", { name: "Add agent" }).click();
       // The design pass is a model call, so this is the slow step of the walk.
-      await expect(page).toHaveURL(/#\/team\/[^?]+\?edit/, { timeout: 60_000 });
+      await expect(page).toHaveURL(/#\/company\/agent\/[^?]+\?edit/, { timeout: 60_000 });
 
       // What the host designed, read off the form the create opened — which is
       // the point of the redirect: a role a model wrote is in front of the
