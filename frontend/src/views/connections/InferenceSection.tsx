@@ -1622,12 +1622,19 @@ export function InferenceSection({
                 )}
 
                 {/* Where the balance those turns bill against is topped up, and
-                    where the key itself is revoked. Managed only: the other
-                    providers bill their own accounts, not this one. */}
-                {provider === "managed" && (
+                    where the key itself is revoked. Managed only, and only
+                    while the saved config actually rides the platform proxy:
+                    `status.keyConfigured` merely says an inference key exists,
+                    which under `managed` can be a raw OpenRouter key the
+                    operator pasted directly (`!savedIsProxied`) — that key
+                    bills OpenRouter, not the TinyHumans account these links
+                    always point at, and `credential?.configured` is the
+                    TinyHumans identity these links and their wording are
+                    actually about. */}
+                {provider === "managed" && savedIsProxied && (
                   <HubAccountLinks
                     account={credential?.account}
-                    configured={status?.keyConfigured ?? false}
+                    configured={credential?.configured ?? false}
                   />
                 )}
 
