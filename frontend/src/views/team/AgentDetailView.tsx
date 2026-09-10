@@ -11,6 +11,7 @@ import {
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { setInboxEnabled } from "@/api/inbox";
 import { listTasks, type Task } from "@/api/tasks";
 import { isDesktopRuntime } from "@/api/transport";
 import {
@@ -258,6 +259,12 @@ export function AgentDetailView({
       resolve out of order (the older one overwriting the newer choice). */
   const [avatarSaving, setAvatarSaving] = useState(false);
   /**
+   * An inbox write is in flight (issue #1190's own page-level control — the
+   * host's `InboxStore` is the source of truth, so the switch stays disabled
+   * until the `PUT` it triggered actually lands).
+   */
+  const [inboxSaving, setInboxSaving] = useState(false);
+  /**
    * What this teammate is on and carrying (issue #1141), or `null` when the
    * board could not be read — in which case the header states neither rather
    * than an invented "idle · 0 open".
@@ -444,6 +451,34 @@ export function AgentDetailView({
       );
     } finally {
       setAvatarSaving(false);
+    }
+  }
+
+  /**
+   * Give this teammate an inbox, or take it away (issue #1190 — the control
+   * moved off the roster card, onto the agent it belongs to).
+   *
+   * Flips `inboxEnabled` on screen before the `PUT` resolves — the switch is
+   * the only signal an operator watches while the write is in flight, and a
+   * control that waits for the round trip to move reads as broken rather than
+   * slow. `inboxSaving` holds it disabled for that stretch, so a second click
+   * cannot race the first, and a failure rolls the optimistic flip back rather
+   * than leaving the switch lying about what the host actually has.
+   */
+  async function toggleInbox(enabled: boolean) {
+    if (!agent) return;
+    const previous = agent;
+    setAgent({ ...agent, inboxEnabled: enabled });
+    setInboxSaving(true);
+    try {
+      await setInboxEnabled(client, company, agent.id, enabled);
+    } catch (error) {
+      if (displayedAgentIdRef.current === agentId) setAgent(previous);
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't change this agent's inbox.",
+      );
+    } finally {
+      if (displayedAgentIdRef.current === agentId) setInboxSaving(false);
     }
   }
 
@@ -728,6 +763,20 @@ export function AgentDetailView({
 
             <PageTabPanel idBase="agent" id="overview" value={tab} className="space-y-6">
             <FactLine agent={agent} workload={workload} />
+            {/* One control, not a tab (see `AGENT_TABS`'s own doc comment) —
+                whether this teammate receives mail at all. */}
+            <div className="flex items-center gap-2">
+              <Switch
+                id="agent-inbox-toggle"
+                data-testid="agent-inbox-toggle"
+                checked={agent.inboxEnabled ?? false}
+                disabled={inboxSaving}
+                onCheckedChange={(on) => void toggleInbox(on)}
+              />
+              <Label htmlFor="agent-inbox-toggle" className="text-sm font-normal">
+                Inbox
+              </Label>
+            </div>
             <OpenTasks tasks={openTasks} />
 
             {/* What this agent has actually done (issue #1573), directly

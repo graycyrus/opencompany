@@ -491,8 +491,9 @@ test("#1141 a card opens an agent, breadcrumbed and editable", async ({ page }) 
   await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/company/tasks/t2");
   await expect(page.getByTestId("agent-open-task-t3")).toHaveCount(0);
 
-  // Edit is on the header row, not buried in a card halfway down, and this
-  // teammate is an overlay so it is live.
+  // Edit lives on the Instructions tab, not the Overview tab this arrival
+  // opens on; this teammate is an overlay so it is live once there.
+  await page.getByRole("tab", { name: "Instructions" }).click();
   const edit = page.getByTestId("agent-edit");
   await expect(edit).toBeEnabled();
   await edit.click();

@@ -30,6 +30,7 @@ import {
 } from "@/lib/member-feedback";
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
+import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AddMemberDialog, type NewMemberFields } from "@/views/room/AddMemberDialog";
@@ -773,6 +774,12 @@ function MemberCard({
         */}
         <div className="mt-auto space-y-1.5 empty:hidden">
           {workload && <WorkloadLine workload={workload} />}
+          {member.budgetUsdDaily !== undefined && (
+            <DailyBudgetLine
+              budgetUsdDaily={member.budgetUsdDaily}
+              spentTodayUsd={member.spentTodayUsd ?? 0}
+            />
+          )}
         </div>
         {/*
           The card's footer is gone with the Inbox switch it existed to hold
@@ -832,6 +839,40 @@ function WorkloadLine({ workload }: { workload: Workload }) {
       <span data-testid="team-card-tasks">
         {workload.open === 1 ? "1 open task" : `${workload.open} open tasks`}
       </span>
+    </p>
+  );
+}
+
+/**
+ * The card's read half of a teammate's daily spend cap (issue #304) — the
+ * edit half moved to the teammate's own page beside Inbox (issue #1206), and
+ * this line is what is left to show for it here.
+ *
+ * Only rendered when `budgetUsdDaily` is present: absence IS the uncapped
+ * signal (`TeamMemberDto.budgetUsdDaily`'s own doc), so a `0` cap would be a
+ * different, wrong claim — nothing to show is not the same as a $0.00 cap.
+ */
+function DailyBudgetLine({
+  budgetUsdDaily,
+  spentTodayUsd,
+}: {
+  budgetUsdDaily: number;
+  spentTodayUsd: number;
+}) {
+  const paused = spentTodayUsd >= budgetUsdDaily;
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="team-budget">
+      <span className={cn("font-medium", paused && "text-status-idle-text")}>
+        {usd(budgetUsdDaily)}/day
+      </span>
+      <span aria-hidden>·</span>
+      <span>{usd(spentTodayUsd)} spent today</span>
+      {paused && (
+        <>
+          <span aria-hidden>·</span>
+          <span className="font-medium text-status-idle-text">paused</span>
+        </>
+      )}
     </p>
   );
 }
