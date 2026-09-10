@@ -51,7 +51,17 @@ it back on a clipboard.
    (`server::hub_link`), and answers with the hub URL to navigate to — carrying
    only `base64url(sha256(verifier))` and an opaque `state`.
 2. **The hub.** The person signs in with their provider and approves a consent
-   screen naming the requesting origin and the scopes. The hub decides those
+   screen naming the requesting origin and the scopes.
+
+   The URL is the **site's** `/connect` page where a site is derivable, and the
+   API's `GET /auth/key` where it is not. `/auth/key` defaults to
+   `provider=google` and redirects there immediately: an admin who pressed a
+   button in their own console arrived at a Google account picker naming nobody,
+   with no way to use the account they actually sign in here with. `/connect`
+   names the instance asking, says what will be created, offers the same three
+   providers the sign-in screen does, and hands off to `/auth/key?provider=…`
+   with every grant parameter passed through — `server::hub_identity::key_grant_query`
+   builds them once, so the two pages cannot disagree about the challenge. The hub decides those
    scopes from the callback origin: a **provisioned tenant origin** may receive
    `connections`; a loopback console receives what a human could mint by hand.
 3. **Finish.** The browser returns with a single-use `code`. The host looks up
@@ -61,6 +71,25 @@ The verifier never leaves the host and the key never reaches the browser. That
 is the reason the exchange is server-side rather than done in the page: whatever
 redeems the code receives the key, and a `connections` key passing through a tab
 is a credential in a place nobody can account for.
+
+**Where the browser comes back to.** The callback is
+`{host_base_url}/?company=…&key=link&state=…`, and `host_base_url` is
+`OPENCOMPANY_PUBLIC_URL` — the console's own origin, because the console is what
+holds the session that may call `finish` and what redeems the code. A host that
+advertises an origin serving no console answers the return leg with a 404 and
+the grant dies holding a spent code. In a hosted tenant the console is served
+from that origin already; locally, either set `OPENCOMPANY_CONSOLE_DIR` to a
+built `frontend/dist` so the host origin serves it, or point
+`OPENCOMPANY_PUBLIC_URL` at the dev server (`http://localhost:5173`).
+
+**The key never reaches the browser.** The return leg carries `state` and a
+one-time `code`, and nothing else — the console posts both to its own host,
+which redeems them and stores the key. There is deliberately no screen anywhere
+in this flow that displays the key: whatever holds the code and the verifier can
+mint it, and a `connections`-scoped credential rendered into a page is one that
+has passed through a tab, its history, and any extension reading either. A key
+somebody wants to see with their own eyes is minted by hand on the dashboard's
+API-keys page instead.
 
 **One grant arms two credentials.** The minted key is stored as both
 `tinyhumans/key` and `inference/key`, and the company's inference provider is
@@ -88,6 +117,7 @@ sign-in:
 
 | Page | Path |
 |---|---|
+| Choose a provider and approve a grant | `{site}/connect?…` |
 | Manage API keys — see, name, revoke | `{site}/dashboard?tab=api-keys` |
 | Top up the balance those keys spend | `{site}/dashboard?tab=billing` |
 

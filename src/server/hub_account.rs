@@ -140,7 +140,10 @@ mod test {
     #[test]
     fn the_connect_page_carries_the_grant_query_through() {
         assert_eq!(
-            connect_url("https://staging.tinyhumans.ai", "callback_url=x&code_challenge=y"),
+            connect_url(
+                "https://staging.tinyhumans.ai",
+                "callback_url=x&code_challenge=y"
+            ),
             "https://staging.tinyhumans.ai/connect?callback_url=x&code_challenge=y"
         );
     }
