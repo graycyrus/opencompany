@@ -17,6 +17,7 @@ import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
+import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
@@ -28,7 +29,6 @@ import {
   type DecideApproval,
   type OperatorChannelDto,
   type TeamMemberDto,
-  type TurnStep,
   type Verdict,
   isDetachedChat,
 } from "@/api/types";
@@ -59,6 +59,7 @@ import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./room/AddMemberDialog";
 import { ChannelCreateDialog } from "./room/ChannelCreateDialog";
+import { BudgetDialog } from "./room/BudgetDialog";
 import { ChannelRail } from "./room/ChannelRail";
 import { ChatHeader } from "./room/ChatHeader";
 import { MembersPane } from "./room/MembersPane";
@@ -75,9 +76,10 @@ import {
 } from "./room/mentions";
 import { echoCause } from "./room/EchoPlaceholder";
 import { MessageTimeline } from "./room/MessageTimeline";
-import type { ChatReceipt } from "./room/ChatLiveReceipt";
 import { ThreadPanel } from "./room/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import * as room from "@/room/store";
+import { foldEpisodes, type EpisodeTurn } from "@/lib/hive/episode";
 import {
   buildChannels,
   buildTimeline,
@@ -164,7 +166,7 @@ interface Props {
    * teammate here and staying in chat would leave them half-written with
    * nothing pointing at where to finish them.
    *
-   * Optional, so `ChatView` still mounts standalone in tests — but a mount
+   * Optional, so `RoomView` still mounts standalone in tests — but a mount
    * without it turns the reduced dialog's create into a dead end, so the shell
    * always passes it.
    */
@@ -175,7 +177,7 @@ interface Props {
    * Every channel's transcript, keyed by channel id, and its setter — owned by
    * `AppShell` rather than here so a transcript survives this component
    * unmounting when the operator navigates to another view and back (the shell
-   * mounts and unmounts `ChatView` per route; component-local state would be
+   * mounts and unmounts `RoomView` per route; component-local state would be
    * discarded on every trip away from Chat).
    */
   transcripts: Transcripts;
@@ -288,34 +290,6 @@ interface Props {
    */
   scopeRef: RefObject<{ connection: string; company: string | null; client: OpenCompanyClient }>;
   /**
-   * Turns accepted but not settled, by host thread id — including ones this
-   * console never POSTed, which is what makes the indicator survive a reload.
-   */
-  openTurns?: Record<string, OpenTurn[]>;
-  /**
-   * The in-flight tool timeline the shell folds out of the live turn frames,
-   * keyed by **host thread id** — so this view has to resolve its channel to a
-   * thread to read it (see `activeThreadId`). Covers turns this console never
-   * started, which is most of what issue #367 is about.
-   */
-  liveStepsByThread?: Record<string, TurnStep[]>;
-  /**
-   * Live rows per query, keyed by the asking message's id (see
-   * `MessageTimeline`). Passed straight through — unlike `liveStepsByThread`,
-   * nothing here has to resolve a key for it: the message id is the key, so it
-   * needs neither `activeThreadId` nor the desk map, and cannot be affected by
-   * their load order.
-   */
-  liveStepsByMessage?: Record<string, TurnStep[]>;
-  /**
-   * The live receipt for a synchronous chat turn in flight, keyed by **host
-   * thread id** (issue #1934) — resolved to this channel's thread the same way
-   * `liveStepsByThread` is. Present between the operator's send and the reply
-   * landing; absent otherwise. Drives the "Sent → Picked up → on step" row that
-   * fills the gap the composer used to leave silent.
-   */
-  receiptByThread?: Record<string, ChatReceipt>;
-  /**
    * Roster agent id → display name, captured by the shell's desks/roster read
    * (issue #1934). Lets the receipt name whoever picked the turn up rather than
    * rendering a raw id; a miss falls back to the channel voice.
@@ -384,7 +358,6 @@ interface Props {
    * additive contract.
    */
   approvals?: ApprovalSummary[];
-  chatChannelByThread?: Record<string, string>;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /**
@@ -453,7 +426,7 @@ function threadRootOf(parentId: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export function ChatView({
+export function RoomView({
   client,
   company,
   sub,
@@ -475,10 +448,6 @@ export function ChatView({
   onSendFailed,
   onSendStale,
   scopeRef,
-  openTurns,
-  liveStepsByThread,
-  liveStepsByMessage,
-  receiptByThread,
   agentNames,
   unread,
   mentions,
@@ -486,7 +455,6 @@ export function ChatView({
   onChannelViewed,
   onChatPaneVisibilityChange,
   approvals,
-  chatChannelByThread,
   taskStatusByTaskId,
   inflightRuns,
   onInflightSteered,
@@ -498,6 +466,25 @@ export function ChatView({
   budgetProximity,
   onDismissBudgetProximity,
 }: Props) {
+  /*
+   * Read straight from the Room store rather than taken as props.
+   *
+   * All five used to be threaded down from `app-shell.tsx`, which held them in
+   * `useState` only because this component unmounts on every trip away from the
+   * Room. They live in `room/store.ts` now, so the shell has nothing to hand
+   * over and this reads them where they are.
+   *
+   * `transcripts` and `hydration` deliberately stay props: `hydration` defaults
+   * to `HISTORY_UNTRACKED` for a `RoomView` mounted with no shell behind it —
+   * resolving every channel to "ready" so a standalone mount does not spin on a
+   * pass that is never coming — and reading the store would replace that with
+   * `HISTORY_UNSTARTED`, which spins forever.
+   */
+  const openTurns = room.useOpenTurns();
+  const liveStepsByThread = room.useLiveStepsByThread();
+  const liveStepsByMessage = room.useLiveStepsByMessage();
+  const receiptByThread = room.useReceiptByThread();
+  const chatChannelByThread = room.useChatChannelByThread();
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   /**
@@ -641,6 +628,16 @@ export function ChatView({
     setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
   /** Your own avatar reference, once `loadViewer` has resolved who you are. */
   const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
+  const [effectiveHive, setEffectiveHive] = useState<{
+    quorum: number;
+    turnBudget: number;
+  } | null>(null);
+  // Who set which cap (issue #360, ported from the retired Team page). Only
+  // an admin may read the user directory, so this stays empty for a member —
+  // the attribution line degrades to "an admin" rather than disappearing.
+  const [people, setPeople] = useState<Person[]>([]);
+  // The member whose budget dialog is open, if any.
+  const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
 
   /**
    * Ask the host whether this company can think (issues #1734, #1735).
@@ -661,7 +658,7 @@ export function ChatView({
    * admin, or this operator in a second window, can configure inference and
    * rebuild the runtime while this chat sits open (codex, PR #1740). The
    * operator's *own* trip to Connections → Inference already re-reads — the shell
-   * mounts and unmounts `ChatView` per route, so coming back remounts it — but
+   * mounts and unmounts `RoomView` per route, so coming back remounts it — but
    * nothing covered the cross-session case, and a standing banner insisting
    * that a company which now thinks perfectly well cannot is the same class of
    * wrong claim as the one this surface exists to remove.
@@ -694,7 +691,7 @@ export function ChatView({
         // An older host, or one that could not answer. Nothing is claimed
         // either way, and chat renders exactly as it did before the banner
         // existed.
-        console.debug("[ChatView] cognition state unavailable", e);
+        console.debug("[RoomView] cognition state unavailable", e);
         if (isCurrent()) setLoadedCognition({ client, company, state: null });
       }
     };
@@ -966,7 +963,7 @@ export function ChatView({
       if (isOperatorChannelDto(dto)) {
         setOperator(dto);
       } else if (dto !== null) {
-        console.debug("[ChatView] getOperatorChannel returned an unexpected shape", dto);
+        console.debug("[RoomView] getOperatorChannel returned an unexpected shape", dto);
       }
     });
   }, [client, company, roomVisits]);
@@ -1376,15 +1373,79 @@ export function ChatView({
 
   const askerNames = useAskerNames(client, company, channelApprovals);
 
+  /**
+   * The rooms this channel held, folded out of its own transcript.
+   *
+   * Derived rather than fetched: a deliberating desk journals nothing but its
+   * turns, so the transcript **is** the episode and there is no episode endpoint
+   * to ask. See `lib/hive/episode.ts`.
+   *
+   * `[]` for every DM, `#general`, the Operator feed and every desk that
+   * answered with one ordinary turn — the fold looks for marker lines and the
+   * reserved `hive-report` author and finds neither. Nothing here consults the
+   * channel's kind, which is what keeps the surface unchanged for every
+   * conversation that is not a room.
+   */
+  useEffect(() => {
+    let live = true;
+    setEffectiveHive(null);
+    // Lightweight room-test clients and older hosts do not expose this optional
+    // grammar read. The fold retains its derived policy in that case.
+    if (!channel?.memberIds || typeof client.getDeskHive !== "function") return () => {
+      live = false;
+    };
+    client
+      .getDeskHive(channel.id, company)
+      .then((hive) => {
+        if (live) {
+          setEffectiveHive({
+            quorum: hive.effective.quorum,
+            turnBudget: hive.effective.turnBudget,
+          });
+        }
+      })
+      // DMs and system channels have no desk grammar endpoint.
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [client, company, channel?.id, channel?.memberIds]);
+
+  const episodes = useMemo(
+    () =>
+      foldEpisodes(
+        entries.map((entry) => entry.message),
+        // The seat count the host derives its quorum and turn budget from. Only
+        // a hint: with no membership the fold falls back to its own default and
+        // reports the number as derived rather than asserting one it cannot know.
+        {
+          members: channel?.memberIds?.length,
+          quorum: effectiveHive?.quorum,
+          turnBudget: effectiveHive?.turnBudget,
+        },
+      ),
+    [entries, channel?.memberIds, effectiveHive],
+  );
+
   const items = useMemo(
     () =>
       buildTimelineItems(
         entries,
         [...channelApprovals, ...settledApprovals],
         decidedApprovals ?? {},
+        episodes,
       ),
-    [entries, channelApprovals, settledApprovals, decidedApprovals],
+    [entries, channelApprovals, settledApprovals, decidedApprovals, episodes],
   );
+
+  /** Each deliberation turn by the message that carried it, for the rows. */
+  const episodeTurn = useMemo(() => {
+    const out: Record<string, EpisodeTurn> = {};
+    for (const episode of episodes)
+      for (const turn of [...episode.turns, ...episode.referrals])
+        out[turn.messageId] = turn;
+    return out;
+  }, [episodes]);
 
   // Company-wide, not scoped to the open channel — see the function's own
   // doc for why a per-channel version silently redeemed the wrong marker
@@ -1424,9 +1485,9 @@ export function ChatView({
   // like `workflowRunEvents`/`openTurns`/`budgetProximity` above — host
   // message ids (`h<seq>`) are a per-company sequence, so a marker id cached
   // under company A's message id must not answer for company B's
-  // identically-numbered one. `ChatView` is not remounted on a company
+  // identically-numbered one. `RoomView` is not remounted on a company
   // switch, so nothing else clears this map: `transcripts` resetting (in
-  // `AppShell`) does not reach a `ChatView`-local `useState`.
+  // `AppShell`) does not reach a `RoomView`-local `useState`.
   useEffect(() => {
     setBudgetPauseMarkerByNotice((prev) => (prev.size === 0 ? prev : new Map()));
   }, [client, company]);
@@ -1815,7 +1876,7 @@ export function ChatView({
    * the panel is showing.
    *
    * They used to be one lookup on the channel id, which could not tell the two
-   * apart — so `ChatView` suppressed the channel's indicator whenever any
+   * apart — so `RoomView` suppressed the channel's indicator whenever any
    * thread was open, and a turn the host was actively running showed nowhere at
    * all. The shell now keys them per thread (`turnStateKey`), which is what
    * makes this split expressible.
@@ -2686,6 +2747,7 @@ export function ChatView({
                 <MessageTimeline
                   channel={channel}
                   items={items}
+                  episodeTurn={episodeTurn}
                   cognition={cognition}
                   historyPending={historyPending}
                   openThreadId={openThreadId}
