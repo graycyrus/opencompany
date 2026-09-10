@@ -9,6 +9,7 @@ import {
   type CompanyBilling,
   type CompanyCredentialStatus,
 } from "@/api/credential";
+import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
@@ -121,12 +122,14 @@ export function ApiKeyView({ client, company }: Props) {
 
   return (
     <section className="space-y-6">
-      <header className="space-y-1">
-        <h1 className="text-lg font-medium">API Key</h1>
-        <p className="text-sm text-muted-foreground">
-          The TinyHumans account this company acts and spends through.
-        </p>
-      </header>
+      {/* The console's one page header (#1763) rather than a hand-rolled `h1`:
+          a routed view that titles itself is how twelve heading styles happened
+          the first time, and `page-header-adoption` is the test that says so. */}
+      <PageHeader
+        title="API Key"
+        width="full"
+        description="The TinyHumans account this company acts and spends through."
+      />
 
       {/* The pitch, in the one place that is about the account rather than
           about something the account happens to unlock. Kept short and kept
