@@ -300,14 +300,31 @@ async fn start_link(
         started.state,
     );
 
-    Ok(Json(StartLinkResponse {
-        authorize_url: crate::server::hub_identity::key_grant_url(
-            &state.config().api_url,
-            &callback_url,
-            &started.challenge,
-            &key_name(runtime),
+    // Through the site's `/connect` where there is one, straight at the API
+    // where there is not.
+    //
+    // `GET /auth/key` defaults to `provider=google` and redirects there at
+    // once, so an admin who pressed a button in their own console landed on a
+    // Google account picker that named nobody and offered no other account.
+    // The site page names the instance asking, says what will be created, and
+    // offers the same providers the sign-in screen does — then sends them to
+    // this very endpoint with the provider they picked. The parameters are
+    // built once either way, so the two paths cannot disagree about the
+    // challenge.
+    let query = crate::server::hub_identity::key_grant_query(
+        &callback_url,
+        &started.challenge,
+        &key_name(runtime),
+    );
+    let authorize_url = match state.config().hub_site() {
+        Some(site) => crate::server::hub_account::connect_url(&site, &query),
+        None => format!(
+            "{}/auth/key?{query}",
+            state.config().api_url.trim_end_matches('/')
         ),
-    }))
+    };
+
+    Ok(Json(StartLinkResponse { authorize_url }))
 }
 
 /// `POST …/credential/link/finish` — redeem the code and store what comes back.
