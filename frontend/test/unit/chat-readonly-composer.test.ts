@@ -8,7 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { isGeneralChannel } from "@/lib/chat";
 import { TOUR } from "@/tour/steps";
-import { RoomView } from "@/views/RoomView";
+import { ChatView } from "@/views/ChatView";
 
 /**
  * The channel composer answers a read-only channel by not existing, and the
@@ -28,12 +28,12 @@ import { RoomView } from "@/views/RoomView";
  * from the Send that provokes one.
  *
  * A grep cannot tell a rendered control from a removed one, so this mounts the
- * real `RoomView` against a stub client and asks the DOM.
+ * real `ChatView` against a stub client and asks the DOM.
  *
  * # The writable half is not optional
  *
  * Every read-only assertion here is an assertion of absence, and absence is
- * also what a `RoomView` that failed to mount produces. The writable cases
+ * also what a `ChatView` that failed to mount produces. The writable cases
  * pin the same queries finding everything, off the same fixture — so a
  * mount that silently renders nothing fails rather than passing twice.
  */
@@ -41,7 +41,7 @@ import { RoomView } from "@/views/RoomView";
 const OPERATOR_DTO = {
   id: "operator",
   name: "Operator",
-  description: "Workflow reports and notifications",
+  description: "Automation reports and notifications",
 };
 
 const DESK_DTO = {
@@ -97,7 +97,7 @@ afterEach(() => {
  *
  * Every other test here passes no `inflightRuns` at all, which is why the
  * sibling-order tests below could once claim the banner and the composer are
- * adjacent: `RoomView` gates `InflightRunBar` on the prop being defined, so a
+ * adjacent: `ChatView` gates `InflightRunBar` on the prop being defined, so a
  * harness that omits it never renders the row that actually sits between them
  * (codex and CodeRabbit, both on PR #2159).
  */
@@ -117,7 +117,7 @@ function tree(
   typing: string[] = [],
   inflight = false,
 ): ReactNode {
-  const view = createElement(RoomView, {
+  const view = createElement(ChatView, {
     client,
     company: "acme",
     sub,
@@ -147,7 +147,7 @@ function tree(
  * Render (or re-render) this root at `sub`, then let the reads settle.
  *
  * Re-rendering the same root with the same client is how the draft test walks
- * between channels: React reconciles `RoomView` in place, which is exactly the
+ * between channels: React reconciles `ChatView` in place, which is exactly the
  * production path an operator takes when they click another channel in the
  * rail. Remounting instead would discard the composer's state for reasons that
  * have nothing to do with the behaviour under test, and the test would pass
@@ -207,7 +207,7 @@ describe("a read-only channel renders no composer", () => {
 
     expect(container.querySelector('[aria-label="Send"]')).toBeNull();
     expect(container.querySelector('[aria-label="What this message is for"]')).toBeNull();
-    for (const chip of ["Just chatting", "Do it once", "Build me the workflow"]) {
+    for (const chip of ["Just chatting", "Do it once", "Build me the automation"]) {
       expect(container.textContent).not.toContain(chip);
     }
   });
@@ -237,7 +237,7 @@ describe("a read-only channel renders no composer", () => {
     await mount("operator");
 
     // "Give the team a brief" prefills a composer this channel does not
-    // render; "Add people" opens a members pane `RoomView` gates off on the
+    // render; "Add people" opens a members pane `ChatView` gates off on the
     // same flag. Both were dead controls under the notice.
     expect(container.textContent).not.toContain("Give the team a brief");
     expect(container.textContent).not.toContain("Add people");
@@ -245,12 +245,17 @@ describe("a read-only channel renders no composer", () => {
 });
 
 describe("a writable channel still renders the whole composer", () => {
-  it("draws the input, the Send button, the chips and the controls", async () => {
+  it("draws the input, the Send button and the controls", async () => {
     await mount("main");
 
     expect(composerInput()).not.toBeNull();
     expect(container.querySelector('[aria-label="Send"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="What this message is for"]')).not.toBeNull();
+    // The intent chips ("Just chatting" / "Do it once" / "Build me the
+    // automation") are behind `COMPOSER_INTENT_HIDDEN`, so the control that
+    // opened them is absent. Asserted rather than dropped, in the idiom
+    // `product-scope-hidden-surfaces.test.ts` uses: a hidden surface coming
+    // back by accident is the failure, and it looks like a feature.
+    expect(container.querySelector('[aria-label="What this message is for"]')).toBeNull();
     for (const label of ["Mention someone", "Formatting"]) {
       expect(container.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
     }
@@ -280,12 +285,12 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     // under, from the offline echo brain, and no setting changes it.
     expect(strip?.textContent).toContain(
       "The replies in this conversation come from the offline echo brain rather than the " +
-        "teammate they appear under. No setting changes that: it takes a host built and " +
+        "agent they appear under. No setting changes that: it takes a host built and " +
         "started with the harness.",
     );
   });
 
-  it("places it below the transcript and above the composer", async () => {
+  it("shares the composer's own box, so nothing can come between them", async () => {
     await mount("main", "unavailable");
 
     const strip = banner()!;
@@ -293,79 +298,53 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     expect(strip).not.toBeNull();
     expect(input).not.toBeNull();
 
-    // `MessageTimeline`'s root is the scrolling viewport. The notice, the
-    // scroller and the composer are all direct children of the same flex
-    // column, so their order in that column is the order on screen — which is
-    // the entire claim being made: the notice qualifies the Send below it, not
-    // the transcript above it.
-    const column = strip.parentElement!;
-    const kids = Array.from(column.children);
-    const scroller = column.querySelector(":scope > div.overflow-y-auto")!;
-    const composerRoot = kids.find((el) => el.contains(input))!;
-
-    expect(scroller).not.toBeNull();
-    expect(composerRoot).not.toBeUndefined();
-    expect(kids.indexOf(scroller)).toBeLessThan(kids.indexOf(strip));
-    expect(kids.indexOf(strip)).toBeLessThan(kids.indexOf(composerRoot));
+    // This used to be an order assertion over the pane's flex column: the
+    // notice was a full-bleed strip in the flow, and the claim was that it sat
+    // after the transcript and before the composer. It kept needing more cases
+    // — the typing line, then the in-flight run bar — because every new row in
+    // that column was a new thing that could land between them.
+    //
+    // The notice hovers now: it and the composer are in one `relative` box, and
+    // it anchors to that box with `absolute bottom-full`. So the adjacency is
+    // structural rather than ordered, and the run bar can render between them
+    // in the DOM without coming between them on screen.
+    const box = strip.parentElement!;
+    expect(box.className).toContain("relative");
+    expect(box.contains(input), "the notice and the composer share one box").toBe(true);
+    expect(strip.className).toContain("absolute");
+    expect(strip.className).toContain("bottom-full");
   });
 
-  it("stays directly above the composer with somebody typing, nothing in flight", async () => {
-    // The order was asserted with nobody typing, which is the one case where
-    // `TypingLine` renders nothing — so `["TRANSCRIPT", "BANNER", "COMPOSER"]`
-    // read correct while the shipped order was TRANSCRIPT, BANNER, TYPING,
-    // COMPOSER for anyone mid-conversation (CodeRabbit review on PR #1984).
-    // Proximity to the composer is the entire reason the strip moved, so the
-    // case with a row competing for that gap is the case worth pinning.
-    await mount("main", "unavailable", ["Jane"]);
+  it("overlaps the transcript rather than displacing it", async () => {
+    await mount("main", "unavailable");
 
     const strip = banner()!;
-    const input = composerInput()!;
-    const typing = container.querySelector('[data-testid="typing-line"]');
-    expect(strip).not.toBeNull();
-    expect(input).not.toBeNull();
-    expect(typing).not.toBeNull();
-
-    const column = strip.parentElement!;
-    const kids = Array.from(column.children);
-    const composerRoot = kids.find((el) => el.contains(input))!;
-
-    // Adjacency, not just order: nothing at all between the notice and the
-    // control it qualifies. True while the company is idle, which is the case
-    // this one pins — `InflightRunBar` is the one thing that comes between them,
-    // and the test below is where that is pinned instead.
-    expect(kids.indexOf(typing!)).toBeLessThan(kids.indexOf(strip));
-    expect(kids.indexOf(composerRoot)).toBe(kids.indexOf(strip) + 1);
-    expect(container.querySelector('[data-testid="inflight-run-bar"]')).toBeNull();
+    // The trade the float makes, stated: it covers the last line of the
+    // transcript instead of pushing it up. The transcript can be scrolled and
+    // this cannot be missed, which is the right way round — but it is only
+    // acceptable because the box takes no pointer events, so a click meant for
+    // the message underneath still lands. The one thing here that IS clickable
+    // puts them back on itself.
+    expect(strip.className).toContain("pointer-events-none");
+    const link = strip.querySelector("a");
+    if (link) expect(strip.className).toContain("[&_a]:pointer-events-auto");
   });
 
-  /**
-   * With a run in flight, the run bar is between the banner and the composer —
-   * on purpose, and the specification says so.
-   *
-   * The adjacency above was asserted with no `inflightRuns` prop at all, and
-   * `RoomView` gates `InflightRunBar` on that prop being defined, so the harness
-   * was pinning a layout no shell in production ever renders. Both reviewers on
-   * PR #2159 caught the same thing in the spec prose; this is the assertion half.
-   */
-  it("lets the in-flight run bar come between it and the composer", async () => {
+  it("still hovers over the composer with a run in flight", async () => {
+    // `InflightRunBar` renders inside the same box, between the notice's anchor
+    // and the composer. That used to break the adjacency assertion; now it
+    // cannot, and this is the case that proves it.
     await mount("main", "unavailable", ["Jane"], true);
 
     const strip = banner()!;
     const input = composerInput()!;
     const bar = container.querySelector('[data-testid="inflight-run-bar"]');
-    expect(strip).not.toBeNull();
-    expect(input).not.toBeNull();
     expect(bar).not.toBeNull();
 
-    const column = strip.parentElement!;
-    const kids = Array.from(column.children);
-    const composerRoot = kids.find((el) => el.contains(input))!;
-    const barRoot = kids.find((el) => el.contains(bar!))!;
-
-    // Still below the transcript and the typing line — the placement this
-    // strip moved for — and still before the composer. Just not glued to it.
-    expect(kids.indexOf(strip)).toBeLessThan(kids.indexOf(barRoot));
-    expect(kids.indexOf(barRoot)).toBeLessThan(kids.indexOf(composerRoot));
+    const box = strip.parentElement!;
+    expect(box.contains(input)).toBe(true);
+    expect(box.contains(bar!)).toBe(true);
+    expect(strip.className).toContain("bottom-full");
   });
 
   /**
@@ -391,7 +370,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     );
     expect(strip?.textContent).toContain(
       "The replies in this conversation come from the offline echo brain rather than the " +
-        "teammate they appear under. No setting changes that: it takes a host built and " +
+        "agent they appear under. No setting changes that: it takes a host built and " +
         "started with the harness.",
     );
 
@@ -407,12 +386,16 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     await mount("operator", "unavailable");
 
     const strip = banner()!;
-    const column = strip.parentElement!;
+    // One level deeper than it used to be: the notice's parent is now the
+    // `relative` box the banner anchors to, so the read-only notice is a
+    // sibling of that box rather than of the banner itself.
+    const box = strip.parentElement!;
+    const column = box.parentElement!;
     const kids = Array.from(column.children);
     const notice = kids.find((el) => el.textContent?.includes("There is nothing to reply to here"));
 
     expect(notice).not.toBeUndefined();
-    expect(kids.indexOf(notice!)).toBeLessThan(kids.indexOf(strip));
+    expect(kids.indexOf(notice!)).toBeLessThan(kids.indexOf(box));
 
     // Order relative to the read-only notice only — deliberately NOT "and it is
     // the last child of the column". `InflightRunBar` renders after this strip
@@ -427,7 +410,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
  *
  * This is the regression the read-only change nearly shipped (codex review on
  * PR #1984). `MessageComposer` holds the draft, the staged attachment, the
- * mentions and the intent in its own `useState`, and `RoomView` renders one
+ * mentions and the intent in its own `useState`, and `ChatView` renders one
  * instance for every channel — so React reconciling it in place is the only
  * reason a draft has ever survived walking to another channel and back.
  * Gating the element on `!readOnly` unmounted it, and the operator came back
@@ -524,7 +507,7 @@ describe("a General address resolves to whichever channel holds the line", () =>
  * Two of the eight stops spotlight `[data-tour="chat-composer"]`, and one of
  * them is the closing "You're all set". A stop that names only `view: "chat"`
  * inherits whichever channel was last open there — `app-shell`'s remembered
- * sub-segment, or `RoomView`'s remembered channel on a cold start — which can
+ * sub-segment, or `ChatView`'s remembered channel on a cold start — which can
  * be the read-only Operator feed. Since PR #1984 that feed renders no composer,
  * so the anchor never mounts, `waitForTarget` times out, and the stop is
  * **skipped in silence**: a missing anchor degrades rather than errors, so the
@@ -544,7 +527,7 @@ describe("the tour's composer stops address a writable channel", () => {
       expect(stop.view).toBe("chat");
       expect(stop.sub).toBeTruthy();
       // A General spelling: the company-wide line exists in every company and
-      // is writable in all of them, and `RoomView` folds every spelling of it
+      // is writable in all of them, and `ChatView` folds every spelling of it
       // onto whichever channel actually holds the line.
       expect(isGeneralChannel(stop.sub!)).toBe(true);
     }

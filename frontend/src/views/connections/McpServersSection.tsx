@@ -708,7 +708,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
         </h2>
       </div>
       <p className="text-sm text-muted-foreground">
-        Remote MCP tool servers your teammates can call. Add an HTTP endpoint and (optionally) a
+        Remote MCP tool servers your agents can call. Add an HTTP endpoint and (optionally) a
         token — the token is stored securely and never shown again.
       </p>
 
@@ -719,12 +719,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       {bridge === "absent" && (
         <Alert data-testid="mcp-bridge-absent">
           <AlertTriangle className="size-4" />
-          <AlertTitle>No teammate can use tool servers in this deployment</AlertTitle>
+          <AlertTitle>No agent can use tool servers in this deployment</AlertTitle>
           <AlertDescription>
             The MCP bridge isn&apos;t compiled into this build, so servers added here are stored and
-            can be probed, but no teammate ever receives their tools. The configuration survives —
+            can be probed, but no agent ever receives their tools. The configuration survives —
             rebuild this deployment with the <code className="font-mono">mcp</code> feature and the
-            servers below start reaching teammates on the next turn.
+            servers below start reaching agents on the next turn.
           </AlertDescription>
         </Alert>
       )}
@@ -810,7 +810,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                             <button
                               type="button"
                               data-testid="mcp-server-open"
-                              className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                              className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none transition-opacity hover:opacity-80"
                               onClick={() => setOpened(server.name)}
                               aria-label={`Open ${server.name}`}
                             >
@@ -975,7 +975,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           compiled in, so with no bridge the red "no tool grant covers …, widen a
                           grant" advice misdiagnoses the cause — grants cannot fix a missing
                           bridge — and the positive "Reachable by: …" line contradicts the banner
-                          that says no teammate receives these tools. The banner already carries
+                          that says no agent receives these tools. The banner already carries
                           the real message here. */}
                       {bridge !== "absent" &&
                         server.reachableBy !== undefined &&
@@ -987,16 +987,16 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           >
                             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                             <span>
-                              No teammate can reach this server — no tool grant covers{" "}
+                              No agent can reach this server — no tool grant covers{" "}
                               <code className="font-mono">mcp:{server.name}</code>. Widen a company or
-                              per-teammate tool grant, or this server is unused.
+                              per-agent tool grant, or this server is unused.
                             </span>
                           </p>
                         ) : (
                           <p data-testid="mcp-reachability" className="text-xs text-muted-foreground">
                             Reachable by:{" "}
                             <span className="font-medium text-foreground">
-                              {/* Names, not ids (issue #931): an operator-added teammate's
+                              {/* Names, not ids (issue #931): an operator-added agent's
                                   id is a minted internal string and tells the reader
                                   nothing about who can reach the server. */}
                               {server.reachableBy.map((agent) => agent.name).join(", ")}
@@ -1228,8 +1228,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Adding saves the server now. {bridge === "absent"
-                    ? "It stays unavailable to teammates until this deployment is rebuilt with MCP support."
-                    : "Teammates pick up its tools on their next turn."}
+                    ? "It stays unavailable to agents until this deployment is rebuilt with MCP support."
+                    : "Agents pick up its tools on their next turn."}
                 </p>
               </div>
             )}
@@ -1237,7 +1237,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
             {/* Issue #1270: the tab could not discover anything — an operator
                 had to arrive already knowing a URL to paste. The directory
                 browser sits inside the same card, under the same manage gate as
-                the form above it (an install hands every teammate a new set of
+                the form above it (an install hands every agent a new set of
                 tools), and what it installs lands in the list above with a
                 `registry` badge rather than in a section of its own.
 

@@ -220,7 +220,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
 
   try {
     // Define one through the dialog the issue calls create-only.
-    await page.getByRole("button", { name: "Add teammate" }).first().click();
+    await page.getByRole("button", { name: "Add agent" }).first().click();
     const dialog = page.getByRole("dialog");
     if (surface === "describe") {
       await expect(dialog.getByTestId("team-describe-box")).toBeVisible();
@@ -231,7 +231,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
       await dialog
         .getByTestId("team-describe-box")
         .fill("Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm.");
-      await dialog.getByRole("button", { name: "Add teammate" }).click();
+      await dialog.getByRole("button", { name: "Add agent" }).click();
       // The design pass is a model call, so this is the slow step of the walk.
       await expect(page).toHaveURL(/#\/team\/[^?]+\?edit/, { timeout: 60_000 });
 
@@ -263,7 +263,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
       await dialog.getByTestId("agent-field-name").fill("Detail Spec");
       await dialog.getByTestId("agent-field-role").fill(role);
       await dialog.getByTestId("agent-field-description").fill(seededDescription);
-      await dialog.getByRole("button", { name: "Add teammate" }).click();
+      await dialog.getByRole("button", { name: "Add agent" }).click();
     }
     // By name, not by role: on the reduced dialog the role is the host's and
     // this spec does not know it until it has read it back.
@@ -318,7 +318,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
     await goToTeam(page);
     const leftover = page.getByTestId("team-card").filter({ hasText: "Detail Spec" }).first();
     if (await leftover.count()) {
-      await leftover.getByLabel("Teammate actions").click();
+      await leftover.getByLabel("Agent actions").click();
       await page.getByRole("menuitem", { name: "Remove" }).click();
       await expect(leftover).toHaveCount(0, { timeout: 30_000 });
     }

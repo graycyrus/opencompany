@@ -179,7 +179,7 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
       "the old copy's blanket 'nothing here to decide' is what this fixes",
     ).not.toContain("nothing here to decide");
     expect(text).toContain("report still waiting");
-    expect(text).toContain("run the workflow again");
+    expect(text).toContain("run the automation again");
     // `DeliveryReport` carries no id, so there is still nothing for Approvals
     // to deep-link to — the button stays hidden, as in the delivery-only arm.
     expect(container.querySelector('[data-testid="gate-workflow-open-approvals"]')).toBeNull();
@@ -204,7 +204,7 @@ describe("WorkflowStep's wording for a run waiting on a person", () => {
     expect(
       text,
       "the run stopped on a node that cannot be re-entered — a rerun is still required",
-    ).toContain("run the workflow again");
+    ).toContain("run the automation again");
     // A live gate approval DOES have an id, so Approvals stays reachable here.
     expect(
       container.querySelector('[data-testid="gate-workflow-open-approvals"]'),

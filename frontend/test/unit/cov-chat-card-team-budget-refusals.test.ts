@@ -44,7 +44,7 @@ vi.mock("sonner", () => ({
 }));
 
 const DESK_DTO = { id: "main", name: "main", description: "The main channel", members: [] as string[] };
-const OPERATOR_DTO = { id: "operator", name: "Operator", description: "Workflow reports" };
+const OPERATOR_DTO = { id: "operator", name: "Operator", description: "Automation reports" };
 const MEMBER_DTO = { id: "m1", name: "Ada", role: "engineer" };
 
 interface Overrides {
@@ -205,7 +205,7 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
 
     expect(toasts.error).toHaveBeenCalledWith("This card still has work running.");
     // Still there: the link half of the chip survives a refused delete.
-    expect(container.querySelector('a[href="#/tasks/task-1"]')).not.toBeNull();
+    expect(container.querySelector('a[href="#/company/tasks/task-1"]')).not.toBeNull();
   });
 
   it("clears the chip when the host says the card is already gone (404)", async () => {
@@ -216,7 +216,7 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
     await openConfirm();
 
     expect(toasts.success).toHaveBeenCalledWith("That card was already gone — chip cleared.");
-    expect(container.querySelector('a[href="#/tasks/task-1"]')).toBeNull();
+    expect(container.querySelector('a[href="#/company/tasks/task-1"]')).toBeNull();
   });
 });
 
@@ -226,10 +226,10 @@ describe("dismissing a card the host refuses to delete (AUTH — the console mus
  * had no coverage was the one refusal the host still enforces (a company's
  * last teammate) and an ordinary write failure, neither silently swallowed.
  */
-describe("removing a teammate from the chat member pane", () => {
+describe("removing an agent from the chat member pane", () => {
   async function openRemove() {
     const toggle = [...container.querySelectorAll("button")].find((b) =>
-      (b.textContent ?? "").includes("teammate"),
+      (b.textContent ?? "").includes("agent"),
     ) as HTMLButtonElement;
     expect(toggle, "the members-pane toggle").not.toBeUndefined();
     await act(async () => toggle.click());
@@ -244,15 +244,15 @@ describe("removing a teammate from the chat member pane", () => {
     await flush();
   }
 
-  it("names the host's last-teammate refusal (AUTH — a removal the host will not allow)", async () => {
+  it("names the host's last-agent refusal (AUTH — a removal the host will not allow)", async () => {
     const client = clientAs({
       removeTeamMember: () =>
-        Promise.reject(new ApiError(409, "conflict", "You can't remove your company's last teammate.")),
+        Promise.reject(new ApiError(409, "conflict", "You can't remove your company's last agent.")),
     });
     await mount(client);
     await openRemove();
 
-    expect(toasts.error).toHaveBeenCalledWith("You can't remove your company's last teammate.");
+    expect(toasts.error).toHaveBeenCalledWith("You can't remove your company's last agent.");
   });
 
   it("reports an ordinary failure rather than leaving the row untouched with no explanation (FAIL)", async () => {

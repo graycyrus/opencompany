@@ -33,7 +33,7 @@ function clientAs(reactToMessage: (seq: string, emoji: string, on: boolean) => P
     scopeFor: () => "/api/v1/companies/acme",
     listDesks: () => Promise.resolve([DESK_DTO]),
     getOperatorChannel: () =>
-      Promise.resolve({ id: "operator", name: "Operator", description: "Workflow reports and notifications" }),
+      Promise.resolve({ id: "operator", name: "Operator", description: "Automation reports and notifications" }),
     reactToMessage: vi.fn(reactToMessage),
   };
   return new Proxy(named, {

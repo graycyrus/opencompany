@@ -110,7 +110,7 @@ const EFFECT_LABELS = {
   // projection — but without a glossary entry it fell through to "Do something
   // that needs your sign-off", which tells an operator nothing about what they
   // are about to restart. The payload names the workflow and the step.
-  "workflow.approve": "Continue a paused workflow",
+  "workflow.approve": "Continue a paused automation",
 };
 
 export function effectAction(kind: string): string {
@@ -150,7 +150,7 @@ const EFFECT_DONE_LABELS = {
   mcp_registry_tool_call: "Used a connected tool",
   media_generate_image: "Generated an image",
   media_generate_video: "Generated a video",
-  "workflow.approve": "Continued a paused workflow",
+  "workflow.approve": "Continued a paused automation",
 } satisfies Record<keyof typeof EFFECT_LABELS, string>;
 
 /**
@@ -269,12 +269,12 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // thing that hands a finished file over. A card that says "publicly" over a
   // hand-off to the operator is the misleading-label failure this issue refused
   // to risk, so the label states what is true under either reading.
-  run_workflow: "Run one of its saved workflows",
+  run_workflow: "Run one of its saved automations",
   // Issue #661 (M7). Only the delete of the three parks — `read_workflow` and
   // `update_workflow` are `Reach::Nothing` — so only the delete needs words
   // here, and "permanently" is the load-bearing one: an update keeps the prior
   // version in the workflow's history, while this takes that history with it.
-  delete_workflow: "Permanently delete one of its saved workflows",
+  delete_workflow: "Permanently delete one of its saved automations",
   // The four tools an operator may grant standing on (#444). They are not in the
   // catch-all `Other` group by accident — they are the low-consequence writes
   // the standing-grant feature exists to apply to, which means they are the

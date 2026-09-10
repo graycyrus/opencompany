@@ -59,7 +59,7 @@ function reason(err: unknown): string {
 }
 
 /**
- * Settings → Search: which index this company's teammates search.
+ * Connections → Search: which index this company's teammates search.
  *
  * Every teammate that holds the `search` grant gets a `web_search` tool. This
  * page decides what is behind it: the platform's own account (metered, capped,
@@ -191,7 +191,7 @@ export function SearchView({ client, company }: Props) {
       width="full"
       description={
         <>
-          Where your teammates look things up. Every teammate that can search
+          Where your agents look things up. Every agent that can search
           gets one <code>web_search</code> tool — this decides which index
           answers it, and whose account pays for the call.
         </>
@@ -240,7 +240,7 @@ export function SearchView({ client, company }: Props) {
             testId="search-read-only"
             title="Only an admin can change where this company searches"
           >
-            Whatever a teammate types into a search reaches the provider selected
+            Whatever an agent types into a search reaches the provider selected
             here, under that provider&rsquo;s own retention policy &mdash; and the
             calls are billed to whichever account the key belongs to. Both are the
             company&rsquo;s to decide, so an admin decides them. You can see which
@@ -249,7 +249,7 @@ export function SearchView({ client, company }: Props) {
         )}
 
         {!status.inBuild ? (
-          <Alert data-testid="search-not-in-build">
+          <Alert variant="warning" data-testid="search-not-in-build">
             <TriangleAlert className="size-4" />
             <AlertDescription>
               This host was built without the agent tools, so these settings will
@@ -265,7 +265,7 @@ export function SearchView({ client, company }: Props) {
             company={company}
             namespace="search"
             canManage={canManage}
-            explanation="No teammate will get a search tool even once a provider is configured."
+            explanation="No agent will get a search tool even once a provider is configured."
             onGranted={load}
             testId="search-not-granted"
           />
@@ -354,7 +354,7 @@ export function SearchView({ client, company }: Props) {
                     onChange={(e) => setEndpoint(e.target.value)}
                   />
                   <p className="text-xs text-muted-foreground">
-                    The address your SearXNG instance answers on. Every teammate
+                    The address your SearXNG instance answers on. Every agent
                     search goes there, so it has to be reachable from this host.
                   </p>
                 </div>
@@ -383,10 +383,10 @@ export function SearchView({ client, company }: Props) {
         </Card>
 
         <p className="text-xs text-muted-foreground">
-          Search queries leave this host. Whatever a teammate types into a search
+          Search queries leave this host. Whatever an agent types into a search
           reaches the provider selected here, under that provider&rsquo;s own
           retention policy — which is the reason the choice is an
-          administrator&rsquo;s and not a teammate&rsquo;s.
+          administrator&rsquo;s and not an agent&rsquo;s.
         </p>
       </div>
     </div>

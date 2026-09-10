@@ -97,10 +97,17 @@ afterEach(() => {
 describe("MemoryView, fact CRUD with no admin gate", () => {
   it("offers a plain member both New memory and per-card delete, matching the ungated fact routes", async () => {
     const client = clientAs({});
+    await show(createElement(MemoryView, { client, company: "acme", sub: "upload" }));
+    await act(async () => {});
+    expect(at("memory-add"), "the add panel is on the Upload tab").not.toBeNull();
+
     await show(createElement(MemoryView, { client, company: "acme" }));
     await act(async () => {});
 
-    expect(at("memory-add")).not.toBeNull();
+    // The add form is a panel on the Upload tab now, not a header button that
+    // stood on all three Brain views — so "can a plain member write?" is asked
+    // where the form actually is. The per-card delete stays on Overview, which
+    // is what this render lands on.
     const card = at("memory-card")!;
     expect(card.querySelector("button[aria-label='Delete memory']")).not.toBeNull();
   });

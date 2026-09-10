@@ -45,12 +45,12 @@ function dmFor(m: TeamMember): Channel {
 }
 
 describe("dmFace", () => {
-  it("hands back the teammate's own name, tone, and id-seeded avatar, so every caller seeds alike", () => {
+  it("hands back the agent's own name, tone, and id-seeded avatar, so every caller seeds alike", () => {
     const ada = member({ id: "agent_ada", name: "Ada", tone: "violet" });
     expect(dmFace(dmFor(ada))).toEqual({ name: "Ada", tone: "violet", avatar: avatarFor("agent_ada") });
   });
 
-  it("resolves to one mascot for one teammate", () => {
+  it("resolves to one mascot for one agent", () => {
     // What the rail row and the header each end up drawing. They call the same
     // function, so the only way these can differ is a change to `dmFace` — the
     // point of routing both through it.

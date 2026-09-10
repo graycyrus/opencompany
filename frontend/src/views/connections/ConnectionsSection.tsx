@@ -1,7 +1,11 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { resolveConnectionPage } from "@/views/connection-pages";
+import { HostingView } from "@/views/HostingView";
+import { InferenceView } from "@/views/InferenceView";
 import { McpServersView } from "@/views/McpServersView";
 import { OAuthView } from "@/views/OAuthView";
+import { SearchView } from "@/views/SearchView";
+import { SkillsView } from "@/views/SkillsView";
 
 interface Props {
   client: OpenCompanyClient;
@@ -27,12 +31,16 @@ interface Props {
  * # This is not a revert of the Connections split
  *
  * A single "Connections" **page** once carried five subjects and was broken
- * apart on purpose (see the comment above the `inference` entry in
- * `settings-pages.ts`). Nothing here puts them back on one page: Apps and MCP
- * Servers are still two pages answering one question each. What they gain is a
- * parent, which is what the original split had no room to give them — and the
- * three credential forms that argument also covers (Inference, Hosting, Search)
- * deliberately stayed in Settings, beside the things they unlock.
+ * apart on purpose. Nothing here puts them back on one page: every entry in
+ * `CONNECTION_PAGES` is still one page answering one question. What they gain
+ * is a parent, which is what the original split had no room to give them.
+ *
+ * Inference, Skills, Hosting and Search have since joined Apps and MCP Servers
+ * under that parent, and the settings rail they left is down to who can sign
+ * in, how the company behaves, what it did and what it spends. The argument
+ * for each move — and for why "a credential form belongs beside what it
+ * unlocks" turned out to point *here* rather than away — is on
+ * `CONNECTION_PAGES` in `views/connection-pages.ts`.
  *
  * # Where the rail went, twice
  *
@@ -52,7 +60,7 @@ interface Props {
  *
  * This file is unchanged by either move, and that is the point worth keeping:
  * what is left is the dispatch, which is all this component ever did besides
- * draw a rail. `OAuthView` and `McpServersView` are re-parented, not rewritten.
+ * draw a rail. Every view under it is re-parented, not rewritten.
  * The one content change was `OAuthView`'s title: the page is called **Apps**
  * now, because "OAuth" names the protocol a connection happens to use rather
  * than the thing an operator came to find, and under a section already named
@@ -65,6 +73,21 @@ export function ConnectionsSection({ client, company, sub }: Props) {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {page === "apps" && <OAuthView client={client} company={company} />}
       {page === "mcp" && <McpServersView client={client} company={company} />}
+      {page === "inference" && <InferenceView client={client} company={company} />}
+      {/* Remounted per company, the same rule `SettingsSection` applied while
+          this page lived on its rail: `canManage` and the Add dialog's draft
+          must not carry one company's admin authority into another's
+          still-resolving read. */}
+      {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
+      {/* Both remounted per company for the reason they were on the settings
+          rail: a deploy token or a search key typed for one company must never
+          ride into another company's Save. */}
+      {page === "hosting" && (
+        <HostingView key={company ?? "self"} client={client} company={company} />
+      )}
+      {page === "search" && (
+        <SearchView key={company ?? "self"} client={client} company={company} />
+      )}
     </div>
   );
 }

@@ -102,12 +102,12 @@ function settledReceipt(approvals: ApprovalSummary[], decided: Record<string, Ve
     return approved === 1 ? approvedLine(undefined) : "Declined — recorded, and nothing will run";
   }
   if (approved === approvals.length) {
-    return `Approved ${actionCount(approved)} — the teammate is picking it up now`;
+    return `Approved ${actionCount(approved)} — the agent is picking it up now`;
   }
   if (declined === approvals.length) {
-    return `Declined ${actionCount(declined)} — the teammate will not take them`;
+    return `Declined ${actionCount(declined)} — the agent will not take them`;
   }
-  return `Approved ${actionCount(approved)} and declined ${actionCount(declined)} — the teammate is picking it up now`;
+  return `Approved ${actionCount(approved)} and declined ${actionCount(declined)} — the agent is picking it up now`;
 }
 
 /**
@@ -469,7 +469,7 @@ export function ApprovalRow({
   // the one thing here the operator has to act on.
   const status = busy
     ? awaiting("approve")
-      ? "Waiting for the teammate…"
+      ? "Waiting for the agent…"
       : "Recording…"
     : failedCount > 0
       ? failureLabel(failedCount, approvals.length)
@@ -679,7 +679,7 @@ function CompactApprovalRow({
             {!busy && (
               <a
                 href={detailsHref}
-                className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
+                className="text-xs text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:underline"
               >
                 View details
               </a>
@@ -824,7 +824,7 @@ function BoardApprovalRow({
           // Stops at the row: the card's own click handler opens the task
           // detail, and this goes somewhere else.
           onClick={(e) => e.stopPropagation()}
-          className="mt-1 block text-2xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
+          className="mt-1 block text-2xs text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:underline"
         >
           View details
         </a>

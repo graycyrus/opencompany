@@ -105,7 +105,7 @@ export function ChatHeader({
       </div>
 
       {/* Issue #1757: the Operator system channel is a read-only report feed
-          with no members, so it offers no teammate pane. */}
+          with no members, so it offers no agent pane. */}
       {!channel.system && (
         <Button
           variant="ghost"
@@ -119,7 +119,7 @@ export function ChatHeader({
         >
           <Users className="size-3.5" />
           <span className="tabular-nums">{memberCount}</span>
-          <span className="sr-only">{membersOpen ? "Hide" : "Show"} teammates</span>
+          <span className="sr-only">{membersOpen ? "Hide" : "Show"} agents</span>
         </Button>
       )}
     </header>

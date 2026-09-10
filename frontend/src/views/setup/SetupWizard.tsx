@@ -795,7 +795,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
                   operator never saw. */}
               Built <strong>{applied.seeded_company}</strong> with{" "}
               {roster?.agents.length ?? 0}{" "}
-              {roster?.agents.length === 1 ? "teammate" : "teammates"}.
+              {roster?.agents.length === 1 ? "agent" : "agents"}.
             </p>
           )}
           {/* The button below cannot restart the host — it only re-enters the
@@ -1523,7 +1523,7 @@ function PowerStep({
         <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
           {onTheHouse
             ? "This host already has a model. Test it and carry on — you don't need a key of your own."
-            : "Your teammates need a model to work. We'll check it reaches before going any further."}
+            : "Your agents need a model to work. We'll check it reaches before going any further."}
         </p>
 
         {/* Cards, not a select. Four options with a sentence each is a choice
@@ -1821,7 +1821,7 @@ function ReviewStep({
           this and never changes it, and nothing in the product renames a
           company afterwards. It sits above the roster because it is the one
           field on this screen that cannot be revisited later, while any
-          teammate can be added, renamed or dropped from the console. */}
+          agent can be added, renamed or dropped from the console. */}
       <div className="space-y-1.5">
         <Label htmlFor="setup-company-name">What should we call it?</Label>
         <Input
@@ -1886,8 +1886,8 @@ function ReviewStep({
               {/* A shipped roster is read here, not edited.
                   Not a restriction for its own sake: an edited roster can only
                   be sent back as a *designed* company, and the designed path is
-                  bounded at six teammates — so renaming one row of an
-                  eight-teammate template would silently drop two of them, and
+                  bounded at six agents — so renaming one row of an
+                  eight-agent template would silently drop two of them, and
                   the operator would find out by not finding them. Every one of
                   these is renameable and removable from the console the moment
                   setup finishes, where no such bound applies. */}
@@ -1927,7 +1927,7 @@ function ReviewStep({
           <AlertTriangle />
           <AlertTitle>That&apos;s everyone gone</AlertTitle>
           <AlertDescription>
-            A company needs at least one teammate. Add one back, or start again.
+            A company needs at least one agent. Add one back, or start again.
           </AlertDescription>
         </Alert>
       )}
@@ -1973,12 +1973,12 @@ function ReviewStep({
             A roster reads as a set of capabilities: "Social Media Manager —
             owns posting and engagement" is taken to mean it can post. It
             cannot, yet, and nothing on this screen used to say so. Every
-            designed teammate starts with the workspace and nothing outward,
+            designed agent starts with the workspace and nothing outward,
             because reaching a real account needs an account connected first —
             an act only a person can perform, and one there has been no
             opportunity to perform yet.
 
-            This is the same failure as the twelve invented teammates that used
+            This is the same failure as the twelve invented agents that used
             to render here: offering something the host cannot honour. The fix
             is the sentence, not a wider tool grant. */}
         <p data-testid="setup-reach">
@@ -1999,7 +1999,7 @@ function ReviewStep({
 
       {built !== null && (
         <p className="text-sm text-muted-foreground" data-testid="setup-building">
-          Building {built} {built === 1 ? "teammate" : "teammates"}…
+          Building {built} {built === 1 ? "agent" : "agents"}…
         </p>
       )}
 
@@ -2145,7 +2145,7 @@ function BusinessStep({
             </option>
             {templates.map((option) => (
               <option key={option.id} value={option.id}>
-                {option.name} ({option.agent_count} teammates)
+                {option.name} ({option.agent_count} agents)
               </option>
             ))}
           </select>

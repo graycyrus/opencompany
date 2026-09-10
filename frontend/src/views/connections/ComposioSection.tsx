@@ -444,9 +444,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       </div>
       <p className="text-sm text-muted-foreground">
         {!canManage
-          ? "Your teammates reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
+          ? "Your agents reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : onByok
-            ? "Your teammates reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — nothing is proxied and nothing is billed elsewhere. Connect providers in the grid below; they are connected in that account."
+            ? "Your agents reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — nothing is proxied and nothing is billed elsewhere. Connect providers in the grid below; they are connected in that account."
             : // Two facts, and they had been collapsed into one sentence. The
               // route a company is on today is not what the form beneath does,
               // and while the form is fixed to this company's own account those
@@ -458,10 +458,10 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
               // filling a blank, and the grid it is looking at belongs to the
               // account it is leaving.
               attested
-              ? "Your teammates reach providers through Composio today, linked through this instance's own cluster identity — nothing is stored here for that. Saving an API key below moves this company onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
+              ? "Your agents reach providers through Composio today, linked through this instance's own cluster identity — nothing is stored here for that. Saving an API key below moves this company onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
               : companyKey
-                ? "Your teammates reach providers through Composio today, on the account this company's stored credential authorizes. Saving an API key below moves it onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
-                : "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account."}
+                ? "Your agents reach providers through Composio today, on the account this company's stored credential authorizes. Saving an API key below moves it onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
+                : "Your agents reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account."}
       </p>
 
       {load === "loading" ? (
@@ -522,7 +522,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
               client={client}
               company={company}
               namespace="composio"
-              explanation="Teammates will not receive Composio tools even once connected."
+              explanation="Agents will not receive Composio tools even once connected."
               canManage={canManage}
               onGranted={async () => {
                 await refresh();

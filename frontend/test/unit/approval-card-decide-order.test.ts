@@ -428,7 +428,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ]);
   });
 
-  it("names a workflow grant revocation after the workflow (#1411)", async () => {
+  it("names an automation grant revocation after the automation (#1411)", async () => {
     // A workflow grant carries no agent (`agent` is empty, issue #1098) — its
     // subject lives in `workflow`, and the revocation label must name that
     // workflow, not the empty string the agent field would yield.
@@ -458,7 +458,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ).not.toBeNull();
   });
 
-  it("names a workflow gate's broad approve after the workflow, not a teammate (#1411)", async () => {
+  it("names an automation gate's broad approve after the automation, not an agent (#1411)", async () => {
     // A native `workflow.approve` gate carries no agent — the broader scope's
     // subject is the workflow itself (issue #1098) — so picking it must not
     // tell a screen-reader user that a "teammate" is being granted the tool.
@@ -495,7 +495,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     });
 
     expect(approveButton().getAttribute("aria-label")).toContain(
-      "let this workflow use this tool for 1 hour",
+      "let this automation use this tool for 1 hour",
     );
   });
 });

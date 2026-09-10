@@ -12,22 +12,23 @@ import {
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarInset,
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AgentProfileProvider } from "@/components/agent-profile-sheet";
-import { ApprovalsButton } from "@/components/approvals-button";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { OverviewButton } from "@/components/overview-button";
+import { TitleBarSearch } from "@/components/title-bar-search";
+import { TitleBarUtilities } from "@/components/title-bar-utilities";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
-import { WindowTitleBar } from "@/components/window-title-bar";
-import { SidebarCollapseButton, SidebarUtilityBar } from "@/components/sidebar-controls";
+import { TITLE_BAR_ICON_BUTTON, WindowTitleBar } from "@/components/window-title-bar";
+import { cn } from "@/lib/utils";
+import { SidebarCollapseButton } from "@/components/sidebar-controls";
 import { SectionContentRail } from "@/components/section-rail";
 import { SidebarNavigation } from "@/components/sidebar-navigation";
 import { RoomRailSlotProvider } from "@/components/room-rail";
@@ -102,6 +103,7 @@ import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { formatConsolePath, parseConsolePath } from "@/lib/console-paths";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { DEFAULT_VIEW, isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
@@ -457,6 +459,13 @@ interface Props {
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
+/**
+ * How the console spells an address. See `lib/console-paths.ts` — the prefix
+ * that files Company's pages under `#/company/…`, and the parse that leaves
+ * every other address to the router's ordinary rules.
+ */
+const CONSOLE_PATH = { parse: parseConsolePath, format: formatConsolePath };
+
 export function AppShell({
   client,
   company,
@@ -489,7 +498,16 @@ export function AppShell({
   // Room is where the console opens. An empty hash, a bare `#/`, a bookmark
   // whose view was retired — all of them land in the room the operator talks
   // to their company in, rather than on a dashboard about it.
-  const [view, sub, navigate] = useHashView<View>(VIEWS, DEFAULT_VIEW, REWRITE_RETIRED);
+  // `CONSOLE_PATH` is what files Company's surfaces under `#/company/…`. It is
+  // a module constant rather than an inline object so the router's `resolve`,
+  // `canonicalize` and `navigate` keep a stable dependency — an object literal
+  // here would be a new identity every render and re-arm all three.
+  const [view, sub, navigate] = useHashView<View>(
+    VIEWS,
+    DEFAULT_VIEW,
+    REWRITE_RETIRED,
+    CONSOLE_PATH,
+  );
   const legacyConnectParamsRef = useRef(legacyConnectParams());
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
@@ -3213,7 +3231,7 @@ export function AppShell({
           blockerDecidedLine(blocker.verdict, undefined, answer.settledIds),
         );
       } else if (verdict === "deny") {
-        noteInChannel(approval.thread, "Declined — the teammate will not take that action.");
+        noteInChannel(approval.thread, "Declined — the agent will not take that action.");
       }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "something went wrong";
@@ -3624,6 +3642,41 @@ export function AppShell({
             canCreateCompany={offersCompanyCreation(client)}
           />
         }
+        sidebarToggle={
+          // Two controls, one slot, exact complements — so the way to the
+          // navigation is in the same corner at every width and is never in
+          // both places or neither.
+          //
+          // `md` and up is the column, which collapses: `SidebarCollapseButton`
+          // says "Collapse"/"Expand", and `md` is the width `useIsMobile` flips
+          // at, so its own mobile guard and this gate agree by construction.
+          //
+          // Below `md` the sidebar is a sheet, which opens: those two labels are
+          // both wrong for one, so the sheet's own trigger takes the slot. It
+          // used to be a reserved row at the FOOT of the inset (issue #1265,
+          // which was about a `fixed` trigger floating over the content and
+          // winning every hit-test in the bottom-left corner). A row of its own
+          // solved that and put the way back to navigation at the bottom of the
+          // screen, furthest from the header it belongs to. In the title row it
+          // is neither floating nor buried.
+          <>
+            <span className="hidden md:inline-flex">
+              <SidebarCollapseButton />
+            </span>
+            <SidebarTrigger
+              aria-label="Toggle sidebar"
+              // The row's shared glyph shape, so it sits with its neighbours
+              // rather than reading as a `ghost` Button that wandered in.
+              className={cn(TITLE_BAR_ICON_BUTTON, "md:hidden")}
+            />
+          </>
+        }
+        search={<TitleBarSearch />}
+        utilities={
+          // The three that were the sidebar's footer, beside Overview in the
+          // same group: all four are about the console rather than the page.
+          <TitleBarUtilities view={view} onNavigate={setView} />
+        }
         overview={
           // The console's front page, as a glyph. `NAV` still carries the
           // labelled row and will until the sidebar restructure removes it; in a
@@ -3635,34 +3688,18 @@ export function AppShell({
             onNavigate={() => setView("overview")}
           />
         }
-        approvals={
-          // What is waiting on you, from every page in every sidebar state.
-          // `pending` is `feed.status.pending_approvals` passed straight
-          // through — the same single value the sidebar badge and the collapsed
-          // rail dot both used before this row took the signal off them.
-          <ApprovalsButton
-            pending={pending}
-            active={isNavigationActive("approvals", view)}
-            onNavigate={() => setView("approvals")}
-          />
-        }
-        autonomy={
-          // What the agents in this company are allowed to do without asking.
-          // Renders nothing until the host has said, rather than guessing a
-          // tier — see `useAutonomy`.
-          //
-          // `canManage` is the role this shell already knows. Both write
-          // routes behind the pill call `require_admin`
-          // (`src/server/ops/policy.rs:309,427`), so without it a member was
-          // offered a menu whose every selection ends in a 403. The pill still
-          // STATES the tier for them — standing policy is a fact about what
-          // the agents around you may do, not an admin setting — it simply
-          // stops pretending to be a control. `null` while `fetchMe` is in
-          // flight reads as read-only, which is the safe direction: it hides
-          // an affordance for one round trip rather than offering one that
-          // cannot work.
-          <AutonomyPill status={autonomy} canManage={isGateAdmin} />
-        }
+        // No `approvals` slot. It is a sidebar row again — a labelled place
+        // you go, rather than one unlabelled square between an Overview glyph
+        // and an autonomy pill. The count that kept it here (issue #1018: a
+        // signal must survive the rail collapsing) is answered in the column by
+        // `SidebarMenuBadge` and its icon-rail mirror `SidebarMenuDot`, so
+        // nothing about the signal depends on this row any more. See
+        // `NAV_SECTIONS`.
+        //
+        // No `autonomy` slot either. The tier is a control on the composer's
+        // toolbar row now (`views/chat/MessageComposer.tsx`): it is a fact
+        // about what happens when you press Send, so it belongs beside Send
+        // rather than in the band that holds facts about the console.
         profile={
           // Who you are signed in as, and nothing else. It renders nothing
           // where there is nobody to name — a host with no sign-in, or a
@@ -3697,16 +3734,20 @@ export function AppShell({
 
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} onNavigate={setView} />
+          <SidebarNavigation view={view} onNavigate={setView} pending={pending} />
         </SidebarContent>
         {/* The console's own utilities sit at the FOOT of the column, under the
             destinations rather than over them. They act on the console, not on
             the company, so they belong after the list of places you can go —
             and the header they used to occupy is gone entirely now that the
             switcher lives in the window's title row. */}
-        <SidebarFooter>
-          <SidebarUtilityBar view={view} onNavigate={setView} />
-        </SidebarFooter>
+        {/* No footer. Settings, Feedback and Discord are glyphs in the
+            window's title row now (`title-bar-utilities.tsx`): none of the
+            three is a place inside this company, which is the one thing this
+            column enumerates. The Overview row that sat with them, drawn
+            `md:hidden` as the complement of the title row's `hidden
+            md:inline-flex`, went with them — the glyph up there is on at every
+            width now, so the destination is still on screen exactly once. */}
         </nav>
         <SidebarRail />
       </Sidebar>
@@ -3720,52 +3761,20 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
-          {/* Show/hide the sidebar, on the corner it acts on.
-
-              It used to sit in the sidebar's own header, which put the control
-              that *hides* a panel inside the panel it hides — collapsing the
-              column took the button with it. On the inset's leading corner it
-              stays put through both states and points at the edge that moves.
-
-              Here rather than inside `ContentSurface`: this control needs
-              `useSidebar`, and that card is deliberately free of sidebar
-              context — every page renders it, including ones with no sidebar at
-              all. Centred ON the card's leading border, not inside it:
-              `left-(--frame-inset)` puts it at the edge and `-translate-x-1/2`
-              straddles it. Inside the card it sat over the page's own heading
-              and read as part of the content; on the seam it reads as chrome
-              belonging to the boundary it moves. Absolutely positioned, so it
-              costs the page no layout and no view makes room for it.
-
-              `hidden md:block` — desktop only, and the breakpoint is not an
-              approximation. `useIsMobile` flips at exactly 768px, which is
-              Tailwind's `md`, so this gate is the precise complement of the
-              `!isMobile` that `SidebarCollapseButton` already reasons about:
-              the two agree by construction rather than by coincidence.
-
-              Below it the sidebar is a sheet, not a column, and it already has
-              a control — the `md:hidden` "Toggle sidebar" bar at the foot of
-              this inset. Leaving this one on made that two controls for one
-              job on one viewport, and the second one was wrong in both of its
-              halves: `SidebarCollapseButton` deliberately treats mobile as
-              not-collapsed, so with the sheet closed it read "Collapse
-              sidebar" and showed the close icon while pressing it OPENED the
-              sheet. Teaching it `openMobile` and retiring the bar was the
-              other way out and is the worse one — this button is absolutely
-              positioned over the content, and issue #1265 moved the mobile
-              trigger into a reserved row precisely to stop a floating control
-              winning the hit-test in that corner. */}
-          <div className="pointer-events-none absolute top-4 left-(--frame-inset) z-20 hidden -translate-x-1/2 md:block">
-            <div className="pointer-events-auto">
-              <SidebarCollapseButton />
-            </div>
-          </div>
+          {/* The sidebar toggle was here — absolutely positioned over this
+              inset, straddling the content card's leading edge. It is a glyph
+              in the window's title row now, beside the switcher whose column it
+              acts on: no `pointer-events` dance, no z-index over the page, and
+              a shape it shares with the four controls next to it. The `md`
+              gate travelled with it, unchanged and for the unchanged reason —
+              below that width the sidebar is a sheet with its own trigger in
+              this inset, and both of this button's labels are wrong for one. */}
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
-        {/* Every teammate's face in here is a way into who they are (issue
+        {/* Every agent's face in here is a way into who they are (issue
             #1653): the panel is mounted once around the whole surface so a
             click on an avatar in a transcript, a member list or a channel
             header opens the same summary, over the page rather than instead of
@@ -3858,6 +3867,20 @@ export function AppShell({
           <RoomView
               client={client}
               company={company}
+              // What the agents in this company are allowed to do without
+              // asking, rendered on the composer's toolbar row. Nothing renders
+              // until the host has said what the tier is, rather than guessing
+              // one — see `useAutonomy`.
+              //
+              // `canManage` is the role this shell already knows. Both write
+              // routes behind the pill call `require_admin`
+              // (`src/server/ops/policy.rs:309,427`), so without it a member was
+              // offered a menu whose every selection ends in a 403. The pill
+              // still STATES the tier for them — standing policy is a fact about
+              // what the agents around you may do, not an admin setting — it
+              // simply stops pretending to be a control. `null` while `fetchMe`
+              // is in flight reads as read-only, which is the safe direction.
+              autonomy={<AutonomyPill status={autonomy} canManage={isGateAdmin} />}
               // The chat segment, not the current view's — see `chatSub`.
               sub={view === "chat" ? sub : chatSub}
               routeOpen={view === "chat"}
@@ -4089,7 +4112,10 @@ export function AppShell({
           )}
           {view === "brain" && (
             <Suspense fallback={<RouteLoading title="Brain" label="Loading what your company remembers…" />}>
-              <MemoryView client={client} company={company} />
+              {/* `#/company/brain/<page>` — Overview, Upload or Settings.
+                  Unvalidated here, as every sub-dispatching route is: only the
+                  view knows which of its pages exist. */}
+              <MemoryView client={client} company={company} sub={sub} />
             </Suspense>
           )}
           {view === "approvals" && (
@@ -4145,7 +4171,7 @@ export function AppShell({
                 // see (persisted client-side, not carried by the route) — see
                 // `RouteLoading`'s own doc for why a guess here would be worse
                 // than no bar.
-                <RouteLoading title="Workflows" label="Loading canvas…" />
+                <RouteLoading title="Automations" label="Loading canvas…" />
               }
             >
               <WorkflowsView
@@ -4219,6 +4245,10 @@ export function AppShell({
               company={company}
               feed={feed}
               sub={sub}
+              // The same tick the `#/observatory/<runId>` route below is given:
+              // the run index renders on this section's rail now, and it watches
+              // the same two signals.
+              eventTick={workflowRunTick + backgroundTurnTick}
               onFlag={() => setFeedbackOpen(true)}
               onResetCompany={onResetCompany}
             />
@@ -4229,22 +4259,14 @@ export function AppShell({
         </ContentSurface>
         </AgentProfileProvider>
 
-        {/* Mobile only: dedicated chrome for the way back to navigation, not an
-            overlay on top of it. A `fixed` trigger here used to float over
-            whatever content happened to scroll into the bottom-left corner and
-            win every hit-test in that region (issue #1265) — this bar reserves
-            its own row in SidebarInset's flex column instead, so the content
-            wrapper's flex-1 height (and every view's own overflow-y-auto
-            within it) already stops short of it. No view needs to know this
-            control exists. */}
-        {/* `p-3` on all four sides, matching `--frame-inset`, so this control
-            lines up with the card's own margin instead of hanging off a
-            different number. The card already supplies the gap above it through
-            that bottom margin — every page is framed now, so there is no longer
-            a flush-to-the-edge case for this row to compensate for. */}
-        <div className="flex shrink-0 items-center bg-transparent p-3 md:hidden">
-          <SidebarTrigger aria-label="Toggle sidebar" />
-        </div>
+        {/* The mobile "Toggle sidebar" row was here, at the foot of the inset.
+            It reserved its own row rather than floating, which is what issue
+            #1265 asked for after a `fixed` trigger kept winning the hit-test in
+            the bottom-left corner — but it left the way back to navigation at
+            the bottom of the screen, furthest from the header it belongs to.
+            The trigger is in the title row now, in the same slot the desktop's
+            collapse glyph uses and as its exact complement. It floats over
+            nothing, so #1265 stays answered. */}
       </SidebarInset>
       </div>
 

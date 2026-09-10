@@ -67,6 +67,21 @@ function at(testid: string): HTMLElement | null {
   return container.querySelector<HTMLElement>(`[data-testid="${testid}"]`);
 }
 
+/**
+ * Open Tools, start editing, and reveal the raw glob field.
+ *
+ * Three steps where there used to be one. Tools is a tab on the agent's page
+ * now (Overview leads), and the editor's primary surface is a switch per grant
+ * in the company ceiling — switches cannot spell a wildcard like `docs.*`, so
+ * the field this file drives moved behind an "Edit globs" disclosure. It is
+ * still the only way to type a pattern, which is exactly why it survived.
+ */
+async function openGlobField() {
+  await act(async () => at("agent-tab-tools")?.click());
+  await act(async () => at("agent-tools-edit")?.click());
+  await act(async () => at("agent-tools-advanced")?.click());
+}
+
 async function type(text: string) {
   const el = at("agent-tools-field") as HTMLInputElement;
   const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -89,7 +104,7 @@ describe("agent tools editor, a grant outside the company ceiling", () => {
       await Promise.resolve();
     });
 
-    await act(async () => at("agent-tools-edit")?.click());
+    await openGlobField();
     await type("docs.*, media.*");
 
     const warning = at("agent-tools-uncovered");
@@ -116,7 +131,7 @@ describe("agent tools editor, a grant outside the company ceiling", () => {
       await Promise.resolve();
     });
 
-    await act(async () => at("agent-tools-edit")?.click());
+    await openGlobField();
     await type("docs.*, media.*");
     const saveButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Save");
     await act(async () => saveButton?.click());
@@ -140,7 +155,7 @@ describe("agent tools editor, a grant outside the company ceiling", () => {
       await Promise.resolve();
     });
 
-    await act(async () => at("agent-tools-edit")?.click());
+    await openGlobField();
     await type("docs.read");
 
     expect(at("agent-tools-uncovered")).toBeNull();

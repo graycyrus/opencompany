@@ -118,7 +118,7 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-describe("Apply a workflow proposal — offered to every member, not just an admin", () => {
+describe("Apply an automation proposal — offered to every member, not just an admin", () => {
   it("reaches the host's apply on click, with no admin-only gate", async () => {
     const post = vi.fn(async (_path: string, _body?: unknown) => ({ ...task(), workflowProposal: undefined, column: "done" }));
     const onReload = await render(clientAs(post));
@@ -137,10 +137,10 @@ describe("Apply a workflow proposal — offered to every member, not just an adm
   });
 });
 
-describe("Apply a workflow proposal — the host refuses it", () => {
+describe("Apply an automation proposal — the host refuses it", () => {
   it("keeps the card in review, shows the host's reason, and never claims success", async () => {
     const post = vi.fn(async () => {
-      throw new ApiError(400, "conflict", "a workflow named “weekly_summary” already exists", true);
+      throw new ApiError(400, "conflict", "an automation named “weekly_summary” already exists", true);
     });
     const onReload = await render(clientAs(post));
 
@@ -154,7 +154,7 @@ describe("Apply a workflow proposal — the host refuses it", () => {
     expect(onReload).not.toHaveBeenCalled();
     const error = document.querySelector('[data-testid="task-workflow-proposal-error"]');
     expect(error?.textContent).toContain(
-      "a workflow named “weekly_summary” already exists",
+      "an automation named “weekly_summary” already exists",
     );
     // The proposal panel — and its Apply control — is still on screen: the
     // card stayed in review rather than the panel simply vanishing.

@@ -182,7 +182,7 @@ describe("finishing setup with no companies on the host", () => {
     ) as HTMLSelectElement;
     expect(picker).toBeTruthy();
     expect(Array.from(picker.options).map((option) => option.textContent)).toContain(
-      "Agentic Software Company (5 teammates)",
+      "Agentic Software Company (5 agents)",
     );
 
     await act(async () => {

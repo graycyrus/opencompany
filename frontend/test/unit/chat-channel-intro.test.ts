@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 describe("the channel intro's mark", () => {
-  it("draws a DM's teammate, face and all", () => {
+  it("draws a DM's agent, face and all", () => {
     render({
       id: "dm:agent_ada",
       name: "Ada",

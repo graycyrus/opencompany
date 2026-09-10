@@ -53,7 +53,7 @@ afterEach(() => {
 });
 
 describe("WorkflowStep publishes each read as it settles", () => {
-  it("renders the run's progress while the workflow-name lookup is still in flight", async () => {
+  it("renders the run's progress while the automation-name lookup is still in flight", async () => {
     let resolveNames!: (names: unknown[]) => void;
     const namesPromise = new Promise<unknown[]>((resolve) => {
       resolveNames = resolve;

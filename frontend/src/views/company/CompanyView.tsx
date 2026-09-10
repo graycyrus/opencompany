@@ -43,9 +43,6 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { Overview } from "@/views/Overview";
 import { OrgChartView } from "@/views/company/OrgChartView";
-import { HiveGrammarPanel } from "@/views/company/hive/HiveGrammarPanel";
-import { CommsView } from "@/views/comms/CommsView";
-import { useHashFlag } from "@/hooks/use-hash-flag";
 import { TeamView } from "@/views/TeamView";
 
 /**
@@ -73,16 +70,19 @@ export const DESKS_SEGMENT = "desks";
 export const GRAPH_SEGMENT = "graph";
 
 /**
- * The company's activity graph — who may reach whom, who has, and who created
- * whom.
+ * The roster's own segment — `#/company/agents`.
  *
- * Reserved exactly as {@link DESKS_SEGMENT} and {@link GRAPH_SEGMENT} are, and
- * with the same accepted collision: `comms` is a legal desk id, so a company
- * declaring a desk with that id reaches the graph instead. Checked **before** the
- * desk arm below, because this component treats any unrecognised `sub` as a desk
- * id and would otherwise focus a chart on a desk that does not exist.
+ * The roster is what a bare `#/company` has always rendered, and it still is:
+ * this names the same page so the sidebar's "Agents" row can point at an
+ * address that says what it opens. `#/company` said "company" and drew the
+ * agents, which is the mismatch the `/company` prefix work set out to remove
+ * everywhere else.
+ *
+ * Reserved exactly like {@link DESKS_SEGMENT} and {@link GRAPH_SEGMENT}, with
+ * the same accepted collision: a desk declared with the literal id `agents`
+ * cannot be focused through its own link.
  */
-export const COMMS_SEGMENT = "comms";
+export const AGENTS_SEGMENT = "agents";
 
 interface Props {
   client: OpenCompanyClient;
@@ -142,39 +142,19 @@ export function CompanyView({
     return <Overview client={client} company={company} companyName={companyName} />;
   }
 
-  if (sub === COMMS_SEGMENT) {
-    return <CommsView client={client} company={company} />;
-  }
-
-  if (sub) {
-    const deskId = sub === DESKS_SEGMENT ? null : sub;
+  if (sub && sub !== AGENTS_SEGMENT) {
     return (
-      <>
-        {/*
-          The grammar editor rides `?hive` over the chart rather than taking an
-          address of its own (Rule 6, by promotion rather than exemption). The
-          chart is already documented as the one surface that creates a desk,
-          moves somebody between desks and changes a lead — installing the moves
-          those seats may make is that same class of structural change, so it
-          belongs beside them rather than in Settings.
-
-          A query flag, not a `sub` segment: the hash carries only head/sub, and
-          the flag makes the browser's Back button close the panel with no extra
-          wiring.
-        */}
-        {deskId ? <DeskHivePanel client={client} company={company} deskId={deskId} /> : null}
-        <OrgChartView
-          client={client}
-          company={company}
-          // The reserved segment names the chart, not a desk on it.
-          focusDeskId={deskId}
-          onBack={() => onNavigate(null)}
-          // The chart's own Add-teammate dialog lands a created teammate on its
-          // detail page (issue #1989), the same `#/team/<agentId>` address the
-          // roster half opens — not a segment of this view.
-          onOpenAgent={onOpenAgent}
-        />
-      </>
+      <OrgChartView
+        client={client}
+        company={company}
+        // The reserved segment names the chart, not a desk on it.
+        focusDeskId={sub === DESKS_SEGMENT ? null : sub}
+        onBack={() => onNavigate(null)}
+        // The chart's own Add-teammate dialog lands a created teammate on its
+        // detail page (issue #1989), the same `#/team/<agentId>` address the
+        // roster half opens — not a segment of this view.
+        onOpenAgent={onOpenAgent}
+      />
     );
   }
 
@@ -191,34 +171,5 @@ export function CompanyView({
       // same destination as the chart's desk nodes.
       onNavigateToDesk={(deskId) => onNavigate(deskId)}
     />
-  );
-}
-
-/**
- * The grammar editor, shown over a desk's page when `?hive` is set.
- *
- * Its own component because {@link CompanyView} is a routing switch with no
- * hooks in it, and reading the flag is a hook.
- */
-function DeskHivePanel({
-  client,
-  company,
-  deskId,
-}: {
-  client: OpenCompanyClient;
-  company: string | null;
-  deskId: string;
-}) {
-  const [open, setOpen] = useHashFlag("hive");
-  if (!open) return null;
-  return (
-    <div className="px-4 pt-4">
-      <HiveGrammarPanel
-        client={client}
-        company={company}
-        deskId={deskId}
-        onClose={() => setOpen(false)}
-      />
-    </div>
   );
 }

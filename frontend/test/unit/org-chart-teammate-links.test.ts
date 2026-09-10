@@ -87,7 +87,7 @@ function linkFor(who: string): [string, string] | undefined {
 }
 
 describe("a staffed seat", () => {
-  it("is an anchor to that teammate's detail page", async () => {
+  it("is an anchor to that agent's detail page", async () => {
     await render(
       client({
         desks: [desk({ id: "research", name: "Research Desk", members: ["maya", "ravi"] })],
@@ -152,7 +152,7 @@ describe("a Not-on-a-desk chip", () => {
     expect(linkFor("Sam")?.[1]).toBe("#/team/sam");
   });
 
-  it("never renders #/team/undefined for a teammate with no id", async () => {
+  it("never renders #/team/undefined for an agent with no id", async () => {
     await render(
       client({
         desks: [],

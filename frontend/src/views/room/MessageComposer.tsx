@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowUp,
   AtSign,
@@ -16,6 +16,7 @@ import type { MessageIntent } from "@/api/tasks";
 import type { AttachmentDto } from "@/api/types";
 import { formatBytes } from "@/api/workspace";
 import { Button } from "@/components/ui/button";
+import { COMPOSER_INTENT_HIDDEN } from "@/product-scope";
 import { cn } from "@/lib/utils";
 import { MentionPicker } from "@/views/room/MentionPicker";
 import {
@@ -83,6 +84,19 @@ interface Props {
   mentionables?: Mentionable[];
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
+  /**
+   * The standing autonomy tier, as a control, on the composer's toolbar row.
+   *
+   * A node rather than the policy itself: `AppShell` is the one place that
+   * knows the tier and whether this operator may change it, and passing the
+   * rendered pill keeps that so — this component stays a composer and learns
+   * nothing about policy.
+   *
+   * Withheld in `compact`, which is the thread panel: the tier is a standing
+   * fact about the company, so one statement of it per screen is the right
+   * number and the main composer is where it belongs.
+   */
+  autonomy?: ReactNode;
   /**
    * Show the what-is-this-message-for control (issues #580, #1152), opt-in per
    * composer.
@@ -237,6 +251,7 @@ export function MessageComposer({
   uploadAttachment,
   deleteAttachment,
   suppressed,
+  autonomy,
 }: Props) {
   const [draft, setDraft] = useState("");
   // The single file staged for the next send (issue #1682). v1 carries one
@@ -720,7 +735,16 @@ export function MessageComposer({
             right-aligned and in-flow — rather than overflowing off-screen with
             no way to scroll to it. On a roomy composer it stays a single row. */}
         <div className="flex flex-wrap items-center gap-0.5 px-2 pb-1.5">
-          {deliverableChoice && !compact && (
+          {/* What the agents may do without asking, at the point where you ask
+              them. It was a pill in the window's title row, which is where the
+              console keeps facts about itself — but this one is a fact about
+              what happens when you press Send, and it belongs beside Send. An
+              operator about to hand over a task can now read the tier and change
+              it without leaving the box they are typing in.
+              `mr-1` and then the icon buttons, so it reads as the row's leading
+              statement rather than as a fourth glyph. */}
+          {!compact && autonomy && <span className="mr-1 flex items-center">{autonomy}</span>}
+          {deliverableChoice && !compact && !COMPOSER_INTENT_HIDDEN && (
             <div
               className="mr-1 flex items-center gap-0.5 rounded-lg border p-0.5"
               role="group"
@@ -748,7 +772,7 @@ export function MessageComposer({
                   },
                   {
                     value: "workflow",
-                    label: "Build me the workflow",
+                    label: "Build me the automation",
                     title: "Turn this into a repeating workflow.",
                   },
                 ] as const

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { liveFrameThreadKey, MAIN_THREAD_ID } from "@/lib/chat";
-import { dmThreadId } from "@/views/room/model";
+import { dmThreadId } from "@/views/chat/model";
 import type { TeamMember } from "@/lib/team";
 
 /**
@@ -23,8 +23,8 @@ const LOADED: Record<string, string> = {
 };
 
 describe("a live frame's thread key", () => {
-  it("leaves a teammate DM in the host-thread namespace the readers use", () => {
-    // The identity `RoomView` reads by and `onSendStart` arms under.
+  it("leaves an agent DM in the host-thread namespace the readers use", () => {
+    // The identity `ChatView` reads by and `onSendStart` arms under.
     expect(dmThreadId(ADA)).toBe("ada");
     // So the frame keys the same way — not `dm:ada`, which the map answers with
     // and which no render or receipt lookup ever asks for.

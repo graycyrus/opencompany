@@ -408,7 +408,7 @@ function ColorSection() {
               ink-hint — subtitles, empty-state prompts. 5.4:1
             </p>
             <p className="text-sm text-ink-muted">
-              ink-muted — teammate counts, metadata. 4.5:1
+              ink-muted — agent counts, metadata. 4.5:1
             </p>
             <p className="text-sm text-primary">primary — links and emphasis. 4.7:1</p>
             <p className="text-sm text-destructive">destructive — errors. 4.67:1</p>
@@ -856,7 +856,7 @@ function ComponentSection() {
               <code className="w-20 shrink-0 font-mono text-3xs text-muted-foreground">
                 {v}
               </code>
-              <Button variant={v}>Run workflow</Button>
+              <Button variant={v}>Run automation</Button>
               <Button variant={v} disabled>
                 Disabled
               </Button>
@@ -1036,10 +1036,10 @@ function ComponentSection() {
               <DialogTrigger render={<Button variant="outline" />}>Open dialog</DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Rename workflow</DialogTitle>
-                  <DialogDescription>Give this workflow a clear name.</DialogDescription>
+                  <DialogTitle>Rename automation</DialogTitle>
+                  <DialogDescription>Give this automation a clear name.</DialogDescription>
                 </DialogHeader>
-                <Input aria-label="Workflow name" defaultValue="Weekly brief" />
+                <Input aria-label="Automation name" defaultValue="Weekly brief" />
                 <DialogFooter showCloseButton>
                   <Button>Save name</Button>
                 </DialogFooter>
@@ -1078,7 +1078,7 @@ function ComponentSection() {
             <DropdownMenu>
               <DropdownMenuTrigger render={<Button variant="outline" />}>Open menu</DropdownMenuTrigger>
               <DropdownMenuContent>
-                <DropdownMenuLabel>Workflow</DropdownMenuLabel>
+                <DropdownMenuLabel>Automation</DropdownMenuLabel>
                 <DropdownMenuItem>Duplicate</DropdownMenuItem>
                 <DropdownMenuItem>Pause</DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -1118,11 +1118,11 @@ function ComponentSection() {
             <CardDescription className="text-2xs">Each outcome has a distinct toast severity.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={() => toast.success("Workflow saved")}>Success</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.success("Automation saved")}>Success</Button>
             <Button size="sm" variant="outline" onClick={() => toast.info("Sync started")}>Info</Button>
             <Button size="sm" variant="outline" onClick={() => toast.warning("Approval is due")}>Warning</Button>
-            <Button size="sm" variant="outline" onClick={() => toast.error("Could not save workflow")}>Error</Button>
-            <Button size="sm" variant="outline" onClick={() => toast.loading("Running workflow")}>Loading</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.error("Could not save automation")}>Error</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.loading("Running automation")}>Loading</Button>
           </CardContent>
         </Card>
 

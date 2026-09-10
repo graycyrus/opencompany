@@ -326,7 +326,7 @@ export function ThreadPanel({
           <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
           <span className="min-w-0">
             The <span className="font-medium text-foreground">Operator</span> channel is a
-            read-only feed of workflow reports and notifications. There is nothing to reply to
+            read-only feed of automation reports and notifications. There is nothing to reply to
             here.
           </span>
         </p>

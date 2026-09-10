@@ -37,7 +37,7 @@ function clientAs(role: "admin" | "member"): OpenCompanyClient {
     listDesks: () => Promise.resolve([DESK_DTO]),
     listTeam: () => Promise.resolve([MEMBER_DTO]),
     getOperatorChannel: () =>
-      Promise.resolve({ id: "operator", name: "Operator", description: "Workflow reports and notifications" }),
+      Promise.resolve({ id: "operator", name: "Operator", description: "Automation reports and notifications" }),
     postForm: vi.fn(async () => REFERENCE),
   };
   return new Proxy(named, {

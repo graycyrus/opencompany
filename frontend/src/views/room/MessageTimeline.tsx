@@ -585,7 +585,14 @@ function ChannelIntro({
   onAddPeople?: () => void;
 }) {
   return (
-    <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
+    // `pt-8` on an empty channel, not `pt-16`. The taller lead-in was there to
+    // push the intro down into a pane with nothing under it — but the
+    // transcript grows from the bottom, so the moment a channel has one message
+    // the intro is pushed up by the message anyway, and on a brand new one 64px
+    // of nothing above the title read as the pane failing to load rather than
+    // as breathing room. Still more than the `pt-6` a channel with history
+    // gets, because on an empty channel the intro IS the content.
+    <div className={cn("px-4 pb-3", empty ? "pt-8" : "pt-6")}>
       <IntroMark channel={channel} />
       <h2 className="text-xl font-semibold tracking-tight">{channelTitle(channel)}</h2>
       {/* Both of these sentences are positive claims that the channel has no
@@ -598,7 +605,7 @@ function ChannelIntro({
       </p>
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
-          offering "add a teammate here" over a channel that turns out to be full
+          offering "add an agent here" over a channel that turns out to be full
           of conversation reads as data loss.
 
           Not on the read-only Operator feed (`channel.system`, the same

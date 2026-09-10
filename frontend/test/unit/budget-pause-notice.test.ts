@@ -114,7 +114,7 @@ describe("parseBudgetPauseAgent on a no-resend notice", () => {
   // no-resend prefix only works if the agent id is still parseable out of it
   // — otherwise those notices are counted as "a pause happened" but filed
   // under no agent, and supersede nothing.
-  it("extracts the teammate id past the longer prefix", () => {
+  it("extracts the agent id past the longer prefix", () => {
     const text =
       `${BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} Paused — maya's turn ran out of inference ` +
       "budget/credits, so it stopped instead of failing silently.";
@@ -123,7 +123,7 @@ describe("parseBudgetPauseAgent on a no-resend notice", () => {
 });
 
 describe("parseBudgetPauseAgent", () => {
-  it("extracts the teammate id from the host's exact wording", () => {
+  it("extracts the agent id from the host's exact wording", () => {
     const text =
       `${BUDGET_PAUSE_NOTICE_PREFIX} Paused — ceo's turn ran out of inference budget/credits, ` +
       "so it stopped instead of failing silently. Add credits to your account, then resend " +
