@@ -629,16 +629,24 @@ impl openhuman_core::openhuman::tools::traits::Tool for EscalateToHumanTool {
             // every request this turn queued.
             run_id: None,
         };
-        self.requests
-            .push(crate::harness::built_in::policy::ApprovalRequest {
+        if !self
+            .requests
+            .push_blocker(crate::harness::built_in::policy::ApprovalRequest {
                 tool: ESCALATE_TO_HUMAN_TOOL.to_string(),
                 reason,
                 effect,
-            });
+            })
+        {
+            return Ok(ToolResult::error(format!(
+                "Your question was not raised: this batch already has the maximum of {} approval \
+                 requests. Stop and wait for the queued requests to be resolved, then ask again.",
+                crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN
+            )));
+        }
 
         Ok(ToolResult::success(format!(
             "Raised your question with the operator: \"{question}\". This card parks until they \
-             answer, so do not ask it again — carry on with anything else you can do without it."
+             answer. Stop and wait for their answer; do not ask it again."
         )))
     }
 }
@@ -884,11 +892,6 @@ mod tool_test {
         );
     }
 
-    /// BOUND-axis (REQ-002): the cap boundary through the real tool, not a
-    /// hand-built `ApprovalRequest`. Exactly `MAX_APPROVAL_REQUESTS_PER_TURN`
-    /// distinct questions in one turn must all land with no overflow; the
-    /// existing pin at `escalate_to_human_does_not_set_the_turn_boundary_and_can_overflow_the_cap`
-    /// (`policy.rs`) only exercises one-past the cap.
     #[tokio::test]
     async fn escalate_to_human_exactly_at_the_cap_produces_no_overflow() {
         use crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
