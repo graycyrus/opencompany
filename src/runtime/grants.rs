@@ -2163,6 +2163,36 @@ mod test {
         );
     }
 
+    /// A line naming neither `agent` nor `workflow` is not one either format
+    /// wrote on purpose — both fields default on deserialize, so it still
+    /// replays rather than refusing to load. `subject` resolves it the same
+    /// way a pre-#1098 line resolves: no `workflow` key means agent, and an
+    /// empty agent string is still a value, so it replays as a permission held
+    /// by the empty-string agent. Nothing mints a line shaped like this today;
+    /// this pins that a malformed one does not panic or silently vanish, and
+    /// that it cannot be mistaken for a workflow permission.
+    #[test]
+    fn a_line_naming_neither_agent_nor_workflow_replays_as_the_empty_string_agent() {
+        let line = r#"{
+            "id": "g-malformed",
+            "tool": "web_fetch",
+            "granted_by": { "kind": "user", "id": "user-1" },
+            "approval_id": "approval-malformed",
+            "at_millis": 1000,
+            "expires_at_millis": 9999
+        }"#;
+        let replayed: StandingGrant =
+            serde_json::from_str(line).expect("agent and workflow both default on load");
+        assert_eq!(replayed.agent, "");
+        assert_eq!(replayed.workflow, None);
+        assert_eq!(replayed.subject(), GrantSubject::agent(""));
+        assert_ne!(
+            replayed.subject(),
+            GrantSubject::workflow(""),
+            "an empty agent must never resolve to a workflow subject"
+        );
+    }
+
     /// The two subjects are separate namespaces. A workflow named like a teammate
     /// must not spend that teammate's permission, in either direction.
     #[test]
