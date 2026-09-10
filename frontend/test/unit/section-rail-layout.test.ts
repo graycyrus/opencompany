@@ -87,8 +87,8 @@ describe("which sections get a rail", () => {
   it("draws one for Connections, with every page that section holds", () => {
     render("connections", "mcp");
     expect(railRows()).toEqual([
-      "API Key",
       "Apps",
+      "API Key",
       "MCP Servers",
       "Inference",
       "Skills",
