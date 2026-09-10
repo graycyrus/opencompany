@@ -3312,17 +3312,8 @@ mod tests {
         );
     }
 
-    // --- FAIL-axis: the MCP registry belt is wired without a grant check ------
-
-    /// The read half of the MCP registry family must be withheld from an agent
-    /// whose effective grants cover no namespace at all.
-    ///
-    /// `build_agent` pushes it on `#[cfg(feature = "mcp")]` + a configured
-    /// `mcp_home` alone, with no `grants` term in the condition, so an agent
-    /// granted nothing still receives it. Pinned here as the safe behaviour.
     #[cfg(feature = "mcp")]
     #[test]
-    #[ignore = "confirms fail-open: mcp_registry_list_tools is wired with no grant term"]
     fn mcp_registry_list_tools_is_withheld_from_an_agent_granted_nothing() {
         let names = built_tool_names(&[], false);
         assert!(
@@ -3331,12 +3322,8 @@ mod tests {
         );
     }
 
-    /// The mutating half — the one that invokes an arbitrary tool on any server
-    /// the company has installed. Same ungated wiring, higher blast radius: an
-    /// agent granted nothing can drive every connected MCP server.
     #[cfg(feature = "mcp")]
     #[test]
-    #[ignore = "confirms fail-open: mcp_registry_tool_call is wired with no grant term"]
     fn mcp_registry_tool_call_is_withheld_from_an_agent_granted_nothing() {
         let names = built_tool_names(&[], false);
         assert!(
@@ -3345,11 +3332,8 @@ mod tests {
         );
     }
 
-    /// Narrow grants are not a way in either: an agent granted only `docs`
-    /// holds no MCP namespace, so neither registry tool may appear.
     #[cfg(feature = "mcp")]
     #[test]
-    #[ignore = "confirms fail-open: a docs-only agent still receives both registry tools"]
     fn a_docs_only_agent_receives_no_mcp_registry_tool() {
         let names = built_tool_names(&["docs.*"], false);
         for tool in ["mcp_registry_list_tools", "mcp_registry_tool_call"] {
@@ -3360,12 +3344,6 @@ mod tests {
         }
     }
 
-    /// The server-backed MCP family (`mcp_list_tools` / `mcp_call`) is the
-    /// contrast case, and it fails closed: with no server configured on the
-    /// company, `registry_for_agent` yields nothing and not one of those tools
-    /// is built — even for a `*` agent. This is the gate the registry family
-    /// above is missing, pinned so a change that wires the belt unconditionally
-    /// is caught here.
     #[cfg(feature = "mcp")]
     #[test]
     fn no_configured_mcp_server_wires_no_server_backed_mcp_tool() {
