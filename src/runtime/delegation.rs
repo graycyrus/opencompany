@@ -9565,6 +9565,437 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert_eq!(cards[0].assignee, "engineer");
     }
+
+    // ── HT-077 / HT-078: state, concurrency, and store-failure residuals ────
+
+    fn card_in(id: &str, column: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: TaskTitle::authored("Draft the launch plan"),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: now_millis(),
+            origin: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        }
+    }
+
+    /// `assign_task`'s write is deliberately narrow — "the column is untouched
+    /// on purpose" per the arm's own comment — but nothing drove that through
+    /// a card that was NOT freshly opened in `todo`. A card already finished
+    /// is the state where a column write sneaking in in the future would be
+    /// most visible and most wrong: reassigning a `done` card must not reopen
+    /// it.
+    #[tokio::test]
+    async fn assigning_a_done_card_moves_only_the_assignee_not_the_column() {
+        let fx = Fixture::new();
+        fx.tasks
+            .upsert(&fx.record.id, &card_in("card-done", COLUMN_DONE))
+            .await
+            .expect("seed a finished card");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "assigning it",
+                vec![Delegation::AssignTask {
+                    task_id: "card-done".to_string(),
+                    assignee: "engineer".to_string(),
+                    note: None,
+                }],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message(
+                "chief",
+                "hand the finished plan to engineering",
+                Some("general"),
+            )
+            .await
+            .expect("assigning a finished card is not refused");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].assignee, "engineer",
+            "the assignee write still lands"
+        );
+        assert_eq!(
+            cards[0].column, COLUMN_DONE,
+            "assigning a card must never move it — a finished card stays finished"
+        );
+    }
+
+    /// `review_task`'s landing column is a pure function of the verdict alone
+    /// (`review_landing_column`) — it never checks that the card was actually
+    /// sitting in `in_review` first. Nothing drove that state-machine gap
+    /// through a card that never got there: a card still in `todo`, never
+    /// dispatched, never reviewed by anyone, is force-moved straight to
+    /// `done` by an `Approve` verdict exactly as if it had been.
+    #[tokio::test]
+    async fn approving_a_card_never_dispatched_still_forces_it_to_done() {
+        let fx = Fixture::new();
+        fx.tasks
+            .upsert(&fx.record.id, &card_in("card-untouched", COLUMN_TODO))
+            .await
+            .expect("seed a card that was never dispatched");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "approved",
+                vec![Delegation::ReviewTask {
+                    task_id: "card-untouched".to_string(),
+                    decision: lifecycle::ReviewDecision::Approve,
+                    note: None,
+                }],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "approve the launch plan card", Some("general"))
+            .await
+            .expect("review_task does not check prior column");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].column, COLUMN_DONE,
+            "review_task's landing column depends only on the verdict, not on whether the \
+             card was ever actually under review — pinned here so a future guard is a \
+             deliberate, visible change to this test rather than a silent behavior shift"
+        );
+    }
+
+    /// A [`TaskStore`] whose `upsert` always fails, passing `list`/`delete`
+    /// straight through to a real backing store — so a lookup succeeds and a
+    /// write does not, driving a delegation through the store-fault arm
+    /// rather than the "no such card" one.
+    struct FailingUpsertStore {
+        inner: Arc<dyn TaskStore>,
+    }
+
+    #[async_trait]
+    impl TaskStore for FailingUpsertStore {
+        async fn list(&self, company: &CompanyId) -> Result<Vec<TaskRecord>> {
+            self.inner.list(company).await
+        }
+        async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> Result<()> {
+            Err(crate::error::OpenCompanyError::Harness(
+                "FailingUpsertStore: forced failure on the write".to_string(),
+            ))
+        }
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            self.inner.delete(company, id).await
+        }
+    }
+
+    /// A genuine infrastructure fault on the write — not a hallucinated
+    /// `task_id` — must surface as an error rather than being folded into the
+    /// same "reported fact, drain keeps going" treatment `unknown_card`
+    /// exists for for. Unlike an unknown card, there IS a real card and a
+    /// real intended write; losing that distinction would silently swallow
+    /// board-store outages.
+    #[tokio::test]
+    async fn a_task_store_write_failure_on_assign_task_surfaces_as_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backing: Arc<dyn TaskStore> = Arc::new(FsOps::new(dir.path()));
+        let record = record();
+        backing
+            .upsert(&record.id, &card_in("card-real", COLUMN_TODO))
+            .await
+            .expect("seed the real card");
+        let tasks: Arc<dyn TaskStore> = Arc::new(FailingUpsertStore {
+            inner: backing.clone(),
+        });
+        let queue = DelegationQueue::default();
+        let steer = InflightRegistry::default();
+        let idle_turns_fx = Fixture::new();
+        let idle_turns = ScriptedTurns::new(&idle_turns_fx, vec![]);
+
+        let runner = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+        let outcome = runner
+            .run_delegation(
+                Delegation::AssignTask {
+                    task_id: "card-real".to_string(),
+                    assignee: "engineer".to_string(),
+                    note: None,
+                },
+                None,
+                MessageContext::default(),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "a real write failure must surface as an error, not a reported fact: {:?}",
+            outcome.err().map(|e| e.to_string())
+        );
+
+        let cards = backing.list(&record.id).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].assignee, "",
+            "the card must be untouched by the failed write"
+        );
+    }
+
+    /// The same store-fault distinction for `review_task`.
+    #[tokio::test]
+    async fn a_task_store_write_failure_on_review_task_surfaces_as_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backing: Arc<dyn TaskStore> = Arc::new(FsOps::new(dir.path()));
+        let record = record();
+        backing
+            .upsert(&record.id, &card_in("card-real", COLUMN_IN_REVIEW))
+            .await
+            .expect("seed the real card");
+        let tasks: Arc<dyn TaskStore> = Arc::new(FailingUpsertStore {
+            inner: backing.clone(),
+        });
+        let queue = DelegationQueue::default();
+        let steer = InflightRegistry::default();
+        let idle_turns_fx = Fixture::new();
+        let idle_turns = ScriptedTurns::new(&idle_turns_fx, vec![]);
+
+        let runner = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+        let outcome = runner
+            .run_delegation(
+                Delegation::ReviewTask {
+                    task_id: "card-real".to_string(),
+                    decision: lifecycle::ReviewDecision::Approve,
+                    note: None,
+                },
+                None,
+                MessageContext::default(),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "a real write failure must surface as an error, not a reported fact: {:?}",
+            outcome.err().map(|e| e.to_string())
+        );
+
+        let cards = backing.list(&record.id).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].column, COLUMN_IN_REVIEW,
+            "the card must be untouched by the failed write"
+        );
+    }
+
+    /// Delays `list()` until every concurrent caller has also read, so two
+    /// `run_delegation` calls racing the same card are guaranteed to both
+    /// load the SAME pre-race snapshot before either writes — the real
+    /// interleaving a read-then-write cycle with no per-card lock allows,
+    /// made deterministic instead of left to chance.
+    struct BothReadBeforeEitherWritesStore {
+        inner: Arc<dyn TaskStore>,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl TaskStore for BothReadBeforeEitherWritesStore {
+        async fn list(&self, company: &CompanyId) -> Result<Vec<TaskRecord>> {
+            let result = self.inner.list(company).await;
+            self.barrier.wait().await;
+            result
+        }
+        async fn upsert(&self, company: &CompanyId, task: &TaskRecord) -> Result<()> {
+            self.inner.upsert(company, task).await
+        }
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            self.inner.delete(company, id).await
+        }
+    }
+
+    /// `run_delegation`'s read-then-write over the card (`load_card` then
+    /// `tasks.upsert`) holds no per-card lock. Two `assign_task` calls that
+    /// both name the SAME real card — two operator turns landing at once, a
+    /// routine shape — can therefore both read the pre-race card, and
+    /// whichever upsert lands last silently overwrites the other's write
+    /// whole, note and assignee together, with nothing that detects or
+    /// reports the loss. Forced deterministic with a barrier rather than
+    /// hoped for, so this is not a flaky proof of a real defect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_assignments_of_the_same_card_lose_exactly_one_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backing: Arc<dyn TaskStore> = Arc::new(FsOps::new(dir.path()));
+        let record = record();
+        backing
+            .upsert(&record.id, &card_in("card-real", COLUMN_TODO))
+            .await
+            .expect("seed the real card");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let tasks: Arc<dyn TaskStore> = Arc::new(BothReadBeforeEitherWritesStore {
+            inner: backing.clone(),
+            barrier,
+        });
+        let queue = DelegationQueue::default();
+        let steer = InflightRegistry::default();
+        let idle_turns_fx = Fixture::new();
+        let idle_turns = ScriptedTurns::new(&idle_turns_fx, vec![]);
+        let runner_a = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+        let runner_b = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+
+        let (a, b) = tokio::join!(
+            runner_a.run_delegation(
+                Delegation::AssignTask {
+                    task_id: "card-real".to_string(),
+                    assignee: "chief".to_string(),
+                    note: Some("from A".to_string()),
+                },
+                None,
+                MessageContext::default(),
+            ),
+            runner_b.run_delegation(
+                Delegation::AssignTask {
+                    task_id: "card-real".to_string(),
+                    assignee: "engineer".to_string(),
+                    note: Some("from B".to_string()),
+                },
+                None,
+                MessageContext::default(),
+            ),
+        );
+        a.expect("A's write itself succeeds");
+        b.expect("B's write itself succeeds");
+
+        let cards = backing.list(&record.id).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert!(
+            card.assignee == "chief" || card.assignee == "engineer",
+            "exactly one writer's assignment must be the one left standing: {card:?}"
+        );
+        let note = card.note.as_deref().unwrap_or_default();
+        assert!(
+            (card.assignee == "chief") == note.contains("from A")
+                && (card.assignee == "engineer") == note.contains("from B"),
+            "the surviving note must belong to the surviving assignee — a lost update, not a \
+             merge of the two: {card:?}"
+        );
+    }
+
+    /// The same lost-update shape on `review_task`: two concurrent verdicts
+    /// on the same card — one `Approve`, one `Revise` — leave the card in
+    /// whichever verdict's write landed last, with the other silently gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_reviews_of_the_same_card_lose_exactly_one_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backing: Arc<dyn TaskStore> = Arc::new(FsOps::new(dir.path()));
+        let record = record();
+        backing
+            .upsert(&record.id, &card_in("card-real", COLUMN_IN_REVIEW))
+            .await
+            .expect("seed the real card");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let tasks: Arc<dyn TaskStore> = Arc::new(BothReadBeforeEitherWritesStore {
+            inner: backing.clone(),
+            barrier,
+        });
+        let queue = DelegationQueue::default();
+        let steer = InflightRegistry::default();
+        let idle_turns_fx = Fixture::new();
+        let idle_turns = ScriptedTurns::new(&idle_turns_fx, vec![]);
+        let runner_a = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+        let runner_b = DelegationRunner::new(
+            &idle_turns,
+            &record,
+            Some(&tasks),
+            &steer,
+            &record.id,
+            &queue,
+            orchestrator::MAX_DELEGATIONS_PER_TURN,
+        );
+
+        let (a, b) = tokio::join!(
+            runner_a.run_delegation(
+                Delegation::ReviewTask {
+                    task_id: "card-real".to_string(),
+                    decision: lifecycle::ReviewDecision::Approve,
+                    note: Some("approved by A".to_string()),
+                },
+                None,
+                MessageContext::default(),
+            ),
+            runner_b.run_delegation(
+                Delegation::ReviewTask {
+                    task_id: "card-real".to_string(),
+                    decision: lifecycle::ReviewDecision::Revise,
+                    note: Some("sent back by B".to_string()),
+                },
+                None,
+                MessageContext::default(),
+            ),
+        );
+        a.expect("A's write itself succeeds");
+        b.expect("B's write itself succeeds");
+
+        let cards = backing.list(&record.id).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert!(
+            card.column == COLUMN_DONE || card.column == COLUMN_TODO,
+            "the card must land wherever exactly one of the two verdicts sent it: {card:?}"
+        );
+        let note = card.note.as_deref().unwrap_or_default();
+        assert!(
+            (card.column == COLUMN_DONE) == note.contains("approved by A")
+                && (card.column == COLUMN_TODO) == note.contains("sent back by B"),
+            "the surviving note must belong to the verdict that actually landed — a lost \
+             update, not a merge of the two: {card:?}"
+        );
+    }
 }
 
 #[cfg(test)]

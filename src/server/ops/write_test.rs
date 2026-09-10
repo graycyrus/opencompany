@@ -8031,7 +8031,7 @@ async fn applying_a_proposal_with_an_unwired_channel_is_refused_and_keeps_the_ca
         problem["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("is not a workflow delivery channel"),
+            .contains("is not an automation delivery channel"),
         "{body}"
     );
 

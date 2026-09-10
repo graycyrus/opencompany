@@ -98,7 +98,7 @@ export function DeskCreateDialog({
   }
 
   // Promote a selected teammate to the lead slot (index 0), which the whole
-  // stack treats as the desk's lead (`members[0]` — see `chat/model.ts` and
+  // stack treats as the desk's lead (`members[0]` — see `room/channels.ts` and
   // `api/types.ts`). The others keep their relative order behind the new lead.
   // No-ops (returns the same reference) when the id is already the lead, and no
   // backend call — the choice is posted with the rest of the draft on Create.

@@ -210,25 +210,22 @@ export function buildChannels(
 
   // Every teammate, not only the ones already spoken to.
   //
-  // This filtered on `transcripts[dm.id].length > 0`, which made the section an
-  // *inbox*: it listed conversations that existed. On a company nobody has
-  // DM'd yet that is an empty section reading "Nothing here yet.", under a
-  // heading naming the one thing an operator most wants from a roster of
-  // teammates — and the way to start one was a "+" whose dialog lists exactly
-  // the people this section was declining to.
+  // Filtering on a non-empty transcript made the section an *inbox*: it listed
+  // conversations that existed. On a company nobody has DM'd yet that is an
+  // empty section reading "Nothing here yet.", under a heading naming the one
+  // thing an operator most wants from a roster of teammates — and the way to
+  // start one was a "+" whose dialog lists exactly the people this section was
+  // declining to.
   //
   // A DM channel is not created by being listed. `directMessageChannels` mints
   // one row per member with a `dmChannelId`, and the transcript is whatever the
-  // host has for that id — empty until somebody speaks. So listing all of them
-  // costs nothing and fabricates nothing; it just stops hiding a teammate until
-  // after you have found another way to reach them.
+  // host has for that id — empty until somebody speaks.
   //
   // Ordering carries what the filter used to: anyone with a transcript sorts
-  // first, most recent at the top, so an active conversation never falls into
-  // an alphabetical list of everyone. `latestMessageAt` answers 0 for an empty
-  // or absent transcript, so the untouched rows tie and fall through to the
-  // name — a stable order rather than roster order, which is the host's and can
-  // move under a reader.
+  // first, most recent at the top. `latestMessageAt` answers 0 for an empty or
+  // absent transcript, so untouched rows tie and fall through to the name — a
+  // stable order rather than roster order, which is the host's and can move
+  // under a reader.
   const dms = directMessageChannels(members).sort((a, b) => {
     const byRecency = latestMessageAt(transcripts[b.id]) - latestMessageAt(transcripts[a.id]);
     return byRecency !== 0 ? byRecency : a.name.localeCompare(b.name);

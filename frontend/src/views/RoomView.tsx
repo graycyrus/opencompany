@@ -885,7 +885,7 @@ export function RoomView({
     //
     // A plain revisit is the other caller, and it must not blank anything.
     // `roomVisits` re-runs this every time an operator returns to Room, and
-    // `setDesks(null)` sent `ChatView` down its `if (!desks)` branch — which
+    // `setDesks(null)` sent `RoomView` down its `if (!desks)` branch — which
     // renders a loading pane and, crucially, no rail. The rail is portalled
     // into the app sidebar, so a refetch of data the operator already had tore
     // the channel list out of the sidebar and put it back a frame later,
