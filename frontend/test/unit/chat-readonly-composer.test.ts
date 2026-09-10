@@ -117,7 +117,7 @@ function tree(
   typing: string[] = [],
   inflight = false,
 ): ReactNode {
-  const view = createElement(ChatView, {
+  const view = createElement(RoomView, {
     client,
     company: "acme",
     sub,
