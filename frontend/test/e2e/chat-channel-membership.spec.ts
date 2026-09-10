@@ -222,9 +222,12 @@ test("#370 a deep link never flashes a channel the company doesn't have", async 
     (window as unknown as { __placeholders: string[] }).__placeholders = [];
     const tick = () => {
       const seen = (window as unknown as { __placeholders: string[] }).__placeholders;
-      const p = document
-        .querySelector("textarea[placeholder], input[placeholder]")
-        ?.getAttribute("placeholder");
+      // The composer is the only `textarea[placeholder]` on the page; scoped
+      // to that element type deliberately, since the sidebar's disabled
+      // search `input` also carries a `placeholder` ("Search") and — sitting
+      // earlier in the DOM now that it lives in the title row — would
+      // otherwise win a bare `querySelector` before the composer ever paints.
+      const p = document.querySelector("textarea[placeholder]")?.getAttribute("placeholder");
       if (p && seen[seen.length - 1] !== p) seen.push(p);
       requestAnimationFrame(tick);
     };
