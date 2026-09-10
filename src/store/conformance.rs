@@ -5251,7 +5251,9 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
 /// this one.
 ///
 /// [`adopt_or_create_folder`]: WorkspaceStore::adopt_or_create_folder
-pub async fn assert_workspace_create_rejects_an_absent_or_foreign_parent(ws: Arc<dyn WorkspaceStore>) {
+pub async fn assert_workspace_create_rejects_an_absent_or_foreign_parent(
+    ws: Arc<dyn WorkspaceStore>,
+) {
     let alpha = CompanyId::new("parent-guard-alpha");
     let beta = CompanyId::new("parent-guard-beta");
 

@@ -140,13 +140,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            runtime.deep_trace().list_step_details(&id, "r1").await.unwrap().len(),
+            runtime
+                .deep_trace()
+                .list_step_details(&id, "r1")
+                .await
+                .unwrap()
+                .len(),
             1,
             "fixture did not seed the record the test purges"
         );
 
         let first = delete_request(&state, "/api/v1/company/deep-trace/r1").await;
-        assert_eq!(first, StatusCode::NO_CONTENT, "first purge destroys the row");
+        assert_eq!(
+            first,
+            StatusCode::NO_CONTENT,
+            "first purge destroys the row"
+        );
         assert!(
             runtime
                 .deep_trace()
@@ -197,10 +206,20 @@ mod tests {
         let first = delete_request(&state, "/api/v1/company/deep-trace").await;
         assert_eq!(first, StatusCode::NO_CONTENT);
         assert!(
-            runtime.deep_trace().list_step_details(&id, "r1").await.unwrap().is_empty()
+            runtime
+                .deep_trace()
+                .list_step_details(&id, "r1")
+                .await
+                .unwrap()
+                .is_empty()
         );
         assert!(
-            runtime.deep_trace().list_step_details(&id, "r2").await.unwrap().is_empty()
+            runtime
+                .deep_trace()
+                .list_step_details(&id, "r2")
+                .await
+                .unwrap()
+                .is_empty()
         );
 
         let second = delete_request(&state, "/api/v1/company/deep-trace").await;
@@ -224,13 +243,14 @@ mod tests {
         let request = Request::builder()
             .method("DELETE")
             .uri("/api/v1/company/deep-trace")
-            .header(
-                "cookie",
-                crate::server::test_support::member_cookie("acme"),
-            )
+            .header("cookie", crate::server::test_support::member_cookie("acme"))
             .body(Body::empty())
             .unwrap();
-        let status = router(state.clone()).oneshot(request).await.unwrap().status();
+        let status = router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status();
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
