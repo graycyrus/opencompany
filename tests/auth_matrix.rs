@@ -435,6 +435,15 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Put, "/credential", Admin, Credential, ""),
     r!(Post, "/credential/link/start", Admin, Credential, ""),
     r!(Post, "/credential/link/finish", Admin, Credential, ""),
+    r!(
+        Get,
+        "/credential/billing",
+        Scoped,
+        Credential,
+        "Members may read what the company's key has left to spend — the person \
+         whose agents stopped mid-afternoon is the one who most needs to see a \
+         balance of zero, and nothing here names the credential itself."
+    ),
     r!(Put, "/logo", Admin, Authority, ""),
     body_admin!(rj!(Patch, "", Admin, Authority, "{}", "")),
     r!(Get, "/composio", Scoped, Ordinary, ""),
