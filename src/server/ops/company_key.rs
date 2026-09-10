@@ -28,6 +28,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 
 use crate::AppState;
 use crate::company::company_key::{key_configured, resolve, store_key};
@@ -275,6 +276,7 @@ struct FinishLink {
 /// minted rather than pasted changes who types it, not what it does.
 async fn start_link(
     State(state): State<AppState>,
+    headers: HeaderMap,
     company: AdminScopedCompany,
 ) -> Result<Json<StartLinkResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
@@ -293,7 +295,7 @@ async fn start_link(
     // Where the hub returns to. `key=link` is this console's own marker, kept
     // distinct from the `key=auth` the hub appends on a sign-in so the two
     // return legs can never be mistaken for each other in `App.tsx`.
-    let origin = state.config().host_base_url();
+    let origin = callback_origin(&state, &headers);
     let callback_url = format!(
         "{}/?company={}&key=link&state={}",
         origin.trim_end_matches('/'),
@@ -326,6 +328,64 @@ async fn start_link(
     };
 
     Ok(Json(StartLinkResponse { authorize_url }))
+}
+
+/// Where the hub sends the browser back to.
+///
+/// [`host_base_url`](crate::AppConfig::host_base_url) is the answer wherever a
+/// deployment states one: a hosted tenant is `OPENCOMPANY_PUBLIC_URL`, and that
+/// origin serves the console, so the return leg lands on the page that finishes
+/// the exchange.
+///
+/// Its fallback — `http://{bind}` — is the wrong answer for local development,
+/// and wrong in a way that only shows up at the end of the flow. The console in
+/// dev is a Vite server on another port; the host on `127.0.0.1:8080` serves no
+/// page unless somebody set `OPENCOMPANY_CONSOLE_DIR`. So an operator signed in,
+/// approved, and landed on a 404 holding a spent code — with nothing on that
+/// page able to say what had gone wrong, because there was no page.
+///
+/// So when nothing states an origin, the browser's own is used: whatever
+/// pressed the button is where the answer should come back to, which is exactly
+/// what a dev server on `:5173` needs and needs nobody to configure.
+///
+/// **Only a loopback origin.** A header is attacker-controllable in principle,
+/// and while a stolen code redeems nothing without the verifier this host keeps
+/// (`server::hub_link`), a callback is not somewhere to accept an arbitrary
+/// address on a request's say-so. Anything else falls through to the bind
+/// address, and a deployment that wants a real origin sets `OPENCOMPANY_PUBLIC_URL`
+/// — which wins over this outright.
+fn callback_origin(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(url) = state.config().public_url.as_deref() {
+        let url = url.trim().trim_end_matches('/');
+        if !url.is_empty() {
+            return url.to_string();
+        }
+    }
+
+    headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|origin| is_loopback_origin(origin))
+        .map(|origin| origin.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| state.config().host_base_url())
+}
+
+/// Whether `origin` is an `http://` address on this machine.
+///
+/// Deliberately the same shape the hub's own gate admits without a tenant
+/// registry lookup — `http` to `localhost` or a loopback literal — so an origin
+/// accepted here cannot be one the hub will refuse a moment later.
+fn is_loopback_origin(origin: &str) -> bool {
+    let Some(rest) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    // Host only: a port is expected (that is the whole point), a path is not.
+    if rest.contains('/') {
+        return false;
+    }
+    let host = rest.split_once(':').map_or(rest, |(host, _)| host);
+    host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
 }
 
 /// `POST …/credential/link/finish` — redeem the code and store what comes back.
