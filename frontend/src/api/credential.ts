@@ -56,6 +56,27 @@ export interface CompanyCredentialStatus {
    * direction.
    */
   hubLink?: boolean;
+  /**
+   * Where this person looks after the account behind the key — the hub
+   * dashboard's key list, and its top-up page.
+   *
+   * Resolved by the **host**, because only the host knows which hub it was
+   * pointed at: a console talking to staging must link to the staging
+   * dashboard, and a link assembled in the browser would send an operator to
+   * production's billing page. Absent on a host whose backend the naming
+   * convention does not describe (self-hosted, loopback), where there is no
+   * dashboard to link to — the console then renders no link rather than a
+   * guess.
+   */
+  account?: HubAccountLinks;
+}
+
+/** The two hub pages the console links out to. */
+export interface HubAccountLinks {
+  /** The dashboard's API-key list — where a minted key is seen and revoked. */
+  manageKeysUrl: string;
+  /** The dashboard's balance and top-up page. */
+  topUpUrl: string;
 }
 
 /** A mutating response: the resulting status plus a plain-language note. */
