@@ -28,6 +28,10 @@ pub struct AppConfig {
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
+    /// TinyHumans **site** base URL, when this deployment states one
+    /// (`TINYHUMANS_WEB_URL`). Read through [`Self::hub_site`], which derives it
+    /// from [`Self::api_url`] when unset — the normal case.
+    pub web_url: Option<String>,
     /// An operator-set display name for this instance
     /// (`OPENCOMPANY_INSTANCE_NAME`), surfaced by `/spec` so a client holding
     /// several connections can show something friendlier than a URL. Purely
@@ -128,6 +132,7 @@ impl Default for AppConfig {
             bind: "127.0.0.1:8080".to_string(),
             openhuman_root: None,
             api_url: crate::app::config::DEFAULT_API_URL.to_string(),
+            web_url: None,
             instance_name: None,
             brain_mode: BrainMode::Hosted,
             tinyplace_api_url: crate::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
