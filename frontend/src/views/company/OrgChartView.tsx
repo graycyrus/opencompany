@@ -53,6 +53,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { consoleHref } from "@/lib/console-paths";
 import { personName } from "@/lib/person";
 import { roleSubtitle, toneFor, type TeamMember } from "@/lib/team";
 import {
@@ -111,8 +112,8 @@ interface DragSeat {
 }
 
 /**
- * Where a teammate named on this chart opens: `#/team/<agentId>`, the sub-page
- * `TeamView` already routes to `AgentDetailView` (issue #1102).
+ * Where a teammate named on this chart opens: `#/company/agent/<agentId>`,
+ * the sub-page `TeamView` already routes to `AgentDetailView` (issue #1102).
  *
  * A **link**, not a click handler on a `div`. The console routes on the hash,
  * so an `<a href>` is the real address: middle-click and cmd-click open a
@@ -126,12 +127,15 @@ interface DragSeat {
  *
  * `null` for an id that is blank or missing, which is the whole point of
  * routing through this function: a teammate with no usable id must render as
- * plain text rather than as a link to `#/team/undefined`, which is a page that
- * cannot exist and would report the teammate as deleted.
+ * plain text rather than as a link to `#/company/agent/undefined`, which is a
+ * page that cannot exist and would report the teammate as deleted.
+ *
+ * Through `consoleHref` rather than a hand-composed template, so this cannot
+ * drift from the address `formatConsolePath` gives every other Company link.
  */
 function teamHref(agentId: string | null | undefined): string | null {
   const id = agentId?.trim();
-  return id ? `#/team/${encodeURIComponent(id)}` : null;
+  return id ? consoleHref("team", id) : null;
 }
 
 /**

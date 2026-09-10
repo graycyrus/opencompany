@@ -48,6 +48,7 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import { useLedgerViewMode, type LedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { withHostParam } from "@/hooks/use-host-route";
+import { formatConsolePath } from "@/lib/console-paths";
 import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 import {
   AlertTriangle,
@@ -1105,9 +1106,10 @@ export function LedgersView({
                       }
                       detailHref={
                         ledger.source === "native"
-                          ? withHostParam(`tasks/${encodeURIComponent(entry.id)}`, {
-                              view: "list",
-                            })
+                          ? withHostParam(
+                              formatConsolePath("tasks", encodeURIComponent(entry.id)),
+                              { view: "list" },
+                            )
                           : undefined
                       }
                       onAmend={() =>
