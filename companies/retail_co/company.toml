@@ -167,11 +167,21 @@ members = ["cancellations", "amendments"]
 
 [group_chat.hive]
 enabled = true
-# Two seats, a few turns each: an opening position, a reply to the room, a
-# commit. Short on purpose — conformity in a group of language models rises with
-# interaction time, so a longer episode buys correlated error rather than
-# scrutiny.
-turn_budget = 8
+# Two seats, and enough budget to survive ONE bad proposal.
+#
+# Eight was too tight, and the way it failed is instructive: `exchanges`
+# proposed with item ids it had invented, `refunds` objected and named the real
+# ones — cross-inhibition working exactly as intended — and the correction then
+# had nowhere to go. `exchanges` spent its remaining turns supporting its own
+# corrected option, which adds no quorum (two DIFFERENT members must back it),
+# and the budget ran out on "refunds, do you agree?". Three of the eight turns
+# were a duplicate evidence line, an unmarked line that folds to nothing, and
+# that self-support.
+#
+# Twelve leaves room for the correction cycle a two-seat desk needs. It is still
+# short on purpose: conformity in a group of language models rises with
+# interaction time, so a long episode buys correlated error rather than scrutiny.
+turn_budget = 12
 quorum = 2
 blind_round = true
 
@@ -194,7 +204,9 @@ members = ["exchanges", "refunds"]
 
 [group_chat.hive]
 enabled = true
-turn_budget = 8
+# Twelve, not eight: one bad proposal plus its correction does not fit in
+# eight when self-support adds no quorum. See the order_ops note above.
+turn_budget = 12
 quorum = 2
 blind_round = true
 

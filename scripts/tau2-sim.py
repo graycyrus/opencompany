@@ -247,9 +247,28 @@ class Host:
         closed = any((m.get("channel") or m.get("from") or "") == "hive-report" for m in body)
         return (len(body), closed)
 
-    def say(self, desk: str, text: str, timeout: float = 3600):
-        """Put one message to `desk`, holding the POST open for the turn."""
-        return self.call("POST", f"{self.scope}/chat", {"text": text, "chat": desk}, timeout=timeout)
+    def say(self, desk: str, text: str, timeout: float = 3600, parent: str | None = None):
+        """Put one message to `desk`, holding the POST open for the turn.
+
+        `parent` threads this message onto an earlier one. Without it every turn
+        is a new line in the channel, and `reply_thread` roots each one on
+        itself — "N messages would mean N threads instead of N *topics*". A
+        follow-up then opens its OWN episode, deriving a fresh topic id from its
+        own words (observed: a confirmation produced the topic `#yes-i`, a room
+        deliberating about the word "yes"), and the prior exchange is demoted to
+        the cross-thread index, which the agent is told not to read: "do NOT
+        read or answer from them unless this message explicitly refers to one".
+        So "go ahead as you described" pointed at a conversation the room was
+        barred from consulting.
+
+        Threaded, the follow-up lands inside the room that asked, that room
+        keeps its own transcript in view, and the seat that made the decision is
+        the one that acts on the answer.
+        """
+        body = {"text": text, "chat": desk}
+        if parent is not None:
+            body["parent"] = str(parent)
+        return self.call("POST", f"{self.scope}/chat", body, timeout=timeout)
 
 
 def load_tasks(data_dir: Path, domain: str) -> list[dict]:
@@ -553,14 +572,19 @@ def main() -> int:
         print(f"\n=== {args.domain} task {tid} ===\n{text}\n", file=sys.stderr)
 
         turns = []
+        thread = None
         ok, why = False, "no turn ran"
         for turn in range(1, args.turns + 1):
-            status, body = host.say(spec["entry"], text, timeout=args.timeout)
+            status, body = host.say(spec["entry"], text, timeout=args.timeout, parent=thread)
+            # The first message roots the thread; every follow-up joins it.
+            if thread is None and isinstance(body, dict):
+                thread = body.get("messageId")
             replies = ([r.get("text") for r in (body or {}).get("responses", [])]
                        if isinstance(body, dict) else [])
             for r in replies:
                 print(f"  [{spec['entry']}] {r}", file=sys.stderr)
-            turns.append({"turn": turn, "status": status, "sent": text, "replies": replies})
+            turns.append({"turn": turn, "status": status, "sent": text,
+                          "thread": thread, "replies": replies})
 
             # A referral is DETACHED — `spawn_referred_turn` puts the question on
             # the other desk's channel and returns; the POST answering here does
