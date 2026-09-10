@@ -533,7 +533,7 @@ test("a new scheduled automation discloses that it starts paused (#813)", async 
       { id: "report", kind: "output", name: "Report" },
     ],
   });
-  const paused = dialog.getByText(/scheduled workflow is created paused/i);
+  const paused = dialog.getByText(/scheduled automation is created paused/i);
 
   // No schedule set yet — there is nothing to disclose.
   await expect(paused).toHaveCount(0);
