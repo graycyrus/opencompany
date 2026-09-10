@@ -949,4 +949,71 @@ mod test {
             "the ring must never lose its last admin under concurrent demotions"
         );
     }
+
+    /// `identity()`'s bare `contains('@')` shape check, by name: a value with
+    /// no `@` at all is refused rather than accepted as a to-be-normalized
+    /// address.
+    #[test]
+    fn identity_refuses_a_malformed_email() {
+        let body = InviteBody {
+            email: "not-an-email".to_string(),
+            wallet: String::new(),
+            role: UserRole::Member,
+        };
+
+        let err = body
+            .identity(AuthMode::Email)
+            .expect_err("a value with no `@` must be refused");
+
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg == "that doesn't look like an email address"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// The same branch on whitespace-only input — `normalize_email` trims it
+    /// to empty, which the emptiness half of the check must also catch.
+    #[test]
+    fn identity_refuses_an_empty_email() {
+        let body = InviteBody {
+            email: "   ".to_string(),
+            wallet: String::new(),
+            role: UserRole::Member,
+        };
+
+        let err = body
+            .identity(AuthMode::Email)
+            .expect_err("whitespace-only input must be refused");
+
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg == "that doesn't look like an email address"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// The positive control: a well-formed address is accepted and comes back
+    /// normalized, so the two refusals above are not simply refusing
+    /// everything.
+    #[test]
+    fn identity_accepts_a_well_formed_email() {
+        let body = InviteBody {
+            email: "Ops@Example.com".to_string(),
+            wallet: String::new(),
+            role: UserRole::Member,
+        };
+
+        let identity = body
+            .identity(AuthMode::Email)
+            .expect("a real address must be accepted");
+
+        assert_eq!(identity, "ops@example.com");
+    }
 }
