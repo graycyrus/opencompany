@@ -486,37 +486,12 @@ mod test {
 /// The `escalate_to_human` tool name.
 pub const ESCALATE_TO_HUMAN_TOOL: &str = "escalate_to_human";
 
-/// Lets an agent stop and **ask**, instead of guessing or going quiet.
+/// Queues an [`Information`](BlockerKind::Information) blocker for the operator.
+/// The turn's drain parks accepted questions through the approval lifecycle.
 ///
-/// Before this, a teammate that hit real ambiguity — "staging or prod?", "which
-/// of these two contradictory briefs is current?" — had two options and both
-/// were bad: pick one and be silently wrong, or produce prose explaining that
-/// it could not proceed, which reads as a completed turn. The orchestrator
-/// brief even pointed at `spawn_task` for "work waiting on a person", which
-/// opens a card that notifies nobody and resumes nothing.
-///
-/// This is the third option. The question parks as a durable
-/// [`Information`](BlockerKind::Information) blocker on the operator's queue,
-/// through the same path a gated tool call parks on, so it survives a restart
-/// and expires through the approval TTL rather than waiting forever.
-///
-/// # Why it stages rather than parks directly
-///
-/// The tool has no host handle — tools receive arguments and nothing else — so
-/// it pushes onto the shared [`ApprovalRequestQueue`] exactly as the approval
-/// policy does for a gated call, and the turn's drain parks it. Both drains
-/// exist: a chat or task turn drains through `park_approval_requests`, a
-/// workflow agent node through `park_gated_calls`. There is no path on which an
-/// agent can raise a question that nothing will deliver.
-///
-/// # What it deliberately does not do
-///
-/// It does not end the turn. The agent asks and keeps working with what it has;
-/// the *run* is what parks, because a turn that queued a blocker settles
-/// [`Blocked`](crate::ports::runs::RunStatus::Blocked) rather than reporting a
-/// result nobody has confirmed. Ending the turn from inside a tool would
-/// discard whatever the agent had already produced, which is the opposite of
-/// what a question is for.
+/// Escalation establishes the turn boundary: subsequent tool calls are refused
+/// until a new turn. An accepted question is queued for the operator; a full
+/// batch returns an explicit refusal.
 pub struct EscalateToHumanTool {
     requests: crate::harness::built_in::policy::ApprovalRequestQueue,
     agent: String,
@@ -629,16 +604,24 @@ impl openhuman_core::openhuman::tools::traits::Tool for EscalateToHumanTool {
             // every request this turn queued.
             run_id: None,
         };
-        self.requests
-            .push(crate::harness::built_in::policy::ApprovalRequest {
+        if !self
+            .requests
+            .push_blocker(crate::harness::built_in::policy::ApprovalRequest {
                 tool: ESCALATE_TO_HUMAN_TOOL.to_string(),
                 reason,
                 effect,
-            });
+            })
+        {
+            return Ok(ToolResult::error(format!(
+                "Your question was not raised: this batch already has the maximum of {} approval \
+                 requests. Stop and wait for the queued requests to be resolved, then ask again.",
+                crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN
+            )));
+        }
 
         Ok(ToolResult::success(format!(
             "Raised your question with the operator: \"{question}\". This card parks until they \
-             answer, so do not ask it again — carry on with anything else you can do without it."
+             answer. Stop and wait for their answer; do not ask it again."
         )))
     }
 }
@@ -884,11 +867,6 @@ mod tool_test {
         );
     }
 
-    /// BOUND-axis (REQ-002): the cap boundary through the real tool, not a
-    /// hand-built `ApprovalRequest`. Exactly `MAX_APPROVAL_REQUESTS_PER_TURN`
-    /// distinct questions in one turn must all land with no overflow; the
-    /// existing pin at `escalate_to_human_does_not_set_the_turn_boundary_and_can_overflow_the_cap`
-    /// (`policy.rs`) only exercises one-past the cap.
     #[tokio::test]
     async fn escalate_to_human_exactly_at_the_cap_produces_no_overflow() {
         use crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
@@ -917,5 +895,131 @@ mod tool_test {
             drained.overflow_notice().is_none(),
             "no notice is owed when nothing was dropped"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_questions_compete_for_the_final_slot_without_silent_loss() {
+        use crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        use std::sync::{Arc, Barrier};
+
+        for round in 0..20 {
+            let queue = ApprovalRequestQueue::default();
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN - 1 {
+                let asked = tool(&queue)
+                    .execute(serde_json::json!({ "question": format!("existing question {i}") }))
+                    .await
+                    .expect("the tool runs");
+                assert!(!asked.is_error, "{}", asked.text());
+            }
+
+            let barrier = Arc::new(Barrier::new(2));
+            let ask = |agent: &str, question: &'static str| {
+                let tool = EscalateToHumanTool::new(queue.clone(), agent.to_string());
+                let barrier = barrier.clone();
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    tokio::runtime::Handle::current()
+                        .block_on(tool.execute(serde_json::json!({ "question": question })))
+                })
+            };
+            let finance = ask("finance", "approve the final budget?");
+            let legal = ask("legal", "approve the final contract?");
+            let results = [
+                (
+                    "approve the final budget?",
+                    finance.await.expect("joins").expect("the tool runs"),
+                ),
+                (
+                    "approve the final contract?",
+                    legal.await.expect("joins").expect("the tool runs"),
+                ),
+            ];
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|(_, result)| !result.is_error)
+                    .count(),
+                1,
+                "round {round}: one remaining blocker slot must have exactly one successful caller"
+            );
+
+            let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(
+                drained.discarded, 0,
+                "no accepted question may be discarded"
+            );
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN - 1 {
+                assert!(
+                    drained
+                        .requests
+                        .iter()
+                        .any(|r| r.reason == format!("existing question {i}"))
+                );
+            }
+            for (question, result) in results {
+                let retained = drained.requests.iter().any(|r| r.reason == question);
+                assert_eq!(retained, !result.is_error, "round {round}: {question}");
+                if result.is_error {
+                    assert!(result.text().contains("not raised"), "{}", result.text());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_run_accepts_its_duplicate_without_consuming_another_runs_capacity() {
+        use crate::harness::built_in::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN};
+
+        let queue = ApprovalRequestQueue::default();
+        let full = queue.claim(ApprovalScope::Run("full".to_string()));
+        let other = queue.claim(ApprovalScope::Run("other".to_string()));
+        let tool = tool(&queue);
+        full.scoped(async {
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+                let asked = tool
+                    .execute(serde_json::json!({ "question": format!("question {i}") }))
+                    .await
+                    .expect("the tool runs");
+                assert!(!asked.is_error, "{}", asked.text());
+            }
+            let duplicate = tool
+                .execute(serde_json::json!({ "question": "question 0" }))
+                .await
+                .expect("the tool runs");
+            assert!(
+                !duplicate.is_error,
+                "the existing question is already queued"
+            );
+            let refused = tool
+                .execute(serde_json::json!({ "question": "new question" }))
+                .await
+                .expect("the tool runs");
+            assert!(
+                refused.is_error,
+                "a new question must be refused at the cap"
+            );
+        })
+        .await;
+
+        let independent = other
+            .scoped(tool.execute(serde_json::json!({ "question": "question 0" })))
+            .await
+            .expect("the tool runs");
+        assert!(
+            !independent.is_error,
+            "a different run has its own capacity"
+        );
+        let full_drain = full
+            .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+            .await;
+        assert_eq!(full_drain.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(full_drain.discarded, 0);
+        let other_drain = other
+            .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+            .await;
+        assert_eq!(other_drain.requests.len(), 1);
+        assert_eq!(other_drain.requests[0].reason, "question 0");
+        assert_eq!(other_drain.discarded, 0);
     }
 }
