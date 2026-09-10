@@ -193,27 +193,40 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
         .map(|record| {
             // Manifest (blueprint) desks first, then operator-created overlay
             // desks — the same order the harness `desk_lead` resolver searches.
-            let manifest_desks = record.manifest.group_chats.iter().map(|chat| {
-                let members = record.effective_desk_members(&chat.id);
-                // The overlay subset: effective members not declared in the
-                // manifest for this desk.
-                let overlay_members = members
-                    .iter()
-                    .filter(|m| !chat.members.contains(m))
-                    .cloned()
-                    .collect();
-                DeskDto {
-                    id: chat.id.clone(),
-                    name: chat.name.clone(),
-                    description: chat.description.clone(),
-                    members,
-                    overlay_members,
-                    // Manifest desks are always lead-routed — the blueprint
-                    // syntax carries no responder field (issue #1835).
-                    responder: ResponderMode::Lead,
-                    overlay_created: false,
-                }
-            });
+            // The general desk is not listed beside General — it IS General.
+            // `[company].general_desk` names the desk the company's own line
+            // resolves to, so projecting it as its own channel puts the same
+            // room in the sidebar twice: once as the main thread everybody
+            // already has, once under whatever id the manifest gave it. Same
+            // reasoning, and same `is_general_chat` shape, as the overlay-desk
+            // exclusion below.
+            let general_desk = record.manifest.company.general_desk.clone();
+            let manifest_desks = record
+                .manifest
+                .group_chats
+                .iter()
+                .filter(move |chat| general_desk.as_deref() != Some(chat.id.as_str()))
+                .map(|chat| {
+                    let members = record.effective_desk_members(&chat.id);
+                    // The overlay subset: effective members not declared in the
+                    // manifest for this desk.
+                    let overlay_members = members
+                        .iter()
+                        .filter(|m| !chat.members.contains(m))
+                        .cloned()
+                        .collect();
+                    DeskDto {
+                        id: chat.id.clone(),
+                        name: chat.name.clone(),
+                        description: chat.description.clone(),
+                        members,
+                        overlay_members,
+                        // Manifest desks are always lead-routed — the blueprint
+                        // syntax carries no responder field (issue #1835).
+                        responder: ResponderMode::Lead,
+                        overlay_created: false,
+                    }
+                });
             // An overlay desk whose own **id** is a General spelling is not
             // projected (issue #1781 review, Codex P2) — the grandfathered
             // shape `POST .../desks` accepted `general` / `main` ids under
