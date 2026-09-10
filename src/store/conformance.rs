@@ -5266,6 +5266,86 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
     assert_eq!(&after.node().id, &ids[0]);
 }
 
+/// [`WorkspaceStore::create`]'s own contract, not [`adopt_or_create_folder`]'s:
+/// "the `parent_id`, when set, must name an existing folder" (the trait doc on
+/// `create`) is asserted directly against `create` on all three backends, for
+/// both a `parent_id` that names nothing and one that names a real folder in a
+/// *different* company.
+///
+/// [`assert_workspace_folder_claims`] already proves the analogous refusal for
+/// the folder-claim primitive; `create` is a separate code path on every
+/// backend (a plain `INSERT`/`insert_one`/file write, not the claim's
+/// transaction-guarded read-or-adopt), so passing there says nothing about
+/// this one.
+///
+/// [`adopt_or_create_folder`]: WorkspaceStore::adopt_or_create_folder
+pub async fn assert_workspace_create_rejects_an_absent_or_foreign_parent(
+    ws: Arc<dyn WorkspaceStore>,
+) {
+    let alpha = CompanyId::new("parent-guard-alpha");
+    let beta = CompanyId::new("parent-guard-beta");
+
+    let child_of_nothing = WorkspaceNode {
+        id: "orphan".to_string(),
+        name: "orphan.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: Some("no-such-folder".to_string()),
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    assert!(
+        ws.create(&alpha, &child_of_nothing, Some("body"))
+            .await
+            .is_err(),
+        "a parent_id naming no node anywhere must be refused"
+    );
+    assert!(
+        ws.tree(&alpha).await.unwrap().is_empty(),
+        "a refused create must not leave the orphan behind"
+    );
+
+    // beta's real folder — reachable, just not from alpha.
+    let beta_root = folder_node("beta-root", "Beta Root");
+    ws.create(&beta, &beta_root, None)
+        .await
+        .expect("a root folder in beta");
+
+    let cross_company_child = WorkspaceNode {
+        id: "cross-company-child".to_string(),
+        name: "cross.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: Some(beta_root.id.clone()),
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    assert!(
+        ws.create(&alpha, &cross_company_child, Some("body"))
+            .await
+            .is_err(),
+        "alpha must not be able to parent a node under beta's folder id, \
+         even though that id is real"
+    );
+    assert!(
+        ws.tree(&alpha).await.unwrap().is_empty(),
+        "the cross-company create must not have landed in alpha either"
+    );
+    assert_eq!(
+        ws.tree(&beta).await.unwrap().len(),
+        1,
+        "beta's own tree is unaffected by alpha's rejected attempt"
+    );
+}
+
 /// The adoption lease every backend must honour (issue #1839).
 ///
 /// #1801 gave the tree an empty-folder rollback: a folder one caller minted, then

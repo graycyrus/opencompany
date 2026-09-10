@@ -2915,6 +2915,16 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_workspace_create_rejects_an_absent_or_foreign_parent() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_create_rejects_an_absent_or_foreign_parent(Arc::new(
+            FsOps::new(&root),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
     async fn conformance_workspace_sibling_names() {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();

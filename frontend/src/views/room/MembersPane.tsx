@@ -1,16 +1,9 @@
 import type { ReactNode } from "react";
-import { MessageSquare, MoreHorizontal, UserPlus } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PresenceStatus } from "@/lib/awareness";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
@@ -61,12 +54,14 @@ interface Props {
   /** True when the roster came from the host rather than the starter set. */
   fromHost: boolean;
   /**
-   * Give this teammate an inbox, or take it away. Whether they have one is read
-   * from the roster (`member.inboxEnabled`), never guessed client-side, so this
-   * pane and the Inbox page agree on the same host state (issue #173).
+   * Put an agent already on the roster onto this channel's desk (issue #2224).
+   * Only ever offered on an "Everyone else" row. Absent has the same meaning
+   * `onManageDesk` gives it: no real desk behind this channel, nothing to add
+   * to — the caller gates this on `activeIsDesk`, not on anything this pane
+   * can see for itself, because a DM has real (non-null) channel membership
+   * too and is not a desk.
    */
-  onRemove: (id: string) => void;
-  onAdd: () => void;
+  onAddExisting?: (id: string) => void;
   onMessage: (member: TeamMember) => void;
   /**
    * Open this channel's desk on the org chart (issue #485). Absent for a DM and
@@ -94,10 +89,13 @@ interface Props {
  * The right-hand member pane — who is in this channel, and the rest of the
  * company under it.
  *
- * This replaces the standalone Team page: everything that page could do lives
- * on a row here (give an agent an inbox, drop them from the roster) or on the
- * Add button, and a row now also opens that teammate's DM, which the page
- * could not do at all.
+ * This replaces the standalone Team page for channel-scoped work: put an
+ * agent already on the roster onto this desk directly from "Everyone else"
+ * (issue #2224), and a row now also opens that teammate's DM, which the page
+ * could not do at all. Hiring a brand-new teammate, and dropping one from the
+ * roster entirely, are different actions and live elsewhere (the empty-desk
+ * "Add an agent" prompt and the Team page, respectively) — this pane only
+ * ever offers an agent already on the roster, and never removes one.
  *
  * The two sections exist because those are two different questions. "Who is in
  * this room" is what a channel header is for, and answering it with the whole
@@ -113,8 +111,7 @@ export function MembersPane({
   presence,
   loading,
   fromHost,
-  onRemove,
-  onAdd,
+  onAddExisting,
   onMessage,
   onManageDesk,
 }: Props) {
@@ -134,16 +131,6 @@ export function MembersPane({
           <h2 className="text-sm font-semibold tracking-tight">Team</h2>
           <p className="truncate text-xs text-muted-foreground">{loading ? "Loading…" : subtitle}</p>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8"
-          onClick={onAdd}
-          aria-label="Add agent"
-          title="Add agent"
-        >
-          <UserPlus className="size-4" />
-        </Button>
       </header>
 
       <div className="flex-1 overflow-y-auto p-2">
@@ -155,15 +142,21 @@ export function MembersPane({
           </div>
         ) : (
           (() => {
-            const rows = (list: TeamMember[]) => (
+            // `withAdd` is only ever true for the "Everyone else" list on a
+            // real desk (see below) — never for `channelMembers` (already
+            // here) and never for the plain-roster fallback (no desk id to
+            // add into).
+            const rows = (list: TeamMember[], withAdd?: boolean) => (
               <ul className="flex flex-col gap-px">
                 {list.map((m) => (
                   <li key={m.id}>
                     <MemberRow
                       member={m}
                       lead={m.id === leadId}
-                      onRemove={() => onRemove(m.id)}
                       onMessage={() => onMessage(m)}
+                      onAddToChannel={
+                        withAdd && onAddExisting ? () => onAddExisting(m.id) : undefined
+                      }
                     />
                   </li>
                 ))}
@@ -203,7 +196,7 @@ export function MembersPane({
                 {others.length > 0 && (
                   <div className="mt-2 border-t pt-2">
                     <SectionLabel className="text-muted-foreground">Everyone else</SectionLabel>
-                    {rows(others)}
+                    {rows(others, true)}
                   </div>
                 )}
 
@@ -274,13 +267,18 @@ function SectionLabel({ children, className }: { children: ReactNode; className?
 function MemberRow({
   member,
   lead,
-  onRemove,
+  onAddToChannel,
   onMessage,
 }: {
   member: TeamMember;
   /** The desk's lead — badged, since this channel routes to them. */
   lead?: boolean;
-  onRemove: () => void;
+  /**
+   * Present only on an "Everyone else" row when there is a real desk to add
+   * to (issue #2224) — `undefined` renders no button at all, not a disabled
+   * one, the same rule every other optional action on this row follows.
+   */
+  onAddToChannel?: () => void;
   onMessage: () => void;
 }) {
   // Issue #1208: only when the role is not the name over again. The roster's
@@ -318,29 +316,18 @@ function MemberRow({
         </span>
       </button>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/member:opacity-100"
-              aria-label={`Actions for ${member.name}`}
-            />
-          }
+      {onAddToChannel && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/member:opacity-100"
+          aria-label={`Add ${member.name} to this channel`}
+          title={`Add ${member.name} to this channel`}
+          onClick={onAddToChannel}
         >
-          <MoreHorizontal className="size-4" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={onMessage}>
-            <MessageSquare className="size-4" /> Message
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive" onClick={onRemove}>
-            Remove from roster
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+          <Plus className="size-4" />
+        </Button>
+      )}
     </div>
   );
 }

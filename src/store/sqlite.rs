@@ -4822,6 +4822,11 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_workspace_create_rejects_an_absent_or_foreign_parent() {
+        conformance::assert_workspace_create_rejects_an_absent_or_foreign_parent(store()).await;
+    }
+
+    #[tokio::test]
     async fn conformance_workspace_sibling_names() {
         conformance::assert_workspace_sibling_names(store()).await;
     }

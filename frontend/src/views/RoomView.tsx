@@ -2532,32 +2532,56 @@ export function RoomView({
   }
 
   /**
-   * Drop a teammate from the roster through the host when it has a record of
-   * them. A blueprint teammate is removable too — the host records a tombstone
-   * rather than rewriting `company.toml` — and the only refusal left is the
-   * company's last teammate (409). A starter-roster row has no host record at
-   * all, so it falls back to a local-only removal.
+   * Put an agent already on the roster onto this channel's desk (issue
+   * #2224) — not a variant of `addMember`, which creates a brand-new
+   * teammate. Dropping one from the roster entirely is a Team-page action;
+   * `MembersPane` no longer offers it here. `activeIsDesk` gates
+   * `MembersPane`'s own "add existing" affordance, so `active.id` is a real
+   * desk id by the time this runs; the check here is defensive, not load
+   * bearing.
+   *
+   * `reloadDirectory` alone does not move the added agent into "In this
+   * channel": it only refetches the `@mention` picker's directory.
+   * `channelMembers`/`others` come from `inChannel`/`outsideChannel`, which
+   * are derived from `desks` — so this also calls `loadDesks`, the same
+   * function every desk-membership mutation on the org chart already
+   * refetches through after `addDeskMember`/`removeDeskMember`. Confirmed
+   * safe to call on a plain revisit, not just a scope change: `loadDesks`'s
+   * own comment says it blanks the list only when the client or company
+   * changed, never on a revisit — so this does not flash the pane empty.
    */
-  async function removeMember(member: TeamMember) {
-    if (!fromHost) {
-      setMembers((ms) => ms.filter((m) => m.id !== member.id));
-      return;
-    }
+  async function addExistingMember(agentId: string) {
+    if (!activeIsDesk) return;
+    // Same rule `send` above follows: if the operator switches company or
+    // connection while the POST is in flight, every UI-visible effect of it —
+    // refresh or toast — belongs to a scope nobody is looking at anymore, so
+    // it is dropped rather than landing on whatever they switched to.
+    const scopeAtAdd = { connection: scope.connection, company: scope.company, client };
+    const stale = () => {
+      const latestScope = scopeRef.current;
+      return (
+        latestScope !== null &&
+        (scopeAtAdd.connection !== latestScope.connection ||
+          scopeAtAdd.company !== latestScope.company ||
+          scopeAtAdd.client !== latestScope.client)
+      );
+    };
     try {
-      await client.removeTeamMember(member.id, company);
-      setMembers((ms) => ms.filter((m) => m.id !== member.id));
-      // The removed teammate leaves the picker now, not on the next reload.
+      await client.addDeskMember(active.id, agentId, company);
+      if (stale()) return;
       void reloadDirectory();
+      void loadDesks();
     } catch (error) {
+      if (stale()) return;
       if (error instanceof ApiError && error.status === 409) {
-        // The only 409 this route still answers: a company must keep at
-        // least one teammate. The host's own message says which teammate and
-        // what to do about it, so it is shown rather than restated.
-        toast.error(
-          error.message || "You can't remove your company's last agent.",
-        );
+        // The one 409 this route answers: already a member. Reached only by
+        // a race with another tab or operator — refresh now so the row
+        // leaves "Everyone else" immediately rather than on an unrelated
+        // reload.
+        void loadDesks();
+        toast.error("Already on this channel.");
       } else {
-        toast.error(error instanceof Error ? error.message : "Couldn't remove agent.");
+        toast.error(error instanceof Error ? error.message : "Couldn't add agent.");
       }
     }
   }
@@ -3081,11 +3105,15 @@ export function RoomView({
                   }
                   loading={loadingTeam}
                   fromHost={fromHost}
-                  onRemove={(id) => {
-                    const member = members.find((m) => m.id === id);
-                    if (member) void removeMember(member);
-                  }}
-                  onAdd={() => setAddOpen(true)}
+                  // `activeIsDesk`, not "`channelMembers` is non-null": a DM
+                  // has real (non-null) channel membership too — one row,
+                  // itself — and is not a desk. `addDeskMember` has no
+                  // meaning there, and the affordance must not appear at all
+                  // (absent, never disabled — the rule `onManageDesk` below
+                  // already follows for the same reason).
+                  onAddExisting={
+                    activeIsDesk ? (agentId) => void addExistingMember(agentId) : undefined
+                  }
                   onMessage={(m) => selectChannel(dmChannelId(m))}
                   /**
                    * The way from this channel to the desk it is (issue #485).
