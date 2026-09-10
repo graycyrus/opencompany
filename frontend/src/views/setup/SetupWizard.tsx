@@ -684,10 +684,16 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     setDesigning(true);
     setDesignError(null);
     try {
+      // A modelless run sends neither half of the design brief. The step no
+      // longer asks for them, and a draft left behind by an operator who
+      // answered and then went back to choose "No model" is not an answer to
+      // the question being asked now — it would still steer the curated pick,
+      // which scores both against the industry answer.
+      const modelless = tested.kind === "skipped";
       const proposed = await proposeSetupRoster(client, {
         industry: draft.industry,
-        teamHint: draft.teamHint,
-        automate: draft.automate,
+        teamHint: modelless ? "" : draft.teamHint,
+        automate: modelless ? "" : draft.automate,
         template: template || null,
         inferenceKey: values.tinyhumans_api_key || null,
         inferenceProvider:
@@ -695,6 +701,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         inferenceBaseUrl:
           tested.kind === "ok" && operatorConfiguredInference ? tested.baseUrl : null,
         inferenceModel: tested.kind === "ok" ? tested.model : null,
+        forceCurated: modelless,
       });
       // The host is contracted never to answer with an empty roster, so a
       // missing or empty one is a failure rather than a team of nobody — and
@@ -1164,6 +1171,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
               // proved, and there is nothing it could be tested against.
               setTested(p === NO_MODEL_OPTION.id ? { kind: "skipped" } : { kind: "untested" });
               setBaseUrl(p === status.inference.provider ? (status.inference.base_url ?? "") : "");
+              // And the roster with it. `advance` only designs when there is
+              // none, so a team designed under the old answer would otherwise
+              // survive into Review and be submitted — a model-authored roster
+              // under copy promising a standard one, for an operator who came
+              // back specifically to change this.
+              setRoster(null);
             }}
             baseUrl={baseUrl}
             onBaseUrl={(v) => {
@@ -1568,25 +1581,50 @@ function PowerStep({
    */
   const inlineTest = spec.needsKey ? !(onTheHouse && !override) : spec.needsUrl;
 
+  /**
+   * What is selected right now, readable from inside a call that started
+   * before it.
+   *
+   * A ref rather than the props themselves: `run` closes over the values from
+   * the render that created it, which are exactly the values it must not use
+   * to decide whether it is still current.
+   */
+  const providerRef = useRef({ provider, key: value.trim(), baseUrl: baseUrl.trim() });
+  providerRef.current = { provider, key: value.trim(), baseUrl: baseUrl.trim() };
+
   const run = async () => {
     // This also protects the Enter shortcut on the inputs. A disabled button
     // alone would still leave that route to a request the provider cannot
     // answer usefully.
     if (!canTest) return;
 
+    // What this call is a verdict *about*. The picker stays live while a test
+    // is in flight, so an answer can arrive after the operator has moved on —
+    // and a verdict is only ever true of the answers it was asked with. The
+    // worst of it: selecting "No model" mid-test, and having the settled
+    // `skipped` overwritten by an `ok` that would then be submitted as
+    // inference for the pseudo-provider `none`, which the host does not know.
+    const asked = { provider, key: value.trim(), baseUrl: baseUrl.trim() };
+    const stale = () =>
+      asked.provider !== providerRef.current.provider ||
+      asked.key !== providerRef.current.key ||
+      asked.baseUrl !== providerRef.current.baseUrl;
+
     onTested({ kind: "testing" });
     try {
       const result = await testInference(client, {
-        provider,
-        key: value.trim() || null,
-        baseUrl: baseUrl.trim() || null,
+        provider: asked.provider,
+        key: asked.key || null,
+        baseUrl: asked.baseUrl || null,
       });
+      if (stale()) return;
       onTested(
         result.ok
           ? { kind: "ok", baseUrl: result.baseUrl, model: result.model }
           : { kind: "failed", error: result.error ?? "Could not reach the provider." },
       );
     } catch (err: unknown) {
+      if (stale()) return;
       onTested({
         kind: "failed",
         error: err instanceof Error ? err.message : String(err),
