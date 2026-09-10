@@ -486,37 +486,12 @@ mod test {
 /// The `escalate_to_human` tool name.
 pub const ESCALATE_TO_HUMAN_TOOL: &str = "escalate_to_human";
 
-/// Lets an agent stop and **ask**, instead of guessing or going quiet.
+/// Queues an [`Information`](BlockerKind::Information) blocker for the operator.
+/// The turn's drain parks accepted questions through the approval lifecycle.
 ///
-/// Before this, a teammate that hit real ambiguity — "staging or prod?", "which
-/// of these two contradictory briefs is current?" — had two options and both
-/// were bad: pick one and be silently wrong, or produce prose explaining that
-/// it could not proceed, which reads as a completed turn. The orchestrator
-/// brief even pointed at `spawn_task` for "work waiting on a person", which
-/// opens a card that notifies nobody and resumes nothing.
-///
-/// This is the third option. The question parks as a durable
-/// [`Information`](BlockerKind::Information) blocker on the operator's queue,
-/// through the same path a gated tool call parks on, so it survives a restart
-/// and expires through the approval TTL rather than waiting forever.
-///
-/// # Why it stages rather than parks directly
-///
-/// The tool has no host handle — tools receive arguments and nothing else — so
-/// it pushes onto the shared [`ApprovalRequestQueue`] exactly as the approval
-/// policy does for a gated call, and the turn's drain parks it. Both drains
-/// exist: a chat or task turn drains through `park_approval_requests`, a
-/// workflow agent node through `park_gated_calls`. There is no path on which an
-/// agent can raise a question that nothing will deliver.
-///
-/// # What it deliberately does not do
-///
-/// It does not end the turn. The agent asks and keeps working with what it has;
-/// the *run* is what parks, because a turn that queued a blocker settles
-/// [`Blocked`](crate::ports::runs::RunStatus::Blocked) rather than reporting a
-/// result nobody has confirmed. Ending the turn from inside a tool would
-/// discard whatever the agent had already produced, which is the opposite of
-/// what a question is for.
+/// Escalation establishes the turn boundary: subsequent tool calls are refused
+/// until a new turn. An accepted question is queued for the operator; a full
+/// batch returns an explicit refusal.
 pub struct EscalateToHumanTool {
     requests: crate::harness::built_in::policy::ApprovalRequestQueue,
     agent: String,
