@@ -14225,6 +14225,52 @@ mod tests {
                 .collect()
         }
 
+        /// Journals an operator line in the teammate's DM and hands back its
+        /// sequence, the root a reply in that DM threads off.
+        async fn asked_in_dm(runtime: &Arc<CompanyRuntime>) -> crate::ports::types::EventSeq {
+            runtime
+                .events
+                .append(
+                    &runtime.id,
+                    crate::ports::types::CompanyEvent::OperatorMessage {
+                        text: "which brief is current?".to_string(),
+                        chat: Some("dm:eng".to_string()),
+                        parent: None,
+                        by: None,
+                        deliverable: None,
+                        mentions: Vec::new(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal the question")
+        }
+
+        async fn dm_replies(
+            runtime: &Arc<CompanyRuntime>,
+        ) -> Vec<(String, Option<crate::ports::types::EventSeq>)> {
+            runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    crate::ports::types::CompanyEvent::AgentReply {
+                        chat_id,
+                        text,
+                        parent,
+                        ..
+                    } if chat_id == "dm:eng" => Some((text, parent)),
+                    _ => None,
+                })
+                .collect()
+        }
+
         fn agent_question() -> BlockerPayload {
             BlockerPayload {
                 kind: BlockerKind::Information,
@@ -14414,6 +14460,96 @@ mod tests {
                     |note| note == "Thanks — using that and carrying on from where it stopped."
                 ),
                 "the answer must reach the conversation it was asked in; posted: {notes:?}"
+            );
+        }
+
+        /// Every resume acknowledgement lands in the thread the question was
+        /// asked in, not at the channel root.
+        ///
+        /// The anchor is the one the approval recorded when it parked, and it
+        /// reaches all three resumes — a card re-entered, a card cancelled, and
+        /// a workflow node. Driven directly because `park_blocker` records no
+        /// parent of its own: only an `escalate_to_human` park carries one, and
+        /// what is under test is that each resume passes on the anchor it is
+        /// handed rather than dropping it.
+        #[tokio::test]
+        async fn a_resume_note_threads_off_the_question_it_answers() {
+            use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
+
+            for (verdict, expected) in [
+                (BlockerVerdict::Retry, "Got it — picking that back up now."),
+                (
+                    BlockerVerdict::Cancel,
+                    "Okay — I've cancelled that. It's back in To-do if you want to pick it up \
+                     later.",
+                ),
+            ] {
+                let (runtime, _home) = runtime().await;
+                seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+                let root = asked_in_dm(&runtime).await;
+                let resolution = BlockerResolution {
+                    verdict,
+                    answer: String::new(),
+                    step: None,
+                };
+
+                if verdict == BlockerVerdict::Cancel {
+                    runtime
+                        .cancel_task_card("t-1", Some("dm:eng"), Some(root))
+                        .await
+                        .expect("cancels");
+                } else {
+                    runtime
+                        .resume_task_card("t-1", &resolution, Some("dm:eng"), Some(root))
+                        .await
+                        .expect("resumes");
+                }
+
+                let threaded: Vec<Option<crate::ports::types::EventSeq>> = dm_replies(&runtime)
+                    .await
+                    .into_iter()
+                    .filter(|(text, _)| text == expected)
+                    .map(|(_, parent)| parent)
+                    .collect();
+                assert_eq!(
+                    threaded,
+                    vec![Some(root)],
+                    "the {verdict:?} acknowledgement must hang off the question it answers"
+                );
+            }
+        }
+
+        /// A resume whose recorded anchor no longer exists still answers, in
+        /// the channel. A root that is gone threads nothing, and the
+        /// acknowledgement is owed either way.
+        #[tokio::test]
+        async fn a_resume_note_whose_anchor_is_gone_still_answers() {
+            use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
+
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            let resolution = BlockerResolution {
+                verdict: BlockerVerdict::Retry,
+                answer: String::new(),
+                step: None,
+            };
+
+            runtime
+                .resume_task_card(
+                    "t-1",
+                    &resolution,
+                    Some("dm:eng"),
+                    Some(crate::ports::types::EventSeq::new(9_999)),
+                )
+                .await
+                .expect("resumes");
+
+            let posted = dm_replies(&runtime).await;
+            assert_eq!(
+                posted,
+                vec![("Got it — picking that back up now.".to_string(), None)],
+                "an anchor that is gone falls back to the channel rather than swallowing the \
+                 acknowledgement"
             );
         }
 
