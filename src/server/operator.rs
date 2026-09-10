@@ -3502,7 +3502,11 @@ async fn chat_and_emit(
                 let message_id = accepted.message_seq.value().to_string();
                 let turn_id = accepted.turn_id.clone();
                 let posted = runtime
-                    .post_blocker_prompt(&desk, &prompt)
+                    .post_blocker_prompt(
+                        &desk,
+                        reply_thread(accepted.thread_root(), accepted.message_seq),
+                        &prompt,
+                    )
                     .await
                     .map_err(ApiError);
                 settle_chat_turn(&runtime, id, turn_id.as_deref(), posted.as_ref().err()).await;
@@ -10822,6 +10826,117 @@ mode = "full"
             moved.column,
             crate::ports::tasks::COLUMN_IN_PROGRESS,
             "the DM answer re-dispatched the paused card"
+        );
+    }
+
+    /// The ask-which question lands in the thread that asked it.
+    ///
+    /// When two blocked things share a DM and the reply names neither, the
+    /// runtime asks which one was meant. That question is an answer to the
+    /// operator's message, so it threads off it the way every other reply in
+    /// this handler does — otherwise the operator reads their own line in a
+    /// thread and the teammate's follow-up at the channel root, which is the
+    /// split this tier exists to close.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_ask_which_question_threads_off_the_reply_that_was_ambiguous() {
+        use crate::company::blocker_sender::BlockerSenderSignals;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = build_state_with_brain_and_manifest(
+            &home,
+            "running",
+            AppConfig::default(),
+            None,
+            roster_manifest(),
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        for (task, connection) in [("t-1", "connection:slack"), ("t-2", "connection:notion")] {
+            runtime
+                .park_blocker(
+                    &BlockerPayload {
+                        kind: BlockerKind::Infrastructure,
+                        source: BlockerSource::Provider,
+                        step: Some(BlockerStep::Task {
+                            task_id: task.to_string(),
+                        }),
+                        reason: format!("{connection} refused the call"),
+                        needed: "a working connection".to_string(),
+                        group_key: Some(connection.to_string()),
+                    },
+                    task,
+                    BlockerSenderSignals {
+                        started_by: None,
+                        owner_desk: None,
+                        assignee: Some("backend_engineer".to_string()),
+                    },
+                )
+                .await
+                .expect("parks the blocker into the teammate's DM");
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/companies/acme/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"chat":"dm:backend_engineer","text":"retry it"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored = runtime
+            .events
+            .read_from(
+                runtime.id(),
+                crate::ports::types::EventSeq::new(0),
+                usize::MAX,
+            )
+            .await
+            .expect("read events");
+        let asked = stored
+            .iter()
+            .find_map(|s| match &s.event {
+                crate::ports::types::CompanyEvent::OperatorMessage { chat, text, .. }
+                    if chat.as_deref() == Some("dm:backend_engineer") && text == "retry it" =>
+                {
+                    Some(s.seq)
+                }
+                _ => None,
+            })
+            .expect("the operator's ambiguous reply is journalled");
+        let prompt = stored
+            .iter()
+            .find_map(|s| match &s.event {
+                crate::ports::types::CompanyEvent::AgentReply {
+                    chat_id,
+                    text,
+                    parent,
+                    ..
+                } if chat_id == "dm:backend_engineer" && text.contains("Which") => {
+                    Some((text.clone(), *parent))
+                }
+                _ => None,
+            })
+            .expect("the runtime asks which of the two was meant");
+        assert_eq!(
+            prompt.1,
+            Some(asked),
+            "the ask-which question must hang off the reply that was ambiguous, not the \
+             channel root; prompt was {:?}",
+            prompt.0
         );
     }
 
