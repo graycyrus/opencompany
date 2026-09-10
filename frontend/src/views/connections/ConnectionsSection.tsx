@@ -1,5 +1,6 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { resolveConnectionPage } from "@/views/connection-pages";
+import { ApiKeyView } from "@/views/connections/ApiKeyView";
 import { HostingView } from "@/views/HostingView";
 import { InferenceView } from "@/views/InferenceView";
 import { McpServersView } from "@/views/McpServersView";
@@ -71,6 +72,9 @@ export function ConnectionsSection({ client, company, sub }: Props) {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {page === "api-key" && (
+        <ApiKeyView client={client} company={company} canManage={canManage} />
+      )}
       {page === "apps" && <OAuthView client={client} company={company} />}
       {page === "mcp" && <McpServersView client={client} company={company} />}
       {page === "inference" && <InferenceView client={client} company={company} />}

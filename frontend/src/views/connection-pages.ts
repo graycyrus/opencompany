@@ -15,6 +15,7 @@ import {
   Blocks,
   BrainCircuit,
   Globe,
+  KeyRound,
   LayoutGrid,
   Search,
   Sparkles,
@@ -64,6 +65,17 @@ import {
  * with an outside service at the other end of it.
  */
 export const CONNECTION_PAGES = [
+  {
+    // First, because it is the one every other page on this rail depends on: a
+    // company with no key can neither think nor connect anything, so a rail
+    // that opened on Apps was offering to connect Gmail to an account that did
+    // not exist yet. It is also the page an operator returns to for a reason
+    // none of the others cover — the balance ran out.
+    id: "api-key",
+    label: "API Key",
+    icon: KeyRound,
+    hint: "The account this company spends through",
+  },
   {
     id: "apps",
     label: "Apps",
