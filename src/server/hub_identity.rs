@@ -136,8 +136,22 @@ pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> Str
 /// give an application a key without a human copying one between two sites.
 pub fn key_grant_url(api_url: &str, callback_url: &str, challenge: &str, name: &str) -> String {
     format!(
-        "{}/auth/key?callback_url={}&code_challenge={}&code_challenge_method=S256&name={}",
+        "{}/auth/key?{}",
         api_url.trim_end_matches('/'),
+        key_grant_query(callback_url, challenge, name),
+    )
+}
+
+/// The grant parameters as one query string, without the endpoint.
+///
+/// Split out because the same parameters are read by two pages: the API's
+/// `GET /auth/key`, which acts on them, and the site's `/connect`, which shows
+/// a person who is asking and lets them pick a provider before handing off to
+/// exactly that endpoint ([`hub_account::connect_url`](crate::server::hub_account::connect_url)).
+/// Building them once means the challenge cannot differ between the two.
+pub fn key_grant_query(callback_url: &str, challenge: &str, name: &str) -> String {
+    format!(
+        "callback_url={}&code_challenge={}&code_challenge_method=S256&name={}",
         percent_encode(callback_url),
         percent_encode(challenge),
         percent_encode(name),
