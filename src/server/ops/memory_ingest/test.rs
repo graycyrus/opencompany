@@ -310,6 +310,11 @@ async fn a_request_over_the_body_limit_is_refused_as_413_not_malformed() {
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
 
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(
+        body["code"], "workspace_quota_exceeded",
+        "the body-limit refusal shares the platform's one \"too big\" code, not the generic \
+         invalid_request one: {body}"
+    );
     let message = body["error"].as_str().expect("an error message");
     assert!(
         message.contains("smaller batches"),
