@@ -32,6 +32,11 @@
 name = "retail-co"
 output = "A customer's order problem resolved by the desk that owns the remedy, with every read and write recorded as a tool call"
 human_role = "Read the transcript and say whether the desks did what the retail policy required"
+# The desk that owns the company's own line. Without this, General resolves to
+# no desk and a message there falls to a root agent picked by filename order.
+# The target is deliberately NOT called General: tinyhivemind refuses an
+# episode on a desk whose id or name is a General spelling.
+general_desk = "all_hands"
 
 [brain]
 mode = "hosted"
@@ -101,6 +106,41 @@ vision-v1 = "deepseek/deepseek-v4-flash"
 # the responder ladder picks `triage` because reading the order is what it is
 # for, and it refers the case on to whichever desk owns the remedy.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# The company's own line, as a real desk.
+#
+# The id is NOT a General spelling: tinyhivemind refuses a desk whose identity
+# collides with one (`reserved desk identity`), and a company that declares
+# `id = "general"` boots clean and then fails every message on its main thread.
+# The NAME is `General`, and `resolve_desk_id` matches a manifest desk by name
+# as well as by id — with no General guard on that pass — so the company's own
+# line resolves here instead of resolving to nothing.
+#
+# That is the actual defect this fixes. With general resolving to no desk, the
+# desk selector bails out and the message falls to a *root* agent chosen by
+# filename order: a delivered-order case was answered by `amendments`, the
+# pending-order seat, holding three write tools and no exchange tool.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "all_hands"
+name = "All Hands"
+description = "The company's own line. Everybody who works here."
+members = ["triage", "exchanges", "refunds", "cancellations", "amendments"]
+
+[group_chat.hive]
+enabled = true
+turn_budget = 12
+quorum = 2
+blind_round = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2
 
 # ---------------------------------------------------------------------------
 # Pending orders. Two seats, competing remedies.
