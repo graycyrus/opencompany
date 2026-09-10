@@ -113,7 +113,7 @@ describe("cyclic automation layout", () => {
   });
 
   it("breaks the authored return when a branch enters the loop's middle", () => {
-    // `agentic_math_lab/euler_solve`, shipped. `cost` fans out to BOTH `solve`
+    // `math_lab/euler_solve`, shipped. `cost` fans out to BOTH `solve`
     // and `approach`, so a DFS reaches `solve` first, descends to `agree`, and
     // finds `approach -> solve` closing onto the stack — an ordinary forward
     // edge. Breaking that one lays `approach` out AFTER `agree`, so the normal

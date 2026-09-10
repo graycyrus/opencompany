@@ -48,7 +48,7 @@ CORS in dev):
 
 ```sh
 # 1. From the repo root — a company on 127.0.0.1:8080
-cargo run --bin opencompany -- serve --company companies/agentic_marketing_agency
+cargo run --bin opencompany -- serve --company companies/marketing_agency
 
 # 2. From frontend/ — the console on http://localhost:5173
 npm install
@@ -324,7 +324,7 @@ turn, closed every card and reached a confidently wrong conclusion is green
 everywhere else here.
 
 `euler-live.spec.ts` closes that. It serves
-[`companies/agentic_math_lab`](../companies/agentic_math_lab) — a roster split
+[`companies/math_lab`](../companies/math_lab) — a roster split
 into decide / program / break, with no `web` and no `search` grant — states a
 Project Euler problem in the main line, dispatches whatever the orchestrator
 opens, keeps asking until the work settles, and then compares the integer the

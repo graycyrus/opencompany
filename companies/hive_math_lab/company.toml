@@ -1,6 +1,6 @@
 # The Agentic Math Lab, re-seated as one hive-mind desk.
 #
-# `companies/agentic_math_lab` splits the work across four one-member desks and
+# `companies/math_lab` splits the work across four one-member desks and
 # an orchestrator that hands it from one to the next. This bundle keeps the
 # same working roles — decide the approach, write the program, break the
 # result — and adds three more instruments the hand-off chain had no seat for

@@ -45,7 +45,7 @@ export interface SetupField {
 
 /** A company template this instance can be seeded from. */
 export interface SetupTemplate {
-  /** Stable preset slug, e.g. `agentic_marketing_agency`. */
+  /** Stable preset slug, e.g. `marketing_agency`. */
   id: string;
   /** Human-readable name. */
   name: string;

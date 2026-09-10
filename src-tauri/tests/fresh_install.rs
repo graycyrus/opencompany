@@ -27,7 +27,7 @@ use opencompany_desktop_lib::local::LocalHosts;
 /// The template the desktop used to seed without asking. It has to still be
 /// offered, or "the wizard opens instead" would be a downgrade rather than a
 /// choice.
-const STARTER_TEMPLATE: &str = "agentic_marketing_agency";
+const STARTER_TEMPLATE: &str = "marketing_agency";
 
 #[tokio::test]
 async fn a_fresh_install_opens_the_wizard_and_can_complete_it() {

@@ -31,14 +31,14 @@ import {
  */
 
 const TEMPLATE = {
-  id: "agentic_marketing_agency",
+  id: "marketing_agency",
   name: "Agentic Marketing Agency",
   agent_count: 8,
   output: "Campaigns across every channel",
 };
 
 const OTHER_TEMPLATE = {
-  id: "agentic_law_firm",
+  id: "law_firm",
   name: "Agentic Law Firm",
   agent_count: 5,
   output: "Filings and advice",

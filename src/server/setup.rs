@@ -121,7 +121,7 @@ pub struct FieldDto {
 /// A company template an instance can be seeded from.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TemplateDto {
-    /// The stable preset slug, e.g. `agentic_marketing_agency`.
+    /// The stable preset slug, e.g. `marketing_agency`.
     pub id: &'static str,
     /// The human-readable name.
     pub name: &'static str,

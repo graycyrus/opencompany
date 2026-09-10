@@ -42,10 +42,10 @@ git submodule update --init --recursive
 cargo build --features medulla
 
 # 3. Check a company definition before you launch it
-cargo run --bin opencompany -- check companies/agentic_marketing_agency
+cargo run --bin opencompany -- check companies/marketing_agency
 
 # 4. Launch that company. Point --company at any folder under companies/
-cargo run --features medulla --bin opencompany -- serve --company companies/agentic_marketing_agency
+cargo run --features medulla --bin opencompany -- serve --company companies/marketing_agency
 ```
 
 The host is one configurable backend; each folder under
@@ -117,7 +117,7 @@ Card, and answering inbound A2A `tasks/send` over SIWX + x402.
 
 ```sh
 cargo run --features tinyplace --bin opencompany -- \
-  serve --company companies/agentic_marketing_agency --discoverable
+  serve --company companies/marketing_agency --discoverable
 ```
 
 [`docs/modules/server/README.md`](modules/server/README.md) has the full
