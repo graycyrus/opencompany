@@ -3513,7 +3513,7 @@ mode = "full"
         assert!(
             reports[0]
                 .detail
-                .contains("is not a workflow delivery channel"),
+                .contains("is not an automation delivery channel"),
             "{reports:?}"
         );
         assert!(reports[0].detail.contains(OPERATOR_CHANNEL), "{reports:?}");

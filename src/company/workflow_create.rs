@@ -5023,7 +5023,7 @@ to = "done"
         assert!(
             problems[0]
                 .message
-                .contains("is not a workflow delivery channel"),
+                .contains("is not an automation delivery channel"),
             "{:?}",
             problems[0]
         );
@@ -5168,7 +5168,7 @@ to = "done"
         .expect_err("the courtesy pass must refuse what apply would refuse");
         assert!(
             err.to_string()
-                .contains("is not a workflow delivery channel"),
+                .contains("is not an automation delivery channel"),
             "{err}"
         );
 

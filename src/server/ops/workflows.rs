@@ -5895,7 +5895,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let message = json_body(response).await.to_string();
             assert!(
-                message.contains("is not a workflow delivery channel"),
+                message.contains("is not an automation delivery channel"),
                 "{message}"
             );
             assert!(message.contains("engineering"), "{message}");
@@ -5930,7 +5930,7 @@ mod tests {
                 body["problems"][0]["message"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("is not a workflow delivery channel"),
+                    .contains("is not an automation delivery channel"),
                 "{body}"
             );
         }
@@ -6015,7 +6015,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let message = json_body(response).await.to_string();
             assert!(
-                message.contains("is not a workflow delivery channel"),
+                message.contains("is not an automation delivery channel"),
                 "{message}"
             );
         }
@@ -6042,7 +6042,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let message = json_body(response).await.to_string();
             assert!(
-                message.contains("is not a workflow delivery channel"),
+                message.contains("is not an automation delivery channel"),
                 "{message}"
             );
             assert!(message.contains("operator"), "{message}");
@@ -11530,7 +11530,7 @@ label = "ok"
                         kind: "channel".to_string(),
                         target: Some("operator".to_string()),
                         status: crate::ports::DeliveryStatus::Failed,
-                        detail: "`operator` is not a workflow delivery channel".to_string(),
+                        detail: "`operator` is not an automation delivery channel".to_string(),
                         reason: crate::ports::DeliveryReason::ChannelNotWired,
                     }],
                     cancelled: false,
