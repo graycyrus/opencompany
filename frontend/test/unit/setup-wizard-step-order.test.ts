@@ -267,3 +267,48 @@ describe("the position survives the list changing under it", () => {
     expect(find("setup-advanced")).toBeNull();
   });
 });
+
+/**
+ * What the Business step asks for depends on whether anything will read it.
+ *
+ * `automate` and `teamHint` are the design brief: the first becomes a numbered
+ * job list the roster is designed against and checked for coverage, the second
+ * a request added on top. Neither is acted on without a model — the host falls
+ * back to a curated team matched on keywords, where the two score one point
+ * each against `industry`'s three.
+ *
+ * So a run with no model asks neither, rather than collecting a description of
+ * somebody's business under copy promising their team is built around it and
+ * then staffing them from a keyword match.
+ */
+describe("the questions a modelless run does not ask", () => {
+  it("asks only what kind of company it is when there is no model", async () => {
+    await show(clientWith(status()));
+    await skipModel();
+    await next(); // -> business
+
+    expect(find("setup-field-industry"), "the one question that still counts").toBeTruthy();
+    expect(find("setup-field-automate")).toBeNull();
+    expect(find("setup-field-teamHint")).toBeNull();
+  });
+
+  it("asks all three once a model answers for them", async () => {
+    // A passing test on the model step is what makes the design brief real, so
+    // this client has to answer the probe rather than the apply.
+    const client = {
+      scopeFor: () => "/api/v1/company",
+      get: async () => status(),
+      post: async (path: string) =>
+        path.endsWith("/inference/test")
+          ? { ok: true, baseUrl: "https://api.example/v1", model: "m" }
+          : { complete: true, config_path: "/data/config.toml", restart_required: [] },
+    } as unknown as OpenCompanyClient;
+    await show(client);
+    await fill("setup-field-key", "sk-works");
+    await click("setup-test-connection");
+    await next(); // -> business
+
+    expect(find("setup-field-automate")).toBeTruthy();
+    expect(find("setup-field-teamHint")).toBeTruthy();
+  });
+});

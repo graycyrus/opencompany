@@ -1127,6 +1127,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             }}
             onChange={setDraft}
             onEnter={advance}
+            modelless={tested.kind === "skipped"}
           />
         )}
 
@@ -2235,6 +2236,7 @@ function BusinessStep({
   onTemplate,
   onChange,
   onEnter,
+  modelless,
 }: {
   draft: SetupDraft;
   templates: SetupStatus["templates"];
@@ -2242,6 +2244,23 @@ function BusinessStep({
   onTemplate: (id: string) => void;
   onChange: (update: (d: SetupDraft) => SetupDraft) => void;
   onEnter: () => void;
+  /**
+   * Whether this company is being built without a model, which is what the
+   * other two questions need to be worth asking.
+   *
+   * They are the design brief: `automate` becomes a numbered job list the
+   * roster is designed against and checked for coverage, and `teamHint` is a
+   * request added on top of it. Neither happens without a model — the host
+   * falls back to a curated team matched on keywords, where `automate` and
+   * `teamHint` score one point each against `industry`'s three and nothing
+   * else reads them.
+   *
+   * So they are not asked. Asking somebody to describe the work they want
+   * taken off their plate, under copy promising their team is built around
+   * it, and then staffing them from a keyword match, is a worse answer than
+   * one fewer question.
+   */
+  modelless: boolean;
 }) {
   const jobs = jobItems(draft.automate);
 
@@ -2305,6 +2324,9 @@ function BusinessStep({
         )}
       </div>
 
+      {/* Both questions exist to brief a model. Without one they are asked and
+          then not acted on — see `modelless`. */}
+      {!modelless && (
       <div>
         <Label htmlFor="setup-automate" className="text-base font-medium leading-snug">
           What are you trying to automate?
@@ -2331,7 +2353,9 @@ function BusinessStep({
           </p>
         )}
       </div>
+      )}
 
+      {!modelless && (
       <div>
         <Label htmlFor="setup-teamHint" className="text-base font-medium leading-snug">
           Anyone in particular you need on the team?
@@ -2350,6 +2374,7 @@ function BusinessStep({
           onChange={(e) => onChange((d) => ({ ...d, teamHint: e.target.value }))}
         />
       </div>
+      )}
     </div>
   );
 }
