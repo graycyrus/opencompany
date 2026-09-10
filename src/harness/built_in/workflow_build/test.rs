@@ -1482,7 +1482,7 @@ async fn a_proposal_naming_an_unwired_channel_settles_to_todo() {
     );
     let note = after.note.unwrap_or_default();
     assert!(
-        note.contains("is not a workflow delivery channel"),
+        note.contains("is not an automation delivery channel"),
         "the destination problem is named on the card: {note}"
     );
     assert!(
