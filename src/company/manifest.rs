@@ -2309,6 +2309,31 @@ mod tests {
         assert!(problems.iter().any(|p| p.contains("5 fields")));
     }
 
+    /// `parse_usd` rejects negative amounts by construction (`amount >= 0.0`),
+    /// but the only existing skill-price test exercises the non-numeric edge
+    /// (`"free"`). A negative decimal string parses fine as an `f64` and would
+    /// slip through a check that only asked "is this a number".
+    #[test]
+    fn rejects_a_negative_skill_price() {
+        let manifest = parse(
+            r#"
+            [company]
+            name = "X"
+            handle = "x"
+            [place]
+            discoverable = true
+            skills = [{ id = "seo.audit", price_usd = "-5.00" }]
+            "#,
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("price_usd") && p.contains("-5.00")),
+            "{problems:?}"
+        );
+    }
+
     #[test]
     fn rejects_a_duplicate_skill_id() {
         let manifest = parse(
