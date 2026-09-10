@@ -21,8 +21,8 @@ import { expect, test } from "@playwright/test";
  * `webServer` override here beyond the shared one).
  */
 
-async function openGeneralSettings(page: import("@playwright/test").Page) {
-  await page.goto("/#/settings/general");
+async function openApprovalsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/#/settings/approvals");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
@@ -35,7 +35,7 @@ async function openGeneralSettings(page: import("@playwright/test").Page) {
 test("the Approvals card states plainly that policy-generated approvals are disabled", async ({
   page,
 }) => {
-  await openGeneralSettings(page);
+  await openApprovalsSettings(page);
   const banner = page.getByTestId("policy-hitl-status");
   await expect(banner).toBeVisible({ timeout: 30_000 });
   await expect(banner).toContainText("Policy-based approval prompts are disabled");
@@ -48,7 +48,7 @@ test("the Approvals card states plainly that policy-generated approvals are disa
 test("the spend cap and always-ask fields say they are inactive and cannot be saved", async ({
   page,
 }) => {
-  await openGeneralSettings(page);
+  await openApprovalsSettings(page);
   await expect(page.getByText("Spend approval threshold (inactive)")).toBeVisible({
     timeout: 30_000,
   });
