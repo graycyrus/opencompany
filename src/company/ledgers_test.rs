@@ -330,6 +330,42 @@ async fn only_a_person_may_delete_a_row() {
     );
 }
 
+/// A second delete of the same id must stay the quiet `Ok(false)`
+/// `purge_entry` already reports for "nothing there" — never an error, and
+/// never a second entry in the log. Nothing before this called `delete_entry`
+/// twice on one id.
+#[tokio::test]
+async fn deleting_an_already_deleted_row_reports_false_not_an_error() {
+    let (ctx, runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
+        .await
+        .expect("recorded");
+
+    assert!(
+        delete_entry(&ctx, &spec, &person(), "r1")
+            .await
+            .expect("the first delete removes the row")
+    );
+    assert!(
+        !delete_entry(&ctx, &spec, &person(), "r1")
+            .await
+            .expect("deleting an already-deleted row is not an error"),
+        "a second delete of the same id must report false, not recreate anything"
+    );
+
+    let events = runtime
+        .ledgers()
+        .events(runtime.id(), "hazards")
+        .await
+        .expect("events");
+    assert!(
+        events.is_empty(),
+        "the row's event was purged by the first delete; a no-op second \
+         delete must not resurrect it: {events:?}"
+    );
+}
+
 /// The runtime is not exempt either: a sweep that could delete rows is the same
 /// loss with nobody to ask about it.
 #[tokio::test]
@@ -370,6 +406,46 @@ async fn only_a_person_may_retire_a_ledger_and_the_rows_survive_it() {
         .await
         .expect("events");
     assert_eq!(events.len(), 1, "the log survives the retirement");
+}
+
+/// A second `retire` of the same slug must stay a clean [`NotFound`], not
+/// panic, not silently succeed, and not touch the rows the first retirement
+/// already left alone.
+///
+/// [`NotFound`]: crate::error::OpenCompanyError::NotFound
+#[tokio::test]
+async fn retiring_an_already_retired_ledger_is_refused_not_silently_repeated() {
+    let (ctx, runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
+        .await
+        .expect("recorded");
+
+    retire(&ctx, &person(), "hazards", false)
+        .await
+        .expect("the first retirement succeeds");
+
+    let error = retire(&ctx, &person(), "hazards", false)
+        .await
+        .expect_err("a second retirement of the same slug must be refused");
+    assert!(
+        matches!(error, OpenCompanyError::NotFound(_)),
+        "a repeat retirement must be reported as not-found, not any other \
+         error shape: {error:?}"
+    );
+
+    // The rows the first retirement left in place are still there — the
+    // refused second call did not fall through to a purge.
+    let events = runtime
+        .ledgers()
+        .events(runtime.id(), "hazards")
+        .await
+        .expect("events");
+    assert_eq!(
+        events.len(),
+        1,
+        "the refused repeat retirement must not have purged anything"
+    );
 }
 
 #[tokio::test]

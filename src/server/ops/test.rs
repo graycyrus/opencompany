@@ -160,6 +160,36 @@ async fn verify_without_resolver_is_404_not_wired() {
     assert_eq!(value["code"], "not_wired");
 }
 
+/// The other refusal on this route, and the one nothing here had driven yet:
+/// a resolver *is* wired, but no domain was ever `PUT`. `verify_without_resolver_is_404_not_wired`
+/// covers the missing-dependency branch and `verify_with_resolver_marks_verified`
+/// covers the happy path; this is `run_verify`'s own `stored.is_none()` guard,
+/// which is neither of those.
+#[tokio::test]
+async fn verify_with_no_domain_configured_is_400() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let resolver = Arc::new(StaticDnsResolver::fully_verifying("acme.com"));
+    let state = state_with(&home, ConnectionsRuntime::new().with_dns(resolver)).await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/domain/verify")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let value = body_json(response).await;
+    assert_eq!(value["code"], "invalid_request");
+    assert_eq!(value["error"], "invalid request: no domain configured");
+}
+
 #[tokio::test]
 async fn verify_with_resolver_marks_verified() {
     let home_dir = home();
