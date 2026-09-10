@@ -1406,7 +1406,12 @@ export function RoomView({
   const episodes = useMemo(
     () =>
       foldEpisodes(
-        entries.map((entry) => entry.message),
+        // The complete transcript, not `entries` — `buildTimeline` folds
+        // thread replies out of the main timeline, but hive turns and
+        // `hive-report` messages can themselves be replies to the triggering
+        // operator message, and `entries` would then miss those rows and
+        // render no episode or an incomplete one.
+        messages,
         // The seat count the host derives its quorum and turn budget from. Only
         // a hint: with no membership the fold falls back to its own default and
         // reports the number as derived rather than asserting one it cannot know.
@@ -1416,7 +1421,7 @@ export function RoomView({
           turnBudget: effectiveHive?.turnBudget,
         },
       ),
-    [entries, channel?.memberIds, effectiveHive],
+    [messages, channel?.memberIds, effectiveHive],
   );
 
   const items = useMemo(
