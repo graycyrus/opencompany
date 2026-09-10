@@ -57,7 +57,7 @@ import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { personAvatar } from "@/lib/person";
 import { useAskerNames } from "@/components/approval-card";
 import { useRoomRailSlot } from "@/components/room-rail";
-import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
+import { AddMemberDialog, type NewMemberFields } from "./room/AddMemberDialog";
 import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
 import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
