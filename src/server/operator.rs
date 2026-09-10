@@ -5828,6 +5828,7 @@ mod test {
     use crate::company::CompanyManifest;
     use crate::ports::tasks::TaskTitle;
     use crate::ports::types::CompanyRecord;
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
     use crate::store::FsCompanyStore;
@@ -12119,6 +12120,61 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// POL-011 (INPUT). `{aid}` is an opaque path segment carried straight
+    /// into `ApprovalId::new` with no format check of its own — the id space
+    /// is "whatever a park was given", so the whole of input-safety here is
+    /// that an adversarial or malformed segment resolves to the same ordinary
+    /// 404 an unknown id does, never a panic or a 500.
+    #[tokio::test]
+    async fn extending_a_malformed_approval_id_is_404_not_a_crash() {
+        fn percent_encode_path_segment(raw: &str) -> String {
+            let mut out = String::new();
+            for byte in raw.bytes() {
+                match byte {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(byte as char);
+                    }
+                    _ => out.push_str(&format!("%{byte:02X}")),
+                }
+            }
+            out
+        }
+
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let app = router(state);
+
+        let hostile_ids = [
+            "../../../etc/passwd".to_string(),
+            "🎉💥-not-an-approval".to_string(),
+            "a".repeat(10_000),
+            "'; DROP TABLE approvals; --".to_string(),
+            "appr\u{0}-null-byte".to_string(),
+        ];
+        for raw in hostile_ids {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/v1/company/approvals/{}/extend",
+                            percent_encode_path_segment(&raw)
+                        ))
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "a malformed id ({raw:?}) must answer the same 404 an unknown id does, not crash"
+            );
+        }
+    }
+
     /// APPR-004: extend must be able to win a race the sweep has not yet run —
     /// an approval whose deadline has already passed but that is still
     /// physically parked (nothing has swept it out of the gate) must still be
@@ -15045,6 +15101,214 @@ mode = "full"
         );
     }
 
+    fn racing_standing_grant(id: &str) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new(id),
+            agent: "ops".into(),
+            workflow: None,
+            tool: "workspace_write".into(),
+            verdict: Verdict::Approve,
+            granted_by: Actor {
+                kind: ActorKind::User,
+                id: "user-7".into(),
+            },
+            approval_id: ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: None,
+        }
+    }
+
+    /// GRANT-012 (CONC). Two browsers — or one double-click — racing a
+    /// `DELETE` on the same grant id must not both report success:
+    /// `revoke_standing` is a plain `HashMap::remove`, so exactly one caller
+    /// takes the grant and every other must see the ordinary "already gone"
+    /// 404 a second revoke gets, not a duplicate 204 or a panic on a double
+    /// free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_simultaneous_revokes_of_the_same_grant_settle_once() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        runtime
+            .grants
+            .grant_standing(racing_standing_grant("g-race"));
+
+        let app = router(state);
+        let racers: Vec<_> = (0..8)
+            .map(|_| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    app.oneshot(
+                        Request::builder()
+                            .method("DELETE")
+                            .uri("/api/v1/company/grants/g-race")
+                            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                })
+            })
+            .collect();
+
+        let mut statuses = Vec::new();
+        for racer in racers {
+            statuses.push(
+                racer
+                    .await
+                    .expect("the request task did not panic")
+                    .status(),
+            );
+        }
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| **s == StatusCode::NO_CONTENT)
+                .count(),
+            1,
+            "exactly one simultaneous revoke may take the grant, got {statuses:?}"
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| **s == StatusCode::NOT_FOUND)
+                .count(),
+            7,
+            "every loser must see the ordinary already-gone 404, got {statuses:?}"
+        );
+        assert_eq!(runtime.grants.standing().len(), 0);
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every `StandingGrantRevoked` line and passes everything else through.
+    /// Targets the **direct** `DELETE {scope}/grants/{gid}` append —
+    /// distinct from `runtime::cycle::test::FailStandingRevokeStore`, which
+    /// pins the mint/revoke *reconcile* path's own (oppositely ordered)
+    /// append.
+    struct RefusingGrantRevokeStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingGrantRevokeStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if line.contains("StandingGrantRevoked") {
+                return Err(OpenCompanyError::Store(
+                    "RefusingGrantRevokeStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// GRANT-012 (FAIL). `revoke_standing_grant` takes the grant out of the
+    /// live set **before** its durable journal append — the opposite order
+    /// from minting, and on purpose (see the function's own doc): a crash
+    /// here must fail toward no-permission, never toward a permission nobody
+    /// can see is still live. When the append then fails, the caller is told
+    /// the revoke failed, but the grant must already be gone from the live
+    /// set that actually governs future calls.
+    #[tokio::test]
+    async fn a_failed_revoke_append_still_removes_the_grant_from_the_live_set() {
+        let home_dir = home();
+        let store = std::sync::Arc::new(RefusingGrantRevokeStore {
+            inner: crate::ports::journal::MemoryJournalStore::default(),
+        });
+        let m = manifest();
+        let id = CompanyId::new("acme");
+        let fs_store = FsCompanyStore::new(home_dir.path().to_path_buf());
+        {
+            use crate::ports::store::CompanyStore;
+            fs_store
+                .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: m.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                    created_at_millis: None,
+                })
+                .await
+                .unwrap();
+        }
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), m)
+            .with_id(id.clone())
+            .with_journal_store(store)
+            .build()
+            .await
+            .unwrap();
+        let runtime = Arc::new(runtime);
+        runtime
+            .grants
+            .grant_standing(racing_standing_grant("g-append-fail"));
+
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id.clone(), runtime.clone());
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/grants/g-append-fail")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the forced append failure must surface"
+        );
+        assert_eq!(
+            runtime.grants.standing().len(),
+            0,
+            "the live-set removal must land even though the durable record of it failed — \
+             fail toward no permission, never toward one nobody can see is still granted"
+        );
+    }
+
     // ---------------------------------------------------------------------
     // Issue #469 — a turn that parks several approvals.
     //
@@ -17418,5 +17682,345 @@ mode = "full"
             1,
             "and must not buy a second permission"
         );
+    }
+
+    // -- resolve_attachments: IDOR-safe re-resolution, the attachment cap, --
+    // -- bad-id/folder refusal, and dedup (issue #1682) ----------------------
+
+    fn attachment_binary_node(id: &str, name: &str, mime: &str) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1_700_000_000_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: Some(mime.to_string()),
+            size: None,
+            sha256: None,
+            adopted: false,
+        }
+    }
+
+    fn attachment_folder_node(id: &str, name: &str) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: NodeKind::Folder,
+            parent_id: None,
+            updated_at_millis: 1_700_000_000_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+            adopted: false,
+        }
+    }
+
+    fn attachment_note_node(id: &str, name: &str) -> WorkspaceNode {
+        WorkspaceNode {
+            kind: NodeKind::File,
+            ..attachment_folder_node(id, name)
+        }
+    }
+
+    /// Two companies on one host, each with its own signed-in admin — the
+    /// shape a cross-company (IDOR) question needs, since a single-company
+    /// host cannot tell "refused for crossing a boundary" from "there was
+    /// nothing else to reach". Mirrors
+    /// `graphql::bridge_scope_test::state_with_two_companies`.
+    async fn state_with_two_companies(home: &std::path::Path) -> AppState {
+        use crate::ports::store::CompanyStore;
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let state = AppState::new(AppConfig::default());
+        for name in ["acme", "globex"] {
+            let id = CompanyId::new(name);
+            let m = manifest();
+            store
+                .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: m.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                    created_at_millis: None,
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), m)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            state.registry().insert(id, Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, name).await;
+        }
+        state
+    }
+
+    fn chat_with_attachments(company: &str, attachments: Vec<String>) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/companies/{company}/chat"))
+            .header("cookie", crate::server::test_support::fixed_cookie(company))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "text": "see attached", "attachments": attachments })
+                    .to_string(),
+            ))
+            .unwrap()
+    }
+
+    async fn last_operator_message_attachments(
+        runtime: &Arc<CompanyRuntime>,
+        company: &CompanyId,
+    ) -> Vec<Attachment> {
+        let events = runtime
+            .events()
+            .read_from(company, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        events
+            .into_iter()
+            .rev()
+            .find_map(|stored| match stored.event {
+                CompanyEvent::OperatorMessage { attachments, .. } => Some(attachments),
+                _ => None,
+            })
+            .expect("an operator message was journaled")
+    }
+
+    /// AUTH (IDOR). The client sends a `node_id` only; the host re-resolves it
+    /// within the *addressed* company's own tree rather than trusting the
+    /// caller. A real node minted under the exact same id in a different
+    /// company must not resolve through this one — proving the lookup is
+    /// scoped per company, not a global id space a guessable ULID could walk.
+    #[tokio::test]
+    async fn a_chat_attachment_cannot_cross_a_company_boundary() {
+        let home_dir = home();
+        let state = state_with_two_companies(home_dir.path()).await;
+        let acme = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let globex = state.registry().get(&CompanyId::new("globex")).unwrap();
+
+        // The exact same node id, minted for real, but only in globex.
+        let shared_id = "n-cross-company";
+        globex
+            .workspace()
+            .create_binary(
+                &CompanyId::new("globex"),
+                &attachment_binary_node(shared_id, "globex-only.png", "image/png"),
+                b"globex bytes",
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(chat_with_attachments("acme", vec![shared_id.to_string()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a node real in another company must not resolve through this one's chat"
+        );
+        assert!(
+            acme.events()
+                .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+                .await
+                .unwrap()
+                .iter()
+                .all(|stored| !matches!(stored.event, CompanyEvent::OperatorMessage { .. })),
+            "a refused attachment must not journal a message with the wrong list"
+        );
+    }
+
+    /// INPUT. An id naming nothing in this company's tree, and an id naming a
+    /// folder rather than a file, are both `400`s — but a genuine non-binary
+    /// **file** (a text note) is not: only the shape actually rejected is
+    /// rejected.
+    #[tokio::test]
+    async fn a_chat_attachment_refuses_an_unknown_id_and_a_folder_but_admits_a_note() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = CompanyId::new("acme");
+        runtime
+            .workspace()
+            .create(&id, &attachment_folder_node("f-1", "reports"), None)
+            .await
+            .unwrap();
+        runtime
+            .workspace()
+            .create(
+                &id,
+                &attachment_note_node("n-1", "notes.md"),
+                Some("just a note"),
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+
+        let unknown = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", vec!["does-not-exist".into()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            unknown.status(),
+            StatusCode::BAD_REQUEST,
+            "an id naming nothing in the tree must be refused"
+        );
+
+        let folder = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", vec!["f-1".into()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            folder.status(),
+            StatusCode::BAD_REQUEST,
+            "a folder id must be refused — it is not a file"
+        );
+
+        let admitted = app
+            .oneshot(chat_with_attachments("acme", vec!["n-1".into()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            admitted.status(),
+            StatusCode::OK,
+            "a genuine non-binary file (a note) must still resolve"
+        );
+        let attachments = last_operator_message_attachments(&runtime, &id).await;
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].node_id, "n-1");
+    }
+
+    /// LIMIT. `MAX_CHAT_ATTACHMENTS` (20) is a hard cap on one message: one
+    /// over is refused before any tree scan or extraction runs, and exactly
+    /// at the cap is still ordinary, successful traffic.
+    #[tokio::test]
+    async fn a_chat_message_may_carry_at_most_twenty_attachments() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = CompanyId::new("acme");
+        let mut ids = Vec::new();
+        for n in 0..21 {
+            let node_id = format!("n-{n}");
+            runtime
+                .workspace()
+                .create_binary(
+                    &id,
+                    &attachment_binary_node(
+                        &node_id,
+                        &format!("f{n}.bin"),
+                        "application/octet-stream",
+                    ),
+                    b"x",
+                )
+                .await
+                .unwrap();
+            ids.push(node_id);
+        }
+
+        let app = router(state);
+
+        let over_cap = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", ids.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            over_cap.status(),
+            StatusCode::BAD_REQUEST,
+            "21 attachments must be refused before any of them are resolved"
+        );
+
+        let at_cap = ids[..20].to_vec();
+        let ok = app
+            .oneshot(chat_with_attachments("acme", at_cap))
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "exactly 20 attachments is still ordinary traffic, not the refused shape"
+        );
+        let attachments = last_operator_message_attachments(&runtime, &id).await;
+        assert_eq!(attachments.len(), 20);
+    }
+
+    /// BOUND. A repeated id collapses to exactly one resolved attachment — and
+    /// the cap is measured against the *raw* list the client sent, before
+    /// dedup, so a client cannot smuggle an over-cap request by repeating one
+    /// id past the limit and relying on dedup to shrink it back down.
+    #[tokio::test]
+    async fn a_chat_attachment_id_repeated_resolves_once_and_the_cap_counts_raw_entries() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = CompanyId::new("acme");
+        runtime
+            .workspace()
+            .create_binary(
+                &id,
+                &attachment_binary_node("n-dup", "one.png", "image/png"),
+                b"one",
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+
+        // 21 copies of the same id: one unique attachment after dedup, but the
+        // raw count is still over MAX_CHAT_ATTACHMENTS.
+        let over_cap_by_repetition = vec!["n-dup".to_string(); 21];
+        let refused = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", over_cap_by_repetition))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.status(),
+            StatusCode::BAD_REQUEST,
+            "the cap must count the raw list the client sent, not the deduplicated one"
+        );
+
+        // Comfortably under the cap, repeated three times: dedup must collapse
+        // it to exactly one resolved attachment.
+        let repeated = vec!["n-dup".to_string(); 3];
+        let ok = app
+            .oneshot(chat_with_attachments("acme", repeated))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let attachments = last_operator_message_attachments(&runtime, &id).await;
+        assert_eq!(
+            attachments.len(),
+            1,
+            "a repeated id must resolve to exactly one attachment, not one per repetition"
+        );
+        assert_eq!(attachments[0].node_id, "n-dup");
     }
 }
