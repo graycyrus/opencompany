@@ -135,3 +135,49 @@ describe("a query whose spacing does not match the text's", () => {
     expect(excerpt.slice(range[0], range[1])).toBe("foo bar");
   });
 });
+
+/**
+ * Folding has to do both jobs at once: match regardless of case, and hand back
+ * offsets into the string that will be rendered. The first attempt at the
+ * Unicode fix did the second by giving up the first (CodeRabbit on #2245).
+ */
+describe("a term whose own case folding expands", () => {
+  it("still matches when the match itself contains the character", () => {
+    // `"İ".toLowerCase()` is two code units. Refusing to fold it keeps offsets
+    // honest and makes the word case-SENSITIVE, so this stopped matching.
+    expect(score("İstanbul", "istanbul")).toBeGreaterThan(0);
+    expect(matches("İstanbul", "istanbul")).toBe(true);
+  });
+
+  it("marks the match in the original string, not one character off", () => {
+    const text = "İstanbul";
+    const [range] = matchRanges(text, "istanbul");
+    expect(text.slice(range[0], range[1])).toBe("İstanbul");
+  });
+
+  it("keeps offsets right for a match after an expanding character", () => {
+    const text = "İstanbul box";
+    const [range] = matchRanges(text, "BOX");
+    expect(text.slice(range[0], range[1])).toBe("box");
+  });
+
+  it("does not measure a surrogate pair in halves", () => {
+    const text = "🕯 candle";
+    const [range] = matchRanges(text, "candle");
+    expect(text.slice(range[0], range[1])).toBe("candle");
+  });
+});
+
+describe("accents, which normalising makes free", () => {
+  it("finds an accented word from an unaccented query, and marks it whole", () => {
+    expect(score("café", "cafe")).toBeGreaterThan(0);
+    const text = "the café is open";
+    const [range] = matchRanges(text, "cafe");
+    // The offsets still index the original, accent and all.
+    expect(text.slice(range[0], range[1])).toBe("café");
+  });
+
+  it("works in the other direction too", () => {
+    expect(matches("cafe society", "café")).toBe(true);
+  });
+});

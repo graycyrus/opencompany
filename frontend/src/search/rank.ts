@@ -22,13 +22,14 @@ import type { MatchRange } from "./types";
 export function matchRanges(text: string, term: string): MatchRange[] {
   if (!term || !text) return [];
   const haystack = fold(text);
-  const needle = fold(term);
+  const needle = fold(term).folded;
   const ranges: MatchRange[] = [];
   let from = 0;
   for (;;) {
-    const at = haystack.indexOf(needle, from);
+    const at = haystack.folded.indexOf(needle, from);
     if (at === -1) break;
-    ranges.push([at, at + needle.length]);
+    // Mapped back, so the caller slices the string it will actually render.
+    ranges.push([haystack.at[at], haystack.at[at + needle.length]]);
     from = at + needle.length;
     // A pathological term (one character, long text) would otherwise build a
     // range per character. Nothing on screen shows more than a few.
@@ -41,29 +42,57 @@ export function matchRanges(text: string, term: string): MatchRange[] {
 const MAX_RANGES = 20;
 
 /**
- * Case folded **without changing length**, so an offset into the result is an
- * offset into the original.
+ * Case folded, with the way back to the original's offsets.
  *
- * `String.prototype.toLowerCase` is not length-preserving: `"İ".toLowerCase()`
- * is two code units, so every index after one drifts by one and a highlight
- * lands a character late — `İstanbul box` highlighting `ox`. Folding a unit at
- * a time and keeping any that does not fold to exactly one unit costs those
- * few characters their case-insensitivity, which is a far smaller wrong than
- * marking the wrong letters.
+ * `String.prototype.toLowerCase` is not length-preserving — `"İ".toLowerCase()`
+ * is two code units — so an index into the folded string is not an index into
+ * the text the operator reads. Left alone that drifts a highlight one character
+ * late (`İstanbul box` marking `ox`); *refusing* to fold those characters, as
+ * this first did, instead makes them case-sensitive, so `İstanbul` stops
+ * matching `istanbul` altogether.
+ *
+ * So neither: fold everything, and carry `at[i]` — the original offset that
+ * folded character `i` came from. One trailing entry for the end, so a range's
+ * exclusive end maps too.
  */
-function fold(value: string): string {
+function fold(value: string): { folded: string; at: number[] } {
   let folded = "";
-  for (const unit of value) {
-    const lower = unit.toLowerCase();
-    folded += lower.length === unit.length ? lower : unit;
+  const at: number[] = [];
+  let index = 0;
+  // By code point, not by unit: a surrogate pair is one character and must not
+  // be folded or measured in halves.
+  for (const character of value) {
+    // Lowercased, then decomposed, then stripped of the combining marks that
+    // decomposition exposes. All three are needed for one word to match
+    // itself: `"İ".toLowerCase()` is `i` plus a combining dot, so `İstanbul`
+    // never matched `istanbul` — not here, and not under the plain
+    // `toLowerCase` this replaced. Accents fall out of the same pass, so
+    // `cafe` now finds `café`, which is the behaviour a search box is expected
+    // to have anyway.
+    const normalized = character
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(COMBINING_MARKS, "");
+    for (let i = 0; i < normalized.length; i += 1) at.push(index);
+    folded += normalized;
+    index += character.length;
   }
-  return folded;
+  at.push(value.length);
+  return { folded, at };
 }
+
+/**
+ * The marks NFD splits off a composed character.
+ *
+ * Dropped rather than kept so that a character and its decomposition compare
+ * equal — which is the whole point of normalising before a substring search.
+ */
+const COMBINING_MARKS = /\p{M}/gu;
 
 /** Whether `text` contains `term` at all, case-insensitively. */
 export function matches(text: string, term: string): boolean {
   if (!term) return true;
-  return text.toLowerCase().includes(term.toLowerCase());
+  return fold(text).folded.includes(fold(term).folded);
 }
 
 /**
@@ -85,8 +114,8 @@ export function matches(text: string, term: string): boolean {
  */
 export function score(text: string, term: string): number {
   if (!term) return 1;
-  const haystack = fold(text);
-  const needle = fold(term);
+  const haystack = fold(text).folded;
+  const needle = fold(term).folded;
   const at = haystack.indexOf(needle);
   if (at === -1) return 0;
 
@@ -142,7 +171,11 @@ export function excerptAround(
     };
   }
 
-  const at = fold(collapsed).indexOf(fold(term));
+  // Found in the folded string, then mapped back: every slice below indexes
+  // `collapsed`, and the two only share offsets while nothing expanded.
+  const haystack = fold(collapsed);
+  const foundAt = haystack.folded.indexOf(fold(term).folded);
+  const at = foundAt === -1 ? -1 : haystack.at[foundAt];
   if (at === -1) {
     return {
       excerpt: collapsed.length > width ? `${collapsed.slice(0, width)}…` : collapsed,

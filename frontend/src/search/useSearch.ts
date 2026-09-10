@@ -44,8 +44,21 @@ import { RESULT_LABEL, RESULT_ORDER, type ResultGroup, type SearchResult } from 
  */
 const DEBOUNCE_MS = 160;
 
-/** How much of a conversation to read when searching inside it. */
-const HISTORY_LIMIT = 500;
+/**
+ * How much of a conversation to read when searching inside it.
+ *
+ * Fetched a page at a time, because the host clamps every request to
+ * `CHAT_HISTORY_PAGE_LIMIT` (200, `src/server/chat_history.rs`) — so asking for
+ * 500 silently returned the newest 200 and reported "Nothing matched" for
+ * anything older, which is the one answer a search must never give wrongly.
+ *
+ * Bounded rather than exhaustive: a search is not an export, and a person
+ * waiting on a modal will not wait out a year of a busy channel. When the cap
+ * is reached the older messages are genuinely unsearched — the honest fix for
+ * that is a host-side message search, not more pages here.
+ */
+const HISTORY_PAGE = 200;
+const HISTORY_PAGES = 5;
 
 /** What the modal needs to draw itself. */
 export interface SearchState {
@@ -102,11 +115,18 @@ export function useSearch(
     void Promise.allSettled([client.listDesks(company), client.listTeam(company)]).then(
       ([deskResult, teamResult]) => {
         if (cancelled) return;
-        loadedFor.current = { client, company };
         // Settled rather than awaited together: a host with no `.../desks` route
         // still has a roster, and one failure should not empty both lists.
         if (deskResult.status === "fulfilled") setDesks(deskResult.value.map(deskFromDto));
         if (teamResult.status === "fulfilled") setMembers(teamResult.value.map(fromDto));
+        // Marked loaded only when both answered. Recording the scope on a
+        // partial read would make one transient failure permanent for the rest
+        // of the session: every later opening returns at the guard above, so a
+        // failed roster read leaves no agents — and with them no `@` scope that
+        // can resolve — until the console is reloaded.
+        if (deskResult.status === "fulfilled" && teamResult.status === "fulfilled") {
+          loadedFor.current = { client, company };
+        }
       },
     );
     return () => {
@@ -142,8 +162,7 @@ export function useSearch(
 
       if (isScopedMessageSearch(query) && scoped) {
         setLoading(true);
-        void client
-          .getChatHistory(scoped.threadId, company, { limit: HISTORY_LIMIT })
+        void readConversation(client, company, scoped.threadId)
           .then((rows) => {
             if (!current()) return;
             setMessages({ context: scoped.context, rows });
@@ -203,6 +222,36 @@ export function useSearch(
   }, [desks, members, messages, files, query]);
 
   return { groups, loading, members, desks };
+}
+
+/**
+ * As much of one conversation as a search is willing to wait for.
+ *
+ * Walks the `before` cursor, which the host keys on a message's sequence — the
+ * bare id it answers with. Stops early on a short page, because that is the
+ * start of the conversation and there is nothing behind it.
+ */
+async function readConversation(
+  client: OpenCompanyClient,
+  company: string | null,
+  threadId: string,
+): Promise<ChatHistoryMessageDto[]> {
+  const all: ChatHistoryMessageDto[] = [];
+  let before: string | undefined;
+  for (let page = 0; page < HISTORY_PAGES; page += 1) {
+    const rows = await client.getChatHistory(threadId, company, {
+      before,
+      limit: HISTORY_PAGE,
+    });
+    if (rows.length === 0) break;
+    // Pages arrive oldest-first within themselves and each page is older than
+    // the last, so earlier pages go in front.
+    all.unshift(...rows);
+    if (rows.length < HISTORY_PAGE) break;
+    before = rows[0]?.id;
+    if (!before) break;
+  }
+  return all;
 }
 
 /** A resolved scope: which conversation to read, and what to call it. */
