@@ -2563,6 +2563,42 @@ export function RoomView({
   }
 
   /**
+   * Put an agent already on the roster onto this channel's desk (issue
+   * #2224) — the counterpart to `removeMember` above, not a variant of
+   * `addMember`, which creates a brand-new teammate. `activeIsDesk` gates
+   * `MembersPane`'s own "add existing" affordance, so `active.id` is a real
+   * desk id by the time this runs; the check here is defensive, not load
+   * bearing.
+   *
+   * `reloadDirectory` alone does not move the added agent into "In this
+   * channel": it only refetches the `@mention` picker's directory.
+   * `channelMembers`/`others` come from `inChannel`/`outsideChannel`, which
+   * are derived from `desks` — so this also calls `loadDesks`, the same
+   * function every desk-membership mutation on the org chart already
+   * refetches through after `addDeskMember`/`removeDeskMember`. Confirmed
+   * safe to call on a plain revisit, not just a scope change: `loadDesks`'s
+   * own comment says it blanks the list only when the client or company
+   * changed, never on a revisit — so this does not flash the pane empty.
+   */
+  async function addExistingMember(agentId: string) {
+    if (!activeIsDesk) return;
+    try {
+      await client.addDeskMember(active.id, agentId, company);
+      void reloadDirectory();
+      void loadDesks();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // The one 409 this route answers: already a member. Reached only by
+        // a race with another tab or operator — the row that triggered this
+        // is already gone from "Everyone else" on the next reload.
+        toast.error("Already on this channel.");
+      } else {
+        toast.error(error instanceof Error ? error.message : "Couldn't add agent.");
+      }
+    }
+  }
+
+  /**
    * The rail's create affordance (issue #1835) — or `undefined`, which is the
    * rule this codebase follows for a control that would be refused: absent,
    * not disabled. A starter roster (`!fromHost`) has no saved teammates to
@@ -3086,6 +3122,15 @@ export function RoomView({
                     if (member) void removeMember(member);
                   }}
                   onAdd={() => setAddOpen(true)}
+                  // `activeIsDesk`, not "`channelMembers` is non-null": a DM
+                  // has real (non-null) channel membership too — one row,
+                  // itself — and is not a desk. `addDeskMember` has no
+                  // meaning there, and the affordance must not appear at all
+                  // (absent, never disabled — the rule `onManageDesk` below
+                  // already follows for the same reason).
+                  onAddExisting={
+                    activeIsDesk ? (agentId) => void addExistingMember(agentId) : undefined
+                  }
                   onMessage={(m) => selectChannel(dmChannelId(m))}
                   /**
                    * The way from this channel to the desk it is (issue #485).

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { MessageSquare, MoreHorizontal, UserPlus } from "lucide-react";
+import { MessageSquare, MoreHorizontal, Plus, UserPlus } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -67,6 +67,16 @@ interface Props {
    */
   onRemove: (id: string) => void;
   onAdd: () => void;
+  /**
+   * Put an agent already on the roster onto this channel's desk (issue #2224).
+   * Only ever offered on an "Everyone else" row, and only when `channelMembers`
+   * is non-null — there is no desk id to add into otherwise. Deliberately
+   * separate from `onAdd`: that opens the create-a-new-teammate dialog, this
+   * adds an existing one, and the two are not the same action wearing one
+   * button. Absent has the same meaning `onManageDesk` gives it: no desk here,
+   * nothing to add to.
+   */
+  onAddExisting?: (id: string) => void;
   onMessage: (member: TeamMember) => void;
   /**
    * Open this channel's desk on the org chart (issue #485). Absent for a DM and
@@ -97,7 +107,10 @@ interface Props {
  * This replaces the standalone Team page: everything that page could do lives
  * on a row here (give an agent an inbox, drop them from the roster) or on the
  * Add button, and a row now also opens that teammate's DM, which the page
- * could not do at all.
+ * could not do at all. An "Everyone else" row can also put that agent onto
+ * this desk directly (issue #2224) — putting an existing teammate on a
+ * channel and hiring a new one are different actions, so that stays separate
+ * from the Add button, which still opens the create-a-teammate dialog.
  *
  * The two sections exist because those are two different questions. "Who is in
  * this room" is what a channel header is for, and answering it with the whole
@@ -115,6 +128,7 @@ export function MembersPane({
   fromHost,
   onRemove,
   onAdd,
+  onAddExisting,
   onMessage,
   onManageDesk,
 }: Props) {
@@ -155,7 +169,11 @@ export function MembersPane({
           </div>
         ) : (
           (() => {
-            const rows = (list: TeamMember[]) => (
+            // `withAdd` is only ever true for the "Everyone else" list on a
+            // real desk (see below) — never for `channelMembers` (already
+            // here) and never for the plain-roster fallback (no desk id to
+            // add into).
+            const rows = (list: TeamMember[], withAdd?: boolean) => (
               <ul className="flex flex-col gap-px">
                 {list.map((m) => (
                   <li key={m.id}>
@@ -164,6 +182,9 @@ export function MembersPane({
                       lead={m.id === leadId}
                       onRemove={() => onRemove(m.id)}
                       onMessage={() => onMessage(m)}
+                      onAddToChannel={
+                        withAdd && onAddExisting ? () => onAddExisting(m.id) : undefined
+                      }
                     />
                   </li>
                 ))}
@@ -203,7 +224,7 @@ export function MembersPane({
                 {others.length > 0 && (
                   <div className="mt-2 border-t pt-2">
                     <SectionLabel className="text-muted-foreground">Everyone else</SectionLabel>
-                    {rows(others)}
+                    {rows(others, true)}
                   </div>
                 )}
 
@@ -275,12 +296,19 @@ function MemberRow({
   member,
   lead,
   onRemove,
+  onAddToChannel,
   onMessage,
 }: {
   member: TeamMember;
   /** The desk's lead — badged, since this channel routes to them. */
   lead?: boolean;
   onRemove: () => void;
+  /**
+   * Present only on an "Everyone else" row when there is a real desk to add
+   * to (issue #2224) — `undefined` renders no button at all, not a disabled
+   * one, the same rule every other optional action on this row follows.
+   */
+  onAddToChannel?: () => void;
   onMessage: () => void;
 }) {
   // Issue #1208: only when the role is not the name over again. The roster's
@@ -317,6 +345,19 @@ function MemberRow({
           )}
         </span>
       </button>
+
+      {onAddToChannel && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/member:opacity-100"
+          aria-label={`Add ${member.name} to this channel`}
+          title={`Add ${member.name} to this channel`}
+          onClick={onAddToChannel}
+        >
+          <Plus className="size-4" />
+        </Button>
+      )}
 
       <DropdownMenu>
         <DropdownMenuTrigger
