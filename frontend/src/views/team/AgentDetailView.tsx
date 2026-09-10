@@ -259,11 +259,23 @@ export function AgentDetailView({
       resolve out of order (the older one overwriting the newer choice). */
   const [avatarSaving, setAvatarSaving] = useState(false);
   /**
-   * An inbox write is in flight (issue #1190's own page-level control — the
-   * host's `InboxStore` is the source of truth, so the switch stays disabled
-   * until the `PUT` it triggered actually lands).
+   * Agent ids with an inbox write in flight (issue #1190's own page-level
+   * control — the host's `InboxStore` is the source of truth, so a switch
+   * stays disabled until the `PUT` it triggered actually lands).
+   *
+   * Keyed by agent id, not a single shared flag: `AgentDetailView` stays
+   * mounted across a same-document navigation to a different agent (`TeamView`
+   * renders it with no `key`), so a bare boolean disabled every agent's
+   * switch for the duration of any ONE agent's write, and — because its own
+   * cleanup checked `displayedAgentIdRef` against the *stale* agent id
+   * that write belonged to — left the switch on whichever agent the operator
+   * had navigated to disabled permanently once that stale check failed to
+   * match. A write's own id is what both the disable and the cleanup key on,
+   * so a write in flight for one agent never touches another's switch.
    */
-  const [inboxSaving, setInboxSaving] = useState(false);
+  const [pendingInboxAgentIds, setPendingInboxAgentIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /**
    * What this teammate is on and carrying (issue #1141), or `null` when the
    * board could not be read — in which case the header states neither rather
@@ -461,24 +473,42 @@ export function AgentDetailView({
    * Flips `inboxEnabled` on screen before the `PUT` resolves — the switch is
    * the only signal an operator watches while the write is in flight, and a
    * control that waits for the round trip to move reads as broken rather than
-   * slow. `inboxSaving` holds it disabled for that stretch, so a second click
-   * cannot race the first, and a failure rolls the optimistic flip back rather
-   * than leaving the switch lying about what the host actually has.
+   * slow. `pendingInboxAgentIds` holds THIS agent's switch disabled for that
+   * stretch, so a second click on it cannot race the first, and a failure
+   * rolls the optimistic flip back rather than leaving the switch lying about
+   * what the host actually has.
+   *
+   * `id` is captured once, up front, and used everywhere below instead of
+   * `agent.id` or the `agentId` prop — the prop can change out from under this
+   * closure if the operator navigates to a different agent before the write
+   * settles, and every decision here (which agent to revert, which agent's
+   * pending entry to clear) has to stay about the agent this call was made
+   * for, not whichever agent is on screen when it resolves.
    */
   async function toggleInbox(enabled: boolean) {
     if (!agent) return;
+    const id = agent.id;
     const previous = agent;
     setAgent({ ...agent, inboxEnabled: enabled });
-    setInboxSaving(true);
+    setPendingInboxAgentIds((pending) => new Set(pending).add(id));
     try {
-      await setInboxEnabled(client, company, agent.id, enabled);
+      await setInboxEnabled(client, company, id, enabled);
     } catch (error) {
-      if (displayedAgentIdRef.current === agentId) setAgent(previous);
+      if (displayedAgentIdRef.current === id) setAgent(previous);
       toast.error(
         error instanceof Error ? error.message : "Couldn't change this agent's inbox.",
       );
     } finally {
-      if (displayedAgentIdRef.current === agentId) setInboxSaving(false);
+      // Cleared unconditionally, unlike the `setAgent` revert above — the
+      // pending entry belongs to `id` regardless of which agent is currently
+      // displayed, and leaving it set because the operator moved on is
+      // exactly the bug this rewrite fixes.
+      setPendingInboxAgentIds((pending) => {
+        if (!pending.has(id)) return pending;
+        const next = new Set(pending);
+        next.delete(id);
+        return next;
+      });
     }
   }
 
@@ -770,7 +800,7 @@ export function AgentDetailView({
                 id="agent-inbox-toggle"
                 data-testid="agent-inbox-toggle"
                 checked={agent.inboxEnabled ?? false}
-                disabled={inboxSaving}
+                disabled={pendingInboxAgentIds.has(agent.id)}
                 onCheckedChange={(on) => void toggleInbox(on)}
               />
               <Label htmlFor="agent-inbox-toggle" className="text-sm font-normal">
