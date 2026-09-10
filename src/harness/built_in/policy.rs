@@ -296,7 +296,7 @@ pub enum ApprovalScope {
 /// which is the property the issue asks for.
 #[derive(Clone)]
 pub struct ApprovalRequestQueue {
-    inner: Arc<Mutex<BTreeMap<ApprovalScope, Vec<ApprovalRequest>>>>,
+    inner: Arc<Mutex<ApprovalQueueState>>,
     /// The live single-use grants (issue #243), riding along so the whole
     /// approval round-trip travels on one handle.
     ///
@@ -321,6 +321,17 @@ pub struct ApprovalRequestQueue {
     /// same way folding it into `inner` would have. `grants_outlive_a_scope`
     /// pins the #439 half of that alongside `grants_survive_a_queue_clear`.
     grants: GrantSet,
+}
+
+#[derive(Default)]
+struct ApprovalQueueState {
+    buckets: BTreeMap<ApprovalScope, Vec<QueuedApproval>>,
+    next_sequence: u64,
+}
+
+struct QueuedApproval {
+    request: ApprovalRequest,
+    sequence: u64,
 }
 
 /// What one cycle-end drain took, and what it threw away (issue #561).
@@ -526,26 +537,14 @@ impl Drop for ApprovalClaim {
 }
 
 impl ApprovalRequestQueue {
-    /// Records a gated call, ignoring one already queued for the same tool and
-    /// arguments.
-    ///
-    /// openhuman blocks the call but lets the turn continue, so a model that
-    /// re-tries the same tool would otherwise park the identical request several
-    /// times over and show the operator a queue of duplicates.
-    /// Records a gated call **in the surrounding claim's scope** (issue #439),
-    /// ignoring one already queued in that same scope for the same tool and
-    /// arguments.
-    ///
-    /// openhuman blocks the call but lets the turn continue, so a model that
-    /// re-tries the same tool would otherwise park the identical request several
-    /// times over and show the operator a queue of duplicates. De-duplication is
-    /// per scope, which is the only reading that makes sense once buckets are
-    /// separate: two different turns asking for the same tool are two requests,
-    /// and collapsing them would hide one turn's ask behind another's.
+    /// Enqueues a gated call in the current scope, deduplicated by effect.
+    /// Overflow is counted and reported by the drain.
     pub fn push(&self, request: ApprovalRequest) {
         self.push_with_cap(request, usize::MAX);
     }
 
+    /// Accepts a blocker only within the first eight entries of its drain order.
+    /// Cycle and Unscoped share that order; Run scopes are independent.
     pub(super) fn push_blocker(&self, request: ApprovalRequest) -> bool {
         self.push_with_cap(request, MAX_APPROVAL_REQUESTS_PER_TURN)
     }
@@ -558,23 +557,37 @@ impl ApprovalRequestQueue {
         }
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let shared_count = match &scope {
-            ApprovalScope::Cycle => guard.get(&ApprovalScope::Unscoped).map_or(0, Vec::len),
-            ApprovalScope::Unscoped => guard.get(&ApprovalScope::Cycle).map_or(0, Vec::len),
-            ApprovalScope::Run(_) => 0,
+        let shared = match &scope {
+            ApprovalScope::Cycle => guard.buckets.get(&ApprovalScope::Unscoped),
+            ApprovalScope::Unscoped => guard.buckets.get(&ApprovalScope::Cycle),
+            ApprovalScope::Run(_) => None,
         };
-        let bucket = guard.entry(scope).or_default();
-        if bucket.iter().any(|q| {
-            q.effect.kind == request.effect.kind
-                && q.effect.payload == request.effect.payload
-                && q.effect.agent == request.effect.agent
+        let bucket = guard.buckets.get(&scope).map_or(&[][..], Vec::as_slice);
+        if let Some((position, existing)) = bucket.iter().enumerate().find(|(_, q)| {
+            q.request.effect.kind == request.effect.kind
+                && q.request.effect.payload == request.effect.payload
+                && q.request.effect.agent == request.effect.agent
         }) {
-            return true;
+            let earlier_shared = shared.map_or(0, |entries| {
+                entries
+                    .iter()
+                    .take_while(|entry| entry.sequence < existing.sequence)
+                    .count()
+            });
+            return position.saturating_add(earlier_shared) < cap;
         }
-        if bucket.len().saturating_add(shared_count) >= cap {
+        if bucket.len().saturating_add(shared.map_or(0, Vec::len)) >= cap {
             return false;
         }
-        bucket.push(request);
+        let sequence = guard.next_sequence;
+        guard.next_sequence = sequence
+            .checked_add(1)
+            .expect("approval queue sequence exhausted");
+        guard
+            .buckets
+            .entry(scope)
+            .or_default()
+            .push(QueuedApproval { request, sequence });
         true
     }
 
@@ -624,6 +637,7 @@ impl ApprovalRequestQueue {
         self.inner
             .lock()
             .expect("approval request queue")
+            .buckets
             .remove(scope);
     }
 
@@ -638,6 +652,7 @@ impl ApprovalRequestQueue {
         self.inner
             .lock()
             .expect("approval request queue")
+            .buckets
             .get(scope)
             .map_or(0, Vec::len)
     }
@@ -651,45 +666,30 @@ impl ApprovalRequestQueue {
         self.discard(&Self::current_scope());
     }
 
-    /// Drains up to `cap` requests (FIFO) from the **current scope**, discarding
-    /// that scope's remainder, so one turn can never flood the operator's queue.
-    ///
-    /// # Why this returns a struct rather than a `Vec` (issue #561)
-    ///
-    /// The discard is the whole point of the cap and it used to be invisible:
-    /// this method dropped the overflow on the floor and handed back a `Vec`
-    /// that looked exactly like a complete one, so the operator was shown eight
-    /// cards and no indication that five more calls had been gated. `cap`
-    /// travels into the result so the count and the number that produced it
-    /// stay one value — see [`DrainedRequests`].
-    ///
-    /// # What #439 changed, and what it did not
-    ///
-    /// The shape is #561's; only *which* requests it can see is #439's. It used
-    /// to drain one company-wide vector, which is why a concurrent turn's
-    /// entries could be taken by whoever drained first. It now sees the calling
-    /// turn's bucket and nothing else — **which also makes `discarded` mean
-    /// something it could not mean before**. A count taken off a shared vector
-    /// mixed in whatever a concurrent run had appended, so "this turn
-    /// overflowed" was never reliably this turn's fact. Scoped, it is.
-    ///
-    /// From the chat cycle this also drains [`ApprovalScope::Unscoped`], so a
-    /// push from any turn entry point not yet under a claim still reaches the
-    /// operator exactly as it did before — the fallback that makes #439
-    /// non-lossy. A workflow run drains only its own bucket and can no longer
-    /// swallow anyone else's.
+    /// Drains the current scope in enqueue order, counting discarded overflow.
+    /// Cycle also drains Unscoped in their combined enqueue order.
+    /// A cap below [`MAX_APPROVAL_REQUESTS_PER_TURN`] imposes a smaller limit
+    /// than blocker admission; production drains use that constant.
     pub fn drain(&self, cap: usize) -> DrainedRequests {
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let mut queued: Vec<ApprovalRequest> = guard.remove(&scope).unwrap_or_default();
-        // The cycle owns anything nobody claimed. A workflow run must not take
-        // it: that would be the shared-queue theft this issue removes.
+        let mut queued = guard.buckets.remove(&scope).unwrap_or_default();
         if scope == ApprovalScope::Cycle {
-            queued.extend(guard.remove(&ApprovalScope::Unscoped).unwrap_or_default());
+            queued.extend(
+                guard
+                    .buckets
+                    .remove(&ApprovalScope::Unscoped)
+                    .unwrap_or_default(),
+            );
+            queued.sort_unstable_by_key(|entry| entry.sequence);
         }
         let discarded = queued.len().saturating_sub(cap);
         queued.truncate(cap);
-        DrainedRequests::new(queued, discarded, cap)
+        DrainedRequests::new(
+            queued.into_iter().map(|entry| entry.request).collect(),
+            discarded,
+            cap,
+        )
     }
 
     /// Builds a queue whose grant set is one the caller already holds.
@@ -733,6 +733,7 @@ impl ApprovalRequestQueue {
         self.inner
             .lock()
             .expect("approval request queue")
+            .buckets
             .get(&Self::current_scope())
             .map_or(0, Vec::len)
     }
@@ -758,14 +759,14 @@ impl ApprovalRequestQueue {
     pub fn blockers_since(&self, from: usize) -> usize {
         let scope = Self::current_scope();
         let guard = self.inner.lock().expect("approval request queue");
-        let Some(bucket) = guard.get(&scope) else {
+        let Some(bucket) = guard.buckets.get(&scope) else {
             return 0;
         };
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
         bucket
             .iter()
             .skip(from)
-            .filter(|request| request.effect.kind.starts_with(&prefix))
+            .filter(|entry| entry.request.effect.kind.starts_with(&prefix))
             .count()
     }
 
@@ -786,12 +787,12 @@ impl ApprovalRequestQueue {
     pub fn stamp_run(&self, from: usize, run_id: &str) -> usize {
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let Some(bucket) = guard.get_mut(&scope) else {
+        let Some(bucket) = guard.buckets.get_mut(&scope) else {
             return 0;
         };
         let mut stamped = 0;
-        for request in bucket.iter_mut().skip(from) {
-            request.effect.run_id = Some(run_id.to_string());
+        for entry in bucket.iter_mut().skip(from) {
+            entry.request.effect.run_id = Some(run_id.to_string());
             stamped += 1;
         }
         stamped
@@ -4649,6 +4650,193 @@ mod tests {
                     .any(|r| r.reason == "last available slot")
             );
             assert!(drained.requests.iter().all(|r| r.reason != "overflow"));
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_blockers_survive_later_ordinary_approvals_across_scopes() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        for blocker_in_cycle in [false, true] {
+            for preceding in [0, MAX_APPROVAL_REQUESTS_PER_TURN - 1] {
+                let (policy, queue) = queued_policy("supervised", &[]);
+                let cycle = queue.claim(ApprovalScope::Cycle);
+                let tool = super::super::blockers::EscalateToHumanTool::new(
+                    queue.clone(),
+                    "engineer".to_string(),
+                );
+                for i in 0..preceding {
+                    let call = request("composio_execute", composio_unclassified_args_numbered(i));
+                    let decision = if blocker_in_cycle {
+                        policy.check(&call).await
+                    } else {
+                        cycle.scoped(policy.check(&call)).await
+                    };
+                    assert!(matches!(
+                        decision,
+                        ToolPolicyDecision::RequireApproval { .. }
+                    ));
+                }
+                let args = serde_json::json!({ "question": "must survive later approvals" });
+                let asked = if blocker_in_cycle {
+                    cycle.scoped(tool.execute(args.clone())).await
+                } else {
+                    tool.execute(args.clone()).await
+                }
+                .expect("the tool runs");
+                assert!(!asked.is_error, "{}", asked.text());
+
+                for i in preceding..preceding + MAX_APPROVAL_REQUESTS_PER_TURN {
+                    let call = request("composio_execute", composio_unclassified_args_numbered(i));
+                    let decision = if blocker_in_cycle {
+                        policy.check(&call).await
+                    } else {
+                        cycle.scoped(policy.check(&call)).await
+                    };
+                    assert!(matches!(
+                        decision,
+                        ToolPolicyDecision::RequireApproval { .. }
+                    ));
+                }
+                let duplicate = if blocker_in_cycle {
+                    cycle.scoped(tool.execute(args)).await
+                } else {
+                    tool.execute(args).await
+                }
+                .expect("the tool runs");
+                assert!(
+                    !duplicate.is_error,
+                    "the accepted duplicate retains its slot"
+                );
+
+                let drained = cycle
+                    .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+                    .await;
+                assert_eq!(
+                    drained
+                        .requests
+                        .iter()
+                        .filter(|r| r.reason == "must survive later approvals")
+                        .count(),
+                    1,
+                    "an accepted blocker must survive later ordinary approvals; blocker_in_cycle={blocker_in_cycle}, preceding={preceding}"
+                );
+                assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+                assert_eq!(drained.discarded, preceding + 1);
+                assert!(drained.overflow_notice().is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blocker_duplicate_outside_the_drain_budget_is_refused() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        let fixture = ApprovalRequestQueue::default();
+        let args = serde_json::json!({ "question": "outside the budget" });
+        super::super::blockers::EscalateToHumanTool::new(fixture.clone(), "engineer".to_string())
+            .execute(args.clone())
+            .await
+            .expect("the fixture tool runs");
+        let existing = fixture
+            .drain(MAX_APPROVAL_REQUESTS_PER_TURN)
+            .requests
+            .remove(0);
+
+        for (existing_in_cycle, ordinary_in_cycle) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let queue = ApprovalRequestQueue::default();
+            let cycle = queue.claim(ApprovalScope::Cycle);
+            for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+                let request = gated(&format!("ordinary.{i}"));
+                if ordinary_in_cycle {
+                    cycle.scoped(async { queue.push(request) }).await;
+                } else {
+                    queue.push(request);
+                }
+            }
+            let tool = super::super::blockers::EscalateToHumanTool::new(
+                queue.clone(),
+                "engineer".to_string(),
+            );
+            let asked = if existing_in_cycle {
+                cycle
+                    .scoped(async {
+                        queue.push(existing.clone());
+                        tool.execute(args.clone()).await
+                    })
+                    .await
+            } else {
+                queue.push(existing.clone());
+                tool.execute(args.clone()).await
+            }
+            .expect("the tool runs");
+            assert!(
+                asked.is_error,
+                "an overflow duplicate must not be reported as raised"
+            );
+            assert!(asked.text().contains("not raised"));
+            let drained = cycle
+                .scoped(async { queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN) })
+                .await;
+            assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+            assert_eq!(drained.discarded, 1);
+            assert!(
+                drained
+                    .requests
+                    .iter()
+                    .all(|r| r.reason != "outside the budget")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_scope_drain_preserves_enqueue_order_and_scoped_stamping() {
+        for cap in [0, 3, MAX_APPROVAL_REQUESTS_PER_TURN] {
+            let queue = ApprovalRequestQueue::default();
+            let cycle = queue.claim(ApprovalScope::Cycle);
+            let run = queue.claim(ApprovalScope::Run("independent".to_string()));
+            for i in 0..10 {
+                let request = gated(&format!("ordinary.{i}"));
+                if i % 2 == 0 {
+                    let boundary = queue.queued();
+                    assert_eq!(boundary, i / 2);
+                    queue.push(request);
+                    assert_eq!(queue.stamp_run(boundary, &format!("fallback.{i}")), 1);
+                } else {
+                    cycle
+                        .scoped(async {
+                            let boundary = queue.queued();
+                            assert_eq!(boundary, i / 2);
+                            queue.push(request);
+                            assert_eq!(queue.stamp_run(boundary, &format!("cycle.{i}")), 1);
+                        })
+                        .await;
+                }
+                run.scoped(async { queue.push(gated(&format!("run.{i}"))) })
+                    .await;
+            }
+            let drained = cycle.scoped(async { queue.drain(cap) }).await;
+            assert_eq!(drained.cap(), cap);
+            assert_eq!(drained.discarded, 10 - cap);
+            assert_eq!(drained.requests.len(), cap);
+            for (i, request) in drained.requests.iter().enumerate() {
+                assert_eq!(
+                    request.tool,
+                    format!("ordinary.{i}"),
+                    "merged drains must preserve enqueue order"
+                );
+                let scope = if i % 2 == 0 { "fallback" } else { "cycle" };
+                assert_eq!(request.effect.run_id, Some(format!("{scope}.{i}")));
+            }
+            let independent = run.scoped(async { queue.drain(cap) }).await;
+            assert_eq!(independent.discarded, 10 - cap);
+            assert_eq!(independent.requests.len(), cap);
+            for (i, request) in independent.requests.iter().enumerate() {
+                assert_eq!(request.tool, format!("run.{i}"));
+                assert!(request.effect.run_id.is_none());
+            }
         }
     }
 
