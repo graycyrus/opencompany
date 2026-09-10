@@ -130,7 +130,13 @@ test("a key typed for a BYOK provider does reach the host on save", async ({ pag
 
   await pickProvider(page, "Custom (OpenAI-compatible)");
   await page.locator("#inference-base-url").fill("http://127.0.0.1:9/v1");
+  // The model grid moved to its own "Manage Routing" tab (InferenceView's
+  // own tab split, the same shape AgentDetailView and MemoryView already
+  // have) -- Connect and Manage Routing are one draft and one Save, but two
+  // tab panels, so filling both fields means visiting both.
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   await page.locator("#inference-model-chat-v1").fill("pw-e2e-model");
+  await page.getByRole("tab", { name: "Connect" }).click();
   await page.locator("#inference-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-save").click();
 
@@ -174,13 +180,18 @@ test("changing provider asks before replacing a typed endpoint or model", async 
 
   await pickProvider(page, "Custom (OpenAI-compatible)");
   await page.locator("#inference-base-url").fill("https://models.example.test/v1");
+  // The model grid is on its own "Manage Routing" tab; the provider select
+  // that triggers the replace-warning dialog is back on Connect.
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   await page.locator("#inference-model-chat-v1").fill("operator-draft");
+  await page.getByRole("tab", { name: "Connect" }).click();
   await pickProvider(page, "OpenRouter");
 
   await expect(page.getByRole("alertdialog")).toContainText("replaces the typed Base URL and model fields");
   await page.getByRole("button", { name: "Keep draft" }).click();
   await expect(page.locator("#inference-provider")).toContainText("Custom (OpenAI-compatible)");
   await expect(page.locator("#inference-base-url")).toHaveValue("https://models.example.test/v1");
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   await expect(page.locator("#inference-model-chat-v1")).toHaveValue("operator-draft");
 });
 
@@ -221,6 +232,8 @@ test("OpenRouter models are selected from the registry and persist through reloa
   // typing one here is what makes the picker's availability deterministic
   // rather than an accident of what state a previous test left behind.
   await page.locator("#inference-key").fill(`pw-e2e-${Date.now()}`);
+  // The catalog picker lives on Manage Routing, not Connect.
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   const chat = page.getByTestId("inference-model-select-chat-v1");
   await expect(chat).toBeEnabled();
   await chat.click();
@@ -235,11 +248,17 @@ test("OpenRouter models are selected from the registry and persist through reloa
   expect((await saved.json()).models["chat-v1"]).toBe("provider/catalog-chat");
 
   await page.reload();
+  // `tab` rides the hash (useHashTab), so a reload keeps Manage Routing
+  // selected -- clicked again here anyway, to assert the tab explicitly
+  // rather than lean on that persistence.
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   await expect(page.getByTestId("inference-model-select-chat-v1")).toContainText("Catalog Chat", {
     timeout: 30_000,
   });
 
+  await page.getByRole("tab", { name: "Connect" }).click();
   await pickProvider(page, "Custom (OpenAI-compatible)");
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   await expect(page.locator("input#inference-model-chat-v1")).toBeVisible();
 
   // Leave the shared E2E company on its committed default for later specs.
@@ -274,6 +293,8 @@ test("a saved OpenRouter tier override can be cleared back to the tier default (
 
   await pickProvider(page, "OpenRouter");
   await page.locator("#inference-key").fill(`pw-e2e-${Date.now()}`);
+  // The catalog picker lives on Manage Routing, not Connect.
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   const chat = page.getByTestId("inference-model-select-chat-v1");
   await expect(chat).toBeEnabled();
   await chat.click();
@@ -288,8 +309,12 @@ test("a saved OpenRouter tier override can be cleared back to the tier default (
   expect((await saved.json()).models["chat-v1"]).toBe("provider/catalog-chat");
 
   // Reload so the picker is seeded straight from the stored override, then
-  // clear it through the select rather than typing anything.
+  // clear it through the select rather than typing anything. `tab` rides the
+  // hash (useHashTab), so this reload keeps Manage Routing selected --
+  // clicked again here anyway, to assert the tab explicitly rather than lean
+  // on that persistence.
   await page.reload();
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   const chatAfterReload = page.getByTestId("inference-model-select-chat-v1");
   await expect(chatAfterReload).toContainText("Catalog Chat", { timeout: 30_000 });
   await chatAfterReload.click();
@@ -336,6 +361,8 @@ test("typing an OpenRouter passthrough id one keystroke at a time is not strippe
   // the real problem. `input#…` only matches the free-text control, the same
   // guard the OpenRouter-catalog spec above already uses.
   await pickProvider(page, "OpenRouter");
+  // The free-text/catalog model control lives on Manage Routing, not Connect.
+  await page.getByRole("tab", { name: "Manage Routing" }).click();
   const chatInput = page.locator("input#inference-model-chat-v1");
   await expect(chatInput).toBeVisible();
   await expect(chatInput).toHaveValue("");
