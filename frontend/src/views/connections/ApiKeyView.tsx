@@ -9,6 +9,7 @@ import {
   type CompanyBilling,
   type CompanyCredentialStatus,
 } from "@/api/credential";
+import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
