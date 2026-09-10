@@ -412,7 +412,7 @@ pub use http::HttpHubIdentityExchange;
 
 #[cfg(feature = "tinyhumans")]
 mod http {
-    use super::{HubIdentity, HubIdentityExchange};
+    use super::{BillingSummary, HubIdentity, HubIdentityExchange};
     use crate::Result;
     use crate::error::OpenCompanyError;
     use async_trait::async_trait;
@@ -439,6 +439,46 @@ mod http {
     struct KeyData {
         /// The plaintext key. The hub emits it exactly once.
         key: String,
+    }
+
+    /// The hub's envelope for `GET /payments/summary`.
+    #[derive(Debug, Deserialize)]
+    struct SummaryResponse {
+        data: SummaryData,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SummaryData {
+        #[serde(default)]
+        credits: SummaryCredits,
+        #[serde(default)]
+        plan: SummaryPlan,
+        #[serde(default)]
+        links: SummaryLinks,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryCredits {
+        #[serde(rename = "totalUsd", default)]
+        total_usd: f64,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryPlan {
+        #[serde(default)]
+        plan: Option<String>,
+        #[serde(rename = "hasActiveSubscription", default)]
+        has_active_subscription: bool,
+        #[serde(rename = "planExpiry", default)]
+        plan_expiry: Option<String>,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryLinks {
+        #[serde(rename = "topUpUrl", default)]
+        top_up_url: Option<String>,
+        #[serde(rename = "manageUrl", default)]
+        manage_url: Option<String>,
     }
 
     /// A [`HubIdentityExchange`] backed by `GET {api_url}/auth/me`.
@@ -542,6 +582,45 @@ mod http {
 
             let parsed: KeyResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
             Ok(parsed.data.key)
+        }
+
+        async fn billing_summary(&self, key: &str) -> Result<BillingSummary> {
+            let url = format!("{}/payments/summary", self.api_url);
+            let (product_header_name, product_header_value) =
+                crate::product::product_identity_header();
+            let resp = self
+                .http
+                .get(&url)
+                .bearer_auth(key)
+                .header(product_header_name, product_header_value)
+                .send()
+                .await
+                .map_err(|e| Self::err("unreachable", e))?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                // The hub's words describe the key's standing — expired, revoked,
+                // wrong scope. The key is in a header, so neither the body nor
+                // `reqwest`'s Display can carry it into this error.
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(Self::err(
+                    &format!("http_{}", status.as_u16()),
+                    truncate(&detail, 200),
+                ));
+            }
+
+            let parsed: SummaryResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
+            Ok(BillingSummary {
+                balance_usd: parsed.data.credits.total_usd,
+                // A hub that names no plan is on the free one — the field is
+                // absent there rather than spelled out, and a card reading
+                // "unknown" would be a worse answer than the true one.
+                plan: parsed.data.plan.plan.unwrap_or_else(|| "free".to_string()),
+                active_subscription: parsed.data.plan.has_active_subscription,
+                plan_expiry: parsed.data.plan.plan_expiry,
+                top_up_url: parsed.data.links.top_up_url,
+                manage_url: parsed.data.links.manage_url,
+            })
         }
     }
 
