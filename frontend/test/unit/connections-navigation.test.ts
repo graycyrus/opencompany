@@ -31,6 +31,10 @@ const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf
 describe("the Connections section", () => {
   it("carries exactly the pages that left the Settings rail, in rail order", () => {
     expect(CONNECTION_PAGES.map((page) => page.id)).toEqual([
+      // Not one of the pages that left Settings — this one was written for the
+      // rail. It leads because every other page here needs a key to exist
+      // before it can do anything.
+      "api-key",
       "apps",
       "mcp",
       "inference",
@@ -113,6 +117,7 @@ describe("the Connections section", () => {
     // renders nothing (#1311).
     const connections = NAV_SECTIONS.find((s) => s.view === "connections")!;
     expect(connections.children?.map((child) => [child.label, child.sub])).toEqual([
+      ["API Key", "api-key"],
       ["Apps", "apps"],
       ["MCP Servers", "mcp"],
       ["Inference", "inference"],
