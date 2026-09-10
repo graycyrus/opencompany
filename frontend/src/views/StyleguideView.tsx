@@ -950,7 +950,7 @@ function ComponentSection() {
                 showed the two together. It carries inline `code` because a
                 warning naming a build feature or a flag is the common case. */}
             <Alert variant="warning">
-              <TriangleAlert className="size-4" />
+              <AlertTriangle className="size-4" />
               <AlertTitle>Stored, but inert</AlertTitle>
               <AlertDescription>
                 This host was built without the agent tools, so these settings will be stored
