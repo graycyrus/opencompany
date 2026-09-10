@@ -6,7 +6,7 @@ import {
   dmChannelId,
   legacyDmChannelId,
   resolveDmChannelId,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 import type { Desk } from "@/lib/desks";
 import type { TeamMember } from "@/lib/team";
 

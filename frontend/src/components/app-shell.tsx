@@ -7,7 +7,6 @@ import {
   type CompanyStatus,
   type GrantScope,
   type NotificationDto,
-  type TurnStep,
   type Verdict,
 } from "@/api/types";
 import {
@@ -76,7 +75,6 @@ import {
   mergeOpenTurns,
   openTurnsFromRuns,
   PendingSyncPosts,
-  type OpenTurn,
 } from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
@@ -147,8 +145,8 @@ import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { readLastChannel } from "@/lib/last-channel";
-import { ChatView } from "@/views/ChatView";
-import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
+import { RoomView } from "@/views/RoomView";
+import { shouldClearReceipt } from "@/views/room/ChatLiveReceipt";
 import {
   channelForThread,
   channelIdForThread,
@@ -158,10 +156,8 @@ import {
   HISTORY_UNSTARTED,
   isOperatorChannelDto,
   type DecidedApproval,
-  type HistoryHydration,
   type HistoryStatus,
-  type Transcripts,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
@@ -172,6 +168,7 @@ import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import * as room from "@/room/store";
 import type { LocalScope } from "@/connections/types";
 import { forgetSession } from "@/connections/registry";
 import { offersCompanyCreation } from "@/components/create-company-dialog";
@@ -481,6 +478,23 @@ export function AppShell({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
+  // Point the Room store at this scope, and clear it when that is a change.
+  //
+  // Called in the render body rather than an effect, and that is load-bearing:
+  // the store is read by `useSyncExternalStore` further down *this same render*,
+  // so a scope set in an effect would let one frame paint with the previous
+  // company's transcript. It is safe to call here because `enterScope` is
+  // idempotent and derives purely from props — re-entering the scope you are
+  // already in is a no-op, so a re-render cannot wipe a live conversation.
+  //
+  // This is the reset `AppShell`'s own `key` used to do for free: the shell is
+  // mounted as `key={connectionId:company}`, so every `useState` below used to
+  // be discarded on a switch. Module state has no such luck, and without this
+  // line a company switch would paint the previous company's conversation onto
+  // an identically named channel — the exact mixing bug `connections/registry`
+  // opens by warning about.
+  const roomScopeKey = `${scope.connection}::${scope.company ?? "single"}`;
+  room.enterScope(roomScopeKey);
   // Room is where the console opens. An empty hash, a bare `#/`, a bookmark
   // whose view was retired — all of them land in the room the operator talks
   // to their company in, rather than on a dashboard about it.
@@ -640,39 +654,36 @@ export function AppShell({
     setSetupCompleted(true);
     clearSetupHandoff();
   }, [scope.connection, company]);
-  // The shell owns every channel's transcript, not `ChatView` — the shell
-  // mounts and unmounts `ChatView` per route, so component-local state there
+  // The shell owns every channel's transcript, not `RoomView` — the shell
+  // mounts and unmounts `RoomView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
-  const [transcripts, setTranscripts] = useState<Transcripts>({});
-  // The latest transcripts, readable from the stable `refreshMentions`
-  // callback without rebuilding it on every channel that lands a line (the
-  // same reason `mentionFeedRef` and `chatChannelByThreadRef` exist).
-  const transcriptsRef = useRef(transcripts);
-  useEffect(() => {
-    transcriptsRef.current = transcripts;
-  }, [transcripts]);
+  const transcripts = room.useTranscripts();
+  const scopedRoomWriters = room.writersForScope(roomScopeKey);
+  const setTranscripts = scopedRoomWriters.setTranscripts;
   // How far each channel's history rehydration has got. Kept beside
   // `transcripts` rather than inside it because an empty transcript is a
   // legitimate final answer, and the timeline has to tell that apart from not
   // having asked yet before it prints "this is the start of…" (issue #934).
-  const [hydration, setHydration] = useState<HistoryHydration>(HISTORY_UNSTARTED);
+  const hydration = room.useHydration();
+  const setHydration = scopedRoomWriters.setHydration;
   // Host thread id → chat channel id, for every channel this company has.
   // Resolved by the desks/roster effect below, which already works the pairing
   // out to hydrate each channel and used to throw it away — leaving the shell
   // unable to say which channel an incoming event belongs to (issue #367).
-  const [chatChannelByThread, setChatChannelByThread] = useState<Record<string, string>>({});
-  // This company's first desk channel — the same channel `ChatView` lands on
+  const chatChannelByThread = room.useChatChannelByThread();
+  const setChatChannelByThread = scopedRoomWriters.setChatChannelByThread;
+  // This company's first desk channel — the same channel `RoomView` lands on
   // when the hash names none, and so where a line with nowhere else to go is
   // still somewhere the operator will find it.
   const [firstDeskChannelId, setFirstDeskChannelId] = useState<string | null>(null);
   // The chat channel the operator last had on screen. A ref, not state,
-  // because it outlives `ChatView`: it is what an unaddressed system line is
+  // because it outlives `RoomView`: it is what an unaddressed system line is
   // addressed to after the operator has walked off to Approvals (issue #368).
   const activeChatChannelRef = useRef<string | null>(null);
-  // Whether `ChatView`'s transcript is actually rendered right now, as opposed
+  // Whether `RoomView`'s transcript is actually rendered right now, as opposed
   // to `activeChatChannelRef` merely still *naming* the channel last shown
   // before the operator dropped to the mobile channel rail. Starts `true` to
-  // match `ChatView`'s own initial pane state; kept out of `activeChatChannelRef`
+  // match `RoomView`'s own initial pane state; kept out of `activeChatChannelRef`
   // because that ref has a second job — addressing an unaddressed system line
   // after a walk to Approvals — that must keep using the last channel even
   // while the rail is what's on screen (#1768 codex review).
@@ -680,7 +691,7 @@ export function AppShell({
   /**
    * The chat segment, remembered across a trip to another section (#2130).
    *
-   * `ChatView` is mounted on every route now, and `sub` is whatever the CURRENT
+   * `RoomView` is mounted on every route now, and `sub` is whatever the CURRENT
    * view's second segment is — `mcp` on `#/connections/mcp`, `goals` on
    * `#/ledgers/goals`. Handing that straight to chat would have it resolve
    * `mcp` as a channel id and raise the unknown-channel notice for a segment
@@ -723,8 +734,10 @@ export function AppShell({
   // looked at. Together with `transcripts` these *derive* the unread counts
   // below — nothing increments a counter, so a message that turns out to be a
   // duplicate cannot leave a badge behind for a line that was never added.
-  const [lastViewedChannel, setLastViewedChannel] = useState<Record<string, number>>({});
-  const [unreadSince, setUnreadSince] = useState(() => Date.now());
+  const lastViewedChannel = room.useLastViewedChannel();
+  const setLastViewedChannel = scopedRoomWriters.setLastViewedChannel;
+  const unreadSince = room.useUnreadSince();
+  const setUnreadSince = scopedRoomWriters.setUnreadSince;
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) and the board itself
   // (issue #464) refetch live.
@@ -736,7 +749,7 @@ export function AppShell({
   const [taskEventTick, setTaskEventTick] = useState(0);
   /**
    * Board-card state for chat's durable background-work indicator (#1758).
-   * Owned here because ChatView unmounts on navigation while the task keeps
+   * Owned here because RoomView unmounts on navigation while the task keeps
    * running, and because the task SSE tick already terminates in this shell.
    */
   const [taskStatusByTaskId, setTaskStatusByTaskId] = useState<
@@ -854,9 +867,7 @@ export function AppShell({
   // folded steps — lands. `toolCallId` is a transient key for the running→done
   // in-place flip; it is structurally a superset of `TurnStep`, so these render
   // through the same `StepTimeline` as the final steps.
-  const [liveStepsByThread, setLiveStepsByThread] = useState<
-    Record<string, (TurnStep & { toolCallId?: string })[]>
-  >({});
+  const setLiveStepsByThread = scopedRoomWriters.setLiveStepsByThread;
   // The same timeline, per **query** rather than per thread, for a frame that
   // says which operator message its turn answers (`messageSeq`). Keyed by that
   // message's console id, so a running turn's rows render under the question
@@ -874,9 +885,7 @@ export function AppShell({
   //
   // Not a replacement: a frame with no `messageSeq` still keys by thread, which
   // is every turn answering no journaled message and every older host.
-  const [liveStepsByMessage, setLiveStepsByMessage] = useState<
-    Record<string, (TurnStep & { toolCallId?: string })[]>
-  >({});
+  const setLiveStepsByMessage = scopedRoomWriters.setLiveStepsByMessage;
   /**
    * Retires the live rows of every message that now has durable steps of its
    * own, and of every message named in `alsoDrop`.
@@ -916,7 +925,7 @@ export function AppShell({
   // outcome the POST reaches. Its lifecycle mirrors `liveStepsByThread`'s: the
   // reply landing on `onSendEnd` is what clears it, exactly as the reply bubble
   // is appended, so the two swap with no empty frame between them.
-  const [receiptByThread, setReceiptByThread] = useState<Record<string, ChatReceipt>>({});
+  const setReceiptByThread = scopedRoomWriters.setReceiptByThread;
   // Roster agent id → display name, so the receipt names the teammate rather
   // than rendering a raw id (issue #1934). Populated by the desks/roster read
   // below, which already fetches the roster this is derived from.
@@ -962,8 +971,9 @@ export function AppShell({
    */
   // Per thread, in acceptance order — a thread can hold a running turn and a
   // queued one behind it, and the poll watches them all (issue #1000). The
-  // working row is the head; `ChatView` and `Conversation` read `[0]`.
-  const [openTurns, setOpenTurns] = useState<Record<string, OpenTurn[]>>({});
+  // working row is the head; `RoomView` and `Conversation` read `[0]`.
+  const openTurns = room.useOpenTurns();
+  const setOpenTurns = scopedRoomWriters.setOpenTurns;
   // Approval ids THIS console is deciding right now, or just decided a moment
   // ago (issue #1211) — so the generic SSE echo of `approval_resolved` can be
   // suppressed for exactly the decision this tab made, the same way
@@ -1289,7 +1299,7 @@ export function AppShell({
     void refreshTaskStatuses();
   }, [feed.now, taskEventTick, refreshTaskStatuses]);
   // Issue #379: the inline approval cards' console-local state, owned here
-  // rather than in `ChatView` for the same reason `transcripts` is — the shell
+  // rather than in `RoomView` for the same reason `transcripts` is — the shell
   // mounts and unmounts that view per route, and an operator who approves in a
   // channel then steps over to Approvals must not come back to a card that has
   // forgotten what they did.
@@ -1494,7 +1504,7 @@ export function AppShell({
     // `transcripts` is keyed by channel id while history is addressed by thread
     // id: a desk's channel id *is* its thread id, and a DM's channel id is the
     // console-local `dmChannelId` while its thread id is the roster agent id
-    // (see `ChatView`'s `send`). Fetching per unique thread means a thread
+    // (see `RoomView`'s `send`). Fetching per unique thread means a thread
     // rendered by more than one channel is read once, not twice, on every tick
     // (issue #1690).
     const hydrateThread = (threadId: string, channels: readonly { channelId: string }[]) => {
@@ -1570,9 +1580,9 @@ export function AppShell({
       // the route) rather than sinking the whole pass: a company can still
       // rehydrate its real desks/DMs without the pinned Operator row.
       //
-      // One retry (issue #1781 review, Codex P2): `ChatView` fetches this
+      // One retry (issue #1781 review, Codex P2): `RoomView` fetches this
       // same identity independently for rendering the pinned row, so a
-      // single dropped request here — while `ChatView`'s own, later call
+      // single dropped request here — while `RoomView`'s own, later call
       // succeeds — used to render the row but permanently omit its id from
       // this pass's rehydration targets and five-second polling, since this
       // pass had already given up. A bounded retry closes the common
@@ -1628,7 +1638,7 @@ export function AppShell({
           ...channelMap(chatDesks, roster),
           ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
         });
-        // The channel `ChatView` lands on when the hash names none, which since
+        // The channel `RoomView` lands on when the hash names none, which since
         // issue #1743 is the built-in `#general` rather than the first desk —
         // the two must agree, or a line with nowhere else to go lands in a
         // channel the operator is not looking at. Resolved rather than
@@ -1639,7 +1649,7 @@ export function AppShell({
         // Fold the Operator feed's id into the same rehydration pass, keyed on
         // its own id both as channel and thread (its channel id *is* its
         // thread id — `chat/history?desk=<id>` reads it through the ordinary
-        // path). Without this, `ChatView`'s pinned row would sit on a channel
+        // path). Without this, `RoomView`'s pinned row would sit on a channel
         // id `historyReady` never sees a status for until `discovered` alone
         // resolves it, and `transcripts[operatorChannel.id]` would never fill
         // in — the spinner-forever failure mode this pass exists to avoid.
@@ -1799,10 +1809,6 @@ export function AppShell({
    * ignored it would delete the rows of a turn that is still running, on the
    * wide window a history round trip opens (PR #1904 review).
    */
-  const openTurnsRef = useRef(openTurns);
-  useEffect(() => {
-    openTurnsRef.current = openTurns;
-  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1861,7 +1867,7 @@ export function AppShell({
       // `threadId` is the **desk** — what `chat/history`, the `threads` fold and
       // `channelForThread` are addressed by. `liveKey` is the **open-turn state
       // key**, which is what `openTurns`, `liveStepsByThread` and
-      // `receiptByThread` are keyed by, because `ChatView` hands `onSendStart`
+      // `receiptByThread` are keyed by, because `RoomView` hands `onSendStart`
       // its `stateKey` and that key is `engineering#41` for a threaded send.
       //
       // Conflating them breaks one side or the other: reading the desk out of
@@ -1903,7 +1909,7 @@ export function AppShell({
           // whenever its frames arrived while this history read was in flight,
           // which on a round trip is a wide window. The newer turn's own
           // settle clears them when it gets there.
-          if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {
+          if (!hasOtherOpenTurns(room.readRoom().openTurns, liveKey, settledTurnId)) {
             setLiveStepsByThread((prev) =>
               prev[liveKey]?.length ? { ...prev, [liveKey]: [] } : prev,
             );
@@ -2114,7 +2120,7 @@ export function AppShell({
   }, [transcripts, lastViewedChannel, unreadSince]);
 
   /**
-   * `ChatView` reporting which channel is on screen — on every switch, and
+   * `RoomView` reporting which channel is on screen — on every switch, and
    * again as the open channel's transcript grows so a line read as it lands
    * doesn't leave a badge behind.
    */
@@ -2175,7 +2181,7 @@ export function AppShell({
         // nothing to show and the `loadedMessageIds` gate unable to clear it
         // (Codex). Re-read the host thread so the mentioned message lands.
         const loadedByChannel: Record<string, ReadonlySet<string>> = {};
-        for (const [channelId, rows] of Object.entries(transcriptsRef.current)) {
+        for (const [channelId, rows] of Object.entries(room.readRoom().transcripts)) {
           loadedByChannel[channelId] = new Set(rows.map((m) => m.id));
         }
         const { threadIds, subjects } = threadsToReReadForMentions(
@@ -2305,7 +2311,7 @@ export function AppShell({
    * The same feed, readable from a callback that must not be rebuilt when it
    * changes.
    *
-   * `onChannelViewed` is handed to `ChatView` and is deliberately stable — it
+   * `onChannelViewed` is handed to `RoomView` and is deliberately stable — it
    * is called on every channel view and on every transcript growth, and adding
    * the feed to its dependencies would rebuild it on every poll. But it also
    * has to clear *this* channel's mentions, which means reading the current
@@ -2323,7 +2329,7 @@ export function AppShell({
       advanceChannelRead = true,
     ) => {
       activeChatChannelRef.current = channelId;
-      // #1890 B. `ChatView` re-reports on every open/close (its effect lists
+      // #1890 B. `RoomView` re-reports on every open/close (its effect lists
       // `openThreadId`), so this ref tracks the panel rather than lagging it.
       openThreadRootRef.current = openThreadId ?? null;
       if (mentionFeedRevision === undefined) return;
@@ -2401,7 +2407,7 @@ export function AppShell({
   /**
    * Approval decisions and other unaddressed lines land in a transcript rather
    * than vanishing: Chat appends the line to a channel. The shell owns
-   * `transcripts`, not `ChatView`, so the write survives that view unmounting —
+   * `transcripts`, not `RoomView`, so the write survives that view unmounting —
    * which it always has, because these lines are written from Approvals.
    *
    * The channel is resolved, not assumed (issue #368). This used to append to
@@ -2412,7 +2418,7 @@ export function AppShell({
    *
    * In order: the channel the operator last had open, which survives the walk
    * over to Approvals and is where they will look first; else this company's
-   * first desk channel, the same first-match `ChatView` lands on when the hash
+   * first desk channel, the same first-match `RoomView` lands on when the hash
    * names none (issue #366); else there is genuinely no channel to write to, so
    * the line stays out of `transcripts` and the toast `ApprovalsView` raises
    * alongside this call is what surfaces the decision. Never a dead bucket.
@@ -2578,13 +2584,13 @@ export function AppShell({
       // is never itself the turn's completion. `onSendFailed` can release such
       // a frame (held while the POST was in flight) before its own async
       // `/runs` lookup below has had a chance to install the still-running
-      // turn into `openTurnsRef` — so at the instant this runs, `openTurns`
+      // turn into the Room store — so at the instant this runs, `openTurns`
       // legitimately knows nothing about it yet, `hasOtherOpenTurns` reads
       // `false`, and treating the advisory as "the end of that turn" would
       // erase the live tool trace of a turn that is, per the very lookup
       // racing it, still running. Only the actual reply — never an advisory
       // interleaved before it — is a completion signal.
-      if (from !== "system" && !hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+      if (from !== "system" && !hasOtherOpenTurns(room.readRoom().openTurns, event.chatId)) {
         setLiveStepsByThread((prev) =>
           prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
         );
@@ -3019,7 +3025,7 @@ export function AppShell({
   /**
    * Who to name in the typing line for a given channel (and, when a thread
    * is open, that thread) — a resolver rather than one precomputed array,
-   * because `ChatView` needs two independent lines: the main composer's
+   * because `RoomView` needs two independent lines: the main composer's
    * (`parentId` unset) and the open thread panel's (`parentId` set to the
    * parent message's id). A single array could only ever answer one of them,
    * which is why thread typing indicators never worked before this: the wire
@@ -3590,7 +3596,7 @@ export function AppShell({
           control, which is inside this context — so the direction is flipped
           here rather than by wrapping the provider in another element. */}
       <SidebarProvider className="h-svh flex-col overflow-hidden">
-      {/* Room's channel list is rendered by `ChatView`, in the content column,
+      {/* Room's channel list is rendered by `RoomView`, in the content column,
           and painted in the sidebar column. This provider is the slot the two
           agree on; `room-rail.tsx` explains why it is a portal rather than the
           whole chat model lifted up here. Inside `SidebarProvider` because it
@@ -3847,7 +3853,7 @@ export function AppShell({
               What that costs, said plainly: ~2,400 lines of chat model stay
               mounted while the operator is on Company or Flows. The data was
               always resident — this shell owns `transcripts`, the mention feed
-              and the unread map precisely *because* `ChatView` used to unmount
+              and the unread map precisely *because* `RoomView` used to unmount
               — so what is newly kept is the view's own state and its
               desks/roster reads, not the polling. The return is a channel list
               that is never a round trip away, and a trip back to Room that
@@ -3855,10 +3861,10 @@ export function AppShell({
 
               The alternative, lifting the rail model up into this shell, was
               rejected when the rail shipped and is worse now: it would put an
-              effect in `ChatView` writing state up here and re-render the whole
+              effect in `RoomView` writing state up here and re-render the whole
               console on every unread tick from every section, rather than only
               from Room. */}
-          <ChatView
+          <RoomView
               client={client}
               company={company}
               // What the agents in this company are allowed to do without
@@ -3900,10 +3906,6 @@ export function AppShell({
               onSendFailed={onSendFailed}
               onSendStale={onSendStale}
           scopeRef={scopeRef}
-              openTurns={openTurns}
-              liveStepsByThread={liveStepsByThread}
-              liveStepsByMessage={liveStepsByMessage}
-              receiptByThread={receiptByThread}
               agentNames={agentNames}
               unread={unread}
               onChannelViewed={onChannelViewed}
@@ -3911,7 +3913,6 @@ export function AppShell({
               mentionFeedRevision={mentionFeedVersion}
               mentions={mentionCounts}
               approvals={feed.approvals}
-              chatChannelByThread={chatChannelByThread}
               taskStatusByTaskId={taskStatusByTaskId}
               inflightRuns={inflightRuns}
               onInflightSteered={refreshTaskStatuses}

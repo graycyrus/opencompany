@@ -41,7 +41,7 @@ import { describe, expect, it } from "vitest";
  * input", which a source read pins precisely.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 describe("send's stateKey does not borrow the open thread for a top-level send", () => {
   it("keys an unthreaded send on the bare channel, not on openThreadId", () => {

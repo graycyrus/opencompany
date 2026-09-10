@@ -2522,6 +2522,25 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowDeleted {
             workflow_id, name, ..
         } => format!("workflow deleted: {name} ({workflow_id})"),
+        // The structural rows. Ids and roles only — this is folded into the
+        // orchestrator's recent-activity context and read by a model, so the
+        // same rule the workflow arms follow applies: no free text, no actor
+        // ids, and no configuration.
+        CompanyEvent::TeammateAdded { .. } => "teammate added".into(),
+        CompanyEvent::DeskCreated { name, .. } => format!("desk created: {name}"),
+        CompanyEvent::DeskDeleted { .. } => "desk deleted".into(),
+        CompanyEvent::DeskMembersChanged { added, removed, .. } => format!(
+            "desk membership changed: +{} −{}",
+            added.len(),
+            removed.len()
+        ),
+        CompanyEvent::DeskHiveConfigured { reset, .. } => {
+            if *reset {
+                "desk move grammar restored".into()
+            } else {
+                "desk move grammar installed".into()
+            }
+        }
         // Issue #276. This one-liner is folded into the orchestrator's
         // recent-activity context, so it is read by a model — and the arms
         // around it drop free text and actor ids for that reason. Name and id
@@ -3745,6 +3764,13 @@ pub struct AddAgentTool {
     /// The minter's **effective** grant — its line already narrowed by the
     /// company `allow`. The ceiling an explicit `tools` argument is clamped to.
     minter_grants: Vec<String>,
+    /// The journal, when this tool is wired with one.
+    ///
+    /// Optional and set through [`AddAgentTool::with_events`] rather than a
+    /// sixth constructor argument, so every test that builds this tool to
+    /// exercise the *mint* keeps compiling unchanged — the audit row is a
+    /// separate concern from the narrowing rules those tests are about.
+    events: Option<Arc<dyn EventLog>>,
 }
 
 impl AddAgentTool {
@@ -3776,7 +3802,18 @@ impl AddAgentTool {
             minter,
             minter_tools,
             minter_grants,
+            events: None,
         }
+    }
+
+    /// Wire the journal, so a mint leaves an audit row naming who did it.
+    ///
+    /// Without this the tool still mints — the row is best-effort and its
+    /// absence costs the console its spawn edges, not the teammate.
+    #[must_use]
+    pub fn with_events(mut self, events: Option<Arc<dyn EventLog>>) -> Self {
+        self.events = events;
+        self
     }
 }
 
@@ -4025,6 +4062,33 @@ impl Tool for AddAgentTool {
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
 
+        // The audit row for one agent creating another.
+        //
+        // The console's activity graph draws its spawn edges from this: before
+        // it, "who made whom" could only be inferred from a tool-call frame
+        // whose arguments arrive redacted and which does not survive a reload.
+        // `POST {scope}/team` journals the identical variant, so the two
+        // creation paths cannot answer the question differently.
+        //
+        // Best-effort, appended after the teammate is durable: a journal that
+        // refuses the row must not undo a mint that already happened.
+        if let Some(events) = &self.events
+            && let Err(err) = events
+                .append(
+                    &self.company,
+                    crate::ports::types::CompanyEvent::TeammateAdded {
+                        agent_id: id.clone(),
+                        role: role.clone(),
+                        by_agent_id: Some(self.minter.clone()),
+                        // An agent did this, not a person.
+                        by: None,
+                    },
+                )
+                .await
+        {
+            tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
+        }
+
         // Issue #619: the mint is observable — the minter, the teammate, and
         // the grant it was given. This was the condition attached to sanctioning
         // the narrowing at all: `add_agent` is `Reach::Nothing` and never asks,
@@ -4188,7 +4252,7 @@ pub fn orchestrator_tools(
         workflow_source_dir,
         store.clone(),
         workflow_revisions,
-        events,
+        events.clone(),
     );
     tools.push(Box::new(
         crate::harness::workflow_admin::ReadWorkflowTool::new(workflow_admin.clone()),
@@ -4199,13 +4263,10 @@ pub fn orchestrator_tools(
     tools.push(Box::new(
         crate::harness::workflow_admin::DeleteWorkflowTool::new(workflow_admin),
     ));
-    tools.push(Box::new(AddAgentTool::new(
-        company,
-        store,
-        minter,
-        minter_tools,
-        minter_grants,
-    )));
+    tools.push(Box::new(
+        AddAgentTool::new(company, store, minter, minter_tools, minter_grants)
+            .with_events(events.clone()),
+    ));
     tools
 }
 
@@ -8403,6 +8464,7 @@ name = "Morning"
 
     fn seeded_record(id: &CompanyId) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -9821,6 +9883,7 @@ name = "Morning"
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: company.clone(),

@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { TeamMember } from "@/lib/team";
-import { AddMemberDialog } from "@/views/chat/AddMemberDialog";
-import { MembersPane } from "@/views/chat/MembersPane";
+import { AddMemberDialog } from "@/views/room/AddMemberDialog";
+import { MembersPane } from "@/views/room/MembersPane";
 
 /**
  * Add/remove a teammate from chat's member pane. `POST {scope}/team`
@@ -187,7 +187,7 @@ describe("AddMemberDialog, when the write is refused", () => {
       avatar: undefined,
       landOnProfile: true,
     });
-    // Not closed on a failed write — the caller's own toast (ChatView.addMember)
+    // Not closed on a failed write — the caller's own toast (RoomView.addMember)
     // is the visible error; this dialog's honest half is staying open and
     // retryable rather than claiming the write landed.
     expect(onOpenChange).not.toHaveBeenCalledWith(false);

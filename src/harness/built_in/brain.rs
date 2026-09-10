@@ -5174,6 +5174,7 @@ description = "Runs Acme."
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -5653,6 +5654,7 @@ description = "Builds it."
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -8126,6 +8128,7 @@ members = ["engineer"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -8198,6 +8201,7 @@ members = ["chief"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -8925,6 +8929,7 @@ name = "Design"
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -8989,6 +8994,7 @@ members = ["eng1", "eng2"]
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -9071,6 +9077,7 @@ members = ["eng1", "eng2"]
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -9887,6 +9894,7 @@ members = ["engineer", "designer"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -13795,6 +13803,7 @@ agent = "claude"
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),

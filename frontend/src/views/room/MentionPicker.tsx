@@ -3,7 +3,7 @@ import { Hash, Users } from "lucide-react";
 
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { cn } from "@/lib/utils";
-import type { Mentionable } from "@/views/chat/mentions";
+import type { Mentionable } from "@/views/room/mentions";
 
 /**
  * The `@` picker, anchored above the composer.

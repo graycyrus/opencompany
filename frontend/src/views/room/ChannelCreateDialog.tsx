@@ -68,7 +68,7 @@ export function ChannelCreateDialog({
   const nameErrorId = `${formId}-name-error`;
   const membersErrorId = `${formId}-members-error`;
   // The scope this render belongs to, for the stale-completion guard below —
-  // the same comparison `ChatView`'s send path makes against its `scopeRef`
+  // the same comparison `RoomView`'s send path makes against its `scopeRef`
   // (CodeRabbit on #1872): a `createDesk` that resolves after the operator
   // switched company or host must not hand its desk to the new scope's rail.
   const scopeNow = useRef({ client, company });

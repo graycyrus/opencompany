@@ -19,8 +19,8 @@ import type {
 } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
-import type { DecidedApproval } from "@/views/chat/model";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
+import type { DecidedApproval } from "@/views/room/model";
 
 import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { DeliveryRows } from "./RunHistoryPanel";

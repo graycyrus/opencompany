@@ -72,7 +72,7 @@ import type { ApprovalSummary, DecideApproval, Verdict } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
 import { useAskerNames } from "@/components/approval-card";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 import { TaskItem } from "@/views/TaskCard";
 import {
   BOARD_LEDGER,

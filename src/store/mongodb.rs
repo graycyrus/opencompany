@@ -877,6 +877,11 @@ impl CompanyStore for MongoStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_agent_edits: overlay.agent_edits,
+            // Off the blob, for the reason the filesystem and SQLite backends
+            // read it that way: the write side persists it, so defaulting here
+            // would drop an installed move grammar on every load — and on this
+            // backend that is a hosted tenant losing it.
+            overlay_desk_hive: overlay.desk_hive,
             overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_tool_grants: overlay.tool_grants,
@@ -5565,6 +5570,7 @@ mod test {
 
         for id in [&owned, &orphan] {
             let record = CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
@@ -5646,6 +5652,7 @@ mod test {
 
         for (id, tenant) in [(&id_a, "tenant-a"), (&id_b, "tenant-b")] {
             let record = CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),

@@ -18,7 +18,7 @@ import { formatBytes } from "@/api/workspace";
 import { Button } from "@/components/ui/button";
 import { COMPOSER_INTENT_HIDDEN } from "@/product-scope";
 import { cn } from "@/lib/utils";
-import { MentionPicker } from "@/views/chat/MentionPicker";
+import { MentionPicker } from "@/views/room/MentionPicker";
 import {
   activeMentionQuery,
   aliasSet,
@@ -32,7 +32,7 @@ import {
   stripCodeRegions,
   type Mention,
   type Mentionable,
-} from "@/views/chat/mentions";
+} from "@/views/room/mentions";
 
 interface Props {
   placeholder: string;
@@ -119,7 +119,7 @@ interface Props {
    * composers — so the paperclip is present exactly when the surface can carry
    * a file. The composer holds the returned reference as a pending chip and
    * threads it onto the next `onSend`; the actual upload/verify lives in
-   * `ChatView`.
+   * `RoomView`.
    */
   uploadAttachment?: (file: File) => Promise<AttachmentDto>;
   /**
@@ -143,7 +143,7 @@ interface Props {
    * mentions, the selected intent, the formatting toggle — is `useState` in
    * *this* component, so unmounting it is what discards the draft.
    *
-   * `ChatView` renders one channel composer for every channel: React reconciles
+   * `RoomView` renders one channel composer for every channel: React reconciles
    * it as the same instance across a channel switch, which is why a draft has
    * always survived walking to another channel and back. Gating that element on
    * `!readOnly` quietly took that away — opening `#Operator` for a moment, with
@@ -275,7 +275,7 @@ export function MessageComposer({
       mountedRef.current = false;
     };
   }, []);
-  // The cleanup callback for the scope currently on screen. `ChatView`
+  // The cleanup callback for the scope currently on screen. `RoomView`
   // re-binds `deleteAttachment` (and `uploadAttachment`) when the company or
   // connection changes while this composer stays mounted; an in-flight
   // upload's continuation compares its captured callback against this to know

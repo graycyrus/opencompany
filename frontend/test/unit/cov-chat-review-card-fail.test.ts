@@ -9,11 +9,11 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { ChatMessage } from "@/lib/chat";
 import type { TaskStatus } from "@/api/tasks";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import type { Transcripts } from "@/views/chat/model";
-import { ChatView } from "@/views/ChatView";
+import type { Transcripts } from "@/views/room/model";
+import { RoomView } from "@/views/RoomView";
 
 /**
- * `ChatView.reviewCard` — the settle pill's Approve, `POST {scope}/chat/review`
+ * `RoomView.reviewCard` — the settle pill's Approve, `POST {scope}/chat/review`
  * (`review_card`, `operator.rs`) — already has a `catch`; nothing pinned it.
  * A refused verdict must not remove the card or claim it settled: the row
  * stays exactly as it was, Approve returns to `disabled: false`, and the
@@ -84,7 +84,7 @@ afterEach(() => {
 /** Owns `transcripts` state itself, the way `AppShell` does for the real view. */
 function Harness({ client }: { client: OpenCompanyClient }) {
   const [transcripts, setTranscripts] = useState<Transcripts>({ main: [CARD] });
-  return createElement(ChatView, {
+  return createElement(RoomView, {
     client,
     company: "acme",
     sub: "main",

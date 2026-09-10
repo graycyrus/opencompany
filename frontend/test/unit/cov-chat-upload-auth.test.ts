@@ -7,12 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentDto } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { ChatView } from "@/views/ChatView";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * `POST {scope}/chat/upload` (`workspace.rs`) sits under the same `scoped(…)`
  * guard as every other chat write — any company member, not admin-only — and
- * `ChatView` wires `uploadAttachment` into the composer unconditionally
+ * `RoomView` wires `uploadAttachment` into the composer unconditionally
  * (`useCallback(… uploadChatAttachment …)`, no `isAdmin` check anywhere near
  * it). That is the opposite gate from the daily-budget menu item a few rows
  * away in the same pane (`canEditBudget={isAdmin && fromHost}`,
@@ -74,7 +74,7 @@ afterEach(() => {
 });
 
 function tree(client: OpenCompanyClient): ReactNode {
-  const view = createElement(ChatView, {
+  const view = createElement(RoomView, {
     client,
     company: "acme",
     sub: "main",

@@ -127,10 +127,10 @@ export const NAMED_BY: Record<View, Names> = {
   team: [{ pageHeader: "TeamView.tsx" }, { pageHeader: "team/AgentDetailView.tsx" }],
   /**
    * The channel bar names the loaded pane. The three channel-less states —
-   * desks failed, desks pending, no channel — are `ChatView`'s own panes, and
+   * desks failed, desks pending, no channel — are `RoomView`'s own panes, and
    * each carries a `hidden` header so the page is named before a channel is.
    */
-  chat: [{ handRolled: "chat/ChatHeader.tsx" }, { pageHeader: "ChatView.tsx" }],
+  chat: [{ handRolled: "room/ChatHeader.tsx" }, { pageHeader: "RoomView.tsx" }],
   inbox: [{ pageHeader: "InboxView.tsx" }],
   /**
    * `#/tasks/<id>` is the card detail pane, not the board. A `pageHeader` leaf
@@ -265,7 +265,7 @@ export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
  * check was a grep over `src/views/**` for `sub ===`, `if (sub)` and
  * `resolve*Page`: it finds `CompanyView` (three leaves, enumerated above),
  * `TeamView` (`AgentDetailView`, enumerated), `app-shell`'s `MANAGE_SEGMENT`
- * split under `ledgers` (enumerated), `SettingsSection`, `ConnectionsSection`, and this. `ChatView`
+ * split under `ledgers` (enumerated), `SettingsSection`, `ConnectionsSection`, and this. `RoomView`
  * and `LedgersView` also read `sub`, but to select a channel or a list *within
  * themselves* rather than to render a different component, so they contribute
  * no leaf.

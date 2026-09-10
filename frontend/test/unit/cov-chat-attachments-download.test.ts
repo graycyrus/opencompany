@@ -4,11 +4,11 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageAttachments } from "@/views/chat/MessageAttachments";
+import { MessageAttachments } from "@/views/room/MessageAttachments";
 import type { AttachmentDto } from "@/api/types";
 
 /**
- * `ChatView`'s `resolveAttachmentUrl` wraps `fetchBlobUrl` against the node id
+ * `RoomView`'s `resolveAttachmentUrl` wraps `fetchBlobUrl` against the node id
  * a chat line stored — the node named there can be gone by the time someone
  * clicks it (deleted from the workspace after the line was written). The
  * download button's own `catch` sets `downloadError`; before this it was an

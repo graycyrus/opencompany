@@ -81,7 +81,7 @@ import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
 import {
   AddMemberDialog,
   type NewMemberFields,
-} from "@/views/chat/AddMemberDialog";
+} from "@/views/room/AddMemberDialog";
 
 const SEAT_MIME = "application/x-opencompany-seat";
 
@@ -372,7 +372,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
 
   /**
    * Company creation is durable structure, so a host without the team write
-   * plane must explain the refusal rather than borrow ChatView's local-only
+   * plane must explain the refusal rather than borrow RoomView's local-only
    * fallback. A local row could not be placed on a desk and would vanish on
    * the next chart read.
    */

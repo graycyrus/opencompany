@@ -2960,6 +2960,16 @@ fn cycle_task_id(
             | CompanyEvent::WorkflowCreated { .. }
             | CompanyEvent::WorkflowUpdated { .. }
             | CompanyEvent::WorkflowDeleted { .. }
+            // Structural audit rows: a teammate or desk was created, a seat
+            // moved, a move grammar changed. Each records a decision somebody
+            // already made — none names a card and none competes with a
+            // conversation, so they pass through exactly like every other
+            // record here.
+            | CompanyEvent::TeammateAdded { .. }
+            | CompanyEvent::DeskCreated { .. }
+            | CompanyEvent::DeskDeleted { .. }
+            | CompanyEvent::DeskMembersChanged { .. }
+            | CompanyEvent::DeskHiveConfigured { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             // Issue #371/#382: a run's start and its per-node start/finish
@@ -3190,6 +3200,16 @@ fn cycle_conversation(
             | CompanyEvent::WorkflowCreated { .. }
             | CompanyEvent::WorkflowUpdated { .. }
             | CompanyEvent::WorkflowDeleted { .. }
+            // Structural audit rows: a teammate or desk was created, a seat
+            // moved, a move grammar changed. Each records a decision somebody
+            // already made — none names a card and none competes with a
+            // conversation, so they pass through exactly like every other
+            // record here.
+            | CompanyEvent::TeammateAdded { .. }
+            | CompanyEvent::DeskCreated { .. }
+            | CompanyEvent::DeskDeleted { .. }
+            | CompanyEvent::DeskMembersChanged { .. }
+            | CompanyEvent::DeskHiveConfigured { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             | CompanyEvent::WorkflowRunStarted { .. }
@@ -4853,6 +4873,7 @@ members = ["writer"]
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),

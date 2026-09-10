@@ -125,7 +125,7 @@ test.describe("sidebar toggle reachability", () => {
     // sections and the Room rail — a section's own pages are a content rail, so
     // "Work" is not in here to pick any more. The channel list is the thing this
     // sheet now has that nothing else does, and it is the harder case: it is
-    // portalled in from `ChatView` rather than rendered by the sidebar, so a
+    // portalled in from `RoomView` rather than rendered by the sidebar, so a
     // dismiss that only fired for the sidebar's own rows would miss it (which is
     // what `room-rail.tsx`'s `dismiss` exists for). Picking one still closes the
     // sheet behind it, which is the pattern under test.

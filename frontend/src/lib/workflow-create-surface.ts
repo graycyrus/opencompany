@@ -1,5 +1,5 @@
 import { ApiError } from "@/api/types";
-import { utf8ByteLength } from "@/views/chat/mentions";
+import { utf8ByteLength } from "@/views/room/mentions";
 
 /**
  * Which of the two New-workflow dialogs is on screen.

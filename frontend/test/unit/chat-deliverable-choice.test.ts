@@ -6,9 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OpenCompanyClient } from "@/api/client";
 import type { MessageIntent } from "@/api/tasks";
-import { MessageComposer } from "@/views/chat/MessageComposer";
-import type { ChannelKind } from "@/views/chat/model";
-import { offersDeliverableChoice } from "@/views/chat/model";
+import { MessageComposer } from "@/views/room/MessageComposer";
+import type { ChannelKind } from "@/views/room/model";
+import { offersDeliverableChoice } from "@/views/room/model";
 
 /**
  * Issue #845: which composers offer "Do it once" / "Build me the workflow".

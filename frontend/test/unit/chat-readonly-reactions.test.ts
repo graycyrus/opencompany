@@ -5,13 +5,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
 import {
   buildTimeline,
   buildTimelineItems,
   QUICK_REACTIONS,
   type Channel,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * Issue #1986 — a read-only channel must not offer a new reaction.
@@ -45,7 +45,7 @@ import {
  *   swept the whole action bar away would be caught here.
  */
 
-/** The read-only Operator feed: `system` is the flag `ChatView` gates on. */
+/** The read-only Operator feed: `system` is the flag `RoomView` gates on. */
 const OPERATOR: Channel = {
   id: "operator",
   name: "Operator",

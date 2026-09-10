@@ -5,8 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { makeMessage, markSendFailed, type ChatMessage } from "@/lib/chat";
-import { MessageRow } from "@/views/chat/MessageRow";
-import type { TimelineEntry } from "@/views/chat/model";
+import { MessageRow } from "@/views/room/MessageRow";
+import type { TimelineEntry } from "@/views/room/model";
 
 /**
  * B-099: a message that failed to send must not render as a delivered one.

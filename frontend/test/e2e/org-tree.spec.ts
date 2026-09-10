@@ -431,7 +431,7 @@ const memberPane = (page: Page) => page.getByRole("complementary").last();
 /**
  * Open the chat member pane if it is shut.
  *
- * Its open state lives in `ChatView`, which unmounts when the operator steps
+ * Its open state lives in `RoomView`, which unmounts when the operator steps
  * into another view — so this has to be re-run after a round trip through the
  * chart, and a blind click would close what a previous call opened.
  */

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { listInflight, type InflightRun } from "@/api/tasks";
-import { InflightRunBar } from "@/views/chat/InflightRunBar";
+import { InflightRunBar } from "@/views/room/InflightRunBar";
 
 /**
  * Reading `GET …/tasks/inflight` and reaching the steer controls it feeds.

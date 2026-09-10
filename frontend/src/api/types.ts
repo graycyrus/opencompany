@@ -231,6 +231,94 @@ export interface DeskDto {
 }
 
 /**
+ * `GET/PUT/DELETE {scope}/desks/{deskId}/hive` — a desk's move grammar.
+ *
+ * Mirrors `DeskHiveDto` in `src/server/operator.rs`.
+ *
+ * The `declared` / `effective` split is the reason this is its own payload
+ * rather than a field on {@link DeskDto}. A single `turnBudget: 9` on a
+ * three-seat desk is either an operator's decision or the derived `3 x members`,
+ * and the two behave differently the moment somebody joins — so one number
+ * cannot tell the editor whether adding a seat will change it.
+ */
+export interface DeskHiveDto {
+  deskId: string;
+  /** Where the block in force came from. */
+  source: "overlay" | "manifest" | "default";
+  /**
+   * Whether an episode would actually open right now.
+   *
+   * A one-member desk with `enabled: true` is still `false` — the flag says what
+   * the operator wants, not what the desk can do.
+   */
+  deliberates: boolean;
+  /** The block as authored. Snake_case: this field **is** the manifest block. */
+  declared: DeskHiveDeclared;
+  /** What the runtime will use, every default resolved against membership. */
+  effective: {
+    turnBudget: number;
+    quorum: number;
+    blindRound: boolean;
+    dominanceCap: number;
+    repetitionCap: number;
+    requireGrounded: boolean;
+    requireEvidential: boolean;
+    refutationCap?: number | null;
+  };
+  /** Every move a table may name, and the three no table can take away. */
+  moveKinds: string[];
+  ungatedKinds: string[];
+  seats: DeskHiveSeatDto[];
+  /**
+   * How many seats may deposit a distinct supporter, and whether that clears
+   * the effective quorum. `propose` counts — in the fold a proposal is already
+   * its own author's support.
+   */
+  eligibleSupporters: number;
+  reachesQuorum: boolean;
+}
+
+/**
+ * The `[[group_chat]].hive` block as authored — snake_case, because it is the
+ * TOML block verbatim and a camelCase twin would be a second shape to keep in
+ * step with it. Every key absent means "not said", which is distinct from any
+ * value it could hold.
+ */
+export interface DeskHiveDeclared {
+  enabled?: boolean;
+  turn_budget?: number;
+  quorum?: number;
+  blind_round?: boolean;
+  moves?: Record<string, string[]>;
+  require_evidential?: boolean;
+  refutation_cap?: number;
+  dominance_cap?: number;
+  repetition_cap?: number;
+  referral?: {
+    enabled?: boolean;
+    max_hops?: number;
+    reach?: string;
+    returns?: boolean;
+    peer_cap?: number;
+  };
+}
+
+/** One seat, and the moves it may open a line with. */
+export interface DeskHiveSeatDto {
+  agentId: string;
+  label: string;
+  role: string;
+  /** Already ordered and already unioned with the ungated three. */
+  moves: string[];
+  /**
+   * Whether the table governs this seat at all — invisible from `moves` alone,
+   * since "named with every kind" and "not named" produce the same list and
+   * only one of them is a decision somebody made.
+   */
+  governed: boolean;
+}
+
+/**
  * `GET {scope}/operator-channel` — the identity of the company's
  * always-present, durable Operator feed (issue #1757 rework): a read-only
  * "what happened" feed aggregating workflow-run reports and the owner/
@@ -1192,6 +1280,19 @@ export interface TeamMemberDto {
    * guessing one from `tier`.
    */
   isOrchestrator?: boolean;
+  /**
+   * The desks this teammate may hand work to (`[[agent]].delegates_to`), as
+   * declared — `["*"]` meaning every desk.
+   *
+   * The company's **delegation address space**: the edges a teammate *could*
+   * traverse, as opposed to the ones it has. The comms graph draws it so a
+   * company that has not run yet still shows its wiring rather than a set of
+   * unconnected dots.
+   *
+   * Absent when the teammate delegates nowhere, and on a host that predates the
+   * field — in which case the graph draws observed traffic only.
+   */
+  delegatesTo?: string[];
   /**
    * This teammate's tool grants (issue #601) — the **same** three lists, from
    * the same host-side constructor, that `GET .../team/{agentId}` serves.

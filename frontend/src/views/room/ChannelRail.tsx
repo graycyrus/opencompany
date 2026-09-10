@@ -64,7 +64,7 @@ interface Props {
    * since #2130. On `#/finances/wallet` the marked channel is where Room will
    * take you back to, not the page being read — and two nodes claiming `page`
    * is a page a screen reader cannot locate you on, which is the same defect
-   * the section rail was reviewed for on that PR. `ChatView` passes its own
+   * the section rail was reviewed for on that PR. `RoomView` passes its own
    * `routeOpen` straight through.
    */
   currentPage?: boolean;
@@ -115,7 +115,7 @@ export function ChannelRail({
   // collapsed branch below unmounts every `Section`. Held inside them, folding
   // a section and then collapsing the rail would reopen it on expand — the
   // density toggle must not discard the operator's organization. Absent means
-  // "open": the default is a fully expanded list. `ChatView` passes the state
+  // "open": the default is a fully expanded list. `RoomView` passes the state
   // in so both rail instances share one fold set across the `lg` breakpoint;
   // a standalone rail (tests, other hosts) keeps it local to the instance.
   const [internalOpenSections, setInternalOpenSections] = useState<Record<string, boolean>>({});

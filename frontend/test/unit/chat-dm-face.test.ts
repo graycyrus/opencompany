@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { avatarFor } from "@/lib/team";
 import type { TeamMember } from "@/lib/team";
-import { buildChannels, dmFace, type Channel } from "@/views/chat/model";
+import { buildChannels, dmFace, type Channel } from "@/views/room/model";
 
 /**
  * The seed a DM's avatar is drawn from (issues #1170, #1185).

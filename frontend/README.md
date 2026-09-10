@@ -23,7 +23,7 @@ and survives a refresh.
 | View | What it does |
 |---|---|
 | **Overview** | The company's knowledge graph, full-bleed — see [`src/views/overview/README.md`](src/views/overview/README.md) |
-| **Chat** | A channel-and-DM workspace: channel rail, threaded timeline, composer, thread panel, and the roster in a side pane — see [`src/views/chat/README.md`](src/views/chat/README.md) |
+| **Room** | A channel-and-DM workspace: channel rail, threaded timeline, composer, thread panel, and the roster in a side pane — see [`src/views/room/README.md`](src/views/room/README.md) |
 | **Tasks** | A built-in Kanban board (drag cards between columns) |
 | **Approvals** | The inbox of things parked for your decision, with approve/decline |
 | **Workflows** | A read-only [React Flow](https://reactflow.dev) canvas of how work is routed (lazy-loaded) |

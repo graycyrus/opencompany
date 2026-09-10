@@ -438,6 +438,19 @@ export function TeamView({
                 <Network className="size-4" /> Manage desks
               </Button>
             )}
+            {/*
+              The activity graph is a deep-link destination rather than a fifth
+              sidebar row (Rule 6): it is reached from the roster, which is the
+              page an operator is already on when they ask who works with whom.
+              An anchor, not a callback — it is a plain address, and one more
+              navigation prop through this tree buys nothing.
+            */}
+            <Button
+              variant="outline"
+              render={<a href="#/company/comms" data-testid="company-activity" />}
+            >
+              <Network className="size-4" /> Activity
+            </Button>
             <Button onClick={() => setAddOpen(true)}>
               <UserPlus className="size-4" /> Add agent
             </Button>

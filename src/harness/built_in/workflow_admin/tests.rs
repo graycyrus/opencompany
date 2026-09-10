@@ -208,6 +208,7 @@ impl Fixture {
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: company.clone(),
@@ -1364,6 +1365,7 @@ async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
     ))
     .expect("valid manifest");
     let record = CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         id: company.clone(),

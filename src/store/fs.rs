@@ -1750,6 +1750,12 @@ struct Meta {
     /// which leaves the manifest in charge, exactly as those companies ran.
     #[serde(default)]
     overlay_agent_edits: Vec<crate::ports::types::AgentOverride>,
+    /// The move grammars the operator has installed on desks. Absent on meta
+    /// files written before a grammar could be installed from the console, and
+    /// `#[serde(default)]` reads that absence as "the manifest still decides" —
+    /// exactly how those companies ran.
+    #[serde(default)]
+    overlay_desk_hive: Vec<crate::ports::types::DeskHiveOverride>,
     /// The ids of manifest teammates the operator has removed. Absent on meta
     /// files written before a blueprint teammate could be removed, which
     /// `#[serde(default)]` reads as "nobody was removed" — exactly how those
@@ -1834,6 +1840,7 @@ impl Default for Meta {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_policy: None,
             overlay_tool_grants: None,
@@ -1939,6 +1946,7 @@ impl FsCompanyStore {
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
             overlay_agent_edits: record.overlay_agent_edits.clone(),
+            overlay_desk_hive: record.overlay_desk_hive.clone(),
             overlay_retired_agents: record.overlay_retired_agents.clone(),
             overlay_policy: record.overlay_policy.clone(),
             overlay_tool_grants: record.overlay_tool_grants.clone(),
@@ -2227,6 +2235,7 @@ impl CompanyStore for FsCompanyStore {
 
         Ok(Some(CompanyRecord {
             overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_desk_hive: meta.overlay_desk_hive,
             overlay_retired_agents: meta.overlay_retired_agents,
             id: id.clone(),
             manifest,
@@ -4139,6 +4148,7 @@ mod test {
         let record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4205,6 +4215,7 @@ mod test {
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -4263,6 +4274,7 @@ mod test {
         let first_save = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4321,6 +4333,7 @@ mod test {
         let record = || CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4404,6 +4417,7 @@ mod test {
         let record = |lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4508,6 +4522,7 @@ mod test {
             CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest,
                 ledger: Vec::new(),
@@ -4626,6 +4641,7 @@ mod test {
         let record_named = |name: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4728,6 +4744,7 @@ mod test {
         let record_named = |name: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4799,6 +4816,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4878,6 +4896,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4990,6 +5009,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -5135,6 +5155,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -5282,6 +5303,7 @@ mod test {
         let record_named = |name: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -5367,6 +5389,7 @@ mod test {
         let record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5455,6 +5478,7 @@ mod test {
         let record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5534,6 +5558,7 @@ mod test {
         let record = || CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5860,6 +5885,7 @@ mod test {
         let record = |lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5933,6 +5959,7 @@ mod test {
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -5998,6 +6025,7 @@ mod test {
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),

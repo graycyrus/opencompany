@@ -164,7 +164,7 @@ export const NAV_SECTIONS: NavSection[] = [
   // to do — so it is what opens, and it is first.
   //
   // It has no `children`, and it needs none: its contents are the channel list
-  // `ChatView` renders, portalled into the sidebar's own middle region — which
+  // `RoomView` renders, portalled into the sidebar's own middle region — which
   // is now pinned there on every section rather than being Room's turn at it.
   // See `room-rail.tsx`.
   { view: "chat", label: "Room", icon: MessagesSquare },
@@ -571,8 +571,8 @@ export function SidebarNavigation({
         )}
       >
         {/* The Room rail's mount point, on every section. What lands in it is
-            `ChatView`'s own `ChannelRail`, unchanged — see `room-rail.tsx`, and
-            `app-shell.tsx` for why `ChatView` stays mounted off Room to keep
+            `RoomView`'s own `ChannelRail`, unchanged — see `room-rail.tsx`, and
+            `app-shell.tsx` for why `RoomView` stays mounted off Room to keep
             feeding it. It scrolls rather than truncating behind a "show all": a
             channel list is scanned for a name you already know, and hiding its
             tail behind a control makes the one thing you came for the one thing

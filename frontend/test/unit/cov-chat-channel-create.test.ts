@@ -7,12 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto } from "@/api/types";
 import type { TeamMember } from "@/lib/team";
-import { ChannelCreateDialog } from "@/views/chat/ChannelCreateDialog";
+import { ChannelCreateDialog } from "@/views/room/ChannelCreateDialog";
 
 /**
  * `POST {scope}/desks` (`create_desk`, `operator.rs`) is `scoped(…)` — any
  * company member, not admin-only — and `ChannelCreateDialog` carries no role
- * check of its own; `ChatView`'s own trigger (`onAddChannel`) is likewise
+ * check of its own; `RoomView`'s own trigger (`onAddChannel`) is likewise
  * gated only on `fromHost && members.length > 0`, never on `isAdmin`. This
  * pins the dialog completes end to end for a plain member, and that a
  * refused create shows an honest, retryable error rather than closing on a

@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
 
 /**
  * The chat and board rendering of a parked approval shares `contents_hidden`

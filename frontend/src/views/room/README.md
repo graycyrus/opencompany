@@ -1,4 +1,10 @@
-# Chat — the workspace
+# Room — the workspace
+
+The console calls this surface **Room**; the view id and every minted address
+stay `chat`, because a view id is an address and renaming a row is not a reason
+to break `#/chat/<channelId>` links (`docs/spec/runtime/console-sections.md`,
+"Labels and view ids are allowed to differ"). The directory and the components
+took the label; the URLs did not.
 
 `#/chat` is a channel-and-DM workspace: a channel rail, a threaded timeline, a
 composer, an optional thread panel, and an optional member pane. It replaces
@@ -99,7 +105,7 @@ four spellings into one conversation (`isGeneralChannel`, mirroring
 `is_general_chat`), and every consumer of a live frame already applies that
 fold; routing was the one place that did not, so which of `#/chat/main` and
 `#/chat/general` worked depended on how the company happened to be declared.
-`ChatView` now falls back to `generalChannelId` for a General-spelled segment
+`RoomView` now falls back to `generalChannelId` for a General-spelled segment
 that names no channel outright — exact ids are still asked first, so a real desk
 whose id *is* a General spelling still wins its own channel and nothing that
 already resolved is rerouted. The guided tour's two composer stops depend on
@@ -188,7 +194,7 @@ and the host authorizes it through the very same gate (`chat_actor`,
 harder than saying something"), so a surface that states *there is nothing to
 reply to here* must not offer it either.
 
-`MessageTimeline` reads `channel.system` — the flag `ChatView` derives its own
+`MessageTimeline` reads `channel.system` — the flag `RoomView` derives its own
 `readOnly` from, and the one the channel intro already gates on — and
 `MessageRow` then **removes** the hover toolbar's five quick reactions rather
 than disabling them. The same answer #1984 gave the composer, for the same
@@ -224,14 +230,14 @@ start of your direct message with …" — while the first was true, so reloadin
 DM with months of history rendered it as brand new for as long as the fetch took
 (issue #934). Nothing was lost; it just read exactly like it had been.
 
-`HistoryHydration` in `model.ts` is the missing fact, and `historyReady()` is
+`HistoryHydration` in `timeline.ts` is the missing fact, and `historyReady()` is
 the one place that reads it:
 
 | State | May the intro claim "this is the start"? |
 |---|---|
 | `byChannel[id] === "loading"` | No — the request is in flight. |
 | `byChannel[id] === "ready"` | Yes. Settled, including a host that answered with nothing or failed outright. |
-| No entry, `discovered === false` | No. The shell's pass has not reached this channel yet — `ChatView` resolves its own desk list independently, so it can paint a channel a moment before the shell marks it. |
+| No entry, `discovered === false` | No. The shell's pass has not reached this channel yet — `RoomView` resolves its own desk list independently, so it can paint a channel a moment before the shell marks it. |
 | No entry, `discovered === true` | Yes. The pass ran and did not claim it, so nothing is coming — a console-only teammate, or a host with no `chat/history`. Holding a spinner forever would be a worse lie than the one this prevents. |
 
 `AppShell` owns the map because it owns the fetches. A channel is marked
@@ -296,7 +302,11 @@ chart's desk level, since no desk can name a parent desk. See
 
 | | |
 |---|---|
-| `model.ts` | Channels, senders, timeline grouping, formatting. All pure. |
+| `channels.ts` | What a channel is: desks, DMs, `#general`, the Operator feed, and the id grammar. Pure. |
+| `timeline.ts` | Senders, hydration, grouping, the timeline items (messages, approvals, episodes), reactions. Pure. |
+| `review.ts` | A card's lifecycle inside a conversation: the settle pill a verdict hangs off, and the budget-pause markers. Pure. |
+| `model.ts` | A barrel re-exporting the three above, so one import address still reaches all of it. Declares nothing. |
+| `EpisodeBlock.tsx` | One deliberation: the blind round, the turns, the standings, the verdict. |
 | `ChannelRail.tsx` | The channel/DM list, with collapsible sections. |
 | `ChatHeader.tsx` | The bar above the timeline. |
 | `MessageTimeline.tsx` | The scroll body: day dividers, channel intro, loading skeleton, typing row. |
@@ -306,7 +316,7 @@ chart's desk level, since no desk can name a parent desk. See
 | `MembersPane.tsx` | Who is in this channel, then the rest of the roster. |
 | `AddMemberDialog.tsx` | Define a teammate. |
 
-`../ChatView.tsx` owns the state and composes them.
+`../RoomView.tsx` owns the state and composes them.
 
 ## Grouping rules
 
@@ -340,7 +350,7 @@ image.
 A DM is where seeding it wrong bites hardest: the rail row and `ChatHeader`
 sit on screen together, and seeding them differently would put two faces on
 one teammate — worse than the generic glyph the header drew before issue #1170.
-Both go through `dmFace(channel)` in `model.ts`, which reads
+Both go through `dmFace(channel)` in `channels.ts`, which reads
 `channel.member.avatar`; a channel and a DM with no roster entry get `null`
 there and wear a glyph (`#`, `Lock`, `CircleDot`) instead, because neither has
 one person behind it. The header draws its tile at 24px, the floor below
@@ -348,7 +358,7 @@ which `TeammateAvatar`'s `markOnly` says a mascot is a smudge and the bare
 tone tile is the honest mark.
 
 Your own lines carry your own face too: `buildTimeline` takes a `youAvatar`,
-which `ChatView` reads from the same `auth/me` call that resolves your role.
+which `RoomView` reads from the same `auth/me` call that resolves your role.
 The name stays "You" — in your own transcript the second person is what
 identifies the line, and your name there would read as somebody else — so only
 the face is yours, which is the half you actually pick your lines out by.
@@ -359,13 +369,13 @@ the face is yours, which is the half you actually pick your lines out by.
 four — so a "you" line in a thread had no `avatar`, `TeammateAvatar` seeded on
 the name it was given, and `avatarFor("You")` hashes to the same mascot the
 agent happened to be wearing. Both participants drew one face and the thread
-could not be read. The panel takes a `youAvatar` prop from `ChatView` for
+could not be read. The panel takes a `youAvatar` prop from `RoomView` for
 exactly that reason; a new sender-resolving surface owes the same.
 
 The main timeline's `senderOf(message, channel, members)` carries the same
 seed for a message whose `channel` field names a distinct originating voice:
 it looks that id up against the roster (`members.find`) the same way
-`ChatView` already does elsewhere, and simply leaves the mascot unresolved —
+`RoomView` already does elsewhere, and simply leaves the mascot unresolved —
 falling back to the name seed, never a wrong face — when the id names a desk
 rather than a teammate.
 

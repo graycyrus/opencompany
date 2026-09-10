@@ -22,7 +22,7 @@ import {
   directMessageForId,
   dmThreadId,
   memberForThread,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * The built-in `#general` channel (issue #1743).
@@ -266,7 +266,7 @@ describe("resolving a host thread to the general channel", () => {
    *
    * The fold above is deliberate — `chat_responder("main")` is `None`, so a
    * teammate called `main` cannot capture the company's line — but it left the
-   * DM writable and unreadable at once: `ChatView` addressed the host with the
+   * DM writable and unreadable at once: `RoomView` addressed the host with the
    * bare `member.id` (issue #364 re-keyed DMs onto it), so a message composed
    * in that DM was written and answered in `#general`, under a transcript the
    * DM could not read back.
@@ -314,13 +314,13 @@ describe("resolving a host thread to the general channel", () => {
   /**
    * And the sender actually uses it.
    *
-   * `activeThreadId` is what `ChatView` puts in `chat`. The resolver above is
+   * `activeThreadId` is what `RoomView` puts in `chat`. The resolver above is
    * inert unless that one DM is addressed prefixed, so this holds the sender to
    * the same rule rather than trusting the comment beside it.
    */
   it("addresses that one DM prefixed, and leaves every other bare", () => {
     const view = readFileSync(
-      new URL("../../src/views/ChatView.tsx", import.meta.url),
+      new URL("../../src/views/RoomView.tsx", import.meta.url),
       "utf8",
     );
     expect(view).toContain("dmThreadId(active.member)");
@@ -469,10 +469,10 @@ describe("isGeneralChannel", () => {
 });
 
 /**
- * The two desk affordances `ChatView` derives from a channel, and why neither
+ * The two desk affordances `RoomView` derives from a channel, and why neither
  * may reach the built-in one.
  *
- * A full `ChatView` render needs the whole client and every hook, so this uses
+ * A full `RoomView` render needs the whole client and every hook, so this uses
  * the source-contract idiom `chat-rail-focus.test.ts` established for exactly
  * that case: pin the wiring the behaviour rests on. The behaviour itself is
  * verified in a browser — see the PR.
@@ -483,9 +483,9 @@ describe("isGeneralChannel", () => {
  * tests read as "has membership ⇒ is a desk" — an inference that is true of
  * every channel except this one.
  */
-describe("ChatView offers no desk affordance on the built-in channel", () => {
+describe("RoomView offers no desk affordance on the built-in channel", () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+  const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
   // Collapsed so an assertion pins the wiring rather than the line wrapping
   // Prettier happens to choose for it.
   const source = chatView.replace(/\s+/g, " ");
@@ -526,7 +526,7 @@ describe("ChatView offers no desk affordance on the built-in channel", () => {
  * the host's own history for that desk was empty.
  *
  * The map is module-private to `app-shell.tsx`, so this pins the wiring the
- * same way the `ChatView` block above does.
+ * same way the `RoomView` block above does.
  */
 describe("the shell maps the main line to #general, not to the first desk", () => {
   const here2 = dirname(fileURLToPath(import.meta.url));

@@ -81,7 +81,7 @@ import {
   deskFromDto,
   dmChannelId,
   memberForThread,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -821,7 +821,7 @@ export function approvalThreadLink(
   // it its own thread.
   //
   // Guarded on the topology being *known* rather than on the list being
-  // non-empty. A failed read must not be guessed at — `ChatView` surfaces the
+  // non-empty. A failed read must not be guessed at — `RoomView` surfaces the
   // error and renders no rail, so a link into it would land nowhere — but a
   // company that genuinely declares no desks still has `#general`, and that is
   // the one channel every company has. While an empty answer was overwritten
@@ -897,7 +897,7 @@ export function useApprovalThreadLinks(
     }
     let live = true;
     void Promise.all([
-      // The host's answer, taken as given — the same rule ChatView and
+      // The host's answer, taken as given — the same rule RoomView and
       // AppShell now follow. An empty list is a company with no desks, and an
       // approval raised on its `main` thread still resolves to `#general`. It
       // used to be swapped for `defaultDesks()`, which resolved approvals to

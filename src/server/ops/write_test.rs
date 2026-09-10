@@ -97,6 +97,7 @@ async fn state_with(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -3433,6 +3434,7 @@ async fn state_with_manifest_and_defaults(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -3482,6 +3484,7 @@ async fn state_with_manifest_and_overlays(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -4048,6 +4051,7 @@ async fn state_with_source_dir(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),

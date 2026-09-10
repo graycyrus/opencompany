@@ -278,7 +278,7 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
    * reported as that rather than as a stream that never delivered.
    *
    * It does not read `PendingSyncPosts`, and does not need to. Suppression is
-   * up for certain: `ChatView` calls `onSendStart` before `client.chat`, and
+   * up for certain: `RoomView` calls `onSendStart` before `client.chat`, and
    * this handler is holding that very POST unresolved — so a frame for this
    * thread landing now is a frame `capture` held. `repliesAtCut`, read the
    * moment this returns, is the other half of that reading, and between them

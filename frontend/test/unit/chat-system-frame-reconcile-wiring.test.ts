@@ -37,7 +37,7 @@ import { describe, expect, it } from "vitest";
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 const appShell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
 
 describe("ChatView computes and forwards the settled response's own texts", () => {

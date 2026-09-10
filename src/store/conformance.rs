@@ -304,6 +304,7 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
 /// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_agent_edits: sample_agent_overrides(),
         // Non-empty so a backend that drops the field is caught: without the
         // tombstone the manifest is re-read on load and the removed teammate

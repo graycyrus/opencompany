@@ -63,7 +63,7 @@ interface Props {
   sending: boolean;
   /**
    * Everything an `@` can name here (issue #1645). Drawn from the parent
-   * ChatView's directory so the thread composer shares the same roster.
+   * RoomView's directory so the thread composer shares the same roster.
    * Absent when the host predates the route, or when the directory has not
    * loaded — the composer degrades to plain-text typing.
    */
@@ -75,7 +75,7 @@ interface Props {
   channelMemberIds?: string[];
   /**
    * Whether the channel this thread belongs to is read-only (issue #1757's
-   * Operator channel, `Boolean(channel?.system)` in `ChatView`). The main
+   * Operator channel, `Boolean(channel?.system)` in `RoomView`). The main
    * composer is not rendered on such a channel, but a thread has its own
    * composer — so without this a durable Operator report could still be
    * opened as a thread and replied to there, only for the server's read-only
@@ -118,7 +118,7 @@ interface Props {
    */
   additionalReviewAnchors?: { taskId: string; anchorId: string }[];
   /**
-   * Every task id currently mid-verdict — `ChatView`'s own
+   * Every task id currently mid-verdict — `RoomView`'s own
    * `reviewingCardIds`. {@link reviewInFlight} already covers
    * {@link reviewTaskId}; this is the same signal for each entry in
    * {@link additionalReviewAnchors}, which has no scalar prop of its own to
@@ -143,7 +143,7 @@ interface Props {
   youAvatar?: string;
   /**
    * Resolves an attachment's bytes to an object URL for preview/download
-   * (issue #1682). Threaded from the parent ChatView like the main timeline's
+   * (issue #1682). Threaded from the parent RoomView like the main timeline's
    * `MessageRow` gets it, so a thread line can render the same chips — a
    * reply with an attachment is legal on the wire and history preserves it,
    * and it was invisible without this path.
@@ -315,7 +315,7 @@ export function ThreadPanel({
 
           `noopSend` went with it: with no composer there is nothing left to
           wire a no-op to. The belt that mattered is the server's read-only
-          guard (issue #1757), which is untouched, plus `ChatView`'s own
+          guard (issue #1757), which is untouched, plus `RoomView`'s own
           `if (readOnly) return;` before it calls `client.chat`. */}
       {readOnly ? (
         <p

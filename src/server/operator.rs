@@ -103,6 +103,13 @@ pub fn router() -> Router<AppState> {
             "/desks/{desk_id}/members/{agent_id}",
             delete(remove_desk_member),
         ))
+        // A desk's move grammar: read the table in force, install or replace it,
+        // or drop the override and fall back to the manifest's own block.
+        // Registered under both scope forms.
+        .merge(scoped(
+            "/desks/{desk_id}/hive",
+            get(desk_hive).put(set_desk_hive).delete(reset_desk_hive),
+        ))
         // Desk member ordering / hierarchy (issue #131): set the operator's
         // explicit member order for a desk. Registered under both scope forms.
         .merge(scoped("/desks/{desk_id}/order", put(set_desk_order)))
@@ -439,11 +446,312 @@ async fn add_desk_member(
         ))));
     }
     record.overlay_desk_members.push(OverlayDeskMember {
-        desk_id,
-        agent_id: body.agent_id,
+        desk_id: desk_id.clone(),
+        agent_id: body.agent_id.clone(),
     });
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added: vec![body.agent_id],
+            removed: Vec::new(),
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Append a structural audit row, best-effort.
+///
+/// Best-effort on purpose, and it is the same posture the episode driver takes
+/// with its closing report: the change is already durable on the company record
+/// by the time this runs, so a journal that refuses the row must not turn a
+/// completed write into a failed request. The row is the audit trail, not the
+/// change itself.
+async fn journal_structural(scope: &ScopedCompany, event: CompanyEvent) {
+    if let Err(err) = scope.runtime.events().append(scope.id(), event).await {
+        tracing::warn!(error = %err, "structural audit row could not be journaled");
+    }
+}
+
+/// One desk's move grammar, as the console renders and edits it.
+///
+/// Two shapes in one payload, and the split is the point:
+///
+/// - `declared` is the block **as authored** — every field an `Option` whose
+///   `None` means "not said". It is what a `PUT` round-trips.
+/// - `effective` is what the runtime will actually use, with every default
+///   resolved against the current membership.
+///
+/// One number could not carry both. `turn_budget = 9` on a three-seat desk is
+/// either an operator's decision or the derived `3 x members`, and the two
+/// behave differently the moment somebody joins — so a console showing a single
+/// figure cannot say whether adding a seat will change it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeskHiveDto {
+    desk_id: String,
+    /// `"overlay"` when an operator installed this, `"manifest"` when the
+    /// blueprint declares it, `"default"` when neither does.
+    source: &'static str,
+    /// Whether an episode would actually open right now.
+    ///
+    /// A one-member desk with `enabled = true` is still `false`: the flag says
+    /// what the operator wants, not what the desk is able to do, and a console
+    /// that showed "deliberates" for a desk of one would be describing a room
+    /// that cannot exist.
+    deliberates: bool,
+    /// The block as authored. Snake_case, deliberately: this field **is** the
+    /// manifest block, the console's editor edits it directly, and a camelCase
+    /// twin would be a second shape to keep in step with the TOML.
+    declared: crate::hivemind::HiveConfig,
+    effective: EffectiveHiveDto,
+    /// Every move a table may name, and the three no table can take away.
+    move_kinds: &'static [&'static str],
+    ungated_kinds: &'static [&'static str],
+    seats: Vec<HiveSeatDto>,
+    /// How many seats may deposit a distinct supporter, and whether that clears
+    /// the effective quorum.
+    ///
+    /// `!propose` counts here, because in the fold a proposal is already its own
+    /// author's support. When `reaches_quorum` is false the desk answers with a
+    /// single responder however much the room agrees — `desk_episode` declines —
+    /// and the console has to be able to say so.
+    eligible_supporters: u32,
+    reaches_quorum: bool,
+}
+
+/// What the runtime will use, with every default resolved.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectiveHiveDto {
+    turn_budget: u32,
+    quorum: u32,
+    blind_round: bool,
+    dominance_cap: u32,
+    repetition_cap: u32,
+    require_grounded: bool,
+    require_evidential: bool,
+    refutation_cap: Option<u32>,
+}
+
+/// One seat, and the moves it may open a line with.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HiveSeatDto {
+    agent_id: String,
+    label: String,
+    role: String,
+    /// Already in `MOVE_KINDS` order and already unioned with the ungated three,
+    /// so the console renders this verbatim rather than re-deriving it.
+    moves: Vec<&'static str>,
+    /// Whether the table governs this seat at all.
+    ///
+    /// Invisible from `moves` alone — "named with every kind" and "not named"
+    /// produce the same list, and only one of them is a decision somebody made.
+    governed: bool,
+}
+
+/// Build the payload for one desk.
+fn desk_hive_dto(record: &crate::ports::CompanyRecord, desk_id: &str) -> DeskHiveDto {
+    let config = record.effective_desk_hive(desk_id);
+    let members: Vec<String> = record
+        .effective_desk_members(desk_id)
+        .into_iter()
+        .filter(|id| record.is_roster_agent(id))
+        .collect();
+    let policy = crate::hivemind::HivePolicy::from_config(&config, members.len()).episode;
+    let eligible = members
+        .iter()
+        .filter(|id| config.may(id, "support") || config.may(id, "propose"))
+        .count();
+    let seats = members
+        .iter()
+        .map(|id| {
+            let agent = record.effective_agents().into_iter().find(|a| &a.id == id);
+            HiveSeatDto {
+                agent_id: id.clone(),
+                label: agent
+                    .as_ref()
+                    .and_then(|a| a.name.clone())
+                    .unwrap_or_else(|| id.clone()),
+                role: agent.map(|a| a.role.clone()).unwrap_or_default(),
+                moves: config.moves_for(id),
+                governed: config.moves.get(id).is_some_and(|kinds| !kinds.is_empty()),
+            }
+        })
+        .collect();
+    let source = if record.desk_hive_is_installed(desk_id) {
+        "overlay"
+    } else if record
+        .manifest
+        .group_chats
+        .iter()
+        .any(|group| group.id == desk_id)
+    {
+        "manifest"
+    } else {
+        "default"
+    };
+    DeskHiveDto {
+        desk_id: desk_id.to_string(),
+        source,
+        deliberates: config.deliberates(members.len()),
+        effective: EffectiveHiveDto {
+            turn_budget: policy.turn_budget,
+            quorum: policy.quorum.threshold,
+            blind_round: policy.blind_round,
+            dominance_cap: policy.dominance_cap,
+            repetition_cap: policy.repetition_cap,
+            require_grounded: policy.quorum.require_grounded,
+            require_evidential: policy.quorum.require_evidential,
+            refutation_cap: policy.quorum.refutation_cap,
+        },
+        declared: config,
+        move_kinds: crate::hivemind::MOVE_KINDS,
+        ungated_kinds: crate::hivemind::UNGATED_KINDS,
+        eligible_supporters: u32::try_from(eligible).unwrap_or(u32::MAX),
+        reaches_quorum: u32::try_from(eligible)
+            .is_ok_and(|eligible| eligible >= policy.quorum.threshold),
+        seats,
+    }
+}
+
+/// `GET {scope}/desks/{desk_id}/hive` — the move grammar in force on a desk.
+async fn desk_hive(
+    scope: ScopedCompany,
+    Path(DeskPath { desk_id }): Path<DeskPath>,
+) -> Result<Json<DeskHiveDto>, ApiError> {
+    let record = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
+            "desk {desk_id}"
+        ))));
+    }
+    Ok(Json(desk_hive_dto(&record, &desk_id)))
+}
+
+/// `PUT {scope}/desks/{desk_id}/hive` — install or replace a desk's move
+/// grammar, without rewriting the version-controlled `[[group_chat]]` block.
+///
+/// The body is a bare `HiveConfig` — the manifest block verbatim. Unknown fields
+/// are ignored rather than refused, so a newer console against an older server
+/// degrades instead of 400-ing.
+///
+/// **Validated against the desk's *effective* roster**, not its declared one, so
+/// overlay additions and Team-API retirements are what the table is judged by.
+/// That can legitimately refuse a config the manifest would have accepted — a
+/// table valid when `company.toml` was written stops being valid once a seat
+/// retires — which is why the message names the desk.
+///
+/// An episode already running is unaffected: `EpisodeDriver` holds its
+/// `HiveDesk` as a snapshot for the episode's life, so a room cannot have its
+/// quorum moved underneath it mid-argument. The change takes effect on the next
+/// message that opens one.
+async fn set_desk_hive(
+    scope: ScopedCompany,
+    Path(DeskPath { desk_id }): Path<DeskPath>,
+    Json(body): Json<crate::hivemind::HiveConfig>,
+) -> Result<Json<DeskHiveDto>, ApiError> {
+    let _guard = scope.runtime.serial.lock().await;
+    // The same load-modify-save serialization every desk write takes; see
+    // `add_desk_member` for why `serial` alone is not enough.
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
+    let mut record = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
+            "desk {desk_id}"
+        ))));
+    }
+    let members: Vec<String> = record
+        .effective_desk_members(&desk_id)
+        .into_iter()
+        .filter(|id| record.is_roster_agent(id))
+        .collect();
+    // The manifest's own checks, on the manifest's own words — one
+    // implementation, so the runtime cannot accept what a `company.toml` with
+    // the same block would be refused for.
+    let problems = crate::company::hive_problems(&format!("desk `{desk_id}`"), &members, &body);
+    if !problems.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            problems.join(" "),
+        )));
+    }
+    record.upsert_desk_hive(crate::ports::types::DeskHiveOverride {
+        desk_id: desk_id.clone(),
+        hive: body,
+    });
+    scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskHiveConfigured {
+            desk_id: desk_id.clone(),
+            reset: false,
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
+    // The derived result of what was just installed, so the console renders the
+    // effective numbers without a second round trip.
+    Ok(Json(desk_hive_dto(&record, &desk_id)))
+}
+
+/// `DELETE {scope}/desks/{desk_id}/hive` — drop the installed grammar and fall
+/// back to whatever the manifest declares.
+///
+/// Because the override is a sibling collection rather than a merged field,
+/// "restore the blueprint's version" is a `retain` and nothing else.
+async fn reset_desk_hive(
+    scope: ScopedCompany,
+    Path(DeskPath { desk_id }): Path<DeskPath>,
+) -> Result<Json<DeskHiveDto>, ApiError> {
+    let _guard = scope.runtime.serial.lock().await;
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
+    let mut record = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
+            "desk {desk_id}"
+        ))));
+    }
+    // A reset with nothing installed is not an error: the caller asked for the
+    // manifest's grammar and the manifest's grammar is what they now have.
+    if record.clear_desk_hive(&desk_id) {
+        scope.runtime.store().save(&record).await?;
+        journal_structural(
+            &scope,
+            CompanyEvent::DeskHiveConfigured {
+                desk_id: desk_id.clone(),
+                reset: true,
+                by: scope.actor.clone(),
+            },
+        )
+        .await;
+    }
+    Ok(Json(desk_hive_dto(&record, &desk_id)))
 }
 
 /// `PUT {scope}/desks/{desk_id}/order` — set the operator's explicit member
@@ -606,6 +914,16 @@ async fn remove_desk_member(
         .overlay_desk_order
         .retain(|o| !(o.desk_id == desk_id && o.ordered.is_empty()));
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added: Vec::new(),
+            removed: vec![agent_id],
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -830,6 +1148,16 @@ async fn create_desk(
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskCreated {
+            desk_id: id.clone(),
+            name: name.clone(),
+            members: members.clone(),
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
 
     let effective = record.effective_desk_members(&id);
     Ok((
@@ -909,7 +1237,20 @@ async fn delete_desk(
     }
     // Drop any member-overlay rows that targeted the now-deleted desk.
     record.overlay_desk_members.retain(|m| m.desk_id != desk_id);
+    // And the installed move grammar, for the same reason. Left behind, an
+    // overlay desk re-created with the same id silently inherits a grammar
+    // nobody installed on it — a desk deliberating under a table its operator
+    // never wrote, which is the drift the overlay layer exists to prevent.
+    record.clear_desk_hive(&desk_id);
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskDeleted {
+            desk_id,
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1534,6 +1875,63 @@ fn project_event_for_viewer(
             let mut o = envelope("workflow_deleted");
             o["workflowId"] = json!(workflow_id);
             o["name"] = json!(name);
+            o
+        }
+        // The structural changes a console draws its activity graph from: who
+        // created a teammate or a desk, who moved a seat, who changed how a desk
+        // deliberates. Before these the graph could only infer a spawn from a
+        // redacted tool-call frame that does not survive a reload.
+        //
+        // `by_agent_id` rides along and `by` does not — the same deny-by-default
+        // actor omission as every arm above. The agent is the company's own
+        // structure and is what the edge is drawn from; the human is not.
+        CompanyEvent::TeammateAdded {
+            agent_id,
+            role,
+            by_agent_id,
+            ..
+        } => {
+            let mut o = envelope("teammate_added");
+            o["agentId"] = json!(agent_id);
+            o["role"] = json!(role);
+            if let Some(by) = by_agent_id {
+                o["byAgentId"] = json!(by);
+            }
+            o
+        }
+        CompanyEvent::DeskCreated {
+            desk_id,
+            name,
+            members,
+            ..
+        } => {
+            let mut o = envelope("desk_created");
+            o["deskId"] = json!(desk_id);
+            o["name"] = json!(name);
+            o["members"] = json!(members);
+            o
+        }
+        CompanyEvent::DeskDeleted { desk_id, .. } => {
+            let mut o = envelope("desk_deleted");
+            o["deskId"] = json!(desk_id);
+            o
+        }
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added,
+            removed,
+            ..
+        } => {
+            let mut o = envelope("desk_members_changed");
+            o["deskId"] = json!(desk_id);
+            o["added"] = json!(added);
+            o["removed"] = json!(removed);
+            o
+        }
+        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => {
+            let mut o = envelope("desk_hive_configured");
+            o["deskId"] = json!(desk_id);
+            o["reset"] = json!(reset);
             o
         }
         // Issue #276: a workflow armed or paused, so a console holding the
@@ -5468,6 +5866,7 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5570,6 +5969,7 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5799,6 +6199,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5909,6 +6310,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5951,6 +6353,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -6418,6 +6821,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -6709,6 +7113,7 @@ mode = "full"
         .unwrap();
 
         let record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -6859,6 +7264,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -7432,6 +7838,388 @@ mode = "full"
             .expect("delete_desk never resumed after the lock was released")
             .expect("delete_desk task panicked");
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// A desk that declares no `hive` block still reports the numbers the
+    /// runtime would derive, rather than blanks.
+    ///
+    /// This is the difference the whole DTO exists for: the manifest says
+    /// nothing, so `declared` is empty — but the desk would still run on a
+    /// budget and a quorum, and a console showing an empty form would be
+    /// describing a desk that does not exist.
+    #[tokio::test]
+    async fn desk_hive_reports_derived_numbers_for_an_undeclared_block() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(body["source"], "manifest");
+        assert_eq!(body["deliberates"], true);
+        // Three seats: 3 x members, and a majority that still leaves somebody out.
+        assert_eq!(body["effective"]["turnBudget"], 9);
+        assert_eq!(body["effective"]["quorum"], 2);
+        // Nothing was declared, so the authored block is empty — which is
+        // exactly what distinguishes it from an operator who wrote `9`.
+        assert_eq!(body["declared"], serde_json::json!({}));
+        // Every seat holds every move until a table narrows one.
+        assert_eq!(body["seats"].as_array().unwrap().len(), 3);
+        assert_eq!(body["seats"][0]["governed"], false);
+        assert_eq!(body["seats"][0]["moves"].as_array().unwrap().len(), 9);
+        assert_eq!(body["eligibleSupporters"], 3);
+        assert_eq!(body["reachesQuorum"], true);
+    }
+
+    /// Installing a grammar takes effect, is reported back derived, and is
+    /// undone by a reset — without the manifest ever being rewritten.
+    #[tokio::test]
+    async fn a_move_grammar_installs_and_resets() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let install = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"quorum":2,"moves":{"a":["propose","support"],"b":["object","evidence"],"c":["support"]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(install.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(install.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["source"], "overlay");
+        assert_eq!(body["effective"]["quorum"], 2);
+        // `b` was narrowed to object/evidence, and still keeps the three no
+        // table can take away.
+        let b = body["seats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|seat| seat["agentId"] == "b")
+            .unwrap()
+            .clone();
+        assert_eq!(b["governed"], true);
+        let b_moves: Vec<String> = serde_json::from_value(b["moves"].clone()).unwrap();
+        assert!(b_moves.contains(&"commit".to_string()));
+        assert!(b_moves.contains(&"question".to_string()));
+        assert!(b_moves.contains(&"defer".to_string()));
+        assert!(!b_moves.contains(&"propose".to_string()));
+        // a and c may support or propose; b may not. Two clears a quorum of two.
+        assert_eq!(body["eligibleSupporters"], 2);
+        assert_eq!(body["reachesQuorum"], true);
+
+        let reset = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(reset.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        // Back to the blueprint, which declared nothing.
+        assert_eq!(body["source"], "manifest");
+        assert_eq!(body["declared"], serde_json::json!({}));
+        assert_eq!(body["eligibleSupporters"], 3);
+    }
+
+    /// The runtime refuses exactly what a manifest carrying the same block
+    /// would be refused for — and in the same words.
+    #[tokio::test]
+    async fn installing_an_unreachable_quorum_is_refused() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Only `a` may deposit a supporter, but the quorum asks for two — the
+        // room could never decide anything however much it agreed.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"quorum":2,"moves":{"a":["propose"],"b":["object"],"c":["object"]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // An unknown move kind, and an id that is not on the desk, are refused
+        // for the same reason: both fail *open* at runtime, handing the seat
+        // every move and letting the desk quietly go on voting.
+        for body in [
+            r#"{"moves":{"a":["shrug"]}}"#,
+            r#"{"moves":{"ghost":["propose"]}}"#,
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/company/desks/solvers/hive")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "body {body} was accepted"
+            );
+        }
+    }
+
+    /// The structural rows a console draws its activity graph from.
+    ///
+    /// Before these, "who created this desk" and "who moved this seat" were
+    /// answerable only from a live frame that does not survive a reload.
+    #[tokio::test]
+    async fn desk_lifecycle_is_journaled() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let events = runtime.events();
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for (method, uri, body) in [
+            (
+                "POST",
+                "/api/v1/company/team",
+                Some(r#"{"name":"Dana","role":"Analyst"}"#),
+            ),
+            (
+                "POST",
+                "/api/v1/company/desks",
+                Some(r#"{"name":"Growth","members":["eng"]}"#),
+            ),
+            (
+                "POST",
+                "/api/v1/company/desks/growth/members",
+                Some(r#"{"agent_id":"ceo"}"#),
+            ),
+            (
+                "PUT",
+                "/api/v1/company/desks/growth/hive",
+                Some(r#"{"quorum":1}"#),
+            ),
+            ("DELETE", "/api/v1/company/desks/growth/hive", None),
+            ("DELETE", "/api/v1/company/desks/growth/members/ceo", None),
+            ("DELETE", "/api/v1/company/desks/growth", None),
+        ] {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", &cookie);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
+            }
+            let res = app
+                .clone()
+                .oneshot(req.body(body.map_or(Body::empty(), Body::from)).unwrap())
+                .await
+                .unwrap();
+            assert!(
+                res.status().is_success(),
+                "{method} {uri} answered {}",
+                res.status()
+            );
+        }
+
+        let rows = events
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), 500)
+            .await
+            .unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|row| row.event.kind()).collect();
+        assert!(kinds.contains(&"DeskCreated"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"DeskDeleted"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"TeammateAdded"), "kinds: {kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "DeskHiveConfigured").count(),
+            2,
+            "one row for install and one for reset: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "DeskMembersChanged").count(),
+            2,
+            "one row for the add and one for the remove: {kinds:?}"
+        );
+    }
+
+    /// Deleting a desk takes its installed grammar with it.
+    ///
+    /// Left behind, an overlay desk re-created with the same id silently
+    /// inherits a table nobody installed on it.
+    #[tokio::test]
+    async fn deleting_a_desk_drops_its_installed_grammar() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng","ceo"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let installed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/growth/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"moves":{"eng":["propose","support"]}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(installed.status(), StatusCode::OK);
+
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/growth")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        // Re-create the same id; it must come back ungoverned.
+        let again = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng","ceo"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CREATED);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/desks/growth/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["source"], "default");
+        for seat in body["seats"].as_array().unwrap() {
+            assert_eq!(
+                seat["governed"], false,
+                "a re-created desk inherited a grammar"
+            );
+        }
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest

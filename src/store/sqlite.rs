@@ -816,6 +816,12 @@ impl CompanyStore for SqliteStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_agent_edits: overlay.agent_edits,
+            // Read back off the blob, not defaulted: the write side already
+            // serializes it through `OverlayBlob::from_record_gated`, so
+            // defaulting here would silently drop an installed move grammar on
+            // every load — a desk would deliberate under the manifest's table
+            // while the console showed the operator's.
+            overlay_desk_hive: overlay.desk_hive,
             overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_tool_grants: overlay.tool_grants,
@@ -5087,6 +5093,7 @@ mod test {
         let id = CompanyId::new("acme");
         company
             .save(&CompanyRecord {
+                       overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: toml::from_str(

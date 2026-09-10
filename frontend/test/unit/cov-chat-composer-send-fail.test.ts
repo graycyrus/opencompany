@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import type { Transcripts } from "@/views/chat/model";
-import { ChatView } from "@/views/ChatView";
+import type { Transcripts } from "@/views/room/model";
+import { RoomView } from "@/views/RoomView";
 
 /**
- * `ChatView.send`'s own `catch`: a host that refuses
+ * `RoomView.send`'s own `catch`: a host that refuses
  * the POST — an over-length body, a 4xx of any other shape — must leave an
  * honest line in the transcript rather than dropping the operator's message
  * or leaving it looking sent. `MessageComposer` clears the draft the instant
@@ -72,7 +72,7 @@ afterEach(() => {
 /** Owns `transcripts` state itself, the way `AppShell` does for the real view. */
 function Harness({ client }: { client: OpenCompanyClient }) {
   const [transcripts, setTranscripts] = useState<Transcripts>({});
-  return createElement(ChatView, {
+  return createElement(RoomView, {
     client,
     company: "acme",
     sub: "main",

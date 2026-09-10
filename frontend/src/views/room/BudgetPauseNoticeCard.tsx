@@ -34,7 +34,7 @@ export function BudgetPauseNoticeCard({
   message: ChatMessage;
   /**
    * Carries `message.id` alongside the agent id (issue #1846 review, Codex
-   * #3868962374) — see `ChatView.redeemBudgetPause`'s doc for why a live
+   * #3868962374) — see `RoomView.redeemBudgetPause`'s doc for why a live
    * re-read at click time cannot bind to the specific marker this card was
    * rendered from on its own.
    */

@@ -330,6 +330,7 @@ async fn harness(
     };
 
     let record = CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         id,
@@ -787,6 +788,7 @@ async fn an_oversized_note_reaches_the_model_whole_and_read_only() {
 /// gets, so it is the mode these last tests care about.
 async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRecord) {
     let mut record = CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         id: CompanyId::new("acme"),

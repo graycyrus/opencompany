@@ -1373,6 +1373,87 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// A teammate was minted at runtime — by the orchestrator's `add_agent`
+    /// tool, or by the console's `POST {scope}/team`.
+    ///
+    /// Journaled because **no durable row otherwise records that it happened**,
+    /// still less who did it. The record carries the teammate's current
+    /// existence; nothing carries its creation, so "who spawned whom" was
+    /// unanswerable from the journal and the console could only infer it from a
+    /// redacted tool-call frame that does not survive a reload.
+    ///
+    /// Both creation paths journal this, deliberately: two paths that answer
+    /// "was a teammate added" differently is how the first hole got here.
+    ///
+    /// Carries no prompt, no tool grant and no instructions — the same rule
+    /// [`WorkflowUpdated`](Self::WorkflowUpdated) follows, since the journal
+    /// reaches readers with no business holding an agent's configuration. The
+    /// current state is on the record and one read away.
+    ///
+    /// Best-effort and appended **after** the write lands, so it records a
+    /// completed change: a failed audit append must never fail the mint.
+    TeammateAdded {
+        /// The new teammate's roster id.
+        agent_id: String,
+        /// Its role, so a reader need not resolve an id that may later retire.
+        role: String,
+        /// The teammate that created it, when an agent did. `None` when the
+        /// operator did it from the console.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_agent_id: Option<String>,
+        /// Who asked, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// An operator-created desk came into existence.
+    ///
+    /// Journaled for the same reason as [`TeammateAdded`](Self::TeammateAdded):
+    /// a desk's existence is on the record, its creation is nowhere.
+    DeskCreated {
+        desk_id: String,
+        name: String,
+        /// The seats it opened with.
+        members: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// An operator-created desk was removed.
+    DeskDeleted {
+        desk_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A desk gained or lost a seat at runtime.
+    ///
+    /// One variant for both directions rather than two, because a reader
+    /// reconstructing membership over time wants one ordered stream, and a
+    /// move between desks is a removal and an addition that belong together.
+    DeskMembersChanged {
+        desk_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        added: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A desk's move grammar was installed, replaced, or reset to the manifest's.
+    ///
+    /// Carries **no config body**, same rule as
+    /// [`WorkflowUpdated`](Self::WorkflowUpdated): the row answers "who changed
+    /// how this desk thinks, and when", and the table itself is one read away.
+    ///
+    /// Permanent under the retention rule — only the workflow-run kinds and
+    /// `McpCallFailed` may ever be pruned — which is the right trade for an
+    /// audit fact whose lifetime cardinality is "how often does an operator
+    /// re-author a grammar".
+    DeskHiveConfigured {
+        desk_id: String,
+        /// True when the override was dropped and the manifest restored.
+        reset: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
     /// A workflow was switched on or off (issue #276) — from the console's
     /// `PUT …/workflows/{wid}/enabled` route, or from the disarm rule that
     /// forces `false` when a create or an edit arms a schedule. Journaled
@@ -2154,6 +2235,11 @@ impl CompanyEvent {
             Self::WorkflowCreated { .. } => "WorkflowCreated",
             Self::WorkflowUpdated { .. } => "WorkflowUpdated",
             Self::WorkflowDeleted { .. } => "WorkflowDeleted",
+            Self::TeammateAdded { .. } => "TeammateAdded",
+            Self::DeskCreated { .. } => "DeskCreated",
+            Self::DeskDeleted { .. } => "DeskDeleted",
+            Self::DeskMembersChanged { .. } => "DeskMembersChanged",
+            Self::DeskHiveConfigured { .. } => "DeskHiveConfigured",
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
             Self::WorkspaceChanged { .. } => "WorkspaceChanged",
@@ -2301,6 +2387,18 @@ impl CompanyEvent {
             | Self::WorkflowCreated { .. }
             | Self::WorkflowUpdated { .. }
             | Self::WorkflowDeleted { .. }
+            // The structural audit trail: who created a teammate or a desk, who
+            // moved a seat, and who changed how a desk deliberates. Permanent
+            // for the plainest of the three reasons above — it *is* evidence,
+            // and it is the only record that these things happened at all: the
+            // company record carries current state and nothing carries the
+            // change. Low cardinality by construction (an operator authors these
+            // by hand), so permanence costs almost nothing.
+            | Self::TeammateAdded { .. }
+            | Self::DeskCreated { .. }
+            | Self::DeskDeleted { .. }
+            | Self::DeskMembersChanged { .. }
+            | Self::DeskHiveConfigured { .. }
             | Self::TaskSteered { .. }
             | Self::TaskCardChanged { .. }
             | Self::DeskTaskCompleted { .. }
@@ -3521,6 +3619,33 @@ pub struct OverlayDeskOrder {
     pub ordered: Vec<String>,
 }
 
+/// The operator's runtime replacement for a desk's `hive` block — the console's
+/// "install a move grammar" write.
+///
+/// A **sibling collection rather than a field on [`OverlayDesk`]**, and that is
+/// the whole design. `OverlayDesk` covers only console-*created* desks, so
+/// hanging the grammar off it would leave the interesting case — installing a
+/// table on a desk the manifest declared, without rewriting `company.toml` —
+/// needing a second mechanism. This mirrors [`AgentOverride`] instead, which is
+/// the layer that already exists for "the operator edited a manifest-declared
+/// thing".
+///
+/// **Wholesale replacement, not a field-wise patch**, unlike `AgentOverride`. A
+/// `moves` table is a single artefact: merging one seat into a stored table is
+/// how a desk ends up running a grammar nobody authored. It also makes "clear
+/// `quorum` back to the derived default" expressible, which a merge cannot do —
+/// every field is an `Option` whose `None` already means something.
+///
+/// Reset is therefore a `retain`, and nothing else: drop the row and
+/// [`CompanyRecord::effective_desk_hive`] falls through to the manifest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskHiveOverride {
+    /// The desk (group-chat) id this grammar is installed on.
+    pub desk_id: String,
+    /// The block as authored, in the manifest's own shape.
+    pub hive: crate::hivemind::HiveConfig,
+}
+
 /// How a desk's unmentioned messages find their answerer (issue #1835).
 ///
 /// `Lead` is the model every desk has always had: `members[0]` is the desk
@@ -4138,6 +4263,11 @@ pub struct OverlayBlob {
     /// which is exactly how those companies ran.
     #[serde(default)]
     pub agent_edits: Vec<AgentOverride>,
+    /// The move grammars the operator has installed on desks. Absent on rows
+    /// written before a grammar could be installed from the console, which
+    /// `#[serde(default)]` loads as empty — "the manifest still decides".
+    #[serde(default)]
+    pub desk_hive: Vec<DeskHiveOverride>,
     /// The ids of manifest teammates the operator has removed. Absent on rows
     /// written before a blueprint teammate could be removed, which
     /// `#[serde(default)]` loads as empty — "nobody was removed".
@@ -4247,6 +4377,7 @@ impl OverlayBlob {
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
             agent_edits: record.overlay_agent_edits.clone(),
+            desk_hive: record.overlay_desk_hive.clone(),
             retired_agents: record.overlay_retired_agents.clone(),
             policy: record.overlay_policy.clone(),
             tool_grants: record.overlay_tool_grants.clone(),
@@ -4281,6 +4412,7 @@ impl OverlayBlob {
                     workflows: Vec::new(),
                     budgets: Vec::new(),
                     agent_edits: Vec::new(),
+                    desk_hive: Vec::new(),
                     retired_agents: Vec::new(),
                     policy: None,
                     tool_grants: None,
@@ -4422,6 +4554,19 @@ pub struct CompanyRecord {
     /// [`Self::upsert_agent_override`].
     #[serde(default)]
     pub overlay_agent_edits: Vec<AgentOverride>,
+    /// The move grammars the operator has installed on desks, replacing the
+    /// `[[group_chat]].hive` block the manifest declared (or supplying one for a
+    /// desk that declared none).
+    ///
+    /// Absent on every record written before a grammar could be installed from
+    /// the console, which `#[serde(default)]` loads as empty — "the manifest
+    /// still decides", which is exactly how those companies ran.
+    ///
+    /// **At most one entry per `desk_id`**; mutate through
+    /// [`Self::upsert_desk_hive`], and read through
+    /// [`Self::effective_desk_hive`] rather than reaching in here.
+    #[serde(default)]
+    pub overlay_desk_hive: Vec<DeskHiveOverride>,
     /// Ids of **manifest-declared** teammates the operator has removed from the
     /// console — the tombstone half of the same layer
     /// [`Self::overlay_agent_edits`] is the edit half of.
@@ -5283,6 +5428,63 @@ impl CompanyRecord {
     /// The one way a write path should add to [`Self::overlay_agent_edits`], for
     /// the reason [`Self::upsert_budget_override`] gives: a second row for one
     /// teammate is not a harmless duplicate, it is a silently unreachable edit.
+    /// The `hive` block in force on `desk_id`.
+    ///
+    /// The operator's installed grammar if there is one, else the manifest's
+    /// `[[group_chat]].hive`, else the default. **The one place this precedence
+    /// lives** — `desk_episode`, `desk_federation` and the console read through
+    /// here, so a desk cannot deliberate under one table while the console shows
+    /// another.
+    #[must_use]
+    pub fn effective_desk_hive(&self, desk_id: &str) -> crate::hivemind::HiveConfig {
+        if let Some(installed) = self
+            .overlay_desk_hive
+            .iter()
+            .find(|held| held.desk_id == desk_id)
+        {
+            return installed.hive.clone();
+        }
+        self.manifest
+            .group_chats
+            .iter()
+            .find(|group| group.id == desk_id)
+            .map(|group| group.hive.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether an operator-installed grammar is what `effective_desk_hive`
+    /// returned, as opposed to the manifest's own block or the default.
+    ///
+    /// The console needs the difference to offer "restore the manifest's
+    /// version", which is meaningless when there is nothing installed.
+    #[must_use]
+    pub fn desk_hive_is_installed(&self, desk_id: &str) -> bool {
+        self.overlay_desk_hive
+            .iter()
+            .any(|held| held.desk_id == desk_id)
+    }
+
+    /// Install or replace a desk's move grammar.
+    ///
+    /// Wholesale, for the reason [`DeskHiveOverride`] gives. One row per desk,
+    /// so a second install replaces the first rather than stacking behind it.
+    pub fn upsert_desk_hive(&mut self, entry: DeskHiveOverride) {
+        self.overlay_desk_hive
+            .retain(|held| held.desk_id != entry.desk_id);
+        self.overlay_desk_hive.push(entry);
+    }
+
+    /// Drop a desk's installed grammar, restoring whatever the manifest says.
+    ///
+    /// Returns whether anything was installed to drop, so a route can answer
+    /// "there was nothing to reset" without a second read.
+    pub fn clear_desk_hive(&mut self, desk_id: &str) -> bool {
+        let before = self.overlay_desk_hive.len();
+        self.overlay_desk_hive
+            .retain(|held| held.desk_id != desk_id);
+        before != self.overlay_desk_hive.len()
+    }
+
     pub fn upsert_agent_override(&mut self, entry: AgentOverride) {
         if let Some(held) = self
             .overlay_agent_edits
@@ -5812,6 +6014,7 @@ mod test {
             automate: "meta ads, order dispatch".into(),
         };
         let mut record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -7150,6 +7353,7 @@ mod test {
 
     fn desk_record(toml_src: &str, overlay: Vec<OverlayDeskMember>) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -7184,6 +7388,48 @@ mod test {
         let mut record = desk_record(toml_src, overlay);
         record.overlay_desk_order = order;
         record
+    }
+
+    #[test]
+    fn desk_hive_overrides_precede_manifest_and_are_replaced_or_cleared() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"studio\"\nname = \"Studio\"\nmembers = []\n\
+             [group_chat.hive]\nquorum = 2\n";
+        let mut record = desk_record(manifest, Vec::new());
+
+        // The manifest wins where no edit exists, and an unknown desk falls
+        // through to the default rather than borrowing another desk's table.
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(2));
+        assert_eq!(
+            record.effective_desk_hive("unknown"),
+            crate::hivemind::HiveConfig::default()
+        );
+        assert!(!record.desk_hive_is_installed("studio"));
+
+        let first = crate::hivemind::HiveConfig {
+            quorum: Some(1),
+            ..Default::default()
+        };
+        record.upsert_desk_hive(DeskHiveOverride {
+            desk_id: "studio".into(),
+            hive: first,
+        });
+        assert!(record.desk_hive_is_installed("studio"));
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(1));
+
+        let replacement = crate::hivemind::HiveConfig {
+            quorum: Some(3),
+            ..Default::default()
+        };
+        record.upsert_desk_hive(DeskHiveOverride {
+            desk_id: "studio".into(),
+            hive: replacement,
+        });
+        assert_eq!(record.overlay_desk_hive.len(), 1);
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(3));
+        assert!(record.clear_desk_hive("studio"));
+        assert!(!record.clear_desk_hive("studio"));
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(2));
     }
 
     /// The effective membership is the manifest members first, then overlay

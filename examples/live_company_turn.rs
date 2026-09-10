@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
 
     let manifest: CompanyManifest = toml::from_str(MANIFEST)?;
     let record = CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         id: CompanyId::new("demo"),

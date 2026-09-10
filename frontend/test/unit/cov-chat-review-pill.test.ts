@@ -4,13 +4,13 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageRow } from "@/views/chat/MessageRow";
+import { MessageRow } from "@/views/room/MessageRow";
 import { makeMessage } from "@/lib/chat";
-import type { TimelineEntry } from "@/views/chat/model";
+import type { TimelineEntry } from "@/views/room/model";
 import type { TaskStatus } from "@/api/tasks";
 
 /**
- * The settle pill's Approve control (`ChatView.reviewCard`, `POST
+ * The settle pill's Approve control (`RoomView.reviewCard`, `POST
  * …/chat/review`). The backend route is `ScopedCompany` (`operator.rs`),
  * not admin-only — any company member may settle a card they are reviewing
  * — so the console rightly offers Approve to every viewer; what it must not

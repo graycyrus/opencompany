@@ -2294,6 +2294,7 @@ agent = "claude"
         )
         .unwrap();
         let mut record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -2370,6 +2371,7 @@ agent = "claude"
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -4895,6 +4897,7 @@ agent = "claude"
     #[test]
     fn the_grounding_is_this_teammate_and_its_neighbours() {
         let mut record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -4986,6 +4989,7 @@ agent = "claude"
     /// nothing else from a running host.
     fn ceo_record() -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),

@@ -6,7 +6,7 @@ import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { WINDOW_TITLE_BAR_HEIGHT, WINDOW_CONTROLS_WIDTH } from "@/components/window-chrome";
+import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { TITLE_BAR_LADDER, WindowTitleBar } from "@/components/window-title-bar";
 
 /**
@@ -20,13 +20,16 @@ import { TITLE_BAR_LADDER, WindowTitleBar } from "@/components/window-title-bar"
  * agreeing, which is the only way this can actually break.
  */
 // Vitest runs with the console package as its cwd, so the repo root is one up.
+/**
+ * The window is natively decorated (`decorations: true`, no `titleBarStyle`),
+ * so macOS draws the title bar and the traffic lights sit in it — not in this
+ * row. These tests used to read `trafficLightPosition` out of the config and
+ * derive the row's height and inset from it; there is nothing to derive from
+ * now, and asserting the absence is the contract.
+ */
 const TAURI = JSON.parse(
   readFileSync(resolve(process.cwd(), "../src-tauri/tauri.conf.json"), "utf8"),
-) as { app: { windows: { trafficLightPosition: { x: number; y: number } }[] } };
-const LIGHTS = TAURI.app.windows[0].trafficLightPosition;
-/** macOS draws three of them, 12px across, on a 20px pitch. */
-const LIGHT_SIZE = 12;
-const LIGHT_PITCH = 20;
+) as { app: { windows: { titleBarStyle?: string; trafficLightPosition?: unknown }[] } };
 
 /**
  * The window's title row.
@@ -139,15 +142,16 @@ describe("the window title row", () => {
     expect(row.className).toContain("items-center");
     expect(row.className).toContain("flex");
 
-    // The centre line the OS gives us: the lights' top offset plus half a
-    // light. Everything in the row is centred on the row's own middle, so the
-    // row's height has to be twice that or the lights sit off it — and no
-    // amount of per-item nudging fixes a row of the wrong height.
-    const lightsCentre = LIGHTS.y + LIGHT_SIZE / 2;
-    expect(WINDOW_TITLE_BAR_HEIGHT).toBe(2 * lightsCentre);
-    expect(row.style.height).toBe(`${2 * lightsCentre}px`);
-    // Which is to say: the row's middle IS the lights' middle.
-    expect(WINDOW_TITLE_BAR_HEIGHT / 2).toBe(lightsCentre);
+    // The height used to be owed to the OS — twice the traffic lights' centre
+    // line, because they floated in this row and could not be moved. The window
+    // is decorated again, so it is a layout choice, and what the row must still
+    // do is carry the 36px switcher trigger with room to spare.
+    expect(row.style.height).toBe(`${WINDOW_TITLE_BAR_HEIGHT}px`);
+    expect(WINDOW_TITLE_BAR_HEIGHT).toBeGreaterThan(36);
+    // The config half of the same fact: nothing here is derived from lights
+    // that the OS is drawing somewhere else.
+    expect(TAURI.app.windows[0].titleBarStyle).toBeUndefined();
+    expect(TAURI.app.windows[0].trafficLightPosition).toBeUndefined();
   });
 
   it("reserves nothing for the lights in a browser", () => {
@@ -155,25 +159,13 @@ describe("the window title row", () => {
     expect(host.querySelector("[data-testid=window-controls-inset]")).toBeNull();
   });
 
-  it("insets around the lights on the macOS desktop", () => {
+  it("reserves nothing on the macOS desktop either", () => {
+    // The case that used to assert a 72px reservation. The lights are in the
+    // OS title bar now, so reserving their old width would be a hole at the
+    // head of the row with the switcher pushed off its own left edge.
     asDesktop("MacIntel");
     render(bar());
-
-    const inset = host.querySelector("[data-testid=window-controls-inset]") as HTMLElement | null;
-    expect(inset).not.toBeNull();
-    // Wide enough to clear the last of the three lights, measured from the
-    // config rather than restated: anything narrower puts the switcher under
-    // a button you can no longer click.
-    const lightsRight = LIGHTS.x + 2 * LIGHT_PITCH + LIGHT_SIZE;
-    expect(WINDOW_CONTROLS_WIDTH).toBe(lightsRight);
-    expect(inset?.style.width).toBe(`${lightsRight}px`);
-
-    // And it stands BEFORE the switcher, which is the whole point: the lights
-    // are at the window's left edge, so anything that does not precede the
-    // switcher leaves the switcher underneath them.
-    const row = host.querySelector("[data-testid=window-title-bar]") as HTMLElement;
-    const switcher = row.querySelector("[data-testid=stub-switcher]") as HTMLElement;
-    expect(inset!.compareDocumentPosition(switcher) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(host.querySelector("[data-testid=window-controls-inset]")).toBeNull();
   });
 
   it("leaves the empty middle draggable", () => {
