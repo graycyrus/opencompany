@@ -11,7 +11,7 @@ import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
 /**
  * Choosing the desk lead (issue #1802).
  *
- * The whole stack treats `members[0]` as the desk's lead (`chat/model.ts`,
+ * The whole stack treats `members[0]` as the desk's lead (`room/channels.ts`,
  * `api/types.ts`). The creator used to encode that purely as selection order
  * with a Crown and a terse "1 · Lead" string, and the only way to change the
  * lead was to deselect everyone and re-pick. This makes the lead explicit: the

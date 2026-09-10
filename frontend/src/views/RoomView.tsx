@@ -111,7 +111,7 @@ import {
   type DecidedApproval,
   type HistoryHydration,
   type Transcripts,
-} from "./chat/model";
+} from "./room/model";
 
 /**
  * The stable empty transcript fallback.
