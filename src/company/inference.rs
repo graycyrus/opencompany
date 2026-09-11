@@ -25,6 +25,8 @@
 //! log line, or agent-visible output: [`InferenceDecl`] derives no `Serialize`
 //! and its `Debug` redacts the credential.
 
+pub mod catalogue;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
