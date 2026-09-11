@@ -93,8 +93,13 @@ export function ActivityTab({
   now: number;
   /** What `notificationHref` needs to resolve a `message` row's channel. */
   channels: { rendered: ReadonlySet<string>; mainChannelId: string | undefined };
-  /** Mark exactly one row read. Never an empty list — see `NotificationsView`. */
-  onDismiss: (id: string) => void;
+  /**
+   * Mark exactly one row read. Never an empty list — see `NotificationsView`.
+   *
+   * Returns when the write is over, so the optimistic hide below can be
+   * released. A caller with nothing to await may return nothing.
+   */
+  onDismiss: (id: string) => void | Promise<void>;
   /** Mark everything this person can see read, in one request. */
   onDismissAll: () => void;
 }) {
@@ -117,7 +122,27 @@ export function ActivityTab({
 
   function dismiss(id: string) {
     setDismissing((current) => new Set(current).add(id));
-    onDismiss(id);
+    // Released when the write settles, not left standing until unmount. This
+    // set is an optimistic hide, and a hide with no release outlives the thing
+    // it was hiding for: a write that fails against an offline or older host is
+    // restored unread by the shell's refresh, and the row would stay filtered
+    // out of this list anyway — hidden here, unread on the host, visible to
+    // nobody (Codex, CodeRabbit).
+    //
+    // Settling is the whole signal, either way. On success the shell's own
+    // optimistic `readAt` stamp already hides the row and the following poll
+    // drops it for good, so releasing changes nothing; on failure the refresh
+    // brings it back and releasing is exactly what lets it reappear.
+    void Promise.resolve(onDismiss(id))
+      .catch(() => {})
+      .then(() =>
+        setDismissing((current) => {
+          if (!current.has(id)) return current;
+          const next = new Set(current);
+          next.delete(id);
+          return next;
+        }),
+      );
   }
 
   if (rows.length === 0) {
