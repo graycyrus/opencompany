@@ -560,6 +560,52 @@ pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// OpenRouter's own host. Named rather than compared against
+/// [`OPENROUTER_BASE_URL`](super::OPENROUTER_BASE_URL) whole, so a trailing
+/// slash or a `/api/v1/` spelling still matches.
+const OPENROUTER_ENDPOINT_HOST: &str = "openrouter.ai";
+
+/// Whether an endpoint is OpenRouter's own — **not** the platform proxy in front
+/// of it, which is a different host with a different account behind it.
+pub fn is_openrouter_endpoint(endpoint: &str) -> bool {
+    endpoint_host(endpoint).is_some_and(|host| {
+        host == OPENROUTER_ENDPOINT_HOST || host.ends_with(&format!(".{OPENROUTER_ENDPOINT_HOST}"))
+    })
+}
+
+/// The **account-scoped** catalog path for an endpoint, when it has one.
+///
+/// `GET /models` on OpenRouter is a public, unauthenticated registry: the whole
+/// ~450-model catalogue, whatever bearer is presented. An account whose Settings
+/// → Privacy allowed-providers list permits only `novita, openai, baseten,
+/// deepseek, deepinfra` is therefore offered every `anthropic/*` model in the
+/// picker and gets a 404 at the first turn — a failure discovered after the
+/// choice, with the reason buried in a thread reply. A picker that offers models
+/// the account cannot use is worse than a short list.
+///
+/// `GET /models/user` is OpenRouter's documented answer: *"List models filtered
+/// by user provider preferences, privacy settings, and guardrails"*, and it is
+/// one of the two endpoint groups in their spec carrying a `bearer` security
+/// block — the ordinary inference key, not a management key.
+///
+/// Two parameters are load-bearing:
+///
+/// * `output_modalities=all` — it **defaults to `text`**, so image, audio and
+///   embedding models vanish silently otherwise. That is the trap most likely to
+///   surface later as a confusing bug report.
+/// * `limit=1000` — the maximum, and the whole permitted catalogue fits in one
+///   response, so there is no paging to get wrong.
+///
+/// `None` for every other endpoint, and for OpenRouter with no credential:
+/// account-scoping is a question about a key, and there is nothing to scope to.
+/// This is deliberately host-specific rather than a general assumption, the same
+/// way the Azure deployment-name rule is — every other provider has its own
+/// account restrictions or none.
+pub fn scoped_catalog_path(endpoint: &str, authenticated: bool) -> Option<&'static str> {
+    (authenticated && is_openrouter_endpoint(endpoint))
+        .then_some("/models/user?limit=1000&output_modalities=all")
+}
+
 /// Whether an endpoint points at an Azure Foundry / Azure OpenAI resource, i.e.
 /// a provider whose `model` field must carry a deployment name.
 pub fn is_azure_endpoint(endpoint: &str) -> bool {
@@ -1288,5 +1334,40 @@ mod tests {
                 "`{bad}` is not an endpoint"
             );
         }
+    }
+    #[test]
+    fn only_openrouters_own_host_gets_the_account_scoped_catalogue() {
+        assert!(is_openrouter_endpoint("https://openrouter.ai/api/v1"));
+        assert!(is_openrouter_endpoint("https://openrouter.ai/api/v1/"));
+        assert!(is_openrouter_endpoint("https://eu.openrouter.ai/api/v1"));
+        // The platform proxy fronts OpenRouter and serves the same catalogue,
+        // but the account behind it is the server's, not the tenant's — and it
+        // is a different host, which is the whole point of matching on one.
+        assert!(!is_openrouter_endpoint(
+            "https://api.tinyhumans.ai/openai/v1"
+        ));
+        assert!(!is_openrouter_endpoint(
+            "https://openrouter.ai.example.com/v1"
+        ));
+        assert!(!is_openrouter_endpoint("http://127.0.0.1:11434/v1"));
+    }
+
+    #[test]
+    fn the_scoped_catalogue_needs_both_the_host_and_a_credential() {
+        let path = scoped_catalog_path(super::super::OPENROUTER_BASE_URL, true)
+            .expect("OpenRouter with a key reads the account-scoped list");
+        assert!(path.starts_with("/models/user"));
+        // `output_modalities` defaults to `text`, so leaving it off silently
+        // drops every image, audio and embedding model.
+        assert!(path.contains("output_modalities=all"), "{path}");
+        assert!(path.contains("limit=1000"), "{path}");
+
+        // Account-scoping is a question about a key. With none there is nothing
+        // to scope to, and the public registry is the honest answer.
+        assert!(scoped_catalog_path(super::super::OPENROUTER_BASE_URL, false).is_none());
+        // Host-specific on purpose, the same way the Azure deployment-name rule
+        // is. Every other provider has its own account restrictions or none.
+        assert!(scoped_catalog_path("https://api.openai.com/v1", true).is_none());
+        assert!(scoped_catalog_path("https://api.tinyhumans.ai/openai/v1", true).is_none());
     }
 }

@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::company::inference::TierVocabulary;
-use crate::company::inference::catalogue::AuthStyle;
+use crate::company::inference::catalogue::{self, AuthStyle};
 
 /// How long a successful catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
@@ -160,6 +160,9 @@ pub(crate) struct DiscoveryError {
     message: String,
     /// `true` for `401`/`403` — an answer about the presented key.
     credential_specific: bool,
+    /// `true` for `404` — the endpoint does not serve this path at all, which is
+    /// what lets the account-scoped read fall back to the public one.
+    not_found: bool,
 }
 
 impl DiscoveryError {
@@ -167,6 +170,7 @@ impl DiscoveryError {
         Self {
             message,
             credential_specific: false,
+            not_found: false,
         }
     }
 
@@ -174,6 +178,15 @@ impl DiscoveryError {
         Self {
             message,
             credential_specific: true,
+            not_found: false,
+        }
+    }
+
+    fn missing(message: String) -> Self {
+        Self {
+            message,
+            credential_specific: false,
+            not_found: true,
         }
     }
 }
@@ -194,7 +207,7 @@ pub(crate) async fn discover_models(
     bearer: Option<&str>,
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let base = base_url.trim_end_matches('/');
     // Bounded here, not left to each caller: reqwest's async client has no
     // default timeout, so an endpoint that accepts the connection but never
     // responds would otherwise hold this open indefinitely. `setup.rs`'s
@@ -209,6 +222,43 @@ pub(crate) async fn discover_models(
                 "failed to build the model-discovery client: {error}"
             ))
         })?;
+
+    // The account-scoped catalogue first, where the endpoint has one — see
+    // `catalogue::scoped_catalog_path` for why, and why it is one host's rule
+    // rather than a general assumption.
+    //
+    // A `404` here is the look-alike case: a proxy or a self-hosted gateway that
+    // answers `/models` on OpenRouter's own host, or OpenRouter withdrawing the
+    // path. It degrades to the public registry rather than reporting the company
+    // has no models at all — but loudly, because the picker is then offering
+    // models the account may not be able to reach and nothing else would say so.
+    if let Some(path) = catalogue::scoped_catalog_path(base_url, bearer.is_some()) {
+        let url = format!("{base}{path}");
+        match fetch_catalog(&client, &url, bearer, auth).await {
+            Ok(models) => return Ok(models),
+            Err(error) if error.not_found => tracing::warn!(
+                %url,
+                "the account-scoped model catalogue answered 404; falling back to the public \
+                 registry, which is not filtered by this key's provider permissions"
+            ),
+            Err(error) => return Err(error),
+        }
+    }
+
+    fetch_catalog(&client, &format!("{base}/models"), bearer, auth).await
+}
+
+/// One catalog read against one URL.
+///
+/// Split out so the account-scoped path and the public one cannot drift on auth,
+/// status classification or parsing — the fallback is about *which URL*, and
+/// nothing else.
+async fn fetch_catalog(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: Option<&str>,
+    auth: AuthStyle,
+) -> Result<Vec<InferenceModel>, DiscoveryError> {
     // **The provider's own style, not bearer-for-everyone.** This is a NATIVE
     // endpoint — `GET /v1/models` — and Anthropic's native API rejects a
     // bearer-authenticated request with no `anthropic-version` header as
@@ -218,7 +268,7 @@ pub(crate) async fn discover_models(
     //
     // Verified against `platform.claude.com/docs/en/api/models/list`, whose own
     // curl example is `-H 'anthropic-version: 2023-06-01' -H "X-Api-Key: …"`.
-    let request = crate::company::inference::probe::apply_auth(client.get(&url), auth, bearer);
+    let request = crate::company::inference::probe::apply_auth(client.get(url), auth, bearer);
     let response = request
         .send()
         .await
@@ -226,13 +276,12 @@ pub(crate) async fn discover_models(
     let status = response.status();
     let response = response.error_for_status().map_err(|error| {
         let message = format!("request to {url} failed: {error}");
-        if matches!(
-            status,
-            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) {
-            DiscoveryError::credential(message)
-        } else {
-            DiscoveryError::endpoint(message)
+        match status {
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+                DiscoveryError::credential(message)
+            }
+            reqwest::StatusCode::NOT_FOUND => DiscoveryError::missing(message),
+            _ => DiscoveryError::endpoint(message),
         }
     })?;
     let payload = response.json::<RegistryResponse>().await.map_err(|error| {

@@ -226,6 +226,61 @@ leaves nothing selected — a select that kept the last pick would claim a
 selection it does not own, since the connection state lives in the page, not the
 control.
 
+## The account-scoped catalogue (OpenRouter only)
+
+`GET /api/v1/models` on OpenRouter carries **no `security` block** — it is a
+public registry, and the bearer changes nothing about what comes back. So the
+picker offered all ~450 models to an account whose Settings → Privacy
+allowed-providers list permits only `novita, openai, baseten, deepseek,
+deepinfra`. Every `anthropic/*` entry was unreachable for that account, and
+choosing one failed at the first turn with a 404 whose reason surfaced in a
+thread reply. A picker that offers models the account cannot use is worse than a
+short list.
+
+`GET /api/v1/models/user` is OpenRouter's own answer, documented as *"List models
+filtered by user provider preferences, privacy settings, and guardrails"*. It is
+one of only two endpoint groups in their spec with `security: [{"bearer": []}]`,
+and it takes the **ordinary inference key** — not a management key. The response
+shape is identical to `/models`, so the existing reader parses it unchanged.
+
+Four things this depends on, each from the docs rather than inference:
+
+- **`output_modalities` defaults to `text`.** Left off, every image, audio,
+  embedding and video model vanishes silently. `all` is passed explicitly.
+- **`limit=1000` is the maximum**, and the whole permitted catalogue fits in one
+  response, so there is no paging to get wrong.
+- **It accepts none of `/models`' rich filters** (`q`, `sort`, `category`,
+  `providers`, price, context). Anything that needed those does them client-side.
+- **A 404 falls back to `/models`**, loudly. A proxy or gateway answering on
+  OpenRouter's host does not serve this path, and degrading to the public
+  registry beats reporting that a company has no models at all.
+
+### What is not readable, and so is not guessed at
+
+The account's allowed-providers list itself appears in **no API response**.
+`GET /api/v1/key` carries credits, limits and usage only; there is no settings or
+preferences endpoint; the `allowed_providers` field that does exist belongs to
+Guardrails, a separate mechanism behind a management key. So the console can show
+*which* models are reachable — exactly, from `/models/user` — but cannot say
+*why* one is missing, because a model can be absent for provider preferences,
+privacy settings or guardrails and the response gives nothing to tell them apart.
+Nor can the 404 be keyed on: `error.code: 404` does not distinguish "no allowed
+provider" from "no such model", and the discriminating text is undocumented
+English prose.
+
+`provider.only` in the request body is **not** an alternative. The docs are
+explicit: *"your account-wide allowed providers act as the ceiling, and the
+request's `only` list narrows within it."* It can narrow, never widen.
+
+### Why it is one host's rule
+
+`scoped_catalog_path` keys on OpenRouter's own host, the same way the Azure
+deployment-name rule keys on Azure's — every other provider has its own
+account-level restrictions or none, and a general assumption here would send
+`/models/user` to endpoints that have never heard of it. The platform proxy is
+deliberately excluded: it fronts OpenRouter and serves the same catalogue, but
+the account behind it is the server operator's rather than the tenant's.
+
 ## Reserved slugs
 
 openhuman keeps two lists under the same name that mean different things — a
