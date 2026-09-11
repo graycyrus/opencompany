@@ -15,7 +15,38 @@ import {
 } from "@/components/ui/select";
 
 /** The select's item for "no override — send the tier and let it resolve". */
-const TIER_DEFAULT = "__tier_default__";
+export const TIER_DEFAULT = "__tier_default__";
+
+/**
+ * Whether the field shows the catalog select rather than the text input.
+ *
+ * A function, not an expression in the component, because it is four reasons
+ * rolled into one answer and each of them is a decision somebody could get
+ * wrong:
+ *
+ * - **`typed`** — the operator asked for the text field. Their choice wins.
+ * - **`freeTextOnly`** — an Azure endpoint routes on a deployment name its own
+ *   `/models` never publishes, so a closed list makes the only correct value
+ *   unreachable.
+ * - **an empty list** — no catalog, or a read that failed. An empty select reads
+ *   as "this provider has no models", which nobody established.
+ * - **a value the list does not contain** — something already typed, or an id
+ *   from a stale catalog. Upgrading the field out from under it would discard
+ *   it, which is the same class of bug as stripping a value mid-keystroke.
+ */
+export function showsCatalogSelect({
+  catalog,
+  typed,
+  value,
+}: {
+  catalog: Pick<ProviderCatalog, "models" | "freeTextOnly"> | null;
+  typed: boolean;
+  value: string;
+}): boolean {
+  if (typed || !catalog || catalog.freeTextOnly) return false;
+  if (catalog.models.length === 0) return false;
+  return !value || catalog.models.includes(value);
+}
 
 /**
  * Choosing a model id for one provider.
@@ -96,10 +127,7 @@ export function ModelField({
   }, [client, company, slug]);
 
   const listed = catalog?.models ?? [];
-  // A value already typed wins over an upgrade: the field never changes shape
-  // under a value the operator put in it.
-  const offersSelect =
-    !typed && !catalog?.freeTextOnly && listed.length > 0 && (!value || listed.includes(value));
+  const offersSelect = showsCatalogSelect({ catalog, typed, value });
 
   return (
     <div className="grid gap-1.5">
