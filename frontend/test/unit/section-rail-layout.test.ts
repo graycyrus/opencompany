@@ -47,11 +47,17 @@ function render(view: View, sub: string | null = null, onNavigate = () => {}) {
 }
 
 /**
- * Renders with an address on the bar, for the rows that read the hash's query.
+ * Renders with the address that names the route also on the bar.
  *
- * A fresh root each time: the rail reads `?tab=` into state when it mounts
- * (`useHashTabValue`), so setting the hash and re-rendering the same instance
- * would assert against the tab the previous case left behind.
+ * The rail reads nothing off `window.location` — `view` and `sub` arrive as
+ * props, and the draft of issue #2259 that had it resolving on `(page, tab)`
+ * went with the Apps tab strip. The hash is still set so each case reads as the
+ * address an operator is at rather than as two loose arguments, and so a rail
+ * that started consulting the hash again would be asserted against a bar
+ * agreeing with its props instead of one the previous case left behind.
+ *
+ * A fresh root each time, for that same independence: re-rendering one instance
+ * would carry any state the rail grows from one case into the next.
  */
 function renderAt(hash: string, view: View, sub: string | null, onNavigate = () => {}) {
   window.location.hash = hash;
@@ -383,6 +389,29 @@ describe("grandchildActive", () => {
     // decides what is marked; they have to be one rule.
     expect(grandchildActive(company, page("Overview"), "finances", "old-page")).toBe(true);
     expect(grandchildActive(company, page("Wallet"), "finances", "old-page")).toBe(false);
+  });
+
+  // CodeRabbit on this PR: the cases above name two rows each, and a row that
+  // started lighting BESIDE the right one passes every one of them. Company is
+  // the section whose rail shape changed here — its Finance caption is no longer
+  // a scope, so the candidate set an address is matched against is Agents, Work,
+  // Workspace and Brain as well as the Finance pages — which is exactly the
+  // mistake this catches and exactly the invariant the Connections suite below
+  // already holds with `lit`. Same shape, so the two cannot drift.
+  //
+  // A group contributes its rows and a plain child contributes itself: Company
+  // is the one section that is a mix of both, which is what the flattening in
+  // `sectionRailRows` is for.
+  const rows = company.children!.flatMap((child) => child.children ?? [child]);
+  const litInCompany = (sub: string | null) =>
+    rows
+      .filter((row) => grandchildActive(company, row, "finances", sub))
+      .map((row) => row.label);
+
+  it("lights exactly one row across the whole section, captions flattened away", () => {
+    expect(litInCompany(null)).toEqual(["Overview"]);
+    expect(litInCompany("wallet")).toEqual(["Wallet"]);
+    expect(litInCompany("old-page")).toEqual(["Overview"]);
   });
 });
 
