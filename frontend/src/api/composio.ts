@@ -93,6 +93,25 @@ export interface ComposioStatus {
    */
   mode?: ComposioMode;
   /**
+   * What the **managed chain** resolves to, independently of the stored mode.
+   *
+   * Under `mode: "managed"` it equals {@link credentialSource}. Under
+   * `mode: "byok"` it says what managed *would* resolve to if the company went
+   * back — which is the only way the console can offer that route honestly
+   * rather than offering a switch into an outage.
+   *
+   * A **tier name**, never a credential and never a boolean about a secret
+   * slot. That distinction is issue #886: `composioTokenConfigured` answers
+   * only about the first of three tiers and is routinely `false` on a working
+   * hosted tenant, so anything driven off it paints a live connector red.
+   *
+   * Optional on the wire: a host predating this field omits it, and absent must
+   * read as "not said" rather than as `none` — see `composio/rows.ts`, which
+   * falls back to {@link credentialSource} only where the two are defined to
+   * agree.
+   */
+  managedCredentialSource?: ComposioCredentialSource;
+  /**
    * The endpoint the calls actually reach (non-secret) — the managed backend, or
    * Composio's own API host under `byok`.
    */
@@ -150,10 +169,37 @@ export interface ComposioStatus {
   catalogNotice: string | null;
 }
 
+/**
+ * What a failed credential check means.
+ *
+ * The host classifies; the console only renders. The raw upstream error is what
+ * the classifier reads and it must not reach the console at all — it can echo
+ * request headers or fragments of the key just written, and a console banner is
+ * the most screenshot-able surface there is. `composio/classify.ts` turns this
+ * value into a sentence.
+ *
+ * Only `auth` is destructive: the host rejects the write with a 4xx and stores
+ * nothing. Every other class **stores the key** and returns an {@link
+ * ComposioMutation.advisory} beside it, because a corporate proxy, a WAF, a
+ * rate limit and a slow upstream all fail a probe while the key is perfectly
+ * good — and the naive roll-back-on-any-failure flow destroys valid credentials.
+ */
+export type ComposioProbeClass = "auth" | "endpoint" | "quota" | "timeout" | "unknown";
+
 /** A mutating response: the resulting status plus a plain-language note. */
 export interface ComposioMutation {
   status: ComposioStatus;
   note: string;
+  /**
+   * Operator-facing copy for a **non-destructive** probe failure. The key
+   * **was** stored; only reachability is in question.
+   *
+   * Optional, and absent on success and on every host predating the probe.
+   * Never rendered as an error — see {@link ComposioProbeClass}.
+   */
+  advisory?: string;
+  /** Which class of failure {@link advisory} is about. Absent when there was none. */
+  probeClass?: ComposioProbeClass;
 }
 
 /** The `POST …/composio/authorize` response: the hosted connect URL to open. */
@@ -311,8 +357,21 @@ export function setComposioApiKey(
   client: OpenCompanyClient,
   company: string | null,
   apiKey: string,
+  /**
+   * Store the key without probing it first.
+   *
+   * Offered **only after a typed probe failure**, never as a standing option: a
+   * Composio account behind a corporate proxy fails the check while the key is
+   * fine, and without this the operator cannot get past a check that is wrong
+   * about them. Defaulted to `false` here rather than omitted-means-skip, so a
+   * caller that forgets the argument gets the verified path.
+   */
+  skipVerify = false,
 ): Promise<ComposioMutation> {
-  return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/api-key`, { apiKey });
+  return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/api-key`, {
+    apiKey,
+    skipVerify,
+  });
 }
 
 /**
