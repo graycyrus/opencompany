@@ -312,6 +312,85 @@ struct InferenceStatusDto {
     /// from the deployment shape: the rebuilder is wired by the binary, and
     /// only the binary knows whether it wired one.
     can_rebuild_in_place: bool,
+    /// Every provider this company holds, entry zero first.
+    ///
+    /// **Additive, and it has to stay that way.** This DTO is the "can this
+    /// company think?" oracle for four surfaces that are not about inference at
+    /// all — the setup dialog, the agent detail view, the copilot panel and the
+    /// workflow create dialog — so every field above keeps its exact meaning. A
+    /// company with one provider reports a list of one, which is the truth and
+    /// already more than the single form ever said.
+    ///
+    /// Carries `key_configured` per entry and **never a credential**. See
+    /// [`ProviderDto`].
+    providers: Vec<ProviderDto>,
+}
+
+/// One provider on the wire.
+///
+/// Derives `Serialize` and holds no credential field, which is not a
+/// coincidence: the two facts have to be checked together every time this struct
+/// is edited. The record it is built from
+/// ([`store::Provider`](crate::company::inference::store::Provider)) derives no
+/// `Serialize` at all, precisely so that adding a key to it could not silently
+/// put one on a wire — and this is the shape that *is* serialized, so the rule
+/// lands here as "no key field, ever".
+///
+/// `key_configured` is derived by asking the store whether a value exists,
+/// never by reading a stored flag. A flag goes stale the moment a secret is
+/// cleared by another path, and then this tells the console a key exists that
+/// does not.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderDto {
+    /// Stable, opaque identity. Never shown to an operator.
+    id: String,
+    /// Routing key — what a routing entry names.
+    slug: String,
+    /// Display label.
+    label: String,
+    /// Provider kind.
+    kind: String,
+    /// Resolved OpenAI-compatible base URL.
+    base_url: String,
+    /// Abstract tier → concrete model id.
+    models: BTreeMap<String, String>,
+    /// Whether this is available for routing. Distinct from deleted.
+    enabled: bool,
+    /// Whether a credential is stored. **Never the credential.**
+    key_configured: bool,
+}
+
+/// The provider list for the status DTO.
+///
+/// A read-only projection over [`store::list_providers`]: this stage adds the
+/// list to the wire and nothing that writes it. The single form is still the way
+/// to change things, deliberately — two surfaces briefly, where the list says
+/// what is connected and the form still changes it.
+async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, ApiError> {
+    use crate::company::inference::store;
+
+    let secrets = runtime.secrets().as_ref();
+    let providers = store::list_providers(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let mut out = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let key_configured = store::provider_key_configured(runtime.id(), secrets, &provider)
+            .await
+            .map_err(ApiError)?;
+        out.push(ProviderDto {
+            id: provider.id.as_str().to_string(),
+            slug: provider.slug,
+            label: provider.label,
+            kind: provider.kind,
+            base_url: provider.base_url,
+            models: provider.models,
+            enabled: provider.enabled,
+            key_configured,
+        });
+    }
+    Ok(out)
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -626,6 +705,7 @@ async fn effective_status_with(
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
+    let providers = provider_list(runtime).await?;
     // Independent of `decl`: the shipped defaults are the same regardless of
     // what (if anything) this company has configured.
     let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
@@ -647,6 +727,7 @@ async fn effective_status_with(
             harness_reachable: harness_reachable(runtime),
             designs_profiles: designs_profiles(runtime),
             can_rebuild_in_place,
+            providers,
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -666,6 +747,7 @@ async fn effective_status_with(
             harness_reachable: harness_reachable(runtime),
             designs_profiles: designs_profiles(runtime),
             can_rebuild_in_place,
+            providers,
         },
     })
 }
@@ -2371,13 +2453,40 @@ base_url = "https://byo.example/v1"
             Some(json!({ "provider": "openai_compatible", "baseUrl": "https://byo.example/v1", "key": TOKEN })),
         )
         .await;
-        let (_, _, get_raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let (_, get_dto, get_raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
         // The live probe path returns an error (unreachable host) — assert the
         // scrubbed error body still never contains the token.
         let (_, _, test_raw) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
 
         for raw in [put_raw, get_raw, test_raw] {
             assert!(!raw.contains(TOKEN), "a response leaked the token: {raw}");
+        }
+
+        // The list route, extended here **before** there was anything to leak.
+        // The provider list is the newest way a credential could reach a wire,
+        // and the point of adding it to this test on the same change that adds
+        // the field is that the assertion exists before the mistake can.
+        let providers = get_dto["providers"]
+            .as_array()
+            .expect("the status carries a provider list");
+        assert_eq!(
+            providers.len(),
+            1,
+            "one provider: the flat slot, as entry zero"
+        );
+        let entry_zero = &providers[0];
+        assert_eq!(entry_zero["slug"], "openai_compatible");
+        assert_eq!(
+            entry_zero["keyConfigured"], true,
+            "the boolean is the only thing a read may say about a key"
+        );
+        // Not "no field called `key`" — no field with the VALUE, whatever it is
+        // called. A convenience rename would pass the narrower assertion.
+        for (name, value) in entry_zero.as_object().expect("a provider object") {
+            assert!(
+                !value.to_string().contains(TOKEN),
+                "provider field `{name}` leaked the token"
+            );
         }
     }
 

@@ -11,6 +11,7 @@
 // shared `api/types.ts` is needed.
 
 import type { OpenCompanyClient } from "./client";
+import type { Provider } from "@/inference/types";
 
 /**
  * Provider kinds the console offers.
@@ -155,6 +156,24 @@ export interface InferenceStatus {
    * say "not in this build" rather than offer a switch that does nothing.
    */
   canRebuildInPlace: boolean;
+  /**
+   * Every provider this company holds, entry zero first.
+   *
+   * **Additive, and it must stay that way.** This interface is the "can this
+   * company think?" oracle for four surfaces that are not about inference at
+   * all — `SetupDialog`, `AgentDetailView`, `CopilotPanel` and
+   * `WorkflowCreateDialog` — so every field above keeps its exact meaning. Add
+   * fields here; do not reshape the ones that are already read elsewhere.
+   *
+   * Optional because an older host does not send it. `undefined` means "this
+   * host did not say", which is not the same as "this company has no
+   * providers" — read it as unknown and fall back to the single-provider
+   * fields, exactly as `designsProfiles` is read.
+   *
+   * A company with one provider reports a list of one. That is the truth, and
+   * already more than the single form ever said.
+   */
+  providers?: Provider[];
 }
 
 /** The set-provider body. `key` is write-only (never returned). */
