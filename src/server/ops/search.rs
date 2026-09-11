@@ -529,6 +529,21 @@ async fn connect_provider(
     }))
 }
 
+/// The `{slug}` capture, as a named struct.
+///
+/// **Not `Path<String>`.** Every route here is registered by
+/// [`scoped`](super::scope::scoped), which serves both the platform form
+/// (`…/companies/{id}/search/providers/{slug}`) and the single-company alias
+/// (`…/company/search/providers/{slug}`). The platform form therefore captures
+/// *two* parameters, and a `Path<String>` under it fails extraction with "wrong
+/// number of path parameters" — a 400 on every call, from the console as well
+/// as from a test. A named struct deserializes by key and works under both
+/// shapes, which is why every other ops module with a path parameter uses one.
+#[derive(Debug, Deserialize)]
+struct SlugPath {
+    slug: String,
+}
+
 /// The body for changing one provider.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -544,7 +559,7 @@ struct UpdateBody {
 /// `PUT …/search/providers/{slug}` — enable, disable, or re-address.
 async fn update_provider(
     company: AdminScopedCompany,
-    Path(slug): Path<String>,
+    Path(SlugPath { slug }): Path<SlugPath>,
     State(_state): State<AppState>,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<SearchStatus>, ApiError> {
@@ -583,7 +598,7 @@ async fn update_provider(
 /// `DELETE …/search/providers/{slug}` — remove a provider and its credential.
 async fn remove_provider(
     company: AdminScopedCompany,
-    Path(slug): Path<String>,
+    Path(SlugPath { slug }): Path<SlugPath>,
     State(_state): State<AppState>,
 ) -> Result<Json<SearchStatus>, ApiError> {
     let runtime = &company.runtime;
@@ -613,7 +628,7 @@ struct KeyBody {
 /// read site treats an empty value as unset.
 async fn replace_key(
     company: AdminScopedCompany,
-    Path(slug): Path<String>,
+    Path(SlugPath { slug }): Path<SlugPath>,
     State(_state): State<AppState>,
     Json(body): Json<KeyBody>,
 ) -> Result<Json<SearchStatus>, ApiError> {
@@ -1312,7 +1327,12 @@ mod tests {
 
         // Clearing one leaves the other untouched. Under the old single slot
         // this was not expressible at all.
-        call(
+        //
+        // The status is asserted because it has already hidden a bug once: with
+        // `Path<String>` under `scoped`, the platform form captures `{id}` too
+        // and every one of these returned 400 while the assertions below still
+        // read as "the key was not cleared".
+        let (cleared_status, cleared_body) = call(
             &state,
             "PUT",
             "/api/v1/companies/acme/search/providers/exa/key",
@@ -1320,6 +1340,7 @@ mod tests {
             Some(json!({"apiKey": ""})),
         )
         .await;
+        assert_eq!(cleared_status, StatusCode::OK, "{cleared_body}");
 
         let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
         let rows = after["providers"].as_array().expect("providers");
