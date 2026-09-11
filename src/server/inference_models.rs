@@ -269,13 +269,19 @@ async fn fetch_catalog(
     // Verified against `platform.claude.com/docs/en/api/models/list`, whose own
     // curl example is `-H 'anthropic-version: 2023-06-01' -H "X-Api-Key: …"`.
     let request = crate::company::inference::probe::apply_auth(client.get(url), auth, bearer);
+    // Every message below names the endpoint **redacted**. A URL may carry
+    // userinfo, and `reqwest` already masks it in its own `Display` — so a
+    // `format!` that interpolates our copy of the URL beside that error is
+    // precisely how a credential that reqwest had already hidden gets put back
+    // into a string the console renders.
+    let named = crate::company::inference::catalogue::redact_endpoint(url);
     let response = request
         .send()
         .await
-        .map_err(|error| DiscoveryError::endpoint(format!("request to {url} failed: {error}")))?;
+        .map_err(|error| DiscoveryError::endpoint(format!("request to {named} failed: {error}")))?;
     let status = response.status();
     let response = response.error_for_status().map_err(|error| {
-        let message = format!("request to {url} failed: {error}");
+        let message = format!("request to {named} failed: {error}");
         match status {
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
                 DiscoveryError::credential(message)
@@ -285,7 +291,7 @@ async fn fetch_catalog(
         }
     })?;
     let payload = response.json::<RegistryResponse>().await.map_err(|error| {
-        DiscoveryError::endpoint(format!("model catalog from {url} was invalid: {error}"))
+        DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {error}"))
     })?;
     Ok(parse_models(payload))
 }

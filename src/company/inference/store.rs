@@ -1401,11 +1401,15 @@ mod tests {
         // slug alphabet is `[a-z0-9-]`, one byte per character once
         // percent-encoded, and `provider/` + `/key` add 17.
         let key = provider_key_key(&"a".repeat(MAX_PROVIDER_NAME_CHARS));
-        assert_eq!(key.len(), MAX_PROVIDER_NAME_CHARS + 17);
+        // `provider/` + `/key` is 13 characters around the slug.
+        assert_eq!(key.len(), MAX_PROVIDER_NAME_CHARS + 13);
+        // Percent-encoding is what the budget is measured in. The slug alphabet
+        // (`[a-z0-9-]`) survives as one byte per character; the two `/`
+        // separators become `%2F`, three bytes each.
+        let encoded_len = key.len() + 2 * 2;
         assert!(
-            key.len() < 200,
-            "a bounded name must not need a truncated secret filename: {} bytes",
-            key.len()
+            encoded_len < 200,
+            "a bounded name must not need a truncated secret filename: {encoded_len} bytes"
         );
     }
 

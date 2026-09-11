@@ -596,6 +596,11 @@ pub async fn probe_models(
 ) -> Result<Vec<String>, ProbeFailure> {
     check_endpoint(base_url, policy).map_err(ProbeFailure::refused)?;
     let url = format!("{}/models", base_url.trim().trim_end_matches('/'));
+    // What the failure text is allowed to say. `raw` reaches a host log, and a
+    // log is disk — so an endpoint carrying userinfo must not be written into
+    // one verbatim. The request itself still goes to `url`; only the sentence
+    // about it is redacted.
+    let named = catalogue::redact_endpoint(&url);
 
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
@@ -627,7 +632,7 @@ pub async fn probe_models(
     let response = request.send().await.map_err(|e| {
         // Classified on the condition alone; the full error, URL and all, is
         // kept for the log. See `ProbeFailure::classified_as`.
-        ProbeFailure::classified_as(transport_condition(&e), format!("{url}: {e}"))
+        ProbeFailure::classified_as(transport_condition(&e), format!("{named}: {e}"))
     })?;
     let status = response.status();
     let body = read_capped(response).await;
@@ -644,7 +649,7 @@ pub async fn probe_models(
         );
         return Err(ProbeFailure::classified_as(
             &reason,
-            format!("{url}: {reason}"),
+            format!("{named}: {reason}"),
         ));
     }
     Ok(parse_model_ids(&body))

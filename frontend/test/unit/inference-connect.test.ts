@@ -9,8 +9,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_PROVIDER_NAME_CHARS,
   addOptions,
+  checkProviderName,
   checkSlug,
+  endpointHasCredentials,
   credentialAsk,
   customProviderReady,
   isConnected,
@@ -115,6 +118,30 @@ describe("the slug, which is derived and never typed", () => {
     expect(slugErrorCopy("empty")).toBe("Enter a provider name to generate a slug.");
     expect(slugErrorCopy("taken")).toContain("already has a provider");
     expect(slugErrorCopy("reserved")).toContain("built-in");
+    expect(slugErrorCopy("too-long")).toContain(String(MAX_PROVIDER_NAME_CHARS));
+  });
+
+  it("bounds the name, because the name becomes the address of a secret", () => {
+    // Mirrors `store::MAX_PROVIDER_NAME_CHARS`. The host holds the rule; this
+    // only spares the operator a round trip. An unbounded name produced an
+    // unbounded secret key, which 500ed a credential read and truncated a
+    // stored key on the way to failing the delete that truncated it.
+    const atLimit = "a".repeat(MAX_PROVIDER_NAME_CHARS);
+    const pastLimit = "a".repeat(MAX_PROVIDER_NAME_CHARS + 1);
+
+    expect(checkProviderName(atLimit)).toBeNull();
+    expect(checkProviderName(pastLimit)).toBe("too-long");
+    expect(checkProviderName("   ")).toBe("empty");
+
+    expect(checkSlug([], atLimit)).toBeNull();
+    expect(checkSlug([], pastLimit)).toBe("too-long");
+
+    expect(customProviderReady([], { label: atLimit, baseUrl: "https://a.example/v1" })).toBe(
+      true,
+    );
+    expect(customProviderReady([], { label: pastLimit, baseUrl: "https://a.example/v1" })).toBe(
+      false,
+    );
   });
 });
 
@@ -133,6 +160,31 @@ describe("the endpoint an operator types", () => {
   it("refuses anything that is not http or https", () => {
     for (const bad of ["file:///etc/passwd", "ftp://acme.example/v1", "localhost:11434", "", "http://"]) {
       expect(normalizeEndpoint(bad)).toBeNull();
+    }
+  });
+
+  it("refuses one that carries a credential, because an endpoint is stored as written", () => {
+    // Mirrors `catalogue::endpoint_has_credentials`. A `baseUrl` is returned
+    // by a `ScopedCompany` route every console reader calls, so a password in
+    // one is a password on the wire for everybody.
+    for (const bad of [
+      "http://alice:hunter2@127.0.0.1:8597/v1",
+      "https://alice@api.acme.example/v1",
+      "http://alice:hun@ter2@127.0.0.1:8597/v1",
+    ]) {
+      expect(endpointHasCredentials(bad)).toBe(true);
+      expect(normalizeEndpoint(bad)).toBeNull();
+    }
+  });
+
+  it("does not mistake an @ in the path for a credential", () => {
+    for (const good of [
+      "https://api.acme.example/v1/@me",
+      "https://api.acme.example/v1?to=a@b",
+      "https://api.acme.example/v1#a@b",
+    ]) {
+      expect(endpointHasCredentials(good)).toBe(false);
+      expect(normalizeEndpoint(good)).toBe(good);
     }
   });
 });
