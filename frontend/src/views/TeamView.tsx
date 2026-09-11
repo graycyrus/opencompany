@@ -16,19 +16,19 @@ import { ApiError, type TeamMemberDto } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
 import {
@@ -707,8 +707,59 @@ function MemberCard({
               )}
             </div>
           )}
-          {/* Above the title button's stretched click target (issue #1810). */}
-          <div className="relative z-10">
+          {/*
+            Above the title button's stretched click target (issue #1810), and
+            holding two controls rather than one since issue #2252.
+
+            `items-center` aligns the pair to each other inside a header that is
+            `items-start`; `shrink-0` keeps them at full size so the squeeze
+            lands on the title's `min-w-0 flex-1` — which truncates — rather
+            than on the buttons, which cannot.
+          */}
+          <div className="relative z-10 flex shrink-0 items-center gap-0.5">
+            {/*
+              Message sits on the card face, not in the overflow (issue #2252).
+
+              It shipped inside the menu first. That put the thing an operator
+              wants *while scanning the roster* — ask this one something — two
+              clicks deep, behind a control whose only other item is
+              destructive. On the face it is one click and always visible: no
+              hover needed to discover it, which matters on a grid where the
+              pointer is travelling between cards rather than resting on one.
+              The menu is back to holding only Remove; two controls doing the
+              same thing would be worse than either alone.
+
+              Still an anchor, so the status bar previews the destination on
+              hover and Cmd-click opens the DM in a new tab — neither of which
+              a button can offer.
+
+              Icon-only, so the name is mandatory and carries the agent:
+              "Message Brand Designer", not a bare "Message" repeated on every
+              card, which would leave a screen reader with thirteen
+              indistinguishable controls. The label is spent twice — as the
+              tooltip and as `aria-label` — the way `McpIconButton` does it.
+            */}
+            {messageHref && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <a
+                      href={messageHref}
+                      aria-label={`Message ${member.name}`}
+                      data-testid="team-card-message"
+                      className={buttonVariants({
+                        variant: "ghost",
+                        size: "icon",
+                        className: "-mt-1 size-7",
+                      })}
+                    />
+                  }
+                >
+                  <MessageSquare className="size-4" />
+                </TooltipTrigger>
+                <TooltipContent>{`Message ${member.name}`}</TooltipContent>
+              </Tooltip>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Agent actions" />}
@@ -730,9 +781,10 @@ function MemberCard({
                   via `DailyBudgetLine` below; only the controls that write
                   moved.
 
-                  What is left passes that same test. Remove is destructive,
-                  and a deliberate extra click before it is worth keeping
-                  beside the title action. Unlike "View agent" it does
+                  That still leaves exactly one item. It stays a menu rather
+                  than a bare button: Remove is destructive, and a deliberate
+                  extra click before it is worth keeping beside the title
+                  action. Unlike "View agent" it does
                   not duplicate the card's own action, and unlike Budget it is
                   not per-agent configuration that reads better on a
                   detail page — it is the one roster-level action an operator
@@ -741,29 +793,13 @@ function MemberCard({
                   discoverable one-hop delete for an extra full-page
                   navigation with no offsetting benefit.
 
-                  Message (issue #2252) joins it on the same grounds, and is
-                  the reason this reads "what is left" rather than "exactly one
-                  item" as it did after #1206. It is navigation to a
-                  conversation, not configuration of an agent, so the rule that
-                  sent Budget and Inbox to the detail page does not reach it —
-                  and "ask this one something" is exactly the thought an
-                  operator has *while* scanning the roster. The members pane
-                  already ships this menu verbatim (`room/MembersPane.tsx`:
-                  Message, separator, then the destructive item); the board was
-                  the odd surface out.
-
-                  It is an anchor rather than an onClick so the address is a
-                  real link — copyable, middle-clickable — and so the board
-                  needs no chat-navigation prop threaded down from the shell.
+                  Message (issue #2252) briefly sat here too, above a
+                  separator. It moved to the card face — see the anchor beside
+                  this trigger — because burying the roster's most-reached-for
+                  action behind an overflow was the thing the menu is supposed
+                  to protect against, not an instance of it. It is deliberately
+                  not in both places: one affordance per action.
                 */}
-                {messageHref && (
-                  <>
-                    <DropdownMenuItem render={<a href={messageHref} />}>
-                      <MessageSquare className="size-4" aria-hidden /> Message
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                  </>
-                )}
                 <DropdownMenuItem variant="destructive" onClick={onRemove}>
                   Remove
                 </DropdownMenuItem>
