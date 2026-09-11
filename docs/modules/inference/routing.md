@@ -5,6 +5,49 @@ workloads, the copy and the mechanics. Source:
 `app/src/components/settings/panels/ai/aiPanelTypes.ts` and the routing tab in
 `AIPanel.tsx`.
 
+## The tab, as shipped
+
+`LLM Providers | Routing` — two pills, and the tab **ids** are unchanged
+(`connect`, `routing`) because `#/connections/inference` is linked from the chat
+pane's "cannot reach a model" banner and from workflow run rows. Relabelling a
+tab is not a reason to break a link.
+
+```
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ Routing mode                                                       │
+  │ ⬤ Managed                                       ┃ Always on ┃      │
+  │ ○ Use Your Own Models                                              │
+  │ ○ Advanced                                                         │
+  └────────────────────────────────────────────────────────────────────┘
+
+  ┌─ Advanced ─────────────────────────────────────────────────────────┐
+  │ Chat            Direct conversational…   Primary (OpenRouter)  [⌄] │
+  │ Reasoning       Main chat agent…         Acme · gpt-5          [⌄] │
+  │ Agentic         Sub-agent runners…       Managed               [⌄] │
+  │ Vision          Image understanding…     Primary (OpenRouter)  [⌄] │
+  │ ───────────────────────────────────────────────────────────────── │
+  │ Coding          Code generation…    Follows Agentic — one tier,    │
+  │                                     two names          (read-only) │
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+**An unset row names what it will actually use** — `Primary (OpenRouter)` — not
+"No model selected". An unset row is not a gap: it resolves somewhere, and
+naming where is the difference between a screen that reports routing and one
+that hides half of it. It is read through `primary()` on every render and never
+cached, so the rows move when the marked default does.
+
+The per-workload dialog carries the workload's recommendation hint, a provider
+select whose first two items are the primary and Managed (an absence and a
+choice, which are different states), a free-text model id, and **Test** — the
+one control in this surface that sends a real completion, with the cost warning
+on the button rather than above the fold.
+
+The model field is free text rather than a catalog select, because a select
+sourced from the provider's catalog makes the only correct value unreachable at
+an Azure endpoint — the request keys on a deployment name while `/models`
+publishes base model ids — and a typed id is honoured verbatim everywhere.
+
 ## Three modes
 
 ```

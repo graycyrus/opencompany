@@ -143,7 +143,13 @@ export function ProviderConnectDialog({
                 autoComplete="off"
                 onChange={(e) => setLabel(e.target.value)}
               />
-              <p className="font-mono text-xs text-muted-foreground">
+              {/* The slug is what a routing entry will say, so the operator
+                  sees it before they commit to it rather than meeting it later
+                  in a routing row. */}
+              <p
+                className="font-mono text-xs text-muted-foreground"
+                data-testid="inference-slug-preview"
+              >
                 Slug: {slug || "None"}
               </p>
               {slugError && (

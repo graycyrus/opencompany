@@ -12,6 +12,89 @@ configured. openhuman's own note on this is worth keeping:
 > Custom is deliberately NOT a fourth select. It is one option, and a select over
 > one option is a button wearing a costume.
 
+## The page the modal opens from — as shipped
+
+Two cards and one line. The page this replaces opened with four paragraphs —
+what bring-your-own-key means, what Test costs, what Reset does, what Remove key
+does — above a form, and every one of them explained a control that was visible
+while it was being read.
+
+```
+  LLM                                        [ LLM Providers | Routing ]
+  Configure AI providers, local models, and the agent chat tools.
+
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ LLM Providers                                                      │
+  │ Add and configure language model providers.   [ + Add a provider ] │
+  └────────────────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ CONNECTED                                                          │
+  │ ◼ Managed                                        ┃ Always on ┃     │
+  │   TinyHumans chooses a model for each task                         │
+  │ ◼ OpenRouter                        Default        [ ▮▬ ]   ⋯      │
+  │   •••• configured                                                  │
+  └────────────────────────────────────────────────────────────────────┘
+
+  Managed is always available as a fallback. To use your own model, choose a
+  routing mode below.
+```
+
+A row is **a mark, a name, one sub-line and a control**. The sub-line is one
+fact chosen by what the row is: `•••• configured` for a keyed provider, the
+endpoint host for a keyless one, `Runs on this machine` for a local runtime.
+
+The mark is a **monogram**, not a brand logo — shipping thirty vendors'
+trademarks opens a licensing question this feature has no need to open, and a
+missing logo would leave a hole in the row.
+
+Health is silent when nothing has been learnt **and when it is `ok`**. A column
+where every healthy row says "ok" spends itself saying nothing and makes the one
+row that is not healthy harder to find.
+
+Two explanations survive the deletion pass, and both carry something no control
+on the page does: the **restart notice**, because a save that has landed and is
+not yet in effect looks exactly like one that is, and the **cost warning** on the
+routing dialog's Test — which sits on the button it applies to rather than above
+the fold.
+
+## The dialogs — as shipped
+
+```
+┌─ Add a provider ────────────────────────┐  ┌─ Add cloud provider ──────────┐
+│ Pick a provider to connect. You can add │  │ The key is stored on this     │
+│ more at any time.                       │  │ company and never shown again.│
+│                                         │  │                               │
+│ Cloud                                   │  │ Name                          │
+│ [ Choose a cloud provider…           ▾] │  │ [ My Provider              ]  │
+│ Hosted models. You supply an API key.   │  │ Slug: my-provider             │
+│                                         │  │                               │
+│ Local runtimes                          │  │ OpenAI URL                    │
+│ [ Choose a local runtime…            ▾] │  │ [ https://api.openai.com/v1]  │
+│ Models running on this machine. You     │  │                               │
+│ supply the endpoint.                    │  │ API Key                       │
+│                                         │  │ [ sk-...                   ]  │
+│ CLI logins                              │  │                               │
+│ [ Choose a CLI login…                ▾] │  │        [Cancel] [Add Provider]│
+│ Not available on this host.             │  └───────────────────────────────┘
+│ ─────────────────────────────────────── │
+│ [ Add a custom provider ]               │
+│ Your own OpenAI-compatible endpoint     │
+└─────────────────────────────────────────┘
+```
+
+Dropdown items are two lines — the mark, the name, and a **monospace** detail —
+because every one of those details is an address or a statement about where the
+thing runs rather than prose.
+
+Before a name is typed the slug line reads `Slug: None` with the inline error
+*"Enter a provider name to generate a slug."*, and Add stays disabled.
+
+**One thing deliberately not ported.** The reference's custom-provider subtitle
+renders a duplicated interpolation — `auth-profiles.json auth-profiles.json.` —
+which is a bug in the screenshot, not a detail to reproduce faithfully. Ours
+says where the key goes, or nothing.
+
 ## Three categories, because they ask three different questions
 
 Copy is verbatim from openhuman; the full list of options is in
