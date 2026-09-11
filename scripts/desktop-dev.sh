@@ -191,7 +191,7 @@ fi
 # runner is cargo to see that the features land anywhere. `tauri build` has no
 # such flag, which is why the workflow spells it the other way.
 TAURI_CLI="${REPO_ROOT}/frontend/node_modules/.bin/tauri"
-cd "${REPO_ROOT}/src-tauri"
+cd "${REPO_ROOT}/crates/opencompany-app"
 if [ -n "${DESKTOP_FEATURES}" ]; then
     set -- --features "${DESKTOP_FEATURES}"
 else

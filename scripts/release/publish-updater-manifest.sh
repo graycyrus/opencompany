@@ -37,12 +37,12 @@ set -euo pipefail
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONF="$REPO_ROOT/src-tauri/tauri.conf.json"
+CONF="$REPO_ROOT/crates/opencompany-app/tauri.conf.json"
 
 VERSION="${VERSION:-${TAG#v}}"
 BUILT_VERSION="$(jq -r '.version' "$CONF")"
 if [ "$VERSION" != "$BUILT_VERSION" ]; then
-  echo "::error::latest.json would advertise $VERSION but the application in this release is $BUILT_VERSION (src-tauri/tauri.conf.json). A client would install the update and immediately be offered it again." >&2
+  echo "::error::latest.json would advertise $VERSION but the application in this release is $BUILT_VERSION (crates/opencompany-app/tauri.conf.json). A client would install the update and immediately be offered it again." >&2
   exit 1
 fi
 

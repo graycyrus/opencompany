@@ -30,7 +30,7 @@
 # `docs/spec/runtime/desktop-updates.md`.
 set -euo pipefail
 
-CONF="${1:-src-tauri/tauri.conf.json}"
+CONF="${1:-crates/opencompany-app/tauri.conf.json}"
 
 if [ ! -f "$CONF" ]; then
   echo "::error::assert-updater-configured: $CONF not found (run from the repository root)" >&2

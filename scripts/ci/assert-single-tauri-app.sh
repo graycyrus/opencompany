@@ -45,8 +45,8 @@ prune=(
 
 configs=$(find . -name tauri.conf.json "${prune[@]}" | sed 's|^\./||' | sort)
 
-if [ "${configs}" != "src-tauri/tauri.conf.json" ]; then
-    echo "assert-single-tauri-app: expected exactly one Tauri app, at src-tauri/tauri.conf.json." >&2
+if [ "${configs}" != "crates/opencompany-app/tauri.conf.json" ]; then
+    echo "assert-single-tauri-app: expected exactly one Tauri app, at crates/opencompany-app/tauri.conf.json." >&2
     echo "Found:" >&2
     echo "${configs}" | sed 's/^/    /' >&2
     echo >&2
@@ -125,13 +125,13 @@ while IFS= read -r manifest; do
         echo >&2
         echo "npm runs a script from the manifest's own directory, so an unqualified" >&2
         echo "'tauri' picks up whatever project sits beneath it. Name the directory:" >&2
-        echo '    "tauri:build": "npm run build && cd ../src-tauri && ../frontend/node_modules/.bin/tauri build"' >&2
+        echo '    "tauri:build": "npm run build && cd ../crates/opencompany-app && ../../frontend/node_modules/.bin/tauri build"' >&2
         status=1
     fi
 done < <(find . -name package.json "${prune[@]}")
 
 if [ "${status}" -eq 0 ]; then
-    echo "assert-single-tauri-app: one Tauri app (src-tauri/), no unqualified CLI invocations."
+    echo "assert-single-tauri-app: one Tauri app (crates/opencompany-app/), no unqualified CLI invocations."
 fi
 
 exit "${status}"

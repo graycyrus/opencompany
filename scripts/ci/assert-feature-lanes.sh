@@ -86,7 +86,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # is the exact hole this script exists to close, so the enumeration has to come
 # from the resolver rather than from the text.
 cargo metadata --no-deps --locked --format-version 1 \
-  | jq -r '.packages[] | select(.name == "opencompany") | .features | keys[]' \
+  | jq -r '.packages[] | select(.name == "opencompany-core") | .features | keys[]' \
   | sort > "${WORK}/features"
 
 if [ ! -s "${WORK}/features" ]; then

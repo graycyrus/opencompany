@@ -131,9 +131,9 @@ check() {
 # the script would report the remaining step as "ok" and exit 0. The one thing
 # this exists to catch — a call site compiling the default set — was the one
 # thing it skipped.
-ci_lines="$(grep -nE 'cargo (clippy|test|check|build)[^|]*--manifest-path src-tauri/Cargo.toml' "$CI_WORKFLOW" || true)"
+ci_lines="$(grep -nE 'cargo (clippy|test|check|build)[^|]*--manifest-path crates/opencompany-app/Cargo.toml' "$CI_WORKFLOW" || true)"
 if [ -z "$ci_lines" ]; then
-  echo "assert-desktop-features: no cargo command against src-tauri/Cargo.toml in $CI_WORKFLOW." >&2
+  echo "assert-desktop-features: no cargo command against crates/opencompany-app/Cargo.toml in $CI_WORKFLOW." >&2
   echo "  Either the Desktop lane stopped compiling the shell, or this script's" >&2
   echo "  pattern is stale. Both need a human." >&2
   exit 1
@@ -184,7 +184,7 @@ fi
 # the whole reason this script exists is that such copies drift. Comments may
 # name the features; a shell assignment may not.
 dev_literal="$(
-  grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '=[^|]*opencompany/[a-z-]+' || true
+  grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '=[^|]*opencompany-core/[a-z-]+' || true
 )"
 if [ -n "$dev_literal" ]; then
   echo "  BAD $DEV_SCRIPT hardcodes a feature literal instead of reading the workflow:" >&2
