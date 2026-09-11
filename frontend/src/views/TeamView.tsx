@@ -124,6 +124,21 @@ export function TeamView({
    */
   const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  /**
+   * Ids of rows this console appended itself, because the host has no team
+   * write plane (`addMember`'s 404 branch below).
+   *
+   * `fromHost` cannot answer this. It is one flag for the whole roster, set by
+   * the *read*, and a host that serves `GET …/team` and 404s the `POST` leaves
+   * it true while a console-only row sits on the grid — so both of the card's
+   * host-addressed controls would offer to open something no host holds. See
+   * {@link hostBackedCard}.
+   *
+   * Emptied by every re-read: `boot` replaces the roster wholesale, so a marker
+   * that outlived its row would suppress the controls on a real teammate who
+   * happens to be minted at the same id.
+   */
+  const [consoleOnly, setConsoleOnly] = useState<ReadonlySet<string>>(NO_CONSOLE_ONLY);
   const [nameQuery, setNameQuery] = useState("");
   const [workingOnly, setWorkingOnly] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -188,6 +203,10 @@ export function TeamView({
       setHostEmpty(false);
       return false;
     } finally {
+      // Every branch above replaced the roster from the host — with its rows,
+      // with nobody, or with nobody because the read failed. None of them can
+      // still hold a row this console appended, so the markers go with them.
+      setConsoleOnly(NO_CONSOLE_ONLY);
       setLoad("ready");
     }
   }, [client, company]);
@@ -317,7 +336,13 @@ export function TeamView({
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         // No team write plane on this host — keep the edit local-only.
-        setMembers((m) => [...m, newMember(fields)]);
+        const local = newMember(fields);
+        setMembers((m) => [...m, local]);
+        // And say so per row, because the roster-wide `fromHost` still reads
+        // true here: the read landed, only the write had nowhere to go. Without
+        // this the card would offer to open a detail page and a DM against an
+        // id the host has never heard of.
+        setConsoleOnly((ids) => new Set(ids).add(local.id));
         reportAddMember({ kind: "console-only", name: fields.name });
         setAddOpen(false);
         return true;
@@ -538,15 +563,16 @@ export function TeamView({
                   key={m.id}
                   member={m}
                   onRemove={() => void removeMember(m)}
-                  // Only a host-backed teammate can be opened: a starter-team
-                  // card is a local placeholder with no record behind it, so its
-                  // id would 404 and the detail view would report a teammate that
-                  // was never removed.
-                  onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
-                  // Same host-backed gate as `onOpen`, for the same reason: a
-                  // starter-team card is a local placeholder, and its DM would
-                  // address a thread the host has no agent behind.
-                  messageHref={fromHost ? agentDmHref(m) : undefined}
+                  // Only a host-backed teammate can be opened: a card with no
+                  // record behind it would 404 on its id, and the detail view
+                  // would report a teammate that was never removed.
+                  onOpen={hostBackedCard(m, fromHost, consoleOnly) ? () => onOpenAgent(m.id) : undefined}
+                  // The same gate, because it is the same question: a row no
+                  // host holds has no DM either, and the room would answer with
+                  // its unknown-channel fallback rather than a conversation.
+                  messageHref={
+                    hostBackedCard(m, fromHost, consoleOnly) ? agentDmHref(m) : undefined
+                  }
                   // Looked up by roster id, so a card the board assigned to a
                   // *desk* is never attributed to the people on it.
                   //
@@ -593,6 +619,36 @@ export function TeamView({
  * object per render would change `MemberCard`'s props on every pass.
  */
 const IDLE: Workload = { open: 0, status: "idle" };
+
+/** No row is console-only — the state every roster read returns to. */
+const NO_CONSOLE_ONLY: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Whether this card's two host-addressed controls have anything to address.
+ *
+ * Both the title's detail link and the Message link resolve an **id against the
+ * host**, so both are wrong in exactly the same states and are gated together
+ * rather than separately — one of them silently surviving a narrowing of the
+ * other is how they come to disagree.
+ *
+ * Two states, and `fromHost` alone only covers the first:
+ *
+ *  - **The roster is not the host's.** The read never landed, or landed with
+ *    nobody, so every card on screen is a local placeholder.
+ *  - **This row is not the host's**, on a roster that is. A host serving
+ *    `GET …/team` and 404ing the `POST` leaves `fromHost` true while
+ *    `addMember` appends a console-only row beside the real ones — the state
+ *    `consoleOnly` exists to name. Reaching the detail page for such a row
+ *    reports a teammate that was never removed; reaching its DM lands on the
+ *    room's unknown-channel fallback.
+ */
+export function hostBackedCard(
+  member: TeamMember,
+  fromHost: boolean,
+  consoleOnly: ReadonlySet<string>,
+): boolean {
+  return fromHost && !consoleOnly.has(member.id);
+}
 
 /**
  * The address of this teammate's direct conversation (issue #2252).
