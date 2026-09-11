@@ -211,13 +211,55 @@ describe("where a row sends you", () => {
   });
 
   it("resolves a message row through the channel the host recorded", () => {
-    expect(notificationHref(row({ context: "desk-ops" }), CHANNELS)).toBe("#/chat/desk-ops");
+    expect(notificationHref(row({ context: "desk-ops", subjectId: "412" }), CHANNELS)).toBe(
+      "#/chat/desk-ops?m=h412",
+    );
+  });
+
+  it("names the line, not just the room", () => {
+    // A mention's `subject.id` is the host's own message sequence
+    // (`company/runtime.rs`), and `MessageRow` keys its rows on the console id
+    // — `h`-prefixed. Linking the bare sequence lands in the channel and finds
+    // nothing to scroll to, which is what `search/sources.ts` documents having
+    // learned. Without the anchor at all, a mention above the fold in a busy
+    // channel opens the room and leaves the operator to hunt (Codex).
+    expect(notificationHref(row({ context: "desk-ops", subjectId: "412" }), CHANNELS)).toContain(
+      "?m=h412",
+    );
+    // A row carrying no subject is still a link to the room. `RoomView` gives
+    // up quietly on an anchor it cannot find, so the degraded case here is the
+    // behaviour this had before the anchor existed, not a broken link.
+    expect(notificationHref(row({ context: "desk-ops", subjectId: "" }), CHANNELS)).toBe(
+      "#/chat/desk-ops",
+    );
+  });
+
+  it("leaves a DM channel id unescaped, because the router never decodes", () => {
+    // A DM id is `dm:<member-id>` (`room/channels.ts`) and `readSegments`
+    // splits the hash on `/` with no decoding anywhere downstream, so
+    // percent-encoding the `:` produces `dm%3A…` — a segment that matches no
+    // channel. Every DM mention's row would have been a link to nothing, and
+    // the other cases in this suite could not see it: `desk-ops` and
+    // `desk-design` have no character encoding touches (tinysweeper).
+    //
+    // The `?m=` value on the end stays encoded, and the contrast is the rule:
+    // `RoomView` reads it through `URLSearchParams`, which decodes; the path
+    // segment reaches `readSegments`, which does not.
+    const dm = "dm:ada-1f3k";
+    expect(
+      notificationHref(row({ context: dm, subjectId: "9" }), {
+        rendered: new Set([dm]),
+        mainChannelId: "desk-design",
+      }),
+    ).toBe(`#/chat/${dm}?m=h9`);
   });
 
   it("lands a legacy general-chat context on the rendered main channel", () => {
     // The same resolution the mention badge and the shell's thread re-read
     // share (issue #65) — not a second copy of the rule.
-    expect(notificationHref(row({ context: "general" }), CHANNELS)).toBe("#/chat/desk-design");
+    expect(notificationHref(row({ context: "general", subjectId: "7" }), CHANNELS)).toBe(
+      "#/chat/desk-design?m=h7",
+    );
   });
 
   it("renders inert rather than guessing, for a subject it does not know", () => {

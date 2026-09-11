@@ -15,6 +15,7 @@
 // notification, which is worse than leaving the row inert.
 
 import type { NotificationDto } from "@/api/types";
+import { hostMessageId } from "@/lib/chat";
 import { renderedChannelIdForContext } from "@/lib/mention-badge";
 
 /**
@@ -61,7 +62,26 @@ export function notificationHref(
         channels.mainChannelId,
         channels.rendered,
       );
-      return channel ? `#/chat/${encodeURIComponent(channel)}` : null;
+      if (!channel) return null;
+      // The line, not just the room. A mention's `subject.id` is the host's own
+      // sequence for the message (`company/runtime.rs` writes
+      // `message_seq.value()`), and `MessageRow` keys its rows on the *console*
+      // id — `h`-prefixed, which is what `hostMessageId` makes. `RoomView`
+      // consumes `?m=`, scrolls the row into view and strips the key; a row it
+      // cannot find after a second of polling it simply gives up on, so the
+      // worst case is the channel opening exactly as it did before. This is the
+      // conversion `search/sources.ts` already does, for the same reason (Codex).
+      const anchor = id ? `?m=${encodeURIComponent(hostMessageId(id))}` : "";
+      // The channel segment is **unescaped**, unlike that query value, and the
+      // difference is the point. `RoomView` reads `?m=` through
+      // `URLSearchParams`, which decodes; the path segment reaches
+      // `readSegments`, which splits the hash on `/` and decodes nothing —
+      // `decodeURIComponent` appears nowhere on that path. A DM channel id is
+      // `dm:<member-id>` (`room/channels.ts`), so encoding it turns the `:`
+      // into `%3A` and yields a segment no channel matches: every DM mention
+      // opened nothing. `channels.ts` documents the addressable form as
+      // `#/chat/dm:ada-1f3k` for exactly this reason (tinysweeper).
+      return `#/chat/${channel}${anchor}`;
     }
     default:
       return null;
