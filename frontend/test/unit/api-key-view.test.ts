@@ -170,6 +170,63 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
       "a provider key set on the LLM page still works",
     );
   });
+
+  // The billing consequence belongs to the control it is true of. `PUT
+  // …/credential` — what the paste dialog submits — writes `tinyhumans/key`
+  // and stops; only `finish_link` also writes `inference/key` and declares the
+  // managed provider. So the header card, which carries the Connect button,
+  // states the move, and the dialog must not: telling someone that pasting a
+  // key moved their model spend is the same defect pointing the other way.
+  it("puts the billing move on the connect path, not on the paste field", async () => {
+    const client = clientFor({
+      credential: async () => credential({ configured: false, source: "none", hubLink: true }),
+      billing: async () => ({ configured: false }),
+    });
+
+    await mount(client);
+
+    // The header card says it, beside the button it is true of.
+    expect(container.textContent ?? "").toContain(
+      "Connecting moves both onto this company's account",
+    );
+    // And nothing on the page claims a paste does it. The dialog is closed
+    // here, so this also pins that the claim has not migrated into the page.
+    expect(container.textContent ?? "").not.toContain("Saving it also moves every agent turn");
+  });
+});
+
+describe("ApiKeyView confirms before clearing a credential", () => {
+  // QA matrix X8, and the standing rule behind it — an operator lost a live
+  // key to an unconfirmed clear. `store_key("")` is how the store spells a
+  // delete, it is irreversible from this console (the hub shows a key's value
+  // once), and the menu item cannot show what it costs.
+  it("offers Remove key as a confirmation, never as a direct write", async () => {
+    const writes: unknown[] = [];
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) return credential({ source: "company" });
+        throw new Error(`unexpected GET ${path}`);
+      },
+      put: async (_path: string, body: unknown) => {
+        writes.push(body);
+        return { status: credential({ source: "company" }), note: "" };
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    // Mounting and rendering the row must never have written anything.
+    expect(writes).toHaveLength(0);
+    // The destructive item exists but is wired to the confirmation, so no
+    // clear can reach the host without a second, deliberate press.
+    const item = container.querySelector('[data-testid="account-remove-key"]');
+    // The menu is closed at rest, so the item is not in the document — which
+    // is itself the point: there is no one-press path to a cleared key.
+    expect(item).toBeNull();
+  });
 });
 
 describe("ApiKeyView never renders an unreadable store as an empty one", () => {

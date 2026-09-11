@@ -69,15 +69,21 @@ const SWITCH_NOTE: &str = "Agents present the new credential on their next cycle
 /// exactly what their agents think on. Telling an admin otherwise sends them
 /// hunting for a second key they do not need.
 ///
-/// It also states the **billing move**, which neither string used to. Setting
-/// this key arms the connecting half and the expensive half at once, and an
-/// admin is owed that before they save rather than on their next invoice.
+/// It also states the **billing move**, which neither string used to — but
+/// states it conditionally, because it is conditional. This notice is returned
+/// by [`set_key`] *and* [`finish_link`] *and* [`get_status`], and the two write
+/// paths do different amounts: a paste writes `tinyhumans/key` and stops, while
+/// the grant also writes `inference/key` and declares the managed provider. A
+/// flat "setting this moves every agent turn onto this account" would therefore
+/// be false on the paste path — the same shape of overclaim the rest of this
+/// change removes, pointing the other way.
 const CONSEQUENCE: &str = "This is the company's TinyHumans account key — the identity the platform presents when it \
-     connects providers like Gmail or Slack on your behalf. Setting it also moves every agent \
-     turn onto this account, so what the company thinks is billed here too. Every member's agents \
-     act and spend through it, and a provider connected with it belongs to the company rather \
-     than to the person who connected it. Spend arrives as one account, so it cannot be \
-     attributed per member. It is not a model provider's own key: an OpenRouter key, or your own \
+     connects providers like Gmail or Slack on your behalf. Every member's agents act and spend \
+     through it, and a provider connected with it belongs to the company rather than to the \
+     person who connected it. Spend arrives as one account, so it cannot be attributed per \
+     member. Where this company's model provider is TinyHumans, its agents' thinking is billed \
+     here too — connecting through TinyHumans sets both at once, while pasting a key here sets \
+     only the identity. It is not a model provider's own key: an OpenRouter key, or your own \
      endpoint's, belongs on the Inference card and will not serve as an identity here.";
 
 /// Said instead when nothing is configured and the instance carries no identity

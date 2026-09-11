@@ -13,6 +13,16 @@ import {
 } from "@/api/credential";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -112,6 +122,8 @@ export function ApiKeyView({ client, company }: Props) {
   const [load, setLoad] = useState<AccountLoad>("loading");
   const [generation, setGeneration] = useState(0);
   const [editing, setEditing] = useState(false);
+  /** Whether the Remove-key confirmation is open. */
+  const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // Discards the result of a request that is no longer the latest one asked
@@ -247,8 +259,15 @@ export function ApiKeyView({ client, company }: Props) {
         <CardContent className="flex flex-wrap items-center justify-between gap-3">
           <div className="grid gap-0.5">
             <h2 className="text-sm font-medium">{ACCOUNT_LABEL}</h2>
+            {/* The billing consequence, on the card carrying the button it is
+                true of, and visible before anything is saved. Connecting
+                writes `inference/key` and declares the managed provider as
+                well as the identity, so it moves the thinking bill; the paste
+                dialog says the narrower thing, because it does the narrower
+                thing. */}
             <p className="text-xs text-muted-foreground">
-              One key for the models your agents think with and the accounts they act through.
+              One key for the apps your agents act through and the models they think with.
+              Connecting moves both onto this company&apos;s account.
             </p>
           </div>
           {/* Whichever action is live, never both and never a dead one. The
@@ -369,10 +388,18 @@ export function ApiKeyView({ client, company }: Props) {
                         take away, and a Remove that clears nothing is the
                         control-that-cannot-act the LLM page deleted a toggle
                         over. */}
+                    {/* Opens the confirmation rather than clearing on the
+                        press. Clearing is destructive, irreversible from this
+                        console — the hub emits a key's plaintext once — and
+                        what it costs depends on state the menu item cannot
+                        show. A menu item that silently revokes a company's
+                        identity is the shape of mistake that cost this repo a
+                        live key today. */}
                     {removable && (
                       <DropdownMenuItem
                         variant="destructive"
-                        onClick={() => void write("", "clear")}
+                        onClick={() => setRemoving(true)}
+                        data-testid="account-remove-key"
                       >
                         Remove key
                       </DropdownMenuItem>
@@ -443,6 +470,43 @@ export function ApiKeyView({ client, company }: Props) {
         busy={busy}
         onSubmit={(key) => void write(key, "save")}
       />
+
+      {/* Names what actually depends on the key, and what happens next rather
+          than only what is lost.
+
+          It offers **both** outcomes rather than picking one, because the
+          console genuinely cannot tell which applies: `GET …/credential`
+          reports the tier that *won*, and while this company's own key is set
+          that is always `company` — whether or not an instance identity sits
+          behind it. Naming one confidently would be a guess dressed as a fact,
+          on the screen where being wrong costs a credential. */}
+      <AlertDialog open={removing} onOpenChange={setRemoving}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove this company&apos;s account key?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Apps connected as this company stop being reachable, and anything billed to this
+              account stops being billed to it. The company then falls back to the identity of
+              whoever runs this server, if this instance carries one — and to no account at all if
+              it does not.
+            </AlertDialogDescription>
+            <AlertDialogDescription>
+              The key itself cannot be recovered from here — TinyHumans shows a key&apos;s value
+              once, when it is created. You would have to connect again or paste a new one.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep the key</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void write("", "clear")}
+              className="bg-destructive text-white hover:bg-destructive/90"
+              data-testid="account-remove-key-confirm"
+            >
+              Remove key
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

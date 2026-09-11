@@ -170,13 +170,20 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
         "the notice must say which key this is NOT: {notice}"
     );
 
-    // The billing move, stated before the save rather than discovered on the
-    // next invoice. Setting this key arms the connecting half AND the expensive
-    // half — `finish_link` writes the same value to `inference/key` and
-    // declares the managed provider — and neither string used to say so.
+    // The billing consequence, stated before the save rather than discovered on
+    // the next invoice — and stated *conditionally*, because it is conditional.
+    // This same notice comes back from the paste route and the grant route, and
+    // they do different amounts: a paste writes `tinyhumans/key` and stops,
+    // while `finish_link` also writes `inference/key` and declares the managed
+    // provider. A flat "this moves every agent turn onto the account" would be
+    // false on the path that produced *this* response.
     assert!(
-        notice.contains("every agent turn onto this account"),
-        "the notice must say that setting this key moves the thinking bill: {notice}"
+        notice.contains("billed here too"),
+        "the notice must say the thinking can be billed here: {notice}"
+    );
+    assert!(
+        notice.contains("pasting a key here sets only the identity"),
+        "the notice must not let a paste be read as arming inference: {notice}"
     );
 
     // And it must not overshoot the other way. "It is not the model-provider

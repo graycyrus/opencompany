@@ -45,6 +45,15 @@ interface Props {
  * separation: an OpenRouter key belongs on the LLM page and will not serve as
  * an identity here.
  *
+ * ## The two paths do different amounts, and this one does less
+ *
+ * `PUT …/credential` — what this dialog submits — writes `tinyhumans/key` and
+ * stops. `finish_link` writes that **and** `inference/key`, **and** declares
+ * the managed provider. So the billing consequence an admin is owed before
+ * saving is true of the button and false of this field, and the copy says so
+ * rather than averaging the two. Telling someone that pasting a key moved
+ * their model spend would be the same defect in the other direction.
+ *
  * Write-only, like every credential the console handles: the value goes out on
  * `PUT …/credential` and is never returned, so the field opens empty every time
  * and "set" is reported by a flag rather than by a masked value we would have
@@ -69,15 +78,22 @@ export function AccountKeyDialog({ open, onOpenChange, replacing, busy, onSubmit
           <DialogDescription>
             This company&apos;s TinyHumans account key — the identity its agents present when they
             connect Gmail, Slack or anything else.{" "}
-            {/* The billing consequence, before Save rather than after. Saving
-                arms the connecting half AND the expensive half, and nothing on
-                the old screen said so. */}
+            {/* Precisely what a PASTE does, which is not what the grant does.
+                `PUT …/credential` writes `tinyhumans/key` and nothing else;
+                only `finish_link` also writes `inference/key` and declares the
+                managed provider. Saying "this moves every agent turn onto the
+                account" here would be the same shape of overclaim this page's
+                pass exists to remove — true of the button, false of this
+                field. */}
             <strong className="font-medium text-foreground">
-              Saving it also moves every agent turn onto this account
-            </strong>
-            , so what the company thinks starts being billed here. Not a model provider&apos;s own
-            key: an OpenRouter key, or your own endpoint&apos;s, goes on the LLM page and will not
-            work here.
+              Pasting one sets the identity only
+            </strong>{" "}
+            — it does not change which model your agents think on. Connect TinyHumans sets both at
+            once, and moves the thinking bill onto this account with it.
+          </DialogDescription>
+          <DialogDescription>
+            Not a model provider&apos;s own key: an OpenRouter key, or your own endpoint&apos;s,
+            goes on the LLM page and will not work here.
           </DialogDescription>
         </DialogHeader>
 
