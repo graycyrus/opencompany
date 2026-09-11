@@ -264,7 +264,15 @@ async fn add_provider(
     let kind = body.kind.trim().to_string();
 
     // Step 1 and 2: everything knowable without a network, before any write.
-    let plan = plan_add(&kind, body.label.as_deref(), body.base_url.as_deref())?;
+    let plan = plan_add(
+        &kind,
+        body.label.as_deref(),
+        body.base_url.as_deref(),
+        body.key
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|k| !k.is_empty()),
+    )?;
     let existing = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
@@ -421,7 +429,12 @@ struct AddPlan {
 /// the catalogue; a local runtime's endpoint is the thing being chosen and is
 /// normalised and scheme-checked here; a CLI login supplies neither and skips
 /// the probe because there is nothing to present.
-fn plan_add(kind: &str, label: Option<&str>, base_url: Option<&str>) -> Result<AddPlan, ApiError> {
+fn plan_add(
+    kind: &str,
+    label: Option<&str>,
+    base_url: Option<&str>,
+    has_key: bool,
+) -> Result<AddPlan, ApiError> {
     let invalid = |msg: String| ApiError(OpenCompanyError::InvalidRequest(msg));
 
     if let Some(cloud) = catalogue::cloud_provider(kind) {
@@ -449,6 +462,16 @@ fn plan_add(kind: &str, label: Option<&str>, base_url: Option<&str>) -> Result<A
         let base_url = catalogue::normalize_local_endpoint(&typed).ok_or_else(|| {
             invalid("A local runtime endpoint must be an http or https address.".to_string())
         })?;
+        // **The catalogue says whether this runtime wants a credential, and the
+        // host has to hold that rule too.** OMLX declares `needs_key: true`; the
+        // console's dialog showed and required the field, and the handler
+        // accepted a row without one — a console-only guard, which is not a
+        // guard. The row then stored no credential, `worth_probing` was false
+        // for want of one, and so it was never probed either: a provider that
+        // could not work, added without a word.
+        if local.needs_key && !has_key {
+            return Err(invalid(format!("{} needs an API key.", local.label)));
+        }
         return Ok(AddPlan {
             slug: local.slug.to_string(),
             label: local.label.to_string(),
@@ -1393,16 +1416,8 @@ async fn put_routes(
             ))));
         }
         let route = resolve::ProviderRef::parse(&raw);
-        // Fail closed on a route naming a provider nobody holds. Accepting it
-        // and letting the turn discover it would attribute that workload's spend
-        // to whatever the fallback happened to be — the same defect as resolving
-        // an unknown provider kind instead of rejecting it.
-        if let Some(slug) = route.slug()
-            && !providers.iter().any(|p| p.slug == slug)
-        {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "{tier} names `{slug}`, which this company has no provider for."
-            ))));
+        if let Err(message) = route_is_servable(&tier, &route, &providers) {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(message)));
         }
         routes.insert(tier, route);
     }
@@ -1436,6 +1451,65 @@ async fn put_routes(
     }))
 }
 
+/// Whether this company can actually serve `route`, or why not.
+///
+/// **Fail closed on a route naming a provider nobody holds.** Accepting it and
+/// letting the turn discover it would attribute that workload's spend to
+/// whatever the fallback happened to be — the same defect as resolving an
+/// unknown provider kind instead of rejecting it.
+///
+/// A pure function, and not merely for tidiness: the bug this closes was a
+/// branch that ran for two of the five ref kinds and silently did not for the
+/// other two, which is exactly the shape a handler-shaped check hides. The two
+/// name a provider by **category** rather than by slug, and `route.slug()` is
+/// `None` for both — so `PUT …/routes {"chat-v1":"claude-code:opus"}` returned
+/// 200 and rendered as a working row on a host that refuses to connect a CLI
+/// login at all.
+fn route_is_servable(
+    tier: &str,
+    route: &resolve::ProviderRef,
+    providers: &[store::Provider],
+) -> Result<(), String> {
+    let missing = |name: &str| {
+        Err(format!(
+            "{tier} names `{name}`, which this company has no provider for."
+        ))
+    };
+    match route {
+        resolve::ProviderRef::Cloud { provider_slug, .. } => {
+            if providers.iter().any(|p| &p.slug == provider_slug) {
+                Ok(())
+            } else {
+                missing(provider_slug)
+            }
+        }
+        // Named by kind rather than by slug, and gated the same way.
+        resolve::ProviderRef::Local { .. } => {
+            if has_category(providers, catalogue::Category::Local) {
+                Ok(())
+            } else {
+                missing("local")
+            }
+        }
+        resolve::ProviderRef::ClaudeCode { .. } => {
+            if has_category(providers, catalogue::Category::Cli) {
+                Ok(())
+            } else {
+                missing("claude-code")
+            }
+        }
+        // Neither names a provider record: managed resolves through the
+        // credential chain, and an absence is always servable.
+        resolve::ProviderRef::Managed | resolve::ProviderRef::Default => Ok(()),
+    }
+}
+
+fn has_category(providers: &[store::Provider], category: catalogue::Category) -> bool {
+    providers
+        .iter()
+        .any(|p| catalogue::category_of(&p.kind) == category)
+}
+
 /// The wire name of an inferred mode.
 fn mode_name(mode: resolve::RoutingMode) -> String {
     match mode {
@@ -1444,4 +1518,115 @@ fn mode_name(mode: resolve::RoutingMode) -> String {
         resolve::RoutingMode::Advanced => "advanced",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn provider(slug: &str, kind: &str) -> store::Provider {
+        store::Provider {
+            id: store::ProviderId::new(),
+            slug: slug.to_string(),
+            label: slug.to_string(),
+            kind: kind.to_string(),
+            base_url: format!("https://{slug}.example/v1"),
+            models: BTreeMap::new(),
+            enabled: true,
+            origin: store::ProviderOrigin::Indexed,
+        }
+    }
+
+    // ---- what a route may name ------------------------------------------
+
+    #[test]
+    fn a_cloud_route_must_name_a_provider_this_company_holds() {
+        let held = vec![provider("openrouter", "openrouter")];
+        assert!(
+            route_is_servable(
+                "chat-v1",
+                &resolve::ProviderRef::parse("openrouter:gpt-5"),
+                &held
+            )
+            .is_ok()
+        );
+        let err = route_is_servable("chat-v1", &resolve::ProviderRef::parse("ghost"), &held)
+            .expect_err("a route naming nothing fails closed");
+        assert!(err.contains("ghost"), "{err}");
+    }
+
+    #[test]
+    fn the_slug_less_kinds_are_gated_too() {
+        // The bug: this check is reached through `route.slug()`, which is `None`
+        // for `Local` and `ClaudeCode` — so both bypassed validation entirely.
+        // `POST …/providers {"kind":"claude-code"}` is refused on a host that
+        // cannot reach a CLI login, while `PUT …/routes` accepted
+        // `claude-code:opus` with a 200 and rendered it as a working row.
+        let cloud_only = vec![provider("openrouter", "openrouter")];
+        assert!(
+            route_is_servable(
+                "chat-v1",
+                &resolve::ProviderRef::parse("claude-code:opus"),
+                &cloud_only
+            )
+            .is_err(),
+            "a CLI route on a company with no CLI login must fail closed"
+        );
+        assert!(
+            route_is_servable(
+                "chat-v1",
+                &resolve::ProviderRef::parse("local"),
+                &cloud_only
+            )
+            .is_err(),
+            "and so must a local route with no local runtime"
+        );
+    }
+
+    #[test]
+    fn a_category_that_is_present_serves_its_slug_less_route() {
+        let with_local = vec![provider("ollama", "ollama")];
+        assert!(
+            route_is_servable(
+                "chat-v1",
+                &resolve::ProviderRef::parse("local:llama3"),
+                &with_local
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn managed_and_unset_name_no_record_and_are_always_servable() {
+        // Managed resolves through the credential chain rather than the list,
+        // and an absence is not a claim about anything.
+        assert!(route_is_servable("chat-v1", &resolve::ProviderRef::Managed, &[]).is_ok());
+        assert!(route_is_servable("chat-v1", &resolve::ProviderRef::Default, &[]).is_ok());
+    }
+
+    // ---- what adding a provider requires ---------------------------------
+
+    #[test]
+    fn a_local_runtime_that_wants_a_key_is_refused_without_one() {
+        // OMLX declares `needs_key`, the console's dialog required it, and the
+        // handler did not — a console-only guard, which is not a guard. The row
+        // then stored no credential, so `worth_probing` was false and it was
+        // never probed either: a provider that could not work, added silently.
+        // `AddPlan` is deliberately not `Debug` — it is a step on the way to a
+        // record that holds a credential address — so this matches rather than
+        // reaching for `expect_err`.
+        match plan_add("omlx", None, Some("http://127.0.0.1:10240/v1"), false) {
+            Ok(_) => panic!("omlx declares needs_key, so it must be refused without one"),
+            Err(err) => assert!(format!("{}", err.0).contains("API key"), "{}", err.0),
+        }
+        assert!(plan_add("omlx", None, Some("http://127.0.0.1:10240/v1"), true).is_ok());
+    }
+
+    #[test]
+    fn a_keyless_local_runtime_is_still_added_without_one() {
+        // Ollama wants an endpoint, not a credential. The rule is the
+        // catalogue's per-row `needs_key`, never "local runtimes are keyless".
+        assert!(plan_add("ollama", None, None, false).is_ok());
+    }
 }

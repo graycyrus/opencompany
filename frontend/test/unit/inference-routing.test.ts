@@ -507,3 +507,33 @@ describe("where the default goes when a provider is removed", () => {
     ).toBe(true);
   });
 });
+
+describe("removing a local runtime", () => {
+  it("scrubs the routes that name it by slug", () => {
+    // `ollama:llama3` parses as a cloud ref because it carries a slug, while
+    // `categoryOf("ollama")` is local — so gating the cloud arm on the category
+    // meant the two rules never met and removal scrubbed nothing. The routing
+    // table on disk then became unsaveable, because the host fails closed on a
+    // route naming a provider nobody holds.
+    const ollama = provider("ollama", "ollama");
+    const openrouter = provider("openrouter", "openrouter");
+    const routing = {
+      chat: parseRef("ollama:llama3"),
+      reasoning: parseRef("openrouter:gpt-5"),
+    } as RoutingMap;
+
+    const { routing: next, reset } = scrubOnRemove(routing, ollama, [openrouter], categoryOf);
+    expect(reset).toEqual(["chat"]);
+    expect(next.chat).toEqual({ kind: "default" });
+    expect(next.reasoning).toEqual(parseRef("openrouter:gpt-5"));
+    expect(orphanedRoutes(next, [openrouter])).toEqual([]);
+  });
+
+  it("leaves a slug-less local route alone while another runtime serves it", () => {
+    const ollama = provider("ollama", "ollama");
+    const lmstudio = provider("lmstudio", "lmstudio");
+    const routing = { chat: parseRef("local:llama3") } as RoutingMap;
+    expect(scrubOnRemove(routing, ollama, [lmstudio], categoryOf).reset).toEqual([]);
+    expect(scrubOnRemove(routing, ollama, [], categoryOf).reset).toEqual(["chat"]);
+  });
+});

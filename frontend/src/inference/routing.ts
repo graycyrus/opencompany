@@ -274,7 +274,11 @@ export function scrubOnRemove(
     if (!ref) continue;
     let orphaned = false;
     if (ref.kind === "cloud") {
-      orphaned = category === "cloud" && ref.providerSlug === removed.slug;
+      // A slug match is decisive, whatever the category — `ollama:llama3`
+      // parses as a cloud ref because it carries a slug, while `categoryOf`
+      // says local, so gating on the category meant the two rules never met and
+      // removing a local runtime scrubbed nothing. See `scrub_removed`.
+      orphaned = ref.providerSlug === removed.slug;
     } else if (ref.kind === "local") {
       orphaned = category === "local" && !categorySurvives;
     } else if (ref.kind === "claudeCode") {

@@ -463,9 +463,21 @@ pub fn scrub_removed(
     let mut reset = Vec::new();
     for (tier, route) in routes.iter_mut() {
         let orphaned = match route {
-            ProviderRef::Cloud { provider_slug, .. } => {
-                category == Category::Cloud && provider_slug == &removed.slug
-            }
+            // **A slug match is decisive, whatever the category.** This used to
+            // also require `category == Cloud`, and the two rules then never met
+            // for a local runtime: `ollama:llama3` parses as a `Cloud` ref
+            // because it carries a slug, while `category_of("ollama")` is
+            // `Local` — so the cloud arm refused it on category and the local
+            // arm never saw it, because that arm only matches the slug-less
+            // `local` ref. Removing Ollama left every row pointing at it, and
+            // the routing table then refused to save at all: `put_routes` fails
+            // closed on a route naming a provider nobody holds, so the operator
+            // could not re-save their own routing until they had changed every
+            // row by hand.
+            //
+            // A slug is unique per company, so naming one that is being removed
+            // is orphaned by definition. The category never added anything.
+            ProviderRef::Cloud { provider_slug, .. } => provider_slug == &removed.slug,
             ProviderRef::Local { .. } => category == Category::Local && !category_survives,
             ProviderRef::ClaudeCode { .. } => category == Category::Cli && !category_survives,
             ProviderRef::Managed | ProviderRef::Default => false,
@@ -935,5 +947,52 @@ mod tests {
         assert_eq!(Workload::from_tier("nope-v1"), None);
         // Coding has no row, so no tier maps back to it.
         assert_ne!(Workload::from_tier("agentic-v1"), Some(Workload::Coding));
+    }
+    /// Removing a local runtime must scrub the routes naming it by slug.
+    ///
+    /// `ollama:llama3` parses as a `Cloud` ref — it carries a slug — while
+    /// `category_of("ollama")` is `Local`. The cloud arm refused it on category
+    /// and the local arm never saw it, because that arm only matches the
+    /// slug-less `local` ref, so the two rules never met and removal scrubbed
+    /// nothing. The consequence was the sharp part: `put_routes` fails closed on
+    /// a route naming a provider nobody holds, so the table already on disk
+    /// became unsaveable and the operator could not fix their own routing
+    /// without rewriting every row.
+    #[test]
+    fn removing_a_local_runtime_scrubs_the_routes_that_name_it() {
+        let ollama = provider("ollama", "ollama", true);
+        let openrouter = provider("openrouter", "openrouter", true);
+        let mut routes = Routes::new();
+        routes.insert("chat-v1".into(), ProviderRef::parse("ollama:llama3"));
+        routes.insert(
+            "reasoning-v1".into(),
+            ProviderRef::parse("openrouter:gpt-5"),
+        );
+
+        let reset = scrub_removed(&mut routes, &ollama, std::slice::from_ref(&openrouter));
+        assert_eq!(reset, vec!["chat-v1".to_string()]);
+        assert_eq!(routes.get("chat-v1"), Some(&ProviderRef::Default));
+        assert_eq!(
+            routes.get("reasoning-v1"),
+            Some(&ProviderRef::parse("openrouter:gpt-5")),
+            "another provider's row is untouched"
+        );
+        // And what is left is saveable, which is the property that actually
+        // broke: every remaining route names something this company holds.
+        assert!(orphaned_routes(&routes, &[openrouter]).is_empty());
+    }
+
+    /// The slug-less `local` ref keeps its own rule: it is orphaned only once no
+    /// local runtime remains, because a second one still serves it.
+    #[test]
+    fn a_slug_less_local_route_survives_while_another_runtime_does() {
+        let ollama = provider("ollama", "ollama", true);
+        let lmstudio = provider("lmstudio", "lmstudio", true);
+        let mut routes = Routes::new();
+        routes.insert("chat-v1".into(), ProviderRef::parse("local:llama3"));
+
+        let reset = scrub_removed(&mut routes, &ollama, std::slice::from_ref(&lmstudio));
+        assert!(reset.is_empty(), "lmstudio still serves it");
+        assert!(!scrub_removed(&mut routes, &ollama, &[]).is_empty());
     }
 }
