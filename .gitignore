@@ -4,8 +4,8 @@ target/
 # committed copy is churn that conflicts on every branch. The
 # `frontend/src-tauri/` path is kept because older branches still write there;
 # that app is gone from this one.
-src-tauri/gen/
-frontend/src-tauri/gen/
+crates/opencompany-app/gen/
+frontend/crates/opencompany-app/gen/
 *.profraw
 *.profdata
 lcov.info
