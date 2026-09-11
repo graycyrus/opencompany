@@ -592,7 +592,7 @@ jobs:
       # the other ~1600 default tests under a feature that does not change them
       # would double the job's test time for no coverage.
       - name: Test the SQLite backend
-        run: cargo test --locked --features sqlite --lib store::sqlite
+        run: cargo test --locked -p opencompany-core --features sqlite --lib store::sqlite
 
       # Issue #770. Two more suites in the shape the SQLite step above rescued:
       # gated behind a feature, compiled by `Check (--all-features)`, and run by
@@ -710,7 +710,7 @@ jobs:
       # legitimately miss, and a missing binary here has to be a hard failure
       # rather than a silent rebuild somewhere it does not belong.
       - name: Build the host binary for the e2e lane
-        run: cargo build --locked --bin opencompany
+        run: cargo build --locked -p opencompany-core --bin opencompany
 
       - name: Upload the host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1051,7 +1051,7 @@ jobs:
       # class of bug that motivated this job) surfaces before the lint pass
       # spends time on a tree that does not build.
       - name: Build (openhuman, tinymemory)
-        run: cargo build --locked --features openhuman --all-targets
+        run: cargo build --locked -p opencompany-core --features openhuman --all-targets
 
       # `--no-deps` is LOAD-BEARING — do not "simplify" it away. Cargo treats the
       # vendored `[patch]` crates as local packages, so an unscoped `-D warnings`
@@ -1060,7 +1060,7 @@ jobs:
       # gate would never reach first-party code. Scoping to the primary package
       # is what makes it meaningful.
       - name: Clippy (openhuman, tinymemory)
-        run: cargo clippy --locked --no-deps --features openhuman --all-targets -- -D warnings
+        run: cargo clippy --locked -p opencompany-core --no-deps --features openhuman --all-targets -- -D warnings
 
       # The route-authority matrix names its target explicitly, because a
       # bare `cargo test` reports success when it selects no tests at all —
@@ -1079,7 +1079,7 @@ jobs:
       # as the step above; the union set matches the test steps below, so the
       # compile is shared with them via the cache.
       - name: Clippy (acp, runner, tinymemory)
-        run: cargo clippy --locked --no-deps --features acp,runner,tinymemory --all-targets -- -D warnings
+        run: cargo clippy --locked -p opencompany-core --no-deps --features acp,runner,tinymemory --all-targets -- -D warnings
 
       # Issue #1524 (PR 1). The nested-vendor path deps must stay
       # byte-identical to openhuman's own, or cargo resolves the same crate
@@ -1091,7 +1091,7 @@ jobs:
         run: |
           # Two separate failures, checked separately: a broken resolve must
           # fail loudly, not read as "no duplicates" through an empty pipe.
-          if ! report="$(cargo tree --locked -e normal --features openhuman,tinymemory -d)"; then
+          if ! report="$(cargo tree --locked -p opencompany-core -e normal --features openhuman,tinymemory -d)"; then
             echo "::error::cargo tree failed to resolve the graph"
             exit 1
           fi
@@ -1130,7 +1130,7 @@ jobs:
       # selects exactly the targets that assert: the lib and bin unit tests, plus
       # every integration target under `tests/`, present and future.
       - name: Test (openhuman, tinymemory)
-        run: cargo test --locked --features openhuman --tests
+        run: cargo test --locked -p opencompany-core --features openhuman --tests
 
       # The guard for the next one (issue #475). The step above runs whatever
       # `tests/` holds, but "ran the target" and "the target ran anything" are
@@ -1228,12 +1228,12 @@ jobs:
       # produce a green lane indistinguishable from a working one, and "nothing
       # dialled out" could not be told from "the jail was never locked".
       - name: Build the offline end-to-end target
-        run: cargo test --locked --features openhuman --test offline_e2e --no-run
+        run: cargo test --locked -p opencompany-core --features openhuman --test offline_e2e --no-run
 
       - name: Run it with no network at all
         run: |
           set -eu
-          binary="$(cargo test --locked --features openhuman --test offline_e2e \
+          binary="$(cargo test --locked -p opencompany-core --features openhuman --test offline_e2e \
             --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.executable != null and (.target.name == "offline_e2e")) | .executable' \
             | tail -n 1)"
@@ -1378,7 +1378,7 @@ jobs:
       # bin-resident is ever compile-only again (#1279 review: no lane ran
       # `cargo test --bin` at any feature set).
       - name: Bin tests (tinymemory)
-        run: cargo test --locked --features acp,runner,tinymemory --bin opencompany
+        run: cargo test --locked -p opencompany-core --features acp,runner,tinymemory --bin opencompany
 
       # These two steps run the same two halves under BARE `tinymemory` — the
       # provider contract with no `acp`/`runner`/`openhuman` baggage — so the
@@ -1447,7 +1447,7 @@ jobs:
       # this is a fifth distinct feature resolution, and without it this lane
       # would be the one place CI silently re-resolves the dependency graph.
       - name: Test (tinyplace)
-        run: cargo test --locked --features tinyplace --lib
+        run: cargo test --locked -p opencompany-core --features tinyplace --lib
 
       # `webhooks` gates `HttpWebhookSink` and its HMAC signer, and its tests
       # were compiled by `Check (--all-features)` and run by nothing. Scoped to
@@ -1455,7 +1455,7 @@ jobs:
       # resolution, and the rest of the suite is already covered by the lanes
       # above. `--locked` per issue #251, as for every graph-resolving call.
       - name: Test (webhooks)
-        run: cargo test --locked --features webhooks --lib server::webhook
+        run: cargo test --locked -p opencompany-core --features webhooks --lib server::webhook
 
   # Issue #1118. The gated host binary the `Console E2E (live brain)` job needs
   # is built HERE rather than as the last step of `Rust (openhuman, tinymemory)`
@@ -1528,7 +1528,7 @@ jobs:
       # `--bin`, not `--all-targets`: this job exists to produce one binary. The
       # tests and examples under this feature set are covered by the lane above.
       - name: Build the gated host binary for the live-brain e2e lane
-        run: cargo build --locked --features openhuman,mcp,composio --bin opencompany
+        run: cargo build --locked -p opencompany-core --features openhuman,mcp,composio --bin opencompany
 
       - name: Upload the gated host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
