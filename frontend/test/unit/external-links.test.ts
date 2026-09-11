@@ -2,7 +2,11 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { installExternalLinkOpener, isOutwardHref } from "@/lib/external-links";
+import {
+  installExternalLinkOpener,
+  isOutwardHref,
+  openOutward,
+} from "@/lib/external-links";
 
 /**
  * The desktop shell's bridge, as `tauriCore()` probes for it: `window.__TAURI__`
@@ -10,7 +14,9 @@ import { installExternalLinkOpener, isOutwardHref } from "@/lib/external-links";
  * web case.
  */
 function asDesktop(invoke = vi.fn().mockResolvedValue(undefined)) {
-  (window as unknown as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+  (window as unknown as { __TAURI__?: unknown }).__TAURI__ = {
+    core: { invoke },
+  };
   return invoke;
 }
 
@@ -23,7 +29,12 @@ function clickAnchor(href: string, init: MouseEventInit = {}) {
   anchor.setAttribute("href", href);
   anchor.setAttribute("target", "_blank");
   document.body.append(anchor);
-  const event = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ...init });
+  const event = new MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    ...init,
+  });
   anchor.dispatchEvent(event);
   return event;
 }
@@ -100,15 +111,49 @@ describe("installExternalLinkOpener", () => {
     dispose();
   });
 
-  /** A modified click is the operator asking for the platform's own behaviour. */
-  it("leaves a modified click alone", () => {
+  /**
+   * A Cmd/Ctrl-click asks for a new tab. In the desktop shell that is the very
+   * `_blank` path that opens nothing, so the most natural gesture on a link
+   * would be the one that still looked broken (Codex review on #2283).
+   */
+  it("hands a modified click to the shell in the desktop build", () => {
     const invoke = asDesktop();
     const dispose = installExternalLinkOpener();
 
     const event = clickAnchor("https://openrouter.ai/keys", { metaKey: true });
 
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith("plugin:shell|open", {
+      path: "https://openrouter.ai/keys",
+    });
+    expect(event.defaultPrevented).toBe(true);
+    dispose();
+  });
+
+  /** In a browser the platform's own new-tab behaviour is already right. */
+  it("leaves a modified click to the browser", () => {
+    asBrowser();
+    const dispose = installExternalLinkOpener();
+
+    const event = clickAnchor("https://openrouter.ai/keys", { metaKey: true });
+
     expect(event.defaultPrevented).toBe(false);
+    dispose();
+  });
+
+  /**
+   * `markdown.tsx`'s `isExternalHref` sends `//host/…` outward and gives it
+   * `target="_blank"`. A renderer that calls it external and this module that
+   * called it internal left exactly that class of link inert (Codex review).
+   */
+  it("opens a protocol-relative link, with a scheme the OS can act on", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    clickAnchor("//example.com/docs");
+
+    expect(invoke).toHaveBeenCalledWith("plugin:shell|open", {
+      path: "https://example.com/docs",
+    });
     dispose();
   });
 
@@ -137,5 +182,29 @@ describe("installExternalLinkOpener", () => {
 
     expect(invoke).not.toHaveBeenCalled();
     expect(event.defaultPrevented).toBe(false);
+  });
+});
+
+describe("openOutward", () => {
+  /**
+   * The call sites a click listener cannot see. An OAuth flow calling
+   * `window.open` hands the webview a popup it cannot create, so the
+   * authorization page never appears while the console polls and says
+   * "complete sign-in" — progress that is not happening (Codex review on #2283).
+   */
+  it("takes the url in the desktop build and reports that it did", () => {
+    const invoke = asDesktop();
+
+    expect(openOutward("https://app.composio.dev")).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("plugin:shell|open", {
+      path: "https://app.composio.dev",
+    });
+  });
+
+  /** `false` is what tells the caller its own `window.open` is still correct. */
+  it("declines in a browser so the caller opens its own tab", () => {
+    asBrowser();
+
+    expect(openOutward("https://app.composio.dev")).toBe(false);
   });
 });
