@@ -48,6 +48,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
 import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
+import { ProviderList } from "@/inference/ProviderList";
 
 /** The abstract cognition tiers the tenant model table maps. */
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
@@ -1342,6 +1343,30 @@ export function InferenceSection({
             )}
 
             {/* Switch form. */}
+            {/*
+              What this company can actually reach, as a list.
+
+              Two surfaces at once, on purpose and for one stage: this says what
+              is connected, and the form below is still the only thing that
+              changes it. Rendered only on Connect, because Manage Routing is
+              about which model a tier resolves to rather than which accounts
+              exist.
+
+              `providers` is optional on the wire — an older host does not send
+              it — and `undefined` means "this host did not say", which is not
+              the same as "nothing is connected". So the list is omitted rather
+              than rendered empty, and the status line above still answers the
+              question on its own.
+            */}
+            {showConnect && status?.providers !== undefined && (
+              <div className="space-y-2">
+                <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                  Connected
+                </h3>
+                <ProviderList providers={status.providers} />
+              </div>
+            )}
+
             {/* The switch form is an admin's: it decides the base URL every
                 agent's prompts travel to and the key they are billed against
                 (issue #403). */}
