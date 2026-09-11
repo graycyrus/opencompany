@@ -25,6 +25,7 @@ import {
   UNSET_TARGET,
   WORKLOAD_COPY,
   formatRef,
+  modelAfterProviderChange,
   modelTarget,
   primaryLabel,
   refForTarget,
@@ -110,7 +111,14 @@ export function WorkloadModelDialog({
             <Label htmlFor="inference-workload-provider">Provider</Label>
             <Select
               value={target}
-              onValueChange={(v) => v && setTarget(String(v))}
+              onValueChange={(v) => {
+                if (!v) return;
+                const next = String(v);
+                // A model id belongs to the provider it was chosen from — see
+                // `modelAfterProviderChange`.
+                setModel((current) => modelAfterProviderChange(current, target, next));
+                setTarget(next);
+              }}
             >
               <SelectTrigger id="inference-workload-provider" className="w-full">
                 {/* The trigger renders the raw value unless told otherwise, and

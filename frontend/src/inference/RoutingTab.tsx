@@ -30,6 +30,7 @@ import {
   applyToEveryWorkload,
   managedModeBadge,
   formatRef,
+  modelAfterProviderChange,
   ownModeDraft,
   parseRef,
   routingTargets,
@@ -170,7 +171,16 @@ export function RoutingTab({
                     <Select
                       value={ownSlug || null}
                       disabled={!canManage}
-                      onValueChange={(v) => v && setOwnDraft({ slug: String(v), model: ownModel })}
+                      onValueChange={(v) => {
+                        if (!v) return;
+                        const slug = String(v);
+                        // Same rule as the per-workload dialog: an id chosen at
+                        // one provider is not a value at another.
+                        setOwnDraft({
+                          slug,
+                          model: modelAfterProviderChange(ownModel, ownSlug, slug),
+                        });
+                      }}
                     >
                       <SelectTrigger id="inference-own-provider" className="w-full">
                         <SelectValue placeholder="Choose a provider…" />
