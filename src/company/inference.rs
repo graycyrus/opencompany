@@ -1101,35 +1101,84 @@ pub async fn resolve_effective_scoped(
     // deliberately, so the legacy path keeps every rule it has (the proxy
     // inheritance, the managed chain, `reject_unknown_provider`) rather than a
     // reimplementation of them here.
-    {
-        let providers = store::list_providers(company, secrets).await?;
-        let marked = store::load_default_slug(company, secrets).await?;
-        if let Some(provider) = resolve::primary(&providers, marked.as_deref())
-            && provider.origin == store::ProviderOrigin::Indexed
-        {
-            let key = store::load_provider_key(company, secrets, provider).await?;
-            let had_key = !key.trim().is_empty();
-            // A provider the operator added names its own endpoint. It is a
-            // vendor account, never the platform proxy, so `proxied` is false —
-            // and that is what denies it both the instance identity and the
-            // company's, which is the safety property the credential chain is
-            // built on.
-            let credential = Credential::from_value(key);
-            let proxied = is_managed_choice(&provider.kind);
-            let credential =
-                managed_identity(company, secrets, credential, proxied, had_key).await?;
-            return Ok(Some(InferenceDecl {
-                provider: normalize_provider(&provider.kind).to_string(),
-                base_url: provider.base_url.clone(),
-                models: provider.models.clone(),
-                source: InferenceSource::Runtime,
-                credential,
-                proxied,
-                vocabulary: None,
-            }));
-        }
+    let providers = store::list_providers(company, secrets).await?;
+    if let Some(decl) = decl_for_primary(company, secrets, &providers).await? {
+        return Ok(Some(decl));
     }
 
+    resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await
+}
+
+/// The declaration the company's **primary** provider resolves to, if the list
+/// settles the question at all.
+///
+/// `None` means it does not, and the caller falls through to
+/// [`resolve_legacy_scoped`]: either the list is empty, or its primary is entry
+/// zero — which is the legacy blob wearing a provider record's clothes and has
+/// to resolve through the chain that owns it.
+///
+/// Takes the list rather than reading it, because both callers already hold one
+/// and a second read per turn buys nothing but a round trip.
+async fn decl_for_primary(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    providers: &[store::Provider],
+) -> Result<Option<InferenceDecl>> {
+    let marked = store::load_default_slug(company, secrets).await?;
+    match resolve::primary(providers, marked.as_deref()) {
+        Some(provider) if provider.origin == store::ProviderOrigin::Indexed => {
+            Ok(Some(decl_for_indexed(company, secrets, provider).await?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The declaration one **indexed** provider record resolves to.
+///
+/// Extracted because two callers need it and must not drift: the unrouted path
+/// above, which reaches it through the primary, and a routing row that names
+/// this provider by slug. A second copy of these six lines is a second opinion
+/// about which credential an added provider presents.
+async fn decl_for_indexed(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    provider: &store::Provider,
+) -> Result<InferenceDecl> {
+    let key = store::load_provider_key(company, secrets, provider).await?;
+    let had_key = !key.trim().is_empty();
+    // A provider the operator added names its own endpoint. It is a vendor
+    // account, never the platform proxy, so `proxied` is false — and that is
+    // what denies it both the instance identity and the company's, which is the
+    // safety property the credential chain is built on.
+    let credential = Credential::from_value(key);
+    let proxied = is_managed_choice(&provider.kind);
+    let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
+    Ok(InferenceDecl {
+        provider: normalize_provider(&provider.kind).to_string(),
+        base_url: provider.base_url.clone(),
+        models: provider.models.clone(),
+        source: InferenceSource::Runtime,
+        credential,
+        proxied,
+        vocabulary: None,
+    })
+}
+
+/// What a company resolves to **before** the provider list existed: the runtime
+/// blob, then the manifest, then the platform default.
+///
+/// Split out of [`resolve_effective_scoped`] rather than inlined because a
+/// routing row naming **entry zero** has to reach exactly this chain — entry
+/// zero *is* the legacy blob wearing a provider record's clothes, so resolving
+/// it through the record would drop the proxy inheritance, the managed chain and
+/// `reject_unknown_provider` that only live here.
+async fn resolve_legacy_scoped(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<Option<InferenceDecl>> {
     // 1. Runtime override (console) wins.
     if let Some(runtime) = load_runtime_config_scoped(company, secrets, scope).await? {
         let provider = normalize_provider(&runtime.provider).to_string();
@@ -1244,6 +1293,135 @@ pub async fn resolve_effective_scoped(
     }
 
     Ok(None)
+}
+
+/// [`resolve_effective_scoped`] for the workload one turn is actually for.
+///
+/// **The routing table's only caller on the turn path.** Without it the Routing
+/// tab is a screen that persists choices and changes nothing: every row wrote
+/// `inference/routes`, the status route read it back, and the turn resolved
+/// through the primary regardless — so the value stuck across a reload while the
+/// turn kept reaching the provider and the model the operator had just moved off.
+/// A control that visibly fails is a bug; one that reports success and is inert
+/// is worse, because nothing about it looks wrong.
+///
+/// `tier` is the abstract tier the turn carries (`chat-v1`, …). A tier with no
+/// row of its own — anything outside
+/// [`ROUTABLE_WORKLOADS`](resolve::ROUTABLE_WORKLOADS) — resolves exactly as it
+/// did before routes existed, rather than acquiring a route by accident or
+/// failing closed for want of one.
+///
+/// ## Why a route fails closed and an unset row does not
+///
+/// [`Resolution::Missing`](resolve::Resolution::Missing) and
+/// [`Disabled`](resolve::Resolution::Disabled) become errors here. An unset
+/// workload falls back to the primary because nobody chose anything for it; a
+/// route is a choice with a workload attached, and silently spending it on a
+/// different account is the failure the explicit default marker exists to
+/// prevent, wearing a different hat.
+pub async fn resolve_effective_for_tier(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+    tier: &str,
+) -> Result<Option<InferenceDecl>> {
+    let Some(workload) = resolve::Workload::from_tier(tier) else {
+        return resolve_effective_scoped(company, manifest, env_default, secrets, scope).await;
+    };
+    let providers = store::list_providers(company, secrets).await?;
+    let routes = store::load_routes(company, secrets).await?;
+
+    match resolve::provider_for_workload(workload, &routes, &providers) {
+        // Unset. The whole existing chain, unchanged — which is what keeps a
+        // company that has never opened the Routing tab resolving exactly where
+        // it always did.
+        resolve::Resolution::Primary => {
+            match decl_for_primary(company, secrets, &providers).await? {
+                Some(decl) => Ok(Some(decl)),
+                None => resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await,
+            }
+        }
+        // `managed` is a word in the route grammar, not a provider slug — it is
+        // what the Managed mode button writes into every row. Read as a slug it
+        // names nothing and the workload would fail closed against a provider
+        // the operator never had.
+        resolve::Resolution::Managed => Ok(Some(
+            managed_decl(company, secrets, env_default, scope).await?,
+        )),
+        resolve::Resolution::Missing { workload, slug } => Err(OpenCompanyError::Config(format!(
+            "the {} workload is routed to `{slug}`, which this company does not have. \
+             Point it somewhere else in Settings → Inference → Routing.",
+            workload.as_str()
+        ))),
+        resolve::Resolution::Disabled { workload, slug } => Err(OpenCompanyError::Config(format!(
+            "the {} workload is routed to `{slug}`, which is switched off. \
+             Switch it back on, or point that workload somewhere else in \
+             Settings → Inference → Routing.",
+            workload.as_str()
+        ))),
+        resolve::Resolution::Resolved { provider, model } => {
+            let mut decl = match provider.origin {
+                store::ProviderOrigin::Indexed => {
+                    decl_for_indexed(company, secrets, provider).await?
+                }
+                // See [`resolve_legacy_scoped`]: entry zero is the legacy blob,
+                // and resolving it through the synthesized record would drop the
+                // rules only that chain holds.
+                store::ProviderOrigin::EntryZero => {
+                    match resolve_legacy_scoped(company, manifest, env_default, secrets, scope)
+                        .await?
+                    {
+                        Some(decl) => decl,
+                        None => return Ok(None),
+                    }
+                }
+            };
+            if let Some(model) = model {
+                // The route's pinned model beats the provider's own tier map,
+                // and deliberately: the map is that provider's default for every
+                // workload, the route is this workload's choice. `model_for_tier`
+                // reads `models` first, so writing it here is the whole of it.
+                decl.models.insert(tier.to_string(), model);
+            }
+            Ok(Some(decl))
+        }
+    }
+}
+
+/// The declaration a route naming `managed` resolves to.
+///
+/// The platform endpoint and the managed credential chain — the company's own
+/// TinyHumans key when it has one, else the instance identity — reached through
+/// the same [`resolve_endpoint`] and [`managed_identity`] every other managed
+/// path uses, rather than by assembling the endpoint here.
+async fn managed_decl(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    env_default: Option<&EnvDefault>,
+    scope: &HarnessScope,
+) -> Result<InferenceDecl> {
+    let key = load_inference_key_scoped(
+        company,
+        secrets,
+        credential_slug(LEGACY_MANAGED),
+        None,
+        scope,
+    )
+    .await?;
+    let had_key = !key.trim().is_empty();
+    let (base_url, credential, proxied) = resolve_endpoint(LEGACY_MANAGED, None, key, env_default);
+    let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
+    Ok(InferenceDecl {
+        provider: normalize_provider(LEGACY_MANAGED).to_string(),
+        base_url,
+        models: BTreeMap::new(),
+        source: InferenceSource::Runtime,
+        credential,
+        proxied,
+        vocabulary: None,
+    })
 }
 
 /// Fails a provider kind that is not in [`INFERENCE_PROVIDERS`].
@@ -2781,5 +2959,357 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    // ---- the routing table actually reaches the resolver ---------------------
+    //
+    // The same shape as the block above, one layer along, and found the same
+    // way: the Routing tab wrote `inference/routes`, the status route rendered
+    // it, `provider_for_workload` decided over it in isolation — and the turn
+    // path never asked. Every row of that screen persisted, survived a reload,
+    // and changed nothing about where a turn went. A control that visibly fails
+    // is a bug; a control that reports success and is inert is a lie, and it is
+    // the harder one to find because nothing looks wrong.
+
+    /// The route a tier resolves to, as the wire model the plan would carry.
+    fn wire_model(decl: &InferenceDecl, tier: &str) -> String {
+        model_for_tier(tier, &decl.models, decl.vocabulary())
+    }
+
+    async fn route(secrets: &MemSecrets, tier: &str, raw: &str) {
+        let company = CompanyId::new("acme");
+        let mut routes = store::load_routes(&company, secrets).await.unwrap();
+        routes.insert(tier.to_string(), resolve::ProviderRef::parse(raw));
+        store::save_routes(&company, secrets, &routes)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_route_sends_its_workload_to_the_provider_and_model_it_names() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        route(&secrets, "chat-v1", "second:deepseek/deepseek-v4-flash").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a routed workload resolves");
+        assert_eq!(
+            decl.base_url, "https://second.example/v1",
+            "the route names the provider, so the turn goes there and not to the primary"
+        );
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-2"));
+        assert_eq!(
+            wire_model(&decl, "chat-v1"),
+            "deepseek/deepseek-v4-flash",
+            "the model the route pinned is the model that goes on the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_route_beats_the_default_providers_own_tier_map() {
+        // The sharpest form of the bug, and the one an operator hit: Use Your
+        // Own Models wrote `anthropic:claude-sonnet-5` into all four tiers, and
+        // the next turn sent `anthropic/claude-opus-5` to OpenRouter — neither
+        // their provider nor their model. The route was inert in both
+        // dimensions, and the two failures hid each other: with a route naming
+        // the provider that was already the default, "route honoured" and "route
+        // ignored" look identical. This asserts both halves at once by pointing
+        // the route at a provider that is *not* the marked default, and pinning
+        // a model the default's own tier map would answer differently.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+
+        let mut openrouter_tiers = BTreeMap::new();
+        openrouter_tiers.insert("chat-v1".to_string(), "anthropic/claude-opus-5".to_string());
+        store::put_provider(
+            &company,
+            &secrets,
+            store::ProviderDraft {
+                slug: "openrouter".into(),
+                label: "OpenRouter".into(),
+                kind: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                models: openrouter_tiers,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                &company,
+                &store::provider_key_key("openrouter"),
+                SecretValue("sk-not-a-real-key-or".into()),
+            )
+            .await
+            .unwrap();
+        store::put_provider(
+            &company,
+            &secrets,
+            store::ProviderDraft {
+                slug: "anthropic".into(),
+                label: "Anthropic".into(),
+                kind: "anthropic".into(),
+                base_url: "https://api.anthropic.com/v1".into(),
+                models: BTreeMap::new(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                &company,
+                &store::provider_key_key("anthropic"),
+                SecretValue("sk-not-a-real-key-ant".into()),
+            )
+            .await
+            .unwrap();
+        store::set_default_slug(&company, &secrets, "openrouter")
+            .await
+            .unwrap();
+        route(&secrets, "chat-v1", "anthropic:claude-sonnet-5").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("the routed workload resolves");
+        assert_eq!(
+            decl.base_url, "https://api.anthropic.com/v1",
+            "the route names anthropic, so the turn goes to anthropic and not to the default"
+        );
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-ant")
+        );
+        assert_eq!(
+            wire_model(&decl, "chat-v1"),
+            "claude-sonnet-5",
+            "the route's model beats the default provider's own tier map"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workload_with_no_route_still_falls_through_to_the_primary() {
+        // The other half of the property: pinning one row must not move the
+        // others. A fix that routed everything through the chat row would pass
+        // the test above and be worse than the bug.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        route(&secrets, "chat-v1", "second:deepseek/deepseek-v4-flash").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "reasoning-v1",
+        )
+        .await
+        .unwrap()
+        .expect("an unrouted workload resolves");
+        assert_eq!(decl.base_url, "https://first.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-1"));
+        assert_ne!(
+            wire_model(&decl, "reasoning-v1"),
+            "deepseek/deepseek-v4-flash",
+            "another row's pinned model must not leak onto this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_managed_resolves_through_the_managed_chain() {
+        // `managed` is a word in the route grammar, not a provider slug. Read as
+        // a slug it resolves to nothing and the workload fails closed — which is
+        // what the Managed mode button writes into every row.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        route(&secrets, "agentic-v1", "managed").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a managed route resolves");
+        assert!(decl.is_proxied(), "the managed route rides the platform");
+        assert_eq!(decl.base_url, "https://platform.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_a_provider_that_is_gone_fails_closed() {
+        // An unset workload falls back, because nobody chose anything for it. A
+        // route is a choice with a workload attached, so it fails rather than
+        // quietly spending on an account the operator did not name.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        route(&secrets, "chat-v1", "ghost:gpt-5").await;
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a route naming nothing must not silently fall back");
+        let message = err.to_string();
+        assert!(message.contains("ghost"), "{message}");
+        assert!(message.contains("chat"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_a_switched_off_provider_fails_closed_too() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "parked", "sk-not-a-real-key-2").await;
+        store::set_enabled(&company, &secrets, "parked", false)
+            .await
+            .unwrap();
+        route(&secrets, "vision-v1", "parked").await;
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "vision-v1",
+        )
+        .await
+        .expect_err("a parked route is a choice that no longer works");
+        assert!(err.to_string().contains("parked"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn coding_reads_the_agentic_route_rather_than_one_of_its_own() {
+        // The alias, asserted on the path that matters. A coding turn arrives
+        // carrying `agentic-v1`, so this is really a statement about the tier
+        // the route is keyed on — and it is the reason routes are keyed on tiers
+        // rather than on workload names.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        route(&secrets, "agentic-v1", "second").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(decl.base_url, "https://second.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_entry_zero_reaches_the_legacy_config() {
+        // Entry zero is the legacy blob wearing a provider's clothes. A route
+        // that names it has to reach the blob's own endpoint and credential —
+        // not whichever indexed provider happens to be the primary.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openai_compatible".into(),
+                base_url: Some("https://legacy.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        store_key(&company, &secrets, "sk-not-a-real-key-legacy")
+            .await
+            .unwrap();
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        store::set_default_slug(&company, &secrets, "second")
+            .await
+            .unwrap();
+
+        let zero = store::list_providers(&company, &secrets).await.unwrap()[0].clone();
+        route(&secrets, "chat-v1", &format!("{}:gpt-5", zero.slug)).await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(decl.base_url, "https://legacy.example/v1");
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-legacy")
+        );
+        assert_eq!(wire_model(&decl, "chat-v1"), "gpt-5");
+    }
+
+    #[tokio::test]
+    async fn a_tier_nobody_routes_resolves_exactly_as_it_always_did() {
+        // `embedding-v1` and friends have no row on the Routing tab. They must
+        // not acquire one by accident, and they must not fail closed either.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "embedding-v1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(decl.base_url, "https://first.example/v1");
     }
 }

@@ -307,6 +307,44 @@ the same thing: `burst` reads the agentic route, and `summarization` reads the
 memory route. Those are two names for one configured route, which is different
 from an unset route borrowing a set one.
 
+## How a route reaches the turn
+
+A routing table nothing reads is a screen that persists choices and changes
+nothing — which is what shipped first, and it is worse than a control that
+visibly fails: the value stuck across a reload, the tab reported success, and
+every turn kept going to the primary. Nothing looked wrong.
+
+The read happens in `inference::resolve_effective_for_tier`, which the tenant
+provider calls **per turn** with the abstract tier that turn carries. The order
+is:
+
+1. **A tier with no row** — anything outside `ROUTABLE_WORKLOADS` — resolves
+   exactly as it did before routes existed. It does not acquire a route by
+   accident, and it does not fail closed for want of one.
+2. **`Primary`** (the row is unset) falls through to the whole existing chain:
+   the provider list, then `inference/config`, then the manifest, then the
+   platform default. A company that has never opened this tab resolves where it
+   always did.
+3. **`Managed`** resolves through the managed credential chain, not as a provider
+   slug. `managed` is a word in the route grammar — it is what the Managed mode
+   button writes into every row — and reading it as a slug would fail closed
+   against a provider the operator never had.
+4. **`Resolved`** uses that provider's record, except for **entry zero**, which
+   resolves through the legacy chain instead: entry zero *is* the legacy blob
+   wearing a provider record's clothes, and the record carries none of the proxy
+   inheritance or unknown-provider rejection that chain holds.
+5. **`Missing` and `Disabled` fail closed**, with the workload and the slug in
+   the message. An unset workload falls back because nobody chose anything for
+   it; a route is a choice with a workload attached, and quietly moving it to a
+   different account is the failure the explicit default marker exists to
+   prevent, wearing a different hat.
+
+A route's **pinned model** is written into the decl's tier map for that tier
+alone, so `model_for_tier` reads it first and the provider's own map stays the
+default for every other workload. Pinning one row must not move the others — a
+fix that routed everything through the chat row would satisfy the obvious test
+and be worse than the bug it replaced.
+
 ## Mapping onto OpenCompany
 
 openhuman's nine workloads do not map one-to-one onto our four abstract tiers

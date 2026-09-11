@@ -1949,13 +1949,21 @@ impl TenantProvider {
 
     /// Re-resolves the effective config from the secret store and updates the
     /// cached telemetry slug. Errors when no provider is configured at all.
-    async fn resolve(&self) -> anyhow::Result<InferenceDecl> {
-        let decl = inference::resolve_effective_scoped(
+    ///
+    /// `tier` is the abstract tier **this** turn carries, and it is not
+    /// decoration: the company's routing table routes per workload, so resolving
+    /// without it answers "where does this company send work" when the question
+    /// is "where does this company send *this* work". Resolved per turn rather
+    /// than cached for the same reason the credential is — an operator moves a
+    /// row on the Routing tab and the next turn has to honour it.
+    async fn resolve(&self, tier: &str) -> anyhow::Result<InferenceDecl> {
+        let decl = inference::resolve_effective_for_tier(
             &self.company,
             &self.manifest,
             self.env_default.as_ref(),
             self.secrets.as_ref(),
             &self.scope,
+            tier,
         )
         .await
         .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
@@ -2005,12 +2013,15 @@ impl ChatModel<()> for TenantProvider {
     ///
     /// [`Agent::turn`]: openhuman_core::openhuman::agent::Agent
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
+        // The tier first, because resolution now depends on it: the routing
+        // table decides per workload, so the decl cannot be resolved before the
+        // workload is known.
+        let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
         let decl = self
-            .resolve()
+            .resolve(model)
             .await
             .map_err(|e| InferenceError::Model(e.to_string()))?;
         let messages = wire_messages(&request.messages);
-        let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
         let temperature = request.temperature.unwrap_or(0.0);
         let plan = request_plan(
             &decl,
