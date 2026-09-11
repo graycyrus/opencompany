@@ -348,12 +348,19 @@ async fn add_provider(
                 detail = %failure.raw,
                 "inference provider probe failed",
             );
-            if failure.class.destroys_credential() && !body.add_anyway {
+            // Category-aware: a local runtime that is not running rolls back
+            // too. See `probe::rolls_back` for why the same class means the
+            // opposite thing for a cloud provider.
+            if probe::rolls_back(failure.class, catalogue::category_of(&plan.kind))
+                && !body.add_anyway
+            {
                 roll_back_add(runtime, &provider).await;
-                return Err(ApiError(OpenCompanyError::InvalidRequest(probe::describe(
-                    failure.class,
-                    &provider.label,
-                ))));
+                // The **refusal** wording, not `describe`'s: nothing was saved,
+                // and every one of `describe`'s sentences but the auth one
+                // opens by saying it was.
+                return Err(ApiError(OpenCompanyError::InvalidRequest(
+                    probe::describe_refusal(failure.class, &provider.label),
+                )));
             }
             record_health(runtime, &provider.slug, failure.class.as_str()).await;
             let message = probe::describe(failure.class, &advisory_subject(&provider));

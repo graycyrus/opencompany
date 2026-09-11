@@ -211,6 +211,32 @@ pub fn classify(raw: &str) -> ProbeClass {
     ProbeClass::Unknown
 }
 
+/// Whether meeting this class should undo the add, given what kind of provider
+/// it was.
+///
+/// [`ProbeClass::destroys_credential`] answers the general rule: only a rejected
+/// credential is evidence about the credential, so only that class rolls one
+/// back. This adds the one category-specific exception, and it is in the design
+/// this ports:
+///
+/// **A local runtime rolls back on an unreachable endpoint too.** A runtime that
+/// is not running is not a connection worth creating — the operator's next move
+/// is to start it and retry, not to keep a row that points at a port with
+/// nothing behind it. For a cloud provider the same class means the opposite: a
+/// proxy, a WAF or a slow gateway sits between a perfectly good key and an
+/// endpoint that is fine, which is why that case keeps both.
+///
+/// The asymmetry is the point. `endpoint` against `127.0.0.1:11434` is a fact
+/// about the operator's machine; `endpoint` against `api.acme.dev` is a fact
+/// about the network in between.
+pub fn rolls_back(class: ProbeClass, category: catalogue::Category) -> bool {
+    if class.destroys_credential() {
+        return true;
+    }
+    matches!(category, catalogue::Category::Local)
+        && matches!(class, ProbeClass::Endpoint | ProbeClass::Timeout)
+}
+
 /// What to tell the operator, given a class and the provider's label.
 ///
 /// **Never interpolates the raw upstream string.** That text can carry request
@@ -231,6 +257,37 @@ pub fn describe(class: ProbeClass, provider: &str) -> String {
         ProbeClass::Quota => "Saved. The account is out of credit.".to_string(),
         ProbeClass::Timeout => format!("Saved, but {provider} did not answer in time."),
         ProbeClass::Unknown => "Saved, but the check did not complete.".to_string(),
+    }
+}
+
+/// What to tell the operator when the add was **undone**.
+///
+/// [`describe`] opens every sentence but one with "Saved", because for a cloud
+/// provider every class but `auth` kept the record and the credential. Once
+/// [`rolls_back`] can answer true for a second class, that wording becomes a
+/// lie in exactly the case it is shown: a local runtime that is not running
+/// rolls back, and telling the operator it was saved while no row appears is
+/// worse than telling them nothing.
+///
+/// So the refusal path has its own sentences. Each names the next thing to do,
+/// because in every one of these cases there is one.
+pub fn describe_refusal(class: ProbeClass, subject: &str) -> String {
+    match class {
+        ProbeClass::Auth => {
+            format!("Could not reach {subject}: the provider rejected the credential.")
+        }
+        ProbeClass::Endpoint => format!(
+            "Nothing answered at {subject}, so it was not connected. Start it and try again."
+        ),
+        ProbeClass::Timeout => {
+            format!("{subject} did not answer in time, so it was not connected.")
+        }
+        // Not reachable through `rolls_back` today. Answered rather than
+        // panicked, because a future class joining the rollback set should
+        // degrade to a true sentence rather than to a crash.
+        ProbeClass::Model | ProbeClass::Quota | ProbeClass::Unknown => {
+            format!("Could not verify {subject}, so it was not connected.")
+        }
     }
 }
 
@@ -1023,5 +1080,64 @@ mod tests {
                 "`{raw}` is the clearest evidence there is that nothing is at that address"
             );
         }
+    }
+
+    #[test]
+    fn a_local_runtime_that_is_not_running_is_not_a_connection_worth_keeping() {
+        // The one category-specific exception to "only `auth` rolls back". A
+        // runtime that is not listening is a fact about the operator's machine
+        // and their next move is to start it — not to keep a row pointing at a
+        // port with nothing behind it.
+        for class in [ProbeClass::Endpoint, ProbeClass::Timeout] {
+            assert!(rolls_back(class, catalogue::Category::Local), "{class:?}");
+        }
+    }
+
+    #[test]
+    fn the_same_class_against_a_cloud_provider_keeps_everything() {
+        // And this asymmetry is the point: `endpoint` against a vendor's host
+        // is a fact about the network in between — a proxy, a WAF, a slow
+        // gateway — sitting between a perfectly good key and an endpoint that
+        // is fine. Rolling back there is the bug the classifier exists to stop.
+        for class in [ProbeClass::Endpoint, ProbeClass::Timeout, ProbeClass::Quota] {
+            assert!(!rolls_back(class, catalogue::Category::Cloud), "{class:?}");
+        }
+    }
+
+    #[test]
+    fn auth_rolls_back_whatever_the_category() {
+        for category in [
+            catalogue::Category::Cloud,
+            catalogue::Category::Local,
+            catalogue::Category::Cli,
+        ] {
+            assert!(rolls_back(ProbeClass::Auth, category), "{category:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_never_says_saved() {
+        // `describe` opens every sentence but one with "Saved", which is true
+        // when the row was kept. On the rollback path no row exists, and an
+        // operator told it was saved while nothing appears has been lied to
+        // about the one thing they can see.
+        for class in [
+            ProbeClass::Auth,
+            ProbeClass::Endpoint,
+            ProbeClass::Timeout,
+            ProbeClass::Unknown,
+        ] {
+            let said = describe_refusal(class, "Ollama");
+            assert!(!said.contains("Saved"), "{class:?}: {said}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_next_thing_to_do() {
+        assert!(describe_refusal(ProbeClass::Endpoint, "Ollama").contains("Start it"));
+        assert!(
+            describe_refusal(ProbeClass::Auth, "Groq").contains("rejected the credential"),
+            "the auth sentence is unchanged — it was already right"
+        );
     }
 }

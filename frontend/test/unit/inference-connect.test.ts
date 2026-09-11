@@ -19,6 +19,7 @@ import {
   slugify,
 } from "@/inference/connect";
 import { CLOUD_PROVIDERS } from "@/inference/catalogue";
+import { stripEnvelopePrefix } from "@/inference/ProvidersTab";
 import type { Provider } from "@/inference/types";
 
 function provider(slug: string, kind = slug): Provider {
@@ -144,6 +145,30 @@ describe("the custom-provider dialog's Add button", () => {
     );
     expect(customProviderReady([], { label: "Acme", baseUrl: "https://acme.example/v1" })).toBe(
       true,
+    );
+  });
+});
+
+describe("the message a refusal shows the operator", () => {
+  it("drops the envelope's machine prefix", () => {
+    // `invalid request:` says which *kind* of error this is to a caller that
+    // might branch on it, and nothing at all to the person standing in front of
+    // the field they have to correct. The sentence after it is already written
+    // for them.
+    expect(
+      stripEnvelopePrefix("invalid request: Could not reach Groq: the provider rejected the credential."),
+    ).toBe("Could not reach Groq: the provider rejected the credential.");
+  });
+
+  it("leaves a message that has no prefix alone", () => {
+    expect(stripEnvelopePrefix("That did not work.")).toBe("That did not work.");
+  });
+
+  it("does not eat a colon that is part of the sentence", () => {
+    // "Could not reach Groq: …" has its own colon, and only a known envelope
+    // keyword at the very start may be removed.
+    expect(stripEnvelopePrefix("Could not reach Groq: the provider rejected it.")).toBe(
+      "Could not reach Groq: the provider rejected it.",
     );
   });
 });

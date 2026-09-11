@@ -169,6 +169,7 @@ export function ProviderConnectDialog({
               </Label>
               <Input
                 id="inference-connect-url"
+                aria-describedby={error ? "inference-connect-error" : undefined}
                 value={baseUrl}
                 placeholder="https://api.openai.com/v1"
                 autoComplete="off"
@@ -189,6 +190,7 @@ export function ProviderConnectDialog({
               <Label htmlFor="inference-connect-key">API Key</Label>
               <Input
                 id="inference-connect-key"
+                aria-describedby={error ? "inference-connect-error" : undefined}
                 type="password"
                 value={key}
                 placeholder={ask.keyPlaceholder ?? "sk-..."}
@@ -231,11 +233,18 @@ export function ProviderConnectDialog({
             </p>
           )}
 
-          {error && (
-            <p className="text-sm text-status-blocked-text" data-testid="inference-connect-error">
-              {error}
-            </p>
-          )}
+          {/* Always present, never mounted with its text: a live region that
+              appears at the same moment as its content is frequently missed by
+              the announcement, and this one is the reason the operator is still
+              looking at this dialog. */}
+          <p
+            aria-live="polite"
+            id="inference-connect-error"
+            className="text-sm text-status-blocked-text empty:hidden"
+            data-testid="inference-connect-error"
+          >
+            {error ?? ""}
+          </p>
         </div>
 
         <DialogFooter>
@@ -256,13 +265,16 @@ export function ProviderConnectDialog({
               Add anyway
             </Button>
           )}
+          {/* Says what it is doing. The probe is a network round trip and a
+              button that only greys out reads as a click that did not land —
+              which is how a Connect gets pressed twice. */}
           <Button
             type="button"
             disabled={busy || !ready}
             data-testid="inference-connect-submit"
             onClick={() => submit(false)}
           >
-            {custom ? "Add Provider" : "Connect"}
+            {busy ? "Testing…" : custom ? "Add Provider" : "Connect"}
           </Button>
         </DialogFooter>
       </DialogContent>

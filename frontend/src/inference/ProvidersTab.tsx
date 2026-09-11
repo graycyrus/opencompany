@@ -32,6 +32,19 @@ import type { Provider } from "./types";
  * effect looks exactly like one that is, and the cost warning on a real
  * completion, which lives on the button it applies to rather than above the fold.
  */
+/**
+ * Drops the error envelope's own prefix from a message meant for a person.
+ *
+ * The host answers a refusal as `invalid request: <sentence>`, and the prefix is
+ * machine vocabulary: it says which *kind* of error this is to a caller that
+ * might branch on it, and says nothing at all to the operator standing in front
+ * of the field they have to correct. The sentence after it is already written
+ * for them.
+ */
+export function stripEnvelopePrefix(message: string): string {
+  return message.replace(/^(invalid request|conflict|not found):\s*/i, "");
+}
+
 export function ProvidersTab({
   state,
   actions,
@@ -153,7 +166,10 @@ export function ProvidersTab({
       }
       closeConnect();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "That did not work.");
+      // The envelope's own `invalid request: ` prefix is machine vocabulary and
+      // this sentence is read by a person standing in front of the field they
+      // have to correct.
+      setError(err instanceof ApiError ? stripEnvelopePrefix(err.message) : "That did not work.");
       // The host refuses an add on exactly one probe class, and it is the only
       // refusal that unlocks "add anyway".
       if (err instanceof ApiError && err.message.includes("rejected the credential")) {
