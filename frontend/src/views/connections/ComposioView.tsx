@@ -89,7 +89,13 @@ export function ComposioView({ client, company }: Props) {
 
             It is no longer gated by a flag at all. The card asks the host and
             renders nothing when there is no credential plane to talk to, which
-            is a truer answer than a constant. */}
+            is a truer answer than a constant. That stayed true when
+            `COMPOSIO_MANAGED_HIDDEN` itself went off: this card's visibility
+            never depended on it, so the flip changes nothing here — what it
+            changes is the section below, where the managed route is now a row
+            an operator can select rather than only one they can be on. The key
+            this card grants is what the managed row's "Billed to this company's
+            TinyHumans account" reports. */}
         <CompanyCredentialCard
           client={client}
           company={company}
