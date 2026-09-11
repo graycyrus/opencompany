@@ -434,6 +434,34 @@ export function isReservedSlug(slug: string): boolean {
 }
 
 /**
+ * Which of the three questions a provider answers.
+ *
+ * A category is a fact about the provider rather than a routing decision, so it
+ * lives with the table. It is load-bearing in `routing.ts`: the rule for
+ * scrubbing a removed provider out of the routing map differs per category,
+ * because only the cloud refs carry a slug.
+ *
+ * An unknown kind is `cloud` — a custom provider is an OpenAI-compatible
+ * endpoint someone pays for, addressed by the slug they named, which is exactly
+ * how a cloud row behaves. Mirrors the Rust `category_of`.
+ */
+export function categoryOf(kind: string): "cloud" | "local" | "cli" {
+  const trimmed = kind.trim();
+  if (localRuntime(trimmed) !== undefined) return "local";
+  // Codex stores under `openai`, and `openai` is a cloud row in its own right,
+  // so the shared slug stays cloud. Reading it as a CLI login would give the
+  // OpenAI row the slug-less scrub rule and orphan every route naming it.
+  if (
+    CLI_LOGINS.some(
+      (c) => c.optionSlug === trimmed || (c.storedSlug === trimmed && c.storedSlug !== "openai"),
+    )
+  ) {
+    return "cli";
+  }
+  return "cloud";
+}
+
+/**
  * The detail line a row shows under its label.
  *
  * Cloud rows show the endpoint's host rather than the full URL — the path is
