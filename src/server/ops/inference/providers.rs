@@ -1061,6 +1061,7 @@ async fn list_provider_models(
         &provider.base_url,
         (!key.trim().is_empty()).then(|| key.trim()),
         Some(&scope),
+        catalogue::auth_style_for(&provider.kind),
     )
     .await
     {

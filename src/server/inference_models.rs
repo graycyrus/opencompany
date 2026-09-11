@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::company::inference::TierVocabulary;
+use crate::company::inference::catalogue::AuthStyle;
 
 /// How long a successful catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
@@ -191,6 +192,7 @@ impl std::fmt::Display for DiscoveryError {
 pub(crate) async fn discover_models(
     base_url: &str,
     bearer: Option<&str>,
+    auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     // Bounded here, not left to each caller: reqwest's async client has no
@@ -207,10 +209,16 @@ pub(crate) async fn discover_models(
                 "failed to build the model-discovery client: {error}"
             ))
         })?;
-    let mut request = client.get(&url);
-    if let Some(bearer) = bearer.filter(|bearer| !bearer.trim().is_empty()) {
-        request = request.bearer_auth(bearer);
-    }
+    // **The provider's own style, not bearer-for-everyone.** This is a NATIVE
+    // endpoint — `GET /v1/models` — and Anthropic's native API rejects a
+    // bearer-authenticated request with no `anthropic-version` header as
+    // malformed: a 400, not a 401. That 400 on a perfectly good key was the
+    // reported symptom, and it appeared here and nowhere else precisely because
+    // this is the one native call the console makes.
+    //
+    // Verified against `platform.claude.com/docs/en/api/models/list`, whose own
+    // curl example is `-H 'anthropic-version: 2023-06-01' -H "X-Api-Key: …"`.
+    let request = crate::company::inference::probe::apply_auth(client.get(&url), auth, bearer);
     let response = request
         .send()
         .await
@@ -405,6 +413,7 @@ pub(crate) async fn catalog_models(
     base_url: &str,
     bearer: Option<&str>,
     scope: Option<&str>,
+    auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, String> {
     // The partition follows the credential, not the caller: a read that presents
     // nothing has nothing company-specific to leak, and sharing it keeps one
@@ -435,13 +444,15 @@ pub(crate) async fn catalog_models(
             return Err(FetchError::Failed(failure));
         }
 
-        let mut models = discover_models(base_url, bearer).await.map_err(|error| {
-            if error.credential_specific {
-                FetchError::Credential(error.to_string())
-            } else {
-                FetchError::Failed(error.to_string())
-            }
-        })?;
+        let mut models = discover_models(base_url, bearer, auth)
+            .await
+            .map_err(|error| {
+                if error.credential_specific {
+                    FetchError::Credential(error.to_string())
+                } else {
+                    FetchError::Failed(error.to_string())
+                }
+            })?;
         if models.is_empty() {
             return Err(FetchError::Failed(format!(
                 "{endpoint} published an empty model catalog"
@@ -491,8 +502,9 @@ pub(crate) async fn discovered_vocabulary(
     base_url: &str,
     bearer: Option<&str>,
     scope: Option<&str>,
+    auth: AuthStyle,
 ) -> Option<TierVocabulary> {
-    let models = catalog_models(base_url, bearer, scope).await.ok()?;
+    let models = catalog_models(base_url, bearer, scope, auth).await.ok()?;
     Some(TierVocabulary::from_catalog_ids(
         models.iter().map(|model| model.id.as_str()),
     ))
@@ -525,6 +537,7 @@ pub(crate) async fn turn_vocabulary(
     base_url: &str,
     bearer: Option<&str>,
     scope: Option<&str>,
+    auth: AuthStyle,
 ) -> Option<TierVocabulary> {
     // Owned, because the task has to be able to outlive this future — which is
     // the entire reason it is spawned. The bearer lives in process memory for
@@ -534,7 +547,7 @@ pub(crate) async fn turn_vocabulary(
     let bearer = bearer.map(str::to_string);
     let scope = scope.map(str::to_string);
     let read = tokio::spawn(async move {
-        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref()).await
+        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref(), auth).await
     });
     match tokio::time::timeout(TURN_CATALOG_BUDGET, read).await {
         Ok(Ok(vocabulary)) => vocabulary,
@@ -597,7 +610,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let vocabulary = turn_vocabulary(&endpoint, None, None).await;
+        let vocabulary = turn_vocabulary(&endpoint, None, None, AuthStyle::Bearer).await;
         let waited = started.elapsed();
 
         assert_eq!(
@@ -769,7 +782,7 @@ mod tests {
         const ENDPOINT: &str = "https://vocabulary.example/v1";
         catalog_cache(ENDPOINT).store(vec![model("agentic-v1"), model("chat-v1")], Instant::now());
         assert_eq!(
-            discovered_vocabulary(ENDPOINT, None, None).await,
+            discovered_vocabulary(ENDPOINT, None, None, AuthStyle::Bearer).await,
             Some(TierVocabulary::Tiers)
         );
     }

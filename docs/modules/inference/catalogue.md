@@ -81,6 +81,50 @@ with bearer auth is the fix. Port the fixed value and the comment.
 auth style across the catalogue breaks exactly one provider, and it is the one
 people will try first.
 
+### Where `auth` is *applied* — the catalogue entry alone is not enough
+
+Recording the auth style and never consulting it is the same bug as recording it
+wrongly, and it is the one this codebase actually shipped: the catalogue said
+`anthropic`, and the catalog reader sent `Authorization: Bearer` to every
+provider regardless. Verified against Anthropic's own docs, the picture is
+narrower and stranger than "apply the right header everywhere":
+
+| Path | What it reaches at `api.anthropic.com/v1` | Auth |
+|---|---|---|
+| `GET {base}/models` | Anthropic's **native** Models API | `x-api-key` + `anthropic-version` |
+| `POST {base}/chat/completions` | Anthropic's **OpenAI-compatibility layer** | `Authorization: Bearer` |
+
+So `AuthStyle::Anthropic` means **"this provider's native endpoints use
+`x-api-key`"**, and the only native call this product makes is the catalog
+listing. The chat path must stay on bearer — "fixing" it to match the catalogue
+would break a path that works. `harness::built_in::provider::send_plan` carries
+that warning at the line someone would change.
+
+`probe::apply_auth` is the one implementation, called by the connect-time probe,
+the catalog reader (`inference_models::discover_models`) and the per-provider
+test. Its tests assert on the **headers actually sent**, because this bug is
+invisible to a test that only checks a return value.
+
+Two facts confirmed from `platform.claude.com` rather than from memory:
+`anthropic-version: 2023-06-01` is still the current value, and the Models API
+response envelope is `{"data": [{"id": …}], "first_id", "has_more", "last_id"}` —
+`data[].id` is exactly what the OpenAI-shaped reader already parses, so **no
+per-provider response mapping is needed**.
+
+Two caveats worth carrying:
+
+- **The compatibility layer is not Anthropic's recommended production path.**
+  Their own words: "primarily intended to test and compare model capabilities,
+  and is not considered a long-term or production-ready solution for most use
+  cases." It ignores `strict` and `response_format`, supports no prompt caching,
+  and hoists system messages into a single leading one. Reaching Anthropic
+  through a gateway, or through a native request path, remains the better answer
+  if this provider matters — but it works today and does not need one.
+- **The Models API paginates** (`after_id` / `before_id` / `limit`, default
+  **20**, max 1000, with `has_more`). Our reader requests one page and ignores
+  `has_more`, so any provider publishing more than its default page size is
+  silently truncated. It does not bite Anthropic, whose list is short.
+
 ### Provider-specific behaviour that travels with the list
 
 | Provider | Behaviour | Why |

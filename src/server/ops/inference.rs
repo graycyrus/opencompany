@@ -36,6 +36,7 @@ use crate::AppState;
 use crate::app::config::EnvSource;
 use crate::company::IMPLICIT_HARNESS_ID;
 use crate::company::Inference;
+use crate::company::inference::catalogue;
 use crate::company::inference::{
     self, EnvDefault, InferenceSource, RuntimeInference, clear_runtime_config, resolve_effective,
     save_runtime_config, store_key, validate_runtime,
@@ -139,7 +140,7 @@ struct ModelCatalogDto {
 /// exactly the companies that never configured anything.
 async fn resolved_endpoint(
     runtime: &CompanyRuntime,
-) -> Result<Option<(String, Option<String>)>, ApiError> {
+) -> Result<Option<(String, Option<String>, catalogue::AuthStyle)>, ApiError> {
     let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
     let platform = platform_default(&crate::app::config::ProcessEnv);
@@ -150,7 +151,11 @@ async fn resolved_endpoint(
         return Ok(None);
     };
     let bearer = decl.bearer().await.map_err(ApiError)?;
-    Ok(Some((decl.base_url.clone(), bearer)))
+    // Carried alongside the credential, because the two are one decision: a
+    // value and the header it belongs in. Splitting them is how the catalog
+    // read came to send every provider a bearer.
+    let auth = catalogue::auth_style_for(&decl.provider);
+    Ok(Some((decl.base_url.clone(), bearer, auth)))
 }
 
 /// `GET …/inference/models` — the model catalog of the endpoint **this company**
@@ -164,7 +169,7 @@ async fn resolved_endpoint(
 /// serves.
 async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let Some((base_url, bearer)) = resolved_endpoint(runtime).await? else {
+    let Some((base_url, bearer, auth)) = resolved_endpoint(runtime).await? else {
         // Nothing resolves — not even a platform default on this host. There is
         // no endpoint to ask, and saying so beats listing some other vendor's
         // catalog as if it were this company's.
@@ -188,6 +193,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
         &base_url,
         bearer.as_deref(),
         Some(runtime.id().as_ref()),
+        auth,
     )
     .await
     {
@@ -1280,6 +1286,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                     &decl.base_url,
                     bearer.as_deref(),
                     Some(runtime.id().as_ref()),
+                    catalogue::auth_style_for(&decl.provider),
                 )
                 .await;
                 decl.with_vocabulary(vocabulary)

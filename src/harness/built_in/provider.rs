@@ -1785,6 +1785,26 @@ async fn send_plan(
     harness: Option<&str>,
     source: Option<InferenceSource>,
 ) -> anyhow::Result<serde_json::Value> {
+    // **Bearer here, on purpose, for every provider including Anthropic — do not
+    // "fix" this to match the catalogue's `auth_style`.**
+    //
+    // This is the OpenAI-shaped chat path (`POST {base}/chat/completions`), and
+    // for `api.anthropic.com/v1` that reaches Anthropic's **OpenAI SDK
+    // compatibility layer**, which authenticates with `Authorization: Bearer`
+    // and takes no `anthropic-version`. Their *native* API is `POST
+    // /v1/messages` with an entirely different body, and it is the native
+    // endpoints — `GET /v1/models` among them — that want `x-api-key`.
+    //
+    // So `AuthStyle::Anthropic` means "this provider's NATIVE endpoints use
+    // x-api-key", and the only native call this product makes is the catalog
+    // listing (`inference_models::discover_models`). Applying it here would
+    // break a path that currently works.
+    //
+    // Verified at `platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk`.
+    // Note their own caveat: the compatibility layer is "primarily intended to
+    // test and compare model capabilities, and is not considered a long-term or
+    // production-ready solution for most use cases" — it ignores `strict` and
+    // `response_format`, supports no prompt caching, and hoists system messages.
     let mut request = client.post(&plan.url).json(&plan.body);
     if let Some(bearer) = &plan.bearer {
         request = request.bearer_auth(bearer);
@@ -1961,6 +1981,7 @@ impl TenantProvider {
             &decl.base_url,
             bearer.as_deref(),
             Some(&self.catalog_scope()),
+            crate::company::inference::catalogue::auth_style_for(&decl.provider),
         )
         .await;
         Ok(decl.with_vocabulary(vocabulary))
