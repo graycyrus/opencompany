@@ -115,11 +115,13 @@ Required` asserting `unknown` not `auth`, and an id containing `1403` asserting
 no match. Those are the cases the ordering and the per-provider dispatch exist
 for.
 
-The address guard is **not written here**. `guard_link` in
-`src/server/ops/memory_ingest.rs` already refuses link-local and metadata
-addresses and re-checks after DNS resolution; it is lifted to a shared module and
-called with the self-hosted allowance described in
-[`connect-flow.md`](connect-flow.md), rather than copied.
+The address guard **is** written here, against the plan's intention, and
+[`connect-flow.md`](connect-flow.md) records why: `guard_link` in
+`src/server/ops/memory_ingest.rs` refuses every private address including
+`.internal` hostnames, which is exactly where a self-hosted SearXNG instance
+lives, and it is `#[cfg(feature = "documents")]` while this surface is ungated.
+`guard_instance_url` is therefore a narrower rule — metadata and link-local only —
+rather than a copy of a stricter one.
 
 ### The harness seam barely moves
 

@@ -79,9 +79,8 @@ only `searxng` has a writable one.
    │ enabled            │ ──names──▶     │ search/provider/<slug>/key       │
    │ endpoint           │                │ search/provider/<slug>/endpoint  │
    │                    │                │ search/default          one slug │
-   │   NO KEY FIELD     │                │ search/health           map      │
-   └────────────────────┘                │ ──────────────────────────────── │
-                                         │ search/provider   entry zero     │
+   │   NO KEY FIELD     │                │ ──────────────────────────────── │
+   └────────────────────┘                │ search/provider   entry zero     │
                                          │ search/api_key    entry zero     │
                                          │ search/endpoint   entry zero     │
                                          └──────────────────────────────────┘
@@ -149,6 +148,20 @@ So the store, the harness resolver and the capabilities reader move in the same
 commit, through **one** resolution function. This is the same "exactly one
 derivation" argument `effective_provider`'s doc comment already makes — it just
 now has to be obeyed across a feature gate.
+
+### No stored health map
+
+The inference design records what the system last learnt about reaching each
+provider, sourced from things that already happen. **That is not stored here.**
+A row's health is whatever this console session learnt from the add-time probe or
+a manual Test, and it is gone on reload.
+
+The reason is the one that makes search different: every check of an account
+provider costs a real, billed query. Inference can afford to re-learn health
+cheaply because its probe is a free `GET /models`; persisting a health map here
+would invite exactly the background refresh that would spend the company's money
+to keep it current. A row that says nothing until somebody asks is the honest
+shape for a check that is not free.
 
 ## The default marker means something different here
 

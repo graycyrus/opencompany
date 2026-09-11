@@ -223,27 +223,38 @@ question, and colouring it as an error would be a lie about what happened.
 A SearXNG instance URL is an operator-supplied address the host will fetch, which
 makes this an authenticated "fetch an arbitrary URL" primitive.
 
-**The repo already has the guard.** `guard_link` in
-`src/server/ops/memory_ingest.rs` refuses loopback, link-local and metadata
-addresses and re-checks **after DNS resolution**, so `http://anything.example/`
-pointing at `169.254.169.254` cannot slip through. Writing a second one in
-`search::probe` would be a fourth copy of a rule that must not drift. Lift it to a
-shared module and call it.
+The repo already has a guard — and **it turned out not to be reusable**, which is
+worth recording because the plan said it would be. `guard_link` in
+`src/server/ops/memory_ingest.rs` refuses loopback, link-local *and every RFC1918
+address*, plus `.internal` hostnames, re-checking after DNS resolution. That is
+right for fetching a link an operator pasted from the internet and wrong here:
+**a SearXNG instance is legitimately on a private network**, and
+`search.acme.internal` at `10.0.0.5` is the *ordinary* deployment. Calling it
+would refuse the normal case. It is also `#[cfg(feature = "documents")]`, and this
+surface is deliberately ungated.
 
-The complication search adds: **a SearXNG instance is legitimately on a private
-network.** `search.acme.internal` at `10.0.0.5` is the normal deployment, so the
-guard cannot simply refuse private ranges the way a public-content fetcher can.
-The allowance is therefore explicit and narrow:
+So `search::probe::guard_instance_url` is a narrower rule rather than a copy, and
+the difference is the point: it refuses only the class that is never a search
+instance and is always somebody's cloud metadata service. That makes this the
+third URL-shape rule in the tree, and the second one's own comment already says
+the lasting fix is to lift it somewhere both can depend on — which is a separate
+change, because three callers want three different address policies, so lifting
+means parameterising rather than moving.
+
+The allowance is explicit and narrow:
 
 - `http`/`https` only.
 - Link-local and cloud-metadata addresses (`169.254.0.0/16` and friends) are
   refused outright, re-checked after resolution. A search instance is never
   there.
-- Private ranges and loopback are **allowed for the self-hosted category only**,
-  as a deliberate hole rather than an oversight, and this is the reason the probe
-  route is `AdminScopedCompany` and not `ScopedCompany` — see below.
-- Redirects are not followed to a host that fails the above.
-- Body size and time are capped; the body is read only for classification.
+- Private ranges and loopback are **allowed**, as a deliberate hole rather than
+  an oversight, and this is the reason the probe route is `AdminScopedCompany`
+  and not `ScopedCompany` — see below.
+- Redirects are not followed **at all** (`redirect::Policy::none()`): a redirect
+  to somewhere else is not this provider answering, and following one is how a
+  guarded address gets reached anyway.
+- Body size and time are capped (4 KiB, 15s); the body is read only for
+  classification and never returned.
 
 ## Authority
 

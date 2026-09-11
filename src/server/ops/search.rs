@@ -60,7 +60,7 @@ use crate::company::search::resolve::Candidate;
 use crate::company::search::store::{self, SearchProvider};
 use crate::company::search::{
     API_KEY_SECRET, ENDPOINT_SECRET, MANAGED_PROVIDER, PROVIDER_SECRET, SUPPORTED_PROVIDERS,
-    provider_requires_endpoint, provider_requires_key, provider_supported, resolve,
+    provider_requires_endpoint, provider_requires_key, resolve,
 };
 use crate::ports::types::SecretValue;
 use crate::server::error::ApiError;
@@ -756,16 +756,25 @@ async fn put_search(
     let runtime = &company.runtime;
 
     let Some(provider) = supplied(body.provider.as_deref()).map(|p| p.to_ascii_lowercase()) else {
-        // No provider named: apply the key and endpoint to whatever is active.
-        let active = crate::company::search::resolve_effective_provider(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-        )
-        .await?;
-        if active == MANAGED_PROVIDER {
+        // No provider named: apply the key or address to the SELECTED provider,
+        // not to the effective one. They differ precisely in the case this
+        // branch exists to serve — "I picked SearXNG, now here is its address" —
+        // where the selection resolves to nothing yet and the effective provider
+        // is still managed. Reading the effective one here would refuse the
+        // request that completes the configuration.
+        let selected =
+            match store::load_default_slug(runtime.id(), runtime.secrets().as_ref()).await? {
+                Some(slug) => Some(slug),
+                None => store::list_providers(runtime.id(), runtime.secrets().as_ref())
+                    .await?
+                    .into_iter()
+                    .next()
+                    .map(|provider| provider.slug),
+            };
+        let Some(selected) = selected else {
             return Err(invalid("no provider is connected to apply that to"));
-        }
-        return apply_to(runtime, &active, &body).await;
+        };
+        return apply_to(runtime, &selected, &body).await;
     };
 
     if provider == MANAGED_PROVIDER {
@@ -1340,7 +1349,12 @@ mod tests {
                 None,
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{slug}: {body}");
+            assert!(
+                !status.is_success(),
+                "a slug that could address another provider's credential must never \
+                 succeed — axum may refuse it at the router before the handler, which is \
+                 equally fine: {slug}: {body}"
+            );
         }
     }
 }

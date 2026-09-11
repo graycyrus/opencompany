@@ -57,8 +57,7 @@
 use std::sync::Arc;
 
 use crate::company::search::{
-    API_KEY_SECRET, ENDPOINT_SECRET, MANAGED_PROVIDER, PROVIDER_SECRET, configuration_complete,
-    provider_is_byo,
+    API_KEY_SECRET, ENDPOINT_SECRET, PROVIDER_SECRET, configuration_complete, provider_is_byo,
 };
 use crate::ports::SecretStore;
 use crate::ports::types::CompanyId;
