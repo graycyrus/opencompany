@@ -2589,7 +2589,7 @@ mod tests {
 
     const CAMPAIGN: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/companies/marketing_agency/workflows/campaign_pipeline.toml"
+        "/../../companies/marketing_agency/workflows/campaign_pipeline.toml"
     ));
 
     #[test]
@@ -4002,7 +4002,7 @@ mod tests {
     fn the_shipped_guarded_loop_preset_is_valid() {
         const GAME: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/companies/game_studio/workflows/game_build_pipeline.toml"
+            "/../../companies/game_studio/workflows/game_build_pipeline.toml"
         ));
         parse_workflow(GAME).expect("the game-studio guarded loop is valid");
     }
@@ -5076,7 +5076,7 @@ to = "done"
     /// build error naming the path rather than a silently-skipped test.
     const CONSOLE_DIALOG: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/frontend/src/views/WorkflowCreateDialog.tsx"
+        "/../../frontend/src/views/WorkflowCreateDialog.tsx"
     ));
     const CONSOLE_DIALOG_PATH: &str = "frontend/src/views/WorkflowCreateDialog.tsx";
 
@@ -5084,7 +5084,7 @@ to = "done"
     /// destination kinds.
     const CONSOLE_API: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/frontend/src/api/workflows.ts"
+        "/../../frontend/src/api/workflows.ts"
     ));
     const CONSOLE_API_PATH: &str = "frontend/src/api/workflows.ts";
 

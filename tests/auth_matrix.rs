@@ -1755,7 +1755,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
 #[test]
 fn committed_snapshot_pins_every_expected_cell() {
     let actual = render_snapshot();
-    let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/auth-matrix.txt");
+    let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join(".join("../../tests/snapshots/auth-matrix.txt");
     if std::env::var_os("BLESS_AUTH_MATRIX").is_some() {
         std::fs::write(&snapshot, &actual).expect("write auth matrix snapshot");
         return;
@@ -1797,7 +1797,7 @@ fn render_snapshot() -> String {
 
 #[test]
 fn source_path_set_equals_the_ops_matrix_path_set() {
-    let server_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let server_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".join("../../src/server");
     let ops_root = server_root.join("ops");
     let scanned = scan_ops_routes(&ops_root).unwrap_or_else(|error| panic!("{error}"));
 
@@ -1881,7 +1881,7 @@ fn source_path_set_equals_the_ops_matrix_path_set() {
 
 #[test]
 fn external_authority_router_files_have_no_unclassified_paths() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".join("../../src/server");
     let provision = scan_file_route_literals(&root.join("provision.rs"))
         .unwrap_or_else(|error| panic!("{error}"));
     assert_set_eq(
@@ -2638,7 +2638,7 @@ mod scanner_tests {
 
 #[test]
 fn chained_route_verbs_are_all_recorded() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".join("../../src/server");
     let setup = scan_file_route_literals(&root.join("setup.rs")).expect("scan");
     assert!(
         setup.direct_methods.contains("GET /api/v1/setup")

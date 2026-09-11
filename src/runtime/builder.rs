@@ -6216,7 +6216,7 @@ mod test {
 
         for company in ["e2e_harness", "openhuman_demo"] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("companies")
+                .join("../../companies")
                 .join(company);
             let manifest = CompanyManifest::from_path(&path)
                 .unwrap_or_else(|e| panic!("{company} manifest must parse: {e}"));
@@ -7315,7 +7315,7 @@ needs_reason = true
     async fn a_shipped_bundle_seeds_its_own_ledgers_and_renders_them() {
         let home_dir = tmp_home("oc-ledger-shipped-");
         let bundle = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("companies")
+            .join("../../companies")
             .join("law_firm");
         let manifest = CompanyManifest::from_path(&bundle).expect("the shipped bundle parses");
         let id = CompanyId::new("firm");
