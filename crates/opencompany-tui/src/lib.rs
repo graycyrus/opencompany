@@ -69,13 +69,11 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 /// existing `OPENHUMAN_WORKSPACE` remains authoritative just as it is for
 /// `opencompany serve`.
 fn configure_journal_workspace(data_dir: Option<&std::path::Path>) {
-    let root = data_dir
-        .map(|path| path.join("openhuman"))
-        .or_else(|| {
-            std::env::var_os("OPENHUMAN_WORKSPACE")
-                .is_none()
-                .then(|| opencompany::app::config::data_dir_from_env().join("openhuman"))
-        });
+    let root = data_dir.map(|path| path.join("openhuman")).or_else(|| {
+        std::env::var_os("OPENHUMAN_WORKSPACE")
+            .is_none()
+            .then(|| opencompany::app::config::data_dir_from_env().join("openhuman"))
+    });
 
     if let Some(root) = root {
         // Rust 2024 makes process-environment mutation explicitly unsafe.
