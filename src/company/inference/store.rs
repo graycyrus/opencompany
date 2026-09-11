@@ -62,6 +62,7 @@ use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
 use super::catalogue;
+use super::resolve::{ProviderRef, Routes};
 use super::{KEY_KEY, RuntimeInference, normalize_provider};
 
 /// The [`SecretStore`] key holding the provider index — every provider *except*
@@ -570,6 +571,167 @@ pub async fn provider_key_configured(
         .is_empty())
 }
 
+// ---- routes -----------------------------------------------------------------
+
+/// The [`SecretStore`] key holding the routing table: tier → route string.
+///
+/// Beside the providers rather than inside them on purpose. A route is a
+/// statement *about* the set of providers ("reasoning goes to acme"), not a
+/// property of one of them, and putting it on the record would mean a provider
+/// blob that has to be rewritten whenever an unrelated row is re-pointed.
+pub const ROUTES_KEY: &str = "inference/routes";
+
+/// The persisted routing table: tier name → the route string an operator would
+/// type.
+///
+/// **Stored as the grammar, not as a tagged enum.** The value in the store is
+/// the value the console shows and an operator hand-edits (`acme:gpt-5`), so
+/// there is one representation rather than a wire shape and a storage shape that
+/// can disagree. [`ProviderRef::parse`](super::resolve::ProviderRef::parse) is
+/// total — every string is *some* route — which is what makes that safe.
+type StoredRoutes = BTreeMap<String, String>;
+
+/// This company's routing table. Empty is the common case and not an error: a
+/// company with no routes sends every workload through the primary.
+pub async fn load_routes(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Routes> {
+    let Some(SecretValue(raw)) = secrets.get(company, ROUTES_KEY).await? else {
+        return Ok(Routes::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(Routes::new());
+    }
+    let stored: StoredRoutes = serde_json::from_str(&raw).map_err(|e| {
+        OpenCompanyError::Store(format!("inference routes are not valid JSON: {e}"))
+    })?;
+    Ok(stored
+        .into_iter()
+        .map(|(tier, raw)| (tier, ProviderRef::parse(&raw)))
+        .collect())
+}
+
+/// Writes this company's routing table.
+///
+/// [`ProviderRef::Default`] entries are **dropped rather than stored**. Unset is
+/// an absence, and persisting it as `""` would make "never set" and "set back to
+/// nothing" two states that read the same but occupy different storage — a
+/// distinction with no meaning and one more thing to keep in step.
+pub async fn save_routes(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    routes: &Routes,
+) -> Result<()> {
+    let stored: StoredRoutes = routes
+        .iter()
+        .filter(|(_, route)| !matches!(route, ProviderRef::Default))
+        .map(|(tier, route)| (tier.clone(), route.to_route_string()))
+        .collect();
+    let raw = serde_json::to_string(&stored)
+        .map_err(|e| OpenCompanyError::Store(format!("serializing inference routes: {e}")))?;
+    secrets.set(company, ROUTES_KEY, SecretValue(raw)).await
+}
+
+// ---- health -----------------------------------------------------------------
+
+/// The [`SecretStore`] key holding per-provider health.
+pub const HEALTH_KEY: &str = "inference/health";
+
+/// What was last learnt about reaching a provider.
+///
+/// Not a credential, but it lives in the same store because it is per company
+/// and per provider and there is no other per-company blob store to put it in.
+/// It derives `Serialize` because there is nothing secret in it — a class name
+/// and a timestamp — and that is exactly the check to make before adding a
+/// field here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHealth {
+    /// `ok`, or the [`ProbeClass`](super::probe::ProbeClass) of the last failure.
+    pub state: String,
+    /// When it was learnt, RFC 3339.
+    pub at: String,
+}
+
+/// The whole health map: provider slug → what we last learnt.
+///
+/// **Keyed on the provider, never on the endpoint.** A 401 is an answer about
+/// the credential that was presented, not a property of the address — two
+/// providers can point at one gateway with different keys, and caching one's
+/// rejection against the endpoint would condemn the other.
+pub type HealthMap = BTreeMap<String, ProviderHealth>;
+
+/// Every health record this company holds.
+pub async fn load_health(company: &CompanyId, secrets: &dyn SecretStore) -> Result<HealthMap> {
+    let Some(SecretValue(raw)) = secrets.get(company, HEALTH_KEY).await? else {
+        return Ok(HealthMap::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(HealthMap::new());
+    }
+    // A health blob that will not parse is not worth failing a status read over:
+    // it holds no configuration and nothing depends on it being present. Report
+    // "nothing learnt" and let the next probe rewrite it.
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+/// Records what was just learnt about `slug`, and says whether anything changed.
+///
+/// **Latched once per failure episode, not once per retry.** A write only
+/// happens when the *state* differs from what is stored, so a provider failing
+/// the same way on every turn keeps the timestamp of the first failure in that
+/// episode rather than moving it forward on each retry. That is the rule behind
+/// the ~9k events for 6 users the design this is ported from had to fix, and the
+/// timestamp is more useful this way besides: "rejecting since 09:14" is a fact,
+/// "rejecting as of one second ago" is a heartbeat.
+///
+/// Returns `true` when the record moved, so a caller can log the transition
+/// rather than the repetition.
+pub async fn record_health(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    state: &str,
+    at: &str,
+) -> Result<bool> {
+    let mut health = load_health(company, secrets).await?;
+    if health.get(slug).is_some_and(|h| h.state == state) {
+        return Ok(false);
+    }
+    health.insert(
+        slug.to_string(),
+        ProviderHealth {
+            state: state.to_string(),
+            at: at.to_string(),
+        },
+    );
+    write_health(company, secrets, &health).await?;
+    Ok(true)
+}
+
+/// Drops a provider's health record — part of deleting it.
+///
+/// A stale record would otherwise reappear the moment the slug is reused, and
+/// claim a state nothing had established about the new provider.
+pub async fn forget_health(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+) -> Result<()> {
+    let mut health = load_health(company, secrets).await?;
+    if health.remove(slug).is_none() {
+        return Ok(());
+    }
+    write_health(company, secrets, &health).await
+}
+
+async fn write_health(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    health: &HealthMap,
+) -> Result<()> {
+    let raw = serde_json::to_string(health)
+        .map_err(|e| OpenCompanyError::Store(format!("serializing inference health: {e}")))?;
+    secrets.set(company, HEALTH_KEY, SecretValue(raw)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,5 +1147,159 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // ---- routes -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_company_with_no_routes_reads_an_empty_table() {
+        let secrets = MemSecrets::default();
+        assert!(load_routes(&company(), &secrets).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn routes_round_trip_through_the_grammar_an_operator_types() {
+        let secrets = MemSecrets::default();
+        let mut routes = Routes::new();
+        routes.insert("reasoning-v1".to_string(), ProviderRef::parse("acme:gpt-5"));
+        routes.insert("chat-v1".to_string(), ProviderRef::Managed);
+        routes.insert("vision-v1".to_string(), ProviderRef::parse("local:llava"));
+        save_routes(&company(), &secrets, &routes).await.unwrap();
+
+        let read = load_routes(&company(), &secrets).await.unwrap();
+        assert_eq!(read, routes);
+        // And the stored form really is the text, so a person reading raw keys
+        // sees what they would have typed.
+        let raw = secrets
+            .get(&company(), ROUTES_KEY)
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        assert!(raw.contains("acme:gpt-5"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn an_unset_route_is_dropped_rather_than_stored_as_empty() {
+        let secrets = MemSecrets::default();
+        let mut routes = Routes::new();
+        routes.insert("chat-v1".to_string(), ProviderRef::Default);
+        routes.insert("agentic-v1".to_string(), ProviderRef::parse("acme"));
+        save_routes(&company(), &secrets, &routes).await.unwrap();
+
+        let read = load_routes(&company(), &secrets).await.unwrap();
+        assert!(
+            !read.contains_key("chat-v1"),
+            "unset must not persist: {read:?}"
+        );
+        assert_eq!(read.get("agentic-v1"), Some(&ProviderRef::parse("acme")));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_routes_blob_is_an_error_rather_than_silently_empty() {
+        // Routes decide where a company's spend goes. Reading a corrupt table as
+        // "no routes" would move every workload onto the primary without saying
+        // so, which is the silent-demotion failure the resolver refuses.
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company(), ROUTES_KEY, SecretValue("{oops".into()))
+            .await
+            .unwrap();
+        let err = load_routes(&company(), &secrets).await.unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+    }
+
+    // ---- health -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_is_latched_once_per_failure_episode_not_once_per_retry() {
+        let secrets = MemSecrets::default();
+        assert!(
+            record_health(&company(), &secrets, "acme", "auth", "2026-09-11T09:14:00Z")
+                .await
+                .unwrap(),
+            "the first observation moves the record"
+        );
+        assert!(
+            !record_health(&company(), &secrets, "acme", "auth", "2026-09-11T09:15:00Z")
+                .await
+                .unwrap(),
+            "the same failure again must not move the record"
+        );
+        let health = load_health(&company(), &secrets).await.unwrap();
+        assert_eq!(
+            health.get("acme").unwrap().at,
+            "2026-09-11T09:14:00Z",
+            "the timestamp names when the episode began, not the latest retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_state_change_moves_the_record() {
+        let secrets = MemSecrets::default();
+        record_health(&company(), &secrets, "acme", "auth", "2026-09-11T09:14:00Z")
+            .await
+            .unwrap();
+        assert!(
+            record_health(&company(), &secrets, "acme", "ok", "2026-09-11T10:00:00Z")
+                .await
+                .unwrap()
+        );
+        let health = load_health(&company(), &secrets).await.unwrap();
+        assert_eq!(health.get("acme").unwrap().state, "ok");
+        assert_eq!(health.get("acme").unwrap().at, "2026-09-11T10:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn health_is_per_provider_so_one_rejection_does_not_condemn_a_sibling() {
+        // Two providers, one endpoint, two keys: a 401 is an answer about the
+        // credential presented, never about the address.
+        let secrets = MemSecrets::default();
+        record_health(&company(), &secrets, "acme", "auth", "2026-09-11T09:14:00Z")
+            .await
+            .unwrap();
+        record_health(
+            &company(),
+            &secrets,
+            "acme-team",
+            "ok",
+            "2026-09-11T09:14:00Z",
+        )
+        .await
+        .unwrap();
+        let health = load_health(&company(), &secrets).await.unwrap();
+        assert_eq!(health.get("acme").unwrap().state, "auth");
+        assert_eq!(health.get("acme-team").unwrap().state, "ok");
+    }
+
+    #[tokio::test]
+    async fn forgetting_health_stops_a_reused_slug_inheriting_a_state() {
+        let secrets = MemSecrets::default();
+        record_health(&company(), &secrets, "acme", "auth", "2026-09-11T09:14:00Z")
+            .await
+            .unwrap();
+        forget_health(&company(), &secrets, "acme").await.unwrap();
+        assert!(
+            load_health(&company(), &secrets)
+                .await
+                .unwrap()
+                .get("acme")
+                .is_none()
+        );
+        // Forgetting something that was never there is not an error.
+        forget_health(&company(), &secrets, "ghost").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_health_blob_reads_as_nothing_learnt() {
+        // The opposite call from routes, and deliberately: health holds no
+        // configuration, so failing a status read over it would take the whole
+        // page down to preserve a decoration.
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company(), HEALTH_KEY, SecretValue("{oops".into()))
+            .await
+            .unwrap();
+        assert!(load_health(&company(), &secrets).await.unwrap().is_empty());
     }
 }

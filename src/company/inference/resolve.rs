@@ -182,6 +182,38 @@ impl ProviderRef {
         }
     }
 
+    /// The string form, in the same grammar [`ProviderRef::parse`] reads.
+    ///
+    /// This is the **persisted** shape, deliberately: a route is stored as the
+    /// text an operator would type, so the stored value and the value they
+    /// hand-edit are the same value. Storing a tagged enum instead would make
+    /// the console's grammar a presentation layer over a second representation,
+    /// and the two would have to be kept in step forever.
+    ///
+    /// [`ProviderRef::Default`] renders as the empty string — an absence, which
+    /// is why the writer drops those rather than storing `""`.
+    pub fn to_route_string(&self) -> String {
+        match self {
+            Self::Default => String::new(),
+            Self::Managed => "managed".to_string(),
+            Self::Cloud {
+                provider_slug,
+                model,
+            } => match model {
+                Some(model) => format!("{provider_slug}:{model}"),
+                None => provider_slug.clone(),
+            },
+            Self::Local { model } => match model {
+                Some(model) => format!("local:{model}"),
+                None => "local".to_string(),
+            },
+            Self::ClaudeCode { model } => match model {
+                Some(model) => format!("claude-code:{model}"),
+                None => "claude-code".to_string(),
+            },
+        }
+    }
+
     /// The slug this ref names, when it names one at all.
     ///
     /// `None` for local and CLI refs is not an oversight — it is the fact the
