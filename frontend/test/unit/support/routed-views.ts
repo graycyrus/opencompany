@@ -150,7 +150,16 @@ export const NAMED_BY: Record<View, Names> = {
     { pageHeader: "company/ManageListsView.tsx" },
   ],
   workspace: [{ pageHeader: "WorkspaceView.tsx" }],
-  approvals: [{ pageHeader: "ApprovalsView.tsx" }],
+  /**
+   * The page the title row's bell opens. `NotificationsView` draws the header
+   * for both of its tabs, which is why `ApprovalsView.tsx` is NOT a leaf here
+   * any more: it lost its own `hidden` header when this page gained a visible
+   * one, so holding it to a heading would fail on a view that correctly has
+   * none.
+   */
+  notifications: [{ pageHeader: "NotificationsView.tsx" }],
+  /** `#/approvals` renders the same page, with the Approvals tab forced. */
+  approvals: [{ pageHeader: "NotificationsView.tsx" }],
   workflows: [{ pageHeader: "WorkflowsView.tsx" }],
   observatory: [{ pageHeader: "observatory/ObservatoryView.tsx" }],
   pages: [{ pageHeader: "PagesView.tsx" }],

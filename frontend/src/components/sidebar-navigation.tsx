@@ -8,20 +8,16 @@ import {
   Network,
   Plug,
   Wallet,
-  ShieldCheck,
   Workflow,
 } from "lucide-react";
 
 import {
   SidebarGroup,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
-  SidebarMenuDot,
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { approvalsCount, approvalsLabel } from "@/components/approvals-button";
 import { RESTING_ROW } from "@/components/sidebar-controls";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { isNavigationActive, type View } from "@/lib/console-routes";
@@ -278,22 +274,23 @@ export const NAV_SECTIONS: NavSection[] = [
   // (`WorkflowsView`'s `indexTab`), so it is not a pair of routes and promoting
   // it to a rail would be inventing sub-pages rather than relocating any.
   { view: "workflows", label: "Automations", icon: Workflow },
-  // What is waiting on you.
+  // Approvals is NOT here any more, and this is the third position it has held.
   //
-  // It spent a release as an icon in the window's title row, on the argument
-  // that a count has to be visible from every page including the collapsed
-  // rail (issue #1018) and that chrome is the only place that is true of. The
-  // count is the part that argument was really about, and it is answered here
-  // by the badge/dot pair below rather than by the row's location: the badge
-  // shows the number in the column, the dot survives the 3rem rail, and
-  // `SidebarMenuDot` exists again for exactly that reason.
+  // It was a row with a `SidebarMenuBadge` and an icon-rail `SidebarMenuDot`;
+  // it spent a release as a shield glyph in the window's title row (issue
+  // #1018: a count has to survive the rail collapsing, and chrome is the only
+  // place that is true of); and it came back here on the argument that a queue
+  // is a place you GO and one unlabelled square could not say so.
   //
-  // What the title row could not give it is what it is: a place you GO. It sat
-  // between an Overview glyph and an autonomy pill as one unlabelled square,
-  // so the one surface in the console that asks the operator to do something
-  // was the hardest of the five to name. A row with the word on it, in the
-  // list of places, is the plainer answer.
-  { view: "approvals", label: "Approvals", icon: ShieldCheck },
+  // What settles it is that the destination changed. It is not a bare queue any
+  // more — it is the Approvals tab of a Notifications page (`#/notifications`),
+  // which also carries the durable activity feed that had no surface at all.
+  // A bell in the title row names that page without ambiguity, so the objection
+  // that sent the shield back downstairs does not apply to it, and the count
+  // goes with it: this column draws no second copy, and the dot that existed
+  // only to survive a collapse it can no longer suffer is gone with the badge.
+  // See `components/notifications-button.tsx`.
+  //
   // Overview is NOT here, and neither is Observatory. Both are Rule-6 calls,
   // made explicitly in `docs/spec/runtime/ledgers-console-ia.md`:
   //
@@ -500,16 +497,12 @@ export function childAnchor(section: NavSection, child: NavChild): string | unde
 export function SidebarNavigation({
   view,
   onNavigate,
-  pending,
 }: {
   view: View;
   onNavigate: (view: View, sub?: string) => void;
-  /**
-   * How many approvals are waiting — `feed.status.pending_approvals`, passed
-   * through unchanged. Zero is an ordinary state: the row stays and neither
-   * the badge nor the dot appears.
-   */
-  pending: number;
+  // No `pending`. The approvals count is drawn once, by the title row's bell
+  // (`components/notifications-button.tsx`), and this column no longer carries
+  // a copy of it — see the note beside `NAV_SECTIONS` above.
 }) {
   const { isMobile, setOpenMobile } = useSidebar();
   const { setElement } = useRoomRailSlot();
@@ -534,41 +527,13 @@ export function SidebarNavigation({
             <SidebarMenuItem key={section.view} data-tour={`nav-${section.view}`}>
               <SidebarMenuButton
                 isActive={section === active}
-                // The count belongs in the tooltip too. On the 3rem rail the
-                // label is gone and the dot says only "something", so without
-                // this the collapsed state can report that approvals are
-                // waiting and offer no way to learn how many short of
-                // navigating. `approvalsLabel` is the same sentence the title
-                // row's button used, kept so the two never drift.
-                tooltip={
-                  section.view === "approvals" ? approvalsLabel(pending) : section.label
-                }
+                tooltip={section.label}
                 onClick={() => navigate(section.view, section.sub)}
                 className={RESTING_ROW}
               >
                 <section.icon />
                 <span>{section.label}</span>
               </SidebarMenuButton>
-              {section.view === "approvals" && pending > 0 && (
-                <>
-                  {/* Read off the row without opening anything, and without
-                      depending on the badge's text — which is capped at
-                      `99+` and therefore is not the number. */}
-                  <SidebarMenuBadge
-                    data-testid="sidebar-approvals-count"
-                    data-pending={pending}
-                    // The row's only piece of colour, deliberately: it is the
-                    // one thing in this column that ever asks for attention.
-                    className="bg-status-blocked-soft text-status-blocked-text"
-                  >
-                    {approvalsCount(pending)}
-                  </SidebarMenuBadge>
-                  {/* The badge's mirror on the icon rail, where the badge
-                      hides itself. Exactly one of the two is ever on screen —
-                      see `SidebarMenuDot`. */}
-                  <SidebarMenuDot data-testid="sidebar-approvals-dot" />
-                </>
-              )}
             </SidebarMenuItem>
           ))}
         </SidebarMenu>
