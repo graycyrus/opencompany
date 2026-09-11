@@ -229,9 +229,16 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'benches/**'
+              - 'examples/**'
+              # The member manifests (the host's declares its features and
+              # dependencies; the tui crate is a workspace member built by the
+              # bare cargo lines below).
+              - 'crates/opencompany-core/**'
+              - 'crates/opencompany-tui/**'
               # build.rs embeds these and declares rerun-if-changed on them.
               - 'companies/**'
-              # Read from CARGO_MANIFEST_DIR at test time.
+              - 'globals/**'
+              # Read relative to CARGO_MANIFEST_DIR at test time.
               - 'skills/**'
               - 'vendor/**'
               - '.gitmodules'
@@ -251,7 +258,7 @@ jobs:
               - 'scripts/release/**'
             desktop:
               - '.github/workflows/ci.yml'
-              - 'src-tauri/**'
+              - 'crates/opencompany-app/**'
 
   # The header above states an invariant. This job is what makes it one.
   #
@@ -711,6 +718,12 @@ jobs:
       # rather than a silent rebuild somewhere it does not belong.
       - name: Build the host binary for the e2e lane
         run: cargo build --locked -p opencompany-core --bin opencompany
+
+      # The terminal client is a workspace member, so `cargo test --locked`
+      # above already compiled and ran its tests; this names a link failure of
+      # its own binary after its own crate rather than after the host's.
+      - name: Build the terminal client
+        run: cargo build --locked -p opencompany-tui --bin opencompany-tui
 
       - name: Upload the host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
