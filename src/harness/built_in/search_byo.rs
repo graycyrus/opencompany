@@ -129,23 +129,40 @@ impl TenantSearch {
         secrets: &Arc<dyn SecretStore>,
         company: &CompanyId,
     ) -> crate::error::Result<Option<TenantSearch>> {
-        let read = async |key: &str| -> crate::error::Result<Option<String>> {
-            Ok(secrets
-                .get(company, key)
-                .await?
-                .map(|value| value.0.trim().to_string())
-                .filter(|value| !value.is_empty()))
+        // Asks the same resolver the console's status route and the
+        // capabilities panel ask. That is not tidiness: the store's convergence
+        // rule moves a credential from `search/api_key` to
+        // `search/provider/<slug>/key` on the first save, and a reader still
+        // looking at the flat address would see an unconfigured company and
+        // silently drop it to managed search — the agents would keep searching,
+        // they would just quietly stop using the account the operator pays for.
+        // Every reader moves together or none does.
+        let candidates = crate::company::search::candidates(company, secrets.as_ref()).await?;
+        let marked =
+            crate::company::search::store::load_default_slug(company, secrets.as_ref()).await?;
+        let Some(active) = crate::company::search::resolve::active(&candidates, marked.as_deref())
+        else {
+            if !candidates.is_empty() {
+                tracing::warn!(
+                    company = %company,
+                    "[search] a BYO provider is connected but none resolves; falling back to the \
+                     managed surface"
+                );
+            }
+            return Ok(None);
         };
 
-        let provider = read(PROVIDER_SECRET)
-            .await?
-            .unwrap_or_else(|| MANAGED_PROVIDER.to_string());
+        let provider = active.provider.slug.clone();
+        // Belt to the resolver's braces: `active` only ever returns a complete,
+        // enabled provider, and `managed` is never a record.
         if !provider_is_byo(&provider) {
             return Ok(None);
         }
 
-        let api_key = read(API_KEY_SECRET).await?;
-        let endpoint = read(ENDPOINT_SECRET).await?;
+        let api_key =
+            crate::company::search::store::load_provider_key(company, secrets.as_ref(), &provider)
+                .await?;
+        let endpoint = active.provider.endpoint.clone();
         if !configuration_complete(&provider, api_key.is_some(), endpoint.is_some()) {
             tracing::warn!(
                 company = %company,
