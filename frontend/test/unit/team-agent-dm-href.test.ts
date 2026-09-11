@@ -7,10 +7,12 @@ import { agentDmHref } from "@/views/TeamView";
 /**
  * The Agent board's Message action addresses the right conversation (issue #2252).
  *
- * The board grew a "Message" item on each agent card, and the only thing about
- * it that can be silently wrong is the id it routes on. `channels.ts` exports
- * two id builders that agree for most of the roster and disagree for exactly
- * one teammate:
+ * Each agent card carries a Message control on its face — an anchor beside the
+ * overflow trigger, not an item inside it — and the only thing about it that
+ * can be silently wrong is the id it routes on. Moving the control changed
+ * where an operator clicks and nothing about the address, which is why this
+ * file did not move with it. `channels.ts` exports two id builders that agree
+ * for most of the roster and disagree for exactly one teammate:
  *
  * - `dmChannelId(m)` is always `dm:<id>` — the console-local channel id, and so
  *   the address the hash router resolves.
@@ -18,7 +20,7 @@ import { agentDmHref } from "@/views/TeamView";
  *   under — except when the teammate's own id spells General, where the host
  *   folds the bare key onto the company-wide line.
  *
- * So a board that routed on `dmThreadId` would work for every agent a test
+ * So a card that routed on `dmThreadId` would work for every agent a test
  * roster usually contains, and send an operator who clicked the one teammate
  * called `main` to the company's General channel instead of that teammate's DM
  * (the class of bug behind issue #1743). Nothing in the types separates the two
