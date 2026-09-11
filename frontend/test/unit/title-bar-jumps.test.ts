@@ -133,6 +133,19 @@ describe("the notifications jump", () => {
     expect(chip.getAttribute("aria-hidden")).toBe("true");
   });
 
+  it("never says 'undefined approvals need you'", () => {
+    // The count is reconciled from a queue length on the way to this button
+    // (`use-company.ts`, issue #932), so a host answering that route in an
+    // unexpected shape puts `undefined` or `NaN` here despite the type. Both
+    // fail a `<= 0` test, and the label was spoken to a screen reader as
+    // "undefined approvals need you" — observed in a browser while exercising
+    // the cap against a deliberately malformed queue response.
+    const odd = [undefined, Number.NaN, null] as unknown as number[];
+    for (const value of odd) {
+      expect(notificationsLabel(value)).toBe("Notifications");
+    }
+  });
+
   it("marks itself as the page you are on, in more than a colour", () => {
     expect(renderNotifications(0, { active: true }).getAttribute("aria-current")).toBe("page");
     expect(renderNotifications(0).getAttribute("aria-current")).toBeNull();

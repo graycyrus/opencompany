@@ -87,7 +87,15 @@ export function approvalsLabel(pending: number): string {
  * accessible name answers both "where does this go" and "why is it lit".
  */
 export function notificationsLabel(pending: number): string {
-  if (pending <= 0) return "Notifications";
+  // `pending > 0` rather than `pending <= 0`, and the difference is not style:
+  // the count is reconciled from a queue length on the way here
+  // (`use-company.ts`, issue #932), so a host that answers that route in an
+  // unexpected shape can put `undefined` or `NaN` in this argument despite the
+  // type. Both fail `<= 0` and would have produced the sentence "undefined
+  // approvals need you" out loud to a screen reader. Anything that is not a
+  // positive number is simply the destination's name — observed while
+  // exercising the cap with a deliberately malformed queue response.
+  if (!(pending > 0)) return "Notifications";
   return `Notifications — ${approvalsLabel(pending)}`;
 }
 
