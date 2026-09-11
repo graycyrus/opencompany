@@ -689,10 +689,18 @@ async fn delete_provider(
         format!("{} is disconnected and its key is cleared.", provider.label)
     } else {
         format!(
-            "{} is disconnected and its key is cleared. {} now resolve through the \
-             primary provider.",
+            "{} is disconnected and its key is cleared. {} {} through the primary \
+             provider.",
             provider.label,
-            reset.join(", ")
+            reset.join(", "),
+            // One tier resolves; several resolve. A sentence that reads as
+            // broken English on the commonest case — a single route — reads as
+            // a page that was not finished.
+            if reset.len() == 1 {
+                "now resolves"
+            } else {
+                "now resolve"
+            }
         )
     };
     Ok(Json(ProviderMutation {
@@ -755,9 +763,10 @@ async fn set_enabled(
         (true, _) => format!("{} is on.", provider.label),
         (false, true) => format!("{} is off. Nothing was routed through it.", provider.label),
         (false, false) => format!(
-            "{} is off. {} are parked until it is switched back on.",
+            "{} is off. {} {} parked until it is switched back on.",
             provider.label,
-            parked.join(", ")
+            parked.join(", "),
+            if parked.len() == 1 { "is" } else { "are" }
         ),
     };
     Ok(Json(ProviderMutation {
