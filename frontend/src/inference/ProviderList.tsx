@@ -1,84 +1,172 @@
-import { Check, CircleAlert, Minus } from "lucide-react";
+import { EllipsisVertical } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-import { categoryOf, rowDetail } from "./catalogue";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
+import { Monogram } from "./AddProviderDialog";
+import { categoryOf, endpointHost } from "./catalogue";
 import { healthLabel } from "./classify";
 import type { Provider } from "./types";
+
+/** What the always-present managed row says about itself. */
+export const MANAGED_ROW = {
+  label: "Managed",
+  detail: "TinyHumans chooses a model for each task",
+  badge: "Always on",
+} as const;
 
 /**
  * The Connected list: what this company can reach a model through.
  *
- * Read-only for now, deliberately. The single form below it is still the way to
- * change anything, so this stage runs two surfaces at once on purpose — the list
- * says what is connected, the form still changes it. Adding a second provider,
- * and with it the per-row controls, is the stage after this one.
+ * One row per provider, and each row is **a mark, a name, one sub-line and a
+ * control**. Nothing else. The page this replaces carried several paragraphs
+ * explaining what bring-your-own-key meant, what Test cost and what Reset did;
+ * almost all of it said what the control beside it already said.
  *
- * Even at one row this says more than the form ever did. The form calls itself a
- * "switch to" form in its own comments, and that was accurate: there was no list
- * of what is connected, because at most one thing ever was.
+ * ## Managed is a badge, not a disabled toggle
+ *
+ * A locked switch reads as switchable-but-broken and invites a fight the
+ * operator cannot win. A badge says the same thing and is honest about it.
  *
  * ## No decisions live here
  *
- * Every branch this renders — which detail line a category gets, what a health
- * state is called — is a function in `catalogue.ts` or `classify.ts` with a unit
- * test of its own. What is left is layout, which is why there is nothing in this
- * file that deserves a test a screenshot would not answer better.
+ * Which sub-line a row gets, what a health state is called, whether a category
+ * carries a slug — all of it is a function in this file's pure neighbours or in
+ * `rowSubline` below, each with a unit test. What is left is layout.
  */
-export function ProviderList({ providers }: { providers: readonly Provider[] }) {
-  if (providers.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground" data-testid="inference-providers-empty">
-        Nothing connected yet. This company is on the managed brain.
-      </p>
-    );
-  }
-
+export function ProviderList({
+  providers,
+  canManage,
+  busySlug,
+  onToggle,
+  onEdit,
+  onTest,
+  onRemove,
+}: {
+  providers: readonly Provider[];
+  canManage: boolean;
+  /** The slug currently mid-request, so its own controls settle rather than the whole list. */
+  busySlug?: string | null;
+  onToggle: (provider: Provider, enabled: boolean) => void;
+  onEdit: (provider: Provider) => void;
+  onTest: (provider: Provider) => void;
+  onRemove: (provider: Provider) => void;
+}) {
   return (
-    <ul className="divide-y divide-border rounded-md border border-border" data-testid="inference-providers">
+    <ul className="divide-y divide-border" data-testid="inference-providers">
+      {/* Always first and always present. It is not in `providers` because it is
+          not a record — it is the fallback every company has whether or not it
+          has configured anything. */}
+      <li className="flex items-center gap-3 px-4 py-3" data-testid="inference-provider-managed">
+        <Monogram label={MANAGED_ROW.label} />
+        <span className="grid min-w-0 flex-1 leading-tight">
+          <span className="truncate text-sm font-medium">{MANAGED_ROW.label}</span>
+          <span className="truncate text-xs text-muted-foreground">{MANAGED_ROW.detail}</span>
+        </span>
+        <Badge variant="outline" className="border-status-done text-status-done-text">
+          {MANAGED_ROW.badge}
+        </Badge>
+      </li>
+
       {providers.map((provider) => (
-        <ProviderRow key={provider.id} provider={provider} />
+        <ProviderRow
+          key={provider.id}
+          provider={provider}
+          canManage={canManage}
+          busy={busySlug === provider.slug}
+          onToggle={onToggle}
+          onEdit={onEdit}
+          onTest={onTest}
+          onRemove={onRemove}
+        />
       ))}
     </ul>
   );
 }
 
-function ProviderRow({ provider }: { provider: Provider }) {
+/**
+ * The one sub-line a row gets.
+ *
+ * One fact, chosen by what the row is: a keyed provider is identified by the
+ * fact that it holds a key, a local runtime by where it runs, a CLI login by
+ * whose credential it borrows, and a keyless cloud endpoint by its host. Three
+ * facts stacked would be a table, and an operator is scanning for the row rather
+ * than reading it.
+ */
+export function rowSubline(provider: Provider): string {
   const category = categoryOf(provider.kind);
-  const detail = rowDetail(category, provider.baseUrl);
+  if (category === "local") return "Runs on this machine";
+  if (category === "cli") return "Uses a login another CLI already holds";
+  if (provider.keyConfigured) return "•••• configured";
+  return endpointHost(provider.baseUrl) || "no key";
+}
 
+function ProviderRow({
+  provider,
+  canManage,
+  busy,
+  onToggle,
+  onEdit,
+  onTest,
+  onRemove,
+}: {
+  provider: Provider;
+  canManage: boolean;
+  busy: boolean;
+  onToggle: (provider: Provider, enabled: boolean) => void;
+  onEdit: (provider: Provider) => void;
+  onTest: (provider: Provider) => void;
+  onRemove: (provider: Provider) => void;
+}) {
   return (
     <li
-      className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2"
+      className="flex items-center gap-3 px-4 py-3"
       data-testid={`inference-provider-${provider.slug}`}
     >
-      {/*
-        A dot rather than a switch: this stage cannot change the state, and a
-        control that does nothing is worse than no control. The switch arrives
-        with the stage that can honour it.
-      */}
-      <span
-        aria-hidden
-        className={cn(
-          "size-2 shrink-0 rounded-full",
-          provider.enabled ? "bg-status-done" : "bg-status-idle",
-        )}
-      />
-      <span className="min-w-0 font-medium">{provider.label}</span>
-      {/* Cloud rows show the endpoint's host, not the whole URL: the path is
-          noise at a glance and the host is what an operator recognises. */}
-      <span className="min-w-0 truncate text-xs text-muted-foreground">{detail}</span>
-      <span className="text-xs text-muted-foreground">
-        {provider.keyConfigured ? "•••• configured" : "no key"}
+      <Monogram label={provider.label} />
+      <span className="grid min-w-0 flex-1 leading-tight">
+        <span className="truncate text-sm font-medium">{provider.label}</span>
+        <span className="truncate text-xs text-muted-foreground">{rowSubline(provider)}</span>
       </span>
-      <ProviderHealth provider={provider} />
-      <Badge
-        variant="outline"
-        className="ms-auto"
-        data-testid={`inference-provider-${provider.slug}-state`}
-      >
-        {provider.enabled ? "on" : "off"}
-      </Badge>
+
+      <Health provider={provider} />
+
+      <Switch
+        checked={provider.enabled}
+        disabled={!canManage || busy}
+        aria-label={`${provider.label} enabled`}
+        data-testid={`inference-provider-${provider.slug}-toggle`}
+        onCheckedChange={(next) => onToggle(provider, next)}
+      />
+
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={!canManage || busy}
+              aria-label={`${provider.label} actions`}
+              data-testid={`inference-provider-${provider.slug}-menu`}
+            >
+              <EllipsisVertical className="size-4" />
+            </Button>
+          }
+        />
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => onEdit(provider)}>Edit</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onTest(provider)}>Test</DropdownMenuItem>
+          <DropdownMenuItem variant="destructive" onClick={() => onRemove(provider)}>
+            Remove
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </li>
   );
 }
@@ -86,33 +174,23 @@ function ProviderRow({ provider }: { provider: Provider }) {
 /**
  * What was last learnt about reaching this provider.
  *
- * Absent when nothing has been learnt yet, which is honest: a row that has never
- * been probed is not a row that is working. The alternative — a green tick by
- * default — is the state the design being ported is in, where a provider whose
- * key was revoked an hour ago looks identical to one that works.
+ * **Silent when nothing has been learnt**, which is honest: a row that has never
+ * been checked is not a row that is working, and a green tick by default is the
+ * state the design this is ported from is in — where a provider whose key was
+ * revoked an hour ago looks identical to one that works.
  *
- * A failure is amber, not red. The provider is saved and its credential is
- * stored; what is in question is reachability, and colouring that as an error
- * would be a lie about what happened.
+ * Silent when it is `ok`, too, and that is the deletion pass applied to a status
+ * column: a list where every healthy row says "ok" spends a column saying
+ * nothing, and the one row that is not healthy is harder to find for it.
  */
-function ProviderHealth({ provider }: { provider: Provider }) {
-  if (!provider.health) {
-    return (
-      <span className="flex items-center gap-1 text-xs text-muted-foreground">
-        <Minus className="size-3" /> not checked
-      </span>
-    );
-  }
-  if (provider.health.state === "ok") {
-    return (
-      <span className="flex items-center gap-1 text-xs text-status-done-text">
-        <Check className="size-3" /> ok
-      </span>
-    );
-  }
+function Health({ provider }: { provider: Provider }) {
+  if (!provider.health || provider.health.state === "ok") return null;
   return (
-    <span className="flex items-center gap-1 text-xs text-status-blocked-text">
-      <CircleAlert className="size-3" /> {healthLabel(provider.health.state)}
+    <span
+      className="truncate text-xs text-status-blocked-text"
+      data-testid={`inference-provider-${provider.slug}-health`}
+    >
+      {healthLabel(provider.health.state)}
     </span>
   );
 }

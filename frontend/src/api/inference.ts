@@ -464,6 +464,31 @@ export function probeDraft(
   return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/probe`, body);
 }
 
+/**
+ * Re-check a provider that is already connected.
+ *
+ * One of the three things that feed a row's health, and the only one an operator
+ * can ask for — the others are the add-time probe and the turn path's own 401.
+ * There is deliberately **no poller**: one would cost a request per provider per
+ * interval across every company on the host, to learn something the next real
+ * turn learns for free.
+ *
+ * It never deletes a credential, whatever the answer. An add is a commitment
+ * being made and a rollback undoes it; a test is a question being asked, and
+ * making the button that reports a problem the button that causes one would be a
+ * trap.
+ */
+export function testProvider(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+): Promise<ProbeResult> {
+  return client.post<ProbeResult>(
+    `${client.scopeFor(company)}/inference/providers/${encodeURIComponent(slug)}/test`,
+    {},
+  );
+}
+
 /** The routing table, its inferred mode, and any route naming a provider that is gone. */
 export function getRoutes(
   client: OpenCompanyClient,

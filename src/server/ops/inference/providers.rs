@@ -10,14 +10,17 @@
 //!
 //! ## Authority
 //!
-//! **`AdminScopedCompany` on every route in this file, including the probe.**
-//! The axis is "does this decide something for the company", not
-//! read-versus-write: adding a provider decides where the company's turns go and
-//! whose account pays for them. The draft probe is on the same footing for a
-//! different reason — generalising "send a request to this URL with this key" to
-//! company scope creates an authenticated outbound-request primitive, and an
-//! SSRF guard is the second line of defence behind an authority check, not a
-//! substitute for one.
+//! **`AdminScopedCompany` on every route here except one.** The axis is "does
+//! this decide something for the company", not read-versus-write: adding a
+//! provider decides where the company's turns go and whose account pays for
+//! them. The draft probe is on the same footing for a different reason —
+//! generalising "send a request to this URL with this key" to company scope
+//! creates an authenticated outbound-request primitive, and an SSRF guard is the
+//! second line of defence behind an authority check, not a substitute for one.
+//!
+//! The exception is [`test_provider`], which re-asks a question the company has
+//! already answered: it names no destination and no credential of its own, so it
+//! is `ScopedCompany`, exactly like the `POST …/inference/test` it mirrors.
 //!
 //! ## The add flow's ordering, which is not arbitrary
 //!
@@ -78,6 +81,16 @@ pub(super) fn router() -> Router<AppState> {
         // capture is a routing ambiguity waiting to be resolved the wrong way by
         // whichever router version is in play.
         .merge(scoped("/inference/probe", post(probe_draft)))
+        // `ScopedCompany`, not admin — the only route here that is. It probes a
+        // provider **as already stored**, naming no destination and no
+        // credential of its own, which is the same footing as the existing
+        // `POST …/inference/test`. The axis is "does this decide something for
+        // the company", and re-asking a question the company already answered
+        // decides nothing.
+        .merge(scoped(
+            "/inference/providers/{slug}/test",
+            post(test_provider),
+        ))
         .merge(scoped("/inference/routes", get(get_routes).put(put_routes)))
 }
 
@@ -753,6 +766,68 @@ async fn require_provider(
                 "this company has no provider `{slug}`"
             )))
         })
+}
+
+// ---- testing a stored provider ----------------------------------------------
+
+/// `POST …/inference/providers/{slug}/test` — re-check a provider that is
+/// already connected.
+///
+/// One of the three things that feed a row's health, and the only one an
+/// operator can ask for: the other two are the add-time probe and the turn
+/// path's own 401. **There is no poller.** One would cost a request per provider
+/// per interval across every company this host serves, to learn something the
+/// next real turn learns for free.
+async fn test_provider(
+    company: crate::server::ops::ScopedCompany,
+    Path(params): Path<ProviderPath>,
+) -> Result<Json<ProbeResultDto>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let secrets = runtime.secrets().as_ref();
+    let provider = require_provider(runtime, &params.slug).await?;
+    let key = store::load_provider_key(runtime.id(), secrets, &provider)
+        .await
+        .map_err(ApiError)?;
+
+    match probe::probe_models(
+        &provider.base_url,
+        (!key.trim().is_empty()).then(|| key.trim()),
+        catalogue::auth_style_for(&provider.kind),
+        probe::default_policy(),
+    )
+    .await
+    {
+        Ok(models) => {
+            record_health(runtime, &provider.slug, "ok").await;
+            Ok(Json(ProbeResultDto {
+                ok: true,
+                class: None,
+                message: None,
+                model_count: models.len(),
+            }))
+        }
+        Err(failure) => {
+            tracing::info!(
+                company = %runtime.id(),
+                provider = %provider.slug,
+                class = failure.class.as_str(),
+                detail = %failure.raw,
+                "inference provider test failed",
+            );
+            // **The test never deletes a credential**, whatever the class. An
+            // add is a commitment being made and a rollback undoes it; a test is
+            // a question being asked, and answering "your key is rejected" by
+            // destroying it would make the button that reports a problem the
+            // button that causes one.
+            record_health(runtime, &provider.slug, failure.class.as_str()).await;
+            Ok(Json(ProbeResultDto {
+                ok: false,
+                class: Some(failure.class.as_str().to_string()),
+                message: Some(probe::describe(failure.class, &advisory_subject(&provider))),
+                model_count: 0,
+            }))
+        }
+    }
 }
 
 // ---- the draft probe --------------------------------------------------------

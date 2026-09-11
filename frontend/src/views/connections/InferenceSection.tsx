@@ -48,7 +48,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
 import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
-import { ProviderList } from "@/inference/ProviderList";
 
 /** The abstract cognition tiers the tenant model table maps. */
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
@@ -1358,14 +1357,6 @@ export function InferenceSection({
               than rendered empty, and the status line above still answers the
               question on its own.
             */}
-            {showConnect && status?.providers !== undefined && (
-              <div className="space-y-2">
-                <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                  Connected
-                </h3>
-                <ProviderList providers={status.providers} />
-              </div>
-            )}
 
             {/* The switch form is an admin's: it decides the base URL every
                 agent's prompts travel to and the key they are billed against
