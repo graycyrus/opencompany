@@ -17,12 +17,13 @@
 //!   hosted tenant can be provisioned after boot, so the tick re-reads
 //!   [`CompanyRegistry::list`] every minute rather than snapshotting companies
 //!   at boot.
-//! * **Enumeration goes through the seed ∪ overlay union** (issue #168's
-//!   [`list_workflows_union`]), never a raw `source_dir` scan and never the
-//!   manifest's `[workflows].enabled` list — a console-created workflow lives
-//!   only on the record overlay, and it is exactly the kind an operator attaches
-//!   a schedule to. See [`WorkflowScheduler::tick`] for why the enabled list is
-//!   not a filter.
+//! * **Enumeration includes the global baseline after the seed ∪ overlay
+//!   union**, through
+//!   [`list_workflows_with_globals`](crate::company::list_workflows_with_globals),
+//!   never a raw `source_dir` scan and never the manifest's
+//!   `[workflows].enabled` list. Company graphs keep precedence, and
+//!   `[globals].disable` removes opted-out globals. See [`WorkflowScheduler::tick`]
+//!   for why the enabled list is not a filter.
 //! * **Each fire runs on its own tokio task**, so one long agent run cannot
 //!   starve every other company's schedule, with an in-flight guard so a slow
 //!   run is never overlapped by its own next tick.
@@ -81,7 +82,7 @@ use serde_json::json;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use crate::company::{WorkflowFile, list_workflows_union};
+use crate::company::{WorkflowFile, list_workflows_with_global_baseline};
 use crate::ports::types::CompanyId;
 use crate::ports::{DeliveryReport, DeliveryStatus, WorkflowRunContext, is_undelivered};
 use crate::runtime::CompanyRegistry;
@@ -273,7 +274,7 @@ impl WorkflowScheduler {
         self.tick_with_globals(crate::globals::workflows()).await
     }
 
-    async fn tick_with_globals(&mut self, _global_workflows: &[WorkflowFile]) -> usize {
+    async fn tick_with_globals(&mut self, global_workflows: &[WorkflowFile]) -> usize {
         let now = self.clock.now_millis();
         let minute = now / MINUTE_MS;
         let civil = CivilTime::from_unix_millis(now);
@@ -315,19 +316,23 @@ impl WorkflowScheduler {
                     tracing::warn!(%company, %err, "workflow scheduler: pruning old fire claims failed");
                 }
             }
-            // The record's runtime-authored graph bodies, and the ids the
-            // operator has switched off (issue #276) — both off the SAME load, so
-            // the gate costs no second round-trip and cannot read a record that
-            // moved between the two reads. A company with no persisted record
-            // contributes neither; a store failure is logged and skipped rather
-            // than aborting every other company's schedules.
+            // The record's runtime-authored graph bodies, the ids the operator
+            // has switched off, and global opt-outs come from the same load, so
+            // the gates cannot observe different record versions. A company
+            // with no persisted record contributes none; a store failure is
+            // logged and skipped rather than aborting every other company's
+            // schedules.
             //
             // A load failure skipping the company is what makes the gate
             // fail-safe: an unreadable record fires nothing, rather than firing
             // everything because the disable list came back empty.
-            let (overlays, disabled) = match runtime.store().load(&company).await {
-                Ok(Some(record)) => (record.overlay_workflows, record.disabled_workflows),
-                Ok(None) => (Vec::new(), Vec::new()),
+            let (overlays, disabled, global_disable) = match runtime.store().load(&company).await {
+                Ok(Some(record)) => (
+                    record.overlay_workflows,
+                    record.disabled_workflows,
+                    record.manifest.globals.disable,
+                ),
+                Ok(None) => (Vec::new(), Vec::new(), Vec::new()),
                 Err(err) => {
                     tracing::warn!(%company, %err, "workflow scheduler: cannot read company record");
                     continue;
@@ -338,7 +343,12 @@ impl WorkflowScheduler {
             // runner: whether any exist is exactly what decides if an unwired
             // company is misconfigured or simply has nothing to run.
             let mut scheduled: Vec<(WorkflowFile, String, CronExpr)> = Vec::new();
-            for file in list_workflows_union(runtime.source_dir(), &overlays) {
+            for file in list_workflows_with_global_baseline(
+                runtime.source_dir(),
+                &overlays,
+                &global_disable,
+                global_workflows,
+            ) {
                 let Some(cron) = trigger_schedule(&file) else {
                     continue; // no schedule: manual-run only
                 };
