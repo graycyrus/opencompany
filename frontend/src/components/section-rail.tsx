@@ -9,7 +9,6 @@ import {
   type NavChild,
   type NavSection,
 } from "@/components/sidebar-navigation";
-import { useHashTabValue } from "@/hooks/use-hash-tab";
 import type { View } from "@/lib/console-routes";
 import { cn } from "@/lib/utils";
 
@@ -312,20 +311,9 @@ export function SectionContentRail({
   view: View;
   /** The hash's second segment, so a row can light for its own sub-page. */
   sub: string | null;
-  onNavigate: (
-    view: View,
-    sub?: string,
-    /** Query state the row addresses beside its route — see `NavChild.tab`. */
-    query?: Readonly<Record<string, string | null>>,
-  ) => void;
+  onNavigate: (view: View, sub?: string) => void;
   children: ReactNode;
 }) {
-  // Read here rather than handed down, because it is not part of the address
-  // the shell routes on: a page's tab rides the hash's query and `useHashView`
-  // never sees it (`readSegments` stops at the `?`). The rail needs it only to
-  // tell two rows of one sub-page apart — Apps and Composio, issue #2259 — and
-  // subscribing to `hashchange` here keeps that knowledge where it is used.
-  const tab = useHashTabValue();
   const section = sectionOwning(view);
   // ALWAYS the same element at this position, even for a section with no rail.
   //
@@ -347,7 +335,7 @@ export function SectionContentRail({
   // sidebar's scroll at 238px and unmounted nothing; Room → Company and
   // Connections → Flows each unmounted the rail once and dropped the scroll to
   // 0. Exactly the crossings that changed this element's type.
-  const rows = section?.children ? sectionRows(section, view, sub, tab, onNavigate) : [];
+  const rows = section?.children ? sectionRows(section, view, sub, onNavigate) : [];
 
   return (
     <SectionRail label={section?.label ?? ""} rows={rows}>
@@ -361,51 +349,29 @@ function sectionRows(
   section: NavSection,
   view: View,
   sub: string | null,
-  /** The `?tab=` the address names, for the rows a sub-page has two of. */
-  tab: string | null,
-  onNavigate: (
-    view: View,
-    sub?: string,
-    query?: Readonly<Record<string, string | null>>,
-  ) => void,
+  onNavigate: (view: View, sub?: string) => void,
 ): SectionRailRow[] {
   const row = (child: NavChild, active: boolean, anchor?: string): SectionRailRow => ({
-    // Keyed by everything that distinguishes the row from its siblings, which
-    // is more than the address since #2259. Apps and Composio are both
-    // `connections/apps`, and Connections' three captions are all `connections`
-    // with no segment at all — two rows under one React key is one row.
-    key: [
-      `${child.view}/${child.sub ?? ""}`,
-      child.tab === undefined ? "" : `?tab=${child.tab ?? ""}`,
-      child.group ? `#${child.label}` : "",
-    ].join(""),
+    // The address, plus the caption's own name. Every ROW is one address, but
+    // Connections' three captions are all `connections` with no segment at all
+    // (#2259) — and two of them under one React key is one caption.
+    key: `${child.view}/${child.sub ?? ""}${child.group ? `#${child.label}` : ""}`,
     label: child.label,
     hint: child.hint,
     icon: child.icon,
     active,
     anchor,
-    onSelect: () =>
-      // A row that says nothing about tabs navigates by route alone, exactly as
-      // every row did before — which preserves the query when the path is
-      // unchanged, and is what a workflow run's `?run=` depends on. A row that
-      // DOES name one has to say so, `null` included: clearing the key is how
-      // Apps escapes a `?tab=credentials` that Composio left standing.
-      child.tab === undefined
-        ? onNavigate(child.view, child.sub)
-        : onNavigate(child.view, child.sub, { tab: child.tab }),
+    onSelect: () => onNavigate(child.view, child.sub),
   });
 
   return (section.children ?? []).map((child) => ({
-    ...row(child, childActive(section, child, view, sub, tab), childAnchor(section, child)),
+    ...row(child, childActive(section, child, view, sub), childAnchor(section, child)),
     group: child.group,
     children: child.children?.map((grandchild) =>
       // No `data-tour` on a nested row: the anchors follow the address, and a
       // grandchild's address is its parent's view with a second segment — which
       // `childAnchor` would name after the view, colliding with the parent.
-      // Connections' grouped rows would collide outright: Apps and Composio
-      // share `#/connections/apps`, so one anchor would name two nodes and
-      // every selector written against it becomes a strict-mode violation.
-      row(grandchild, grandchildActive(section, grandchild, view, sub, tab)),
+      row(grandchild, grandchildActive(section, grandchild, view, sub)),
     ),
   }));
 }

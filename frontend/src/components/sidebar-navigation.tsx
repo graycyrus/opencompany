@@ -25,7 +25,7 @@ import { approvalsCount, approvalsLabel } from "@/components/approvals-button";
 import { RESTING_ROW } from "@/components/sidebar-controls";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { isNavigationActive, type View } from "@/lib/console-routes";
-import { CONNECTION_RAIL_GROUPS, connectionRailRow } from "@/views/connection-pages";
+import { CONNECTION_PAGE_GROUPS, connectionPagesIn } from "@/views/connection-pages";
 // The leaf table, not the section — importing `FinanceSection` here would pull
 // `InvoicingView`, `WalletView` and the lazy `FinancesView` into the module the
 // sidebar renders on every route. Same reason `connection-pages.ts` exists.
@@ -42,24 +42,6 @@ import { cn } from "@/lib/utils";
 export interface NavChild {
   view: View;
   sub?: string;
-  /**
-   * Which of the sub-page's own tabs this row addresses, for a page the rail
-   * lists twice (issue #2259).
-   *
-   * A page's tab is not a `view`/`sub` address — it is a slice of one page,
-   * riding the hash's query (`useHashTab`) — so it is normally none of this
-   * table's business. It becomes its business the moment two rows resolve to
-   * one sub-page: Apps and Composio are both `#/connections/apps`, and without
-   * this the rail lights both of them at once whichever you are on.
-   *
-   * `null` means the page's default tab, and navigating **clears** the key
-   * rather than writing it — a route-only navigation preserves the query when
-   * the path is unchanged (`useHashView`'s `navigate`), so a row sharing its
-   * page with a tab row has to say so explicitly or it inherits the tab it was
-   * meant to leave. `undefined` means this row is the whole page and the rail
-   * says nothing about its tabs, which is every other row in the table.
-   */
-  tab?: string | null;
   label: string;
   icon: LucideIcon;
   /**
@@ -266,12 +248,12 @@ export const NAV_SECTIONS: NavSection[] = [
   // all along: `group: true` over a list of pages, drawn as a heading by
   // `section-rail.tsx`. Nothing about the addresses changes — every group's
   // rows name a `ConnectionPage`, and the grouping is read off
-  // `CONNECTION_RAIL_GROUPS`, which argues what the split means.
+  // `CONNECTION_PAGE_GROUPS`, which argues what the split means.
   {
     view: "connections",
     label: "Connections",
     icon: Plug,
-    children: CONNECTION_RAIL_GROUPS.map((group) => ({
+    children: CONNECTION_PAGE_GROUPS.map((group) => ({
       view: "connections" as const,
       label: group.label,
       // A caption's own icon is never drawn; the table is one type, so it
@@ -279,17 +261,13 @@ export const NAV_SECTIONS: NavSection[] = [
       icon: Plug,
       hint: "",
       group: true,
-      children: group.rows.map((row) => {
-        const resolved = connectionRailRow(row);
-        return {
-          view: "connections" as const,
-          sub: resolved.page,
-          tab: resolved.tab,
-          label: resolved.label,
-          icon: resolved.icon,
-          hint: resolved.hint,
-        };
-      }),
+      children: connectionPagesIn(group.id).map((page) => ({
+        view: "connections" as const,
+        sub: page.id,
+        label: page.label,
+        icon: page.icon,
+        hint: page.hint,
+      })),
     })),
   },
   // Was "Workflows". One word, and the word an operator uses out loud.
@@ -379,9 +357,8 @@ export function childActive(
   child: NavChild,
   view: View,
   sub: string | null,
-  tab: string | null = null,
 ): boolean {
-  return rowActive(sectionRailRows(section), child, view, sub, tab);
+  return rowActive(sectionRailRows(section), child, view, sub);
 }
 
 /**
@@ -401,9 +378,8 @@ export function grandchildActive(
   grandchild: NavChild,
   view: View,
   sub: string | null,
-  tab: string | null = null,
 ): boolean {
-  return rowActive(sectionRailRows(section), grandchild, view, sub, tab);
+  return rowActive(sectionRailRows(section), grandchild, view, sub);
 }
 
 /**
@@ -442,34 +418,25 @@ function sectionRailRows(section: NavSection): NavChild[] {
  * and Finance's: on `#/finances` the candidates are Overview, Invoicing and
  * Wallet, so "first of the set" is Overview rather than Agents.
  *
- * ## And then the same rule again, one dimension over (issue #2259)
- *
- * Two rows can name one sub-page — Apps and Composio are both
- * `#/connections/apps`, split by the tab each addresses — and matching on the
- * segment alone lights both at once. So among the rows sharing a segment, a row
- * naming a `tab` owns exactly that tab, and the first of them owns every tab
- * none of them names (the page's default included). Exactly the sentence above
- * with "segment" replaced by "tab", on purpose: one rule to learn, and the two
- * levels cannot drift into disagreeing about what an unnamed value means.
+ * One row per address, and every row is a page. A draft of #2259 gave the rail
+ * a second row on the Apps page pointing at its Credentials tab, which made
+ * this function resolve on `(page, tab)` instead — a mechanic nothing else in
+ * the console had. Composio is a page of its own now, so the rail is
+ * page-addressed again and that whole dimension is gone. If a row ever needs to
+ * address less than a page again, the answer is a page.
  */
 function rowActive(
   rows: readonly NavChild[],
   row: NavChild,
   view: View,
   sub: string | null,
-  tab: string | null,
 ): boolean {
   if (!isNavigationActive(row.view, view)) return false;
   if (row.sub === undefined) return true;
   const peers = rows.filter((r) => r.sub !== undefined && isNavigationActive(r.view, view));
   const named = peers.some((peer) => peer.sub === sub);
   if (sub === null || !named) return peers[0] === row;
-  if (row.sub !== sub) return false;
-  const sharing = peers.filter((peer) => peer.sub === sub);
-  if (sharing.length === 1) return true;
-  const tabNamed = sharing.some((peer) => (peer.tab ?? null) === tab);
-  if (tab === null || !tabNamed) return sharing[0] === row;
-  return (row.tab ?? null) === tab;
+  return row.sub === sub;
 }
 
 /**

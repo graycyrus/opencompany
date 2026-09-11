@@ -8,10 +8,9 @@ import { NAV_SECTIONS } from "@/components/sidebar-navigation";
 import { TOUR } from "@/tour/steps";
 import { SETTINGS_PAGES } from "@/views/settings-pages";
 import {
+  CONNECTION_PAGE_GROUPS,
   CONNECTION_PAGES,
-  CONNECTION_RAIL_GROUPS,
-  CONNECTION_RAIL_ROWS,
-  connectionRailRow,
+  connectionPagesIn,
   connectionsHref,
   DEFAULT_CONNECTION_PAGE,
   isConnectionPage,
@@ -44,6 +43,11 @@ describe("the Connections section", () => {
       "api-key",
       "mcp",
       "inference",
+      // Nor this one: it was a TAB of the Apps page, and is a page since #2259.
+      // INSERTED here rather than appended, because the rail draws each group's
+      // pages in this table's order and Composio belongs under LLM. Inserting a
+      // new id moves no existing one, which is the only reason that is allowed.
+      "composio",
       "skills",
       "hosting",
       "search",
@@ -124,43 +128,57 @@ describe("the Connections section", () => {
     expect(connectionsHref("api-key")).toBe("#/connections/api-key");
   });
 
-  it("gives every page exactly one row on the grouped rail", () => {
-    // The failure grouping invites: a page filed under no group is a page an
-    // operator can still reach by address and can no longer find. The other
-    // direction matters too — a row naming no page would be a dead address, and
-    // `ConnectionRailRow.page` is typed `ConnectionPage` so it cannot be one.
-    for (const page of CONNECTION_PAGES) {
-      expect(
-        CONNECTION_RAIL_ROWS.filter((row) => row.page === page.id).length,
-        `${page.id} has a row`,
-      ).toBeGreaterThanOrEqual(1);
+  it("files every page under exactly one group, and every group under a real id", () => {
+    // The failure grouping invites: a page tagged with a group the rail does
+    // not draw is a page an operator can still reach by address and can no
+    // longer find. `group` is typed against the page table, so the reverse —
+    // a group label over no pages — is the one this has to catch at runtime.
+    const filed = CONNECTION_PAGE_GROUPS.flatMap((group) => connectionPagesIn(group.id));
+    expect(filed.map((page) => page.id).sort()).toEqual(
+      CONNECTION_PAGES.map((page) => page.id).sort(),
+    );
+    expect(filed).toHaveLength(CONNECTION_PAGES.length);
+    for (const group of CONNECTION_PAGE_GROUPS) {
+      expect(connectionPagesIn(group.id).length, group.id).toBeGreaterThan(0);
     }
-    // Eight rows over seven pages, and the extra one is the second view of Apps.
-    expect(CONNECTION_RAIL_ROWS).toHaveLength(CONNECTION_PAGES.length + 1);
-    const twice = CONNECTION_RAIL_ROWS.filter((row) => row.page === "apps");
-    expect(twice.map((row) => row.tab)).toEqual([null, "credentials"]);
+  });
+
+  it("draws the groups in order, with Account at the head of the keys", () => {
+    expect(
+      CONNECTION_PAGE_GROUPS.map((group) => [
+        group.label,
+        connectionPagesIn(group.id).map((page) => page.label),
+      ]),
+    ).toEqual([
+      ["Integrations", ["Apps", "MCP Servers", "Skills"]],
+      // Account first: it is the account the rest of this group is billed to,
+      // so the key that pays comes before the keys it pays for.
+      ["API Keys", ["Account", "LLM", "Composio", "Search"]],
+      ["Others", ["Hosting"]],
+    ]);
   });
 
   it("opens a bare `#/connections` on the first row of the first group", () => {
     // `DEFAULT_CONNECTION_PAGE` and the rail's head have to agree, or every
     // existing bookmark to the section quietly lands somewhere else. The rail's
-    // order is now `CONNECTION_RAIL_GROUPS`', not `CONNECTION_PAGES`', so this
-    // is the pair that has to be held rather than the page table's first entry.
-    expect(CONNECTION_RAIL_GROUPS[0].label).toBe("Integrations");
-    expect(CONNECTION_RAIL_GROUPS[0].rows[0].page).toBe(DEFAULT_CONNECTION_PAGE);
+    // order is each group's pages in page-table order, so this is the pair that
+    // has to be held rather than the page table's first entry alone.
+    expect(CONNECTION_PAGE_GROUPS[0].label).toBe("Integrations");
+    expect(connectionPagesIn(CONNECTION_PAGE_GROUPS[0].id)[0].id).toBe(DEFAULT_CONNECTION_PAGE);
     expect(DEFAULT_CONNECTION_PAGE).toBe("apps");
   });
 
-  it("resolves a rail row's label, icon and hint from its page unless it overrides them", () => {
-    const mcp = connectionRailRow({ page: "mcp" });
-    expect(mcp.label).toBe("MCP Servers");
-    expect(mcp.hint).toBe("Tool servers and their tools");
-    // Composio overrides all three: the row is one view of the Apps page, so
-    // wearing the page's own name and glyph would put "Apps" on the rail twice.
-    const composio = CONNECTION_RAIL_ROWS.find((row) => row.label === "Composio")!;
-    expect(composio.page).toBe("apps");
-    expect(composio.label).toBe("Composio");
-    expect(composio.hint).not.toBe(CONNECTION_PAGES[0].hint);
+  it("gives Composio an address of its own rather than a tab of the Apps page", () => {
+    // The draft of #2259 gave the rail a second row on `#/connections/apps`
+    // pointing at its Credentials tab, which made the rail resolve on
+    // `(page, tab)` — a mechanic nothing else in the console had. A page id is
+    // the plainer answer, and `connectionsHref` types it like every other.
+    expect(isConnectionPage("composio")).toBe(true);
+    expect(connectionsHref("composio")).toBe("#/connections/composio");
+    expect(resolveConnectionPage("composio")).toBe("composio");
+    // And the Apps page has no tab strip left to point at.
+    expect(read("views/OAuthView.tsx")).not.toContain("APP_TABS");
+    expect(read("views/OAuthView.tsx")).not.toContain("<PageTabs");
   });
 
   it("draws no rail of its own, whichever surface the sub-navigation is on", () => {
@@ -195,33 +213,49 @@ describe("the Connections section", () => {
       [
         "API Keys",
         [
-          ["LLM", "inference"],
-          // Two rows, one page. The second points at the Credentials tab
-          // `OAuthView` already had, which is what lets the rail say
-          // "Composio is a key" without splitting `ComposioSection` off the
-          // page whose provider tiles read its credential.
-          ["Composio", "apps"],
-          ["Search", "search"],
           ["Account", "api-key"],
+          ["LLM", "inference"],
+          // A page, not a tab of Apps: one row, one address, like every other
+          // row on this rail.
+          ["Composio", "composio"],
+          ["Search", "search"],
         ],
       ],
       ["Others", [["Hosting", "hosting"]]],
     ]);
   });
 
-  it("still renders Composio on the Apps page rather than splitting it out", () => {
-    // `ComposioSection` looks self-contained, but `ProvidersSection` reads its
-    // credential state to decide what every provider tile renders — the
-    // credential is the engine the provider list runs on. Splitting them would
-    // separate a credential from what it unlocks, which is the one thing this
-    // whole section is arranged around not doing.
+  it("keeps the provider grid and the credential reading one shared state", () => {
+    // This asserted that `ComposioSection` was ON the Apps page, because
+    // `ProvidersSection` reads the credential's `credentialSource`, `granted`,
+    // `openMode` and catalog warning to decide what every tile renders.
+    //
+    // The dependency is unchanged; what changed is the reading of it. It is a
+    // DATA dependency, and colocation was only ever a proxy for "one state".
+    // The two surfaces are two pages now (#2259) and the state is lifted, so
+    // what has to be held is the lift: each page mounts the shared hook, and
+    // NEITHER reaches for the status read itself. A page that did would be the
+    // two-surfaces-disagreeing failure the original comment named.
+    //
     // Matched at the JSX element boundary rather than as a substring. A bare
     // `toContain("<ComposioSection")` is satisfied by `<ComposioSectionAnything`,
     // so renaming the element past it proved nothing — verified by mutating it
     // to `<ComposioSectionRemoved`, which passed.
     const oauth = read("views/OAuthView.tsx");
-    expect(oauth).toMatch(/<ComposioSection[\s/>]/);
+    const composio = read("views/connections/ComposioView.tsx");
     expect(oauth).toMatch(/<ProvidersSection[\s/>]/);
+    expect(composio).toMatch(/<ComposioSection[\s/>]/);
+    for (const [name, source] of [
+      ["OAuthView", oauth],
+      ["ComposioView", composio],
+    ] as const) {
+      expect(source, `${name} mounts the shared credential`).toContain(
+        "useComposioCredential(client, company)",
+      );
+      expect(source, `${name} does not read the status itself`).not.toContain(
+        "getComposioStatus(",
+      );
+    }
   });
 });
 

@@ -71,6 +71,7 @@ export const CONNECTION_PAGES = [
     label: "Apps",
     icon: LayoutGrid,
     hint: "The apps your agents act through",
+    group: "integrations",
   },
   {
     // **Account**, not "API Key". Under a group already headed "API Keys" the
@@ -80,20 +81,20 @@ export const CONNECTION_PAGES = [
     // `#/connections/api-key` is an address, and a word on a rail is not a
     // reason to break one (`CONNECTIONS_NAMED_BY`, and `connectionsHref`).
     //
-    // Its position in THIS table is no longer its position on the rail — see
-    // `CONNECTION_RAIL_GROUPS` below, which orders what an operator sees. What
-    // this table's order still decides is nothing at all beyond `apps` being
-    // first, and `DEFAULT_CONNECTION_PAGE` says that outright.
+    // First under "API Keys", because it is the account the rest of that group
+    // is billed to: the key that pays comes before the keys it pays for.
     id: "api-key",
     label: "Account",
     icon: KeyRound,
     hint: "The account this company spends through",
+    group: "keys",
   },
   {
     id: "mcp",
     label: "MCP Servers",
     icon: Blocks,
     hint: "Tool servers and their tools",
+    group: "integrations",
   },
   {
     // **LLM**, not "Inference". "Inference" names the act the model performs;
@@ -106,26 +107,57 @@ export const CONNECTION_PAGES = [
     label: "LLM",
     icon: BrainCircuit,
     hint: "The model agents think with",
+    group: "keys",
+  },
+  {
+    // The Composio credential, as a page rather than a tab on Apps (issue
+    // #2259). It was a column on that page and then a tab of it, on the
+    // argument that a credential exists only to make a provider connectable:
+    // one subject, two views. What that missed is what this rail is a list of —
+    // things you connect *to*, and the keys that authorise them — and a key
+    // reachable only by opening the page named after the things it unlocks and
+    // then finding a tab is filed under the wrong half of that distinction.
+    //
+    // The coupling the tabs protected is preserved and is not a layout one: see
+    // `views/connections/use-composio-credential.ts`, which both this page and
+    // Apps read their credential state from.
+    //
+    // A NEW id, and the only kind of change to this table that is allowed: an
+    // address that did not exist cannot break a link. Nothing above it moved.
+    id: "composio",
+    label: "Composio",
+    icon: KeySquare,
+    hint: "The key the app catalog runs on",
+    group: "keys",
   },
   {
     id: "skills",
     label: "Skills",
     icon: Sparkles,
     hint: "Playbooks your agents read",
+    group: "integrations",
   },
   {
     id: "hosting",
     label: "Hosting",
     icon: Globe,
     hint: "Where this company's sites go live",
+    group: "others",
   },
   {
     id: "search",
     label: "Search",
     icon: Search,
     hint: "Where agents look things up",
+    group: "keys",
   },
-] as const satisfies readonly { id: string; label: string; icon: LucideIcon; hint: string }[];
+] as const satisfies readonly {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  hint: string;
+  group: string;
+}[];
 
 export type ConnectionPage = (typeof CONNECTION_PAGES)[number]["id"];
 
@@ -154,152 +186,46 @@ export function connectionsHref(page: ConnectionPage): string {
 }
 
 /**
- * One row on the Connections rail: a page, and optionally which of that page's
- * tabs the row addresses.
+ * The rail's groups, in the order it draws them.
  *
- * A row is not the same thing as a page, and this type is where the two come
- * apart. Seven pages, eight rows — because Apps answers two questions through
- * the tabs it already has (`APP_TABS` in `OAuthView`), and the rail is allowed
- * to name both of them.
- */
-export interface ConnectionRailRow {
-  /** The page this row opens. Always a real id — no row invents an address. */
-  page: ConnectionPage;
-  /**
-   * The `?tab=` value this row addresses, for a page whose rail rows are split
-   * by tab. `null` means the page's default tab, and **clears** the key rather
-   * than writing it — `#/connections/apps` and `#/connections/apps?tab=providers`
-   * are the same place, and only one of them should be the address you copy out
-   * of the bar (see `useHashTab`). `undefined` means the page has one row and
-   * the rail says nothing about its tabs.
-   */
-  tab?: string | null;
-  /** Overrides the page's own label, for a row that is not the whole page. */
-  label?: string;
-  /** Overrides the page's own icon, for the same reason. */
-  icon?: LucideIcon;
-  /** Overrides the page's own hint, for the same reason. */
-  hint?: string;
-}
-
-/**
- * The rail, grouped — the presentational half of this file, and only that.
+ * The same shape `SETTINGS_PAGE_GROUPS` has had all along — a `group` id on
+ * each page, an ordered list of group labels beside it — because the two rails
+ * sit side by side in one console and must not be two things to learn. The
+ * grouping is presentational only: it changes no id, retires no page, and every
+ * address under this section resolves exactly as it did.
  *
- * ## Why a second table rather than a `group` field
- *
- * `SETTINGS_PAGES` tags each page with a `group` id and lists the groups beside
- * it, and that is the vocabulary this matches wherever it can. What it cannot
- * borrow is the *ordering*: a tag orders rows by the page table's own order
- * within each group, and this rail needs LLM above Account inside "API Keys"
- * while `CONNECTION_PAGES` needs `apps` first and nothing else pinned. More to
- * the point, a tag gives a page exactly one row, and Apps needs two.
- *
- * So the page table stays the routing table — ids, and what each page is —
- * and this is what an operator sees. Nothing here can mint an address:
- * `page` is a `ConnectionPage`, so a row cannot outlive its page for the same
- * reason `connectionsHref` cannot. `connections-navigation.test.ts` holds the
- * other direction — that every page has a row, so grouping cannot quietly
- * strand one.
- *
- * ## The grouping
- *
- * **Integrations** are things the company connects *to*. **API Keys** are the
+ * **Integrations** are the things a company connects *to*. **API Keys** are the
  * credentials that authorise the work. That distinction was already true of
- * these seven pages and an operator had to reconstruct it on every visit,
- * because seven flat rows say nothing about it. It is the same split
- * OpenHuman's own Connections page makes, and Composio appears on both sides
- * there for the same reason it does here: the app grid and the key behind it
- * are two questions about one subject.
+ * these pages and an operator had to reconstruct it on every visit, because a
+ * flat list says nothing about it. It is the same split OpenHuman's own
+ * Connections page makes.
  *
  * **Apps is the first row of the first group, and that is load-bearing.** A
- * bare `#/connections` opens the first row of this list (`rowActive` in
- * `sidebar-navigation.tsx`, and `DEFAULT_CONNECTION_PAGE` agreeing with it),
- * so reordering the head of it changes where every existing bookmark to the
- * section lands.
+ * bare `#/connections` opens the first row of the rail (`rowActive` in
+ * `sidebar-navigation.tsx`, and `DEFAULT_CONNECTION_PAGE` agreeing with it), so
+ * moving the head of this list changes where every existing bookmark to the
+ * section lands. The rail's order is the page table's order within each group,
+ * which is why `composio` was **inserted** into that table rather than the
+ * table being reordered around it.
  *
- * **Others** is one row, and is honest about it: Hosting is neither a thing
- * you connect through nor a key that authorises one, and filing it under
- * either would have made a group label lie to make a rail look tidier.
+ * **Others** is one row, and is honest about it: Hosting is neither a thing you
+ * connect through nor a key that authorises one, and filing it under either
+ * would have made a group label lie to make a rail look tidier.
  */
-export const CONNECTION_RAIL_GROUPS = [
-  {
-    id: "integrations",
-    label: "Integrations",
-    rows: [
-      // `tab: null` rather than nothing: this row shares its page with Composio
-      // below, so pressing it has to *clear* a `?tab=credentials` left standing
-      // by that row. A route-only navigation preserves the query when the path
-      // is unchanged (`useHashView`'s `navigate`), which would land Apps on the
-      // Credentials tab.
-      { page: "apps", tab: null },
-      { page: "mcp" },
-      { page: "skills" },
-    ],
-  },
-  {
-    id: "keys",
-    label: "API Keys",
-    rows: [
-      { page: "inference" },
-      // The second row on the Apps page, pointing at the tab that already
-      // exists. `ComposioSection` is NOT split out of `OAuthView` and must not
-      // be: `ProvidersSection` reads the Composio credential's
-      // `credentialSource`, `granted`, `openMode` and catalog warning to decide
-      // what every provider tile renders, so the credential is the engine the
-      // provider list runs on. What changes here is navigation and nothing
-      // else — the row addresses `#/connections/apps?tab=credentials`, which is
-      // the address the page's own Credentials tab has always written.
-      {
-        page: "apps",
-        tab: "credentials",
-        label: "Composio",
-        icon: KeySquare,
-        hint: "The key the app catalog runs on",
-      },
-      { page: "search" },
-      { page: "api-key" },
-    ],
-  },
-  {
-    id: "others",
-    label: "Others",
-    rows: [{ page: "hosting" }],
-  },
+export const CONNECTION_PAGE_GROUPS = [
+  { id: "integrations", label: "Integrations" },
+  { id: "keys", label: "API Keys" },
+  { id: "others", label: "Others" },
 ] as const satisfies readonly {
-  id: string;
+  id: (typeof CONNECTION_PAGES)[number]["group"];
   label: string;
-  rows: readonly ConnectionRailRow[];
 }[];
 
-/** One rail row with its label, icon and hint filled in from its page. */
-export interface ResolvedConnectionRailRow {
-  page: ConnectionPage;
-  tab?: string | null;
-  label: string;
-  icon: LucideIcon;
-  hint: string;
-}
+export type ConnectionPageGroup = (typeof CONNECTION_PAGE_GROUPS)[number]["id"];
 
-/** A rail row resolved against its page: label, icon and hint, whoever owns them. */
-export function connectionRailRow(row: ConnectionRailRow): ResolvedConnectionRailRow {
-  const page = CONNECTION_PAGES.find((p) => p.id === row.page)!;
-  return {
-    page: row.page,
-    tab: row.tab,
-    label: row.label ?? page.label,
-    icon: row.icon ?? page.icon,
-    hint: row.hint ?? page.hint,
-  };
+/** The pages filed under one group, in the order the rail lists them. */
+export function connectionPagesIn(
+  group: ConnectionPageGroup,
+): readonly (typeof CONNECTION_PAGES)[number][] {
+  return CONNECTION_PAGES.filter((page) => page.group === group);
 }
-
-/**
- * The rail as one ordered list of rows, captions flattened away.
- *
- * What an operator's Tab key walks, and what a check of "every page still has a
- * row" has to count. The groups are what they are *drawn* in; a group is a
- * heading rather than a scope, and nothing that reasons about which row an
- * address lights should have to know they exist (see `rowActive` in
- * `sidebar-navigation.tsx`, which learned that the expensive way).
- */
-export const CONNECTION_RAIL_ROWS: readonly ResolvedConnectionRailRow[] =
-  CONNECTION_RAIL_GROUPS.flatMap((group) => group.rows.map(connectionRailRow));
