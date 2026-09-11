@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeProbe, destroysCredential, healthLabel, offersAddAnyway } from "@/inference/classify";
+import { describeProbe, destroysCredential, healthLabel, offersAddAnyway, testOutcome } from "@/inference/classify";
 import type { ProbeClass } from "@/inference/types";
 
 const ALL_CLASSES: ProbeClass[] = ["auth", "model", "quota", "endpoint", "timeout", "unknown"];
@@ -85,5 +85,40 @@ describe("offering to add without verifying", () => {
     // endpoint is fine, so neither may unlock "add anyway".
     expect(offersAddAnyway({ kind: "slugCollision" })).toBe(false);
     expect(offersAddAnyway({ kind: "keyWriteFailed" })).toBe(false);
+  });
+});
+
+describe("what a finished test reads as on a row", () => {
+  it("has a success tone of its own", () => {
+    // `AdvisoryTone` has no success case, deliberately: it describes what
+    // happened to a *save*, where the only question is how bad the news is. A
+    // test can simply be good news.
+    expect(testOutcome({ kind: "done", ok: true, message: "Reached the provider." })).toEqual({
+      tone: "ok",
+      message: "Reached the provider.",
+    });
+  });
+
+  it("keeps the host's own sentence rather than collapsing to 'failed'", () => {
+    // A 407 behind a corporate proxy has to read differently from a rejected
+    // key — that distinction is the whole reason the classifier exists, and
+    // this is the last step where it could be thrown away.
+    const proxy = testOutcome({
+      kind: "done",
+      ok: false,
+      message: "Saved, but the check did not complete.",
+    });
+    const auth = testOutcome({
+      kind: "done",
+      ok: false,
+      message: "Could not reach Acme: the provider rejected the credential.",
+    });
+    expect(proxy?.message).not.toBe(auth?.message);
+    expect(proxy?.tone).toBe("error");
+  });
+
+  it("shows nothing while idle or in flight", () => {
+    expect(testOutcome({ kind: "idle" })).toBeNull();
+    expect(testOutcome({ kind: "testing" })).toBeNull();
   });
 });

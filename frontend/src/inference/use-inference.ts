@@ -175,7 +175,7 @@ export function useInference(
       // it — so the status has to be re-read or the row keeps showing what it
       // knew before the operator asked.
       setStatus(await getInferenceStatus(client, company));
-      setNote(result.ok ? "Reached the managed brain." : (result.message ?? null));
+      // Same rule as a provider's test: the answer is the row's, not the page's.
       return result;
     },
     test: async (slug) => {
@@ -186,7 +186,9 @@ export function useInference(
         // status has to be re-read or the row keeps showing what it knew before
         // the operator asked.
         setStatus(await getInferenceStatus(client, company));
-        setNote(result.ok ? "Reached the provider." : (result.message ?? null));
+        // **No page-level note.** A test's answer belongs to the row that asked
+        // — with two providers connected, a line under the card says nothing
+        // about which one was tested, which is the bug moving the control fixed.
         return result;
       } finally {
         setBusySlug(null);

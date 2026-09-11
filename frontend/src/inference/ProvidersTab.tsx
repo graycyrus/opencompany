@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 
 import { ApiError } from "@/api/types";
+import type { ProbeResult } from "@/api/inference";
+import { TEST_RESULT_MS } from "./classify";
+import type { TestState } from "./classify";
 import type { ProbeClass } from "./types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -10,7 +13,7 @@ import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { AddProviderDialog } from "./AddProviderDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft } from "./ProviderConnectDialog";
-import { ProviderList } from "./ProviderList";
+import { MANAGED_SLUG, ProviderList } from "./ProviderList";
 import { MANAGED_OPTION_SLUG } from "./connect";
 import { managedFallbackNote } from "./routing";
 import type { InferenceActions, InferenceState } from "./use-inference";
@@ -53,6 +56,61 @@ export function ProvidersTab({
    * because neither is evidence that the endpoint is fine.
    */
   const [probeFailure, setProbeFailure] = useState<ProbeClass | null>(null);
+  /**
+   * What each row's Test is doing, keyed by slug.
+   *
+   * **Per row, not per page.** A single result under the card says nothing about
+   * which of several providers was tested, which was the bug: two providers must
+   * be able to show two different answers at once without ambiguity.
+   */
+  const [tests, setTests] = useState<Record<string, TestState>>({});
+  // Cleared on unmount, so a result that resolves after the page is gone does
+  // not set state on a component nobody is looking at.
+  const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(
+    () => () => {
+      for (const timer of Object.values(timers.current)) clearTimeout(timer);
+    },
+    [],
+  );
+
+  /** Runs a test for one row and lands its answer on that row. */
+  const runTest = (slug: string, run: () => Promise<ProbeResult>) => {
+    clearTimeout(timers.current[slug]);
+    setTests((prev) => ({ ...prev, [slug]: { kind: "testing" } }));
+    void run()
+      .then((result) =>
+        setTests((prev) => ({
+          ...prev,
+          [slug]: {
+            kind: "done",
+            ok: result.ok,
+            // The host's own sentence, so a proxy failure reads differently
+            // from a rejected key. "Failed" would throw that away at the last
+            // step.
+            message: result.ok
+              ? "Reached the provider."
+              : (result.message ?? "The check did not complete."),
+          },
+        })),
+      )
+      .catch((err) =>
+        setTests((prev) => ({
+          ...prev,
+          [slug]: {
+            kind: "done",
+            ok: false,
+            message: err instanceof ApiError ? err.message : "The check did not complete.",
+          },
+        })),
+      )
+      .finally(() => {
+        timers.current[slug] = setTimeout(
+          () => setTests((prev) => ({ ...prev, [slug]: { kind: "idle" } })),
+          TEST_RESULT_MS,
+        );
+      });
+  };
 
   if (state.load === "unavailable") return null;
   if (state.load === "loading") return <Skeleton className="h-64 rounded-xl" />;
@@ -150,14 +208,14 @@ export function ProvidersTab({
               setEditing(p);
               setConnecting(p.kind);
             }}
-            onTest={(p) => void actions.test(p.slug)}
+            onTest={(p) => runTest(p.slug, () => actions.test(p.slug))}
             onRemove={(p) => void actions.remove(p.slug)}
             onMakeDefault={(p) => void actions.makeDefault(p.slug)}
             // The same handler the header's button uses, passed down rather
             // than reimplemented: one way to add a provider, not two.
             onAdd={() => setAdding(true)}
             onManagedToggle={(enabled) => void actions.setManagedOn(enabled)}
-            onManagedTest={() => void actions.testManagedChain()}
+            onManagedTest={() => runTest(MANAGED_SLUG, actions.testManagedChain)}
             // The same dialog the add flow opens on the managed option, so
             // adding a key and replacing one are one code path.
             onManagedReplaceKey={() => {
@@ -168,6 +226,7 @@ export function ProvidersTab({
             // and it removes step 1 alone. The response re-reads the chain, so
             // the row immediately says whichever step answers next.
             onManagedRemoveKey={() => void actions.saveManagedKey("")}
+            testState={(slug) => tests[slug] ?? { kind: "idle" }}
           />
         </CardContent>
       </Card>

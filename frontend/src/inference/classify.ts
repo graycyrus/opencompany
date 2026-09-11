@@ -142,3 +142,33 @@ export function healthLabel(state: "ok" | ProbeClass): string {
 export function offersAddAnyway(failure: { kind: "probe"; probeClass: ProbeClass } | { kind: string }): boolean {
   return failure.kind === "probe";
 }
+
+
+/** How long a finished test result stays on the row before it clears itself. */
+export const TEST_RESULT_MS = 10_000;
+
+/** What a row shows while and after a test. */
+export type TestState =
+  | { kind: "idle" }
+  | { kind: "testing" }
+  | { kind: "done"; ok: boolean; message: string };
+
+/**
+ * What a finished test reads as on the row.
+ *
+ * A tone of its own rather than [`AdvisoryTone`]: that one has no success case,
+ * deliberately — it describes what happened to a *save*, where the only
+ * question is how bad the news is. A test can simply be good news.
+ *
+ * The message is the **host's**, chosen by the same `describe` this module
+ * mirrors, so a 407 behind a corporate proxy reads differently from a rejected
+ * key. That distinction is the whole reason the classifier exists, and
+ * collapsing it to "failed" here would throw it away at the last step.
+ *
+ * Different tones as well as different words, because a result that clears
+ * itself after ten seconds is glanced at rather than read.
+ */
+export function testOutcome(state: TestState): { tone: "ok" | "error"; message: string } | null {
+  if (state.kind !== "done") return null;
+  return { tone: state.ok ? "ok" : "error", message: state.message };
+}

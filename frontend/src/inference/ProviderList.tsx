@@ -1,4 +1,4 @@
-import { EllipsisVertical, Plus } from "lucide-react";
+import { EllipsisVertical, Plus, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,8 +10,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import { Monogram } from "./AddProviderDialog";
+import { cn } from "@/lib/utils";
 import { categoryOf, endpointHost } from "./catalogue";
-import { healthLabel } from "./classify";
+import { healthLabel, testOutcome } from "./classify";
+import type { TestState } from "./classify";
 import type { ManagedState } from "@/api/inference";
 import type { Provider, ProviderHealth } from "./types";
 
@@ -52,6 +54,71 @@ export const MANAGED_LABEL = "Managed";
 export const MANAGED_SLUG = "tinyhumans";
 
 /**
+ * Check this provider, and say so in place.
+ *
+ * **On the row, not in the overflow menu**, because the answer belongs to the
+ * row: with two providers connected, a result rendered under the card says
+ * nothing about which one was tested. Moving the control is what fixes the
+ * attribution; putting the answer beside it is the point of moving it.
+ *
+ * Not gated on `canManage`. The host leaves this route on `ScopedCompany`
+ * deliberately — it probes what is already stored and names no destination of
+ * its own — so a member may ask, and the console must not offer less than the
+ * host allows.
+ *
+ * The result is in an `aria-live` region. It clears itself after ten seconds,
+ * and a result that disappears is invisible to a screen reader unless it is
+ * announced when it arrives.
+ */
+function TestControl({
+  label,
+  slug,
+  state,
+  onTest,
+}: {
+  label: string;
+  slug: string;
+  state: TestState;
+  onTest: () => void;
+}) {
+  const outcome = testOutcome(state);
+  return (
+    <>
+      {/* Polite, and always present rather than mounted with the result — a
+          region that appears at the same moment as its text is frequently
+          missed by the announcement. */}
+      <span
+        aria-live="polite"
+        className={cn(
+          "truncate text-xs",
+          outcome?.tone === "ok" && "text-status-done-text",
+          outcome?.tone === "error" && "text-status-blocked-text",
+        )}
+        data-testid={`inference-provider-${slug}-test-result`}
+      >
+        {outcome?.message ?? ""}
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        disabled={state.kind === "testing"}
+        // Names the provider, so a screen reader hears which of several rows
+        // this button belongs to.
+        aria-label={`Test ${label}`}
+        // The cost warning lives on the control it applies to, not above the
+        // fold: this sends one real request and a provider may charge for it.
+        title={`Test ${label}. Sends one real request; your provider may charge for it.`}
+        data-testid={`inference-provider-${slug}-test`}
+        onClick={onTest}
+      >
+        <RefreshCw className={cn("size-4", state.kind === "testing" && "animate-spin")} />
+      </Button>
+    </>
+  );
+}
+
+/**
  * The Connected list: what this company can reach a model through.
  *
  * One row per provider, and each row is **a mark, a name, one sub-line and a
@@ -85,6 +152,7 @@ export function ProviderList({
   onManagedTest,
   onManagedReplaceKey,
   onManagedRemoveKey,
+  testState,
 }: {
   providers: readonly Provider[];
   /** What the managed chain resolves to. `undefined` when the host did not say. */
@@ -115,6 +183,8 @@ export function ProviderList({
    * rather than going blank or claiming to be off.
    */
   onManagedRemoveKey: () => void;
+  /** What each row's Test is doing, keyed by slug. */
+  testState: (slug: string) => TestState;
 }) {
   // Nothing connected at all: no records, and no managed chain behind them. The
   // card would otherwise be a heading over blank space, which reads as a page
@@ -160,6 +230,13 @@ export function ProviderList({
 
           <Health slug={MANAGED_SLUG} health={managed.health} />
 
+          <TestControl
+            label={MANAGED_LABEL}
+            slug={MANAGED_SLUG}
+            state={testState(MANAGED_SLUG)}
+            onTest={onManagedTest}
+          />
+
           {/* The full set of row controls, because every one of them means
               something here. The credential can be replaced or removed, the
               chain can be checked, and managed can be excluded from routing —
@@ -188,7 +265,8 @@ export function ProviderList({
               }
             />
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={onManagedTest}>Test</DropdownMenuItem>
+              {/* No Test here. One affordance per action — the icon button on
+                  the row is discoverable and its answer lands where it belongs. */}
               <DropdownMenuItem onClick={onManagedReplaceKey}>
                 {managed.source === "provider_key" ? "Replace key" : "Add a key"}
               </DropdownMenuItem>
@@ -217,6 +295,7 @@ export function ProviderList({
           onTest={onTest}
           onRemove={onRemove}
           onMakeDefault={onMakeDefault}
+          testState={testState}
         />
       ))}
     </ul>
@@ -249,6 +328,7 @@ function ProviderRow({
   onTest,
   onRemove,
   onMakeDefault,
+  testState,
 }: {
   provider: Provider;
   canManage: boolean;
@@ -258,6 +338,7 @@ function ProviderRow({
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
   onMakeDefault: (provider: Provider) => void;
+  testState: (slug: string) => TestState;
 }) {
   return (
     <li
@@ -280,6 +361,13 @@ function ProviderRow({
       )}
 
       <Health slug={provider.slug} health={provider.health} />
+
+      <TestControl
+        label={provider.label}
+        slug={provider.slug}
+        state={testState(provider.slug)}
+        onTest={() => onTest(provider)}
+      />
 
       <Switch
         checked={provider.enabled}
@@ -305,7 +393,6 @@ function ProviderRow({
         />
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => onEdit(provider)}>Edit</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => onTest(provider)}>Test</DropdownMenuItem>
           {/* Offered only where it would change something: a provider that is
               already the default, or one that is switched off and so cannot be
               a routing target at all. */}
