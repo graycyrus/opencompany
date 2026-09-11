@@ -1516,4 +1516,61 @@ mod tests {
             .unwrap();
         assert!(load_health(&company(), &secrets).await.unwrap().is_empty());
     }
+    /// What a routing write actually leaves behind, versus what was asked for.
+    ///
+    /// The `PUT` route used to answer with the table it built from the **request
+    /// body**, which made the response a picture of the ask rather than of the
+    /// state — so any divergence between the two was invisible by construction,
+    /// and a save that landed nowhere still came back carrying the operator's own
+    /// intent. This is the smallest concrete divergence, and it is not
+    /// hypothetical: `save_routes` drops `Default` entries, because an absence is
+    /// how "nothing set here" is stored. Echoing the request claimed a row had
+    /// been written that the store deliberately holds nothing for.
+    #[tokio::test]
+    async fn a_routing_write_does_not_store_what_it_was_handed() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+
+        let mut asked = Routes::new();
+        asked.insert("chat-v1".into(), ProviderRef::parse("acme:gpt-5"));
+        // The operator put this row back to "follow the default".
+        asked.insert("reasoning-v1".into(), ProviderRef::parse(""));
+        save_routes(&company, &secrets, &asked).await.unwrap();
+
+        let stored = load_routes(&company, &secrets).await.unwrap();
+        assert_eq!(
+            stored.get("chat-v1"),
+            Some(&ProviderRef::parse("acme:gpt-5"))
+        );
+        assert!(
+            !stored.contains_key("reasoning-v1"),
+            "an unset row is stored as an absence, so a response echoing the request \
+             would claim a row that is not there"
+        );
+        assert_ne!(
+            asked, stored,
+            "the ask and the stored table differ, which is why the route reads back"
+        );
+    }
+
+    /// A routing write that cannot land must not read back as if it had.
+    #[tokio::test]
+    async fn a_dropped_routing_write_is_visible_on_the_read_back() {
+        let company = CompanyId::new("acme");
+        let secrets = FailsWriting {
+            inner: MemSecrets::default(),
+            failing_key: ROUTES_KEY.to_string(),
+        };
+
+        let mut asked = Routes::new();
+        asked.insert("chat-v1".into(), ProviderRef::parse("acme:gpt-5"));
+        assert!(
+            save_routes(&company, &secrets, &asked).await.is_err(),
+            "the write itself reports the failure"
+        );
+        // And the read-back agrees with the store rather than with the ask —
+        // which is the property the route now answers from.
+        let stored = load_routes(&company, &secrets).await.unwrap();
+        assert!(stored.is_empty());
+    }
 }

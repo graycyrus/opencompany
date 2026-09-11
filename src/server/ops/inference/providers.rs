@@ -1373,10 +1373,26 @@ async fn put_routes(
         .await
         .map_err(ApiError)?;
 
+    // **Answered from the store, not from the request.** Echoing `routes` back
+    // made this response a picture of what was *asked for*, so any divergence
+    // between the ask and what is now stored was invisible by construction: a
+    // write that landed nowhere still came back 200 carrying the operator's own
+    // intent, the console rendered the new row, and the routing table held the
+    // old value. That was reported as a save that vanished with no error, and it
+    // could not be reproduced — because nothing on either side was capable of
+    // noticing it.
+    //
+    // One extra read on a rare write buys the property that the console can only
+    // ever render what is actually persisted. It also settles a concurrent write
+    // honestly: two admins saving at once both used to be told they won.
+    let stored = store::load_routes(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+
     Ok(Json(RoutesDto {
-        mode: mode_name(resolve::infer_routing_mode(&routes)),
-        orphaned: resolve::orphaned_routes(&routes, &providers),
-        routes: routes
+        mode: mode_name(resolve::infer_routing_mode(&stored)),
+        orphaned: resolve::orphaned_routes(&stored, &providers),
+        routes: stored
             .into_iter()
             .map(|(tier, route)| (tier, route.to_route_string()))
             .collect(),
