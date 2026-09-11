@@ -61,11 +61,16 @@ type Mark = { src: string; monochrome: boolean };
  * silently missing icon rather than a wrong one — which is why `iconCoverage`
  * in the tests pins these keys against the real provider list.
  *
- * `monochrome` says the file is a single-colour silhouette. Those are rendered
- * as a **mask** over `currentColor` rather than as an image, because a black
- * silhouette disappears against a dark row — and the alternative openhuman uses
- * (`brightness-0 invert`) only works when the swatch behind it is dark, which
- * assumes a theme.
+ * `monochrome` says the file is a **silhouette with no background plate**. Those
+ * are rendered as a mask over `currentColor` rather than as an image, because a
+ * near-black glyph disappears against a dark row — and the alternative openhuman
+ * uses (`brightness-0 invert`) only works when the swatch behind it is dark,
+ * which assumes a theme.
+ *
+ * It is not "is the file one colour". A mark that paints a plate behind its
+ * glyph masks to a solid square, because a mask reads alpha and a plate is
+ * opaque everywhere. Those are images, and their own colours carry them in both
+ * themes anyway.
  */
 const MARKS: Record<string, Mark> = {
   // Codex signs in as an OpenAI credential and is stored under `openai`, so it
@@ -85,7 +90,11 @@ const MARKS: Record<string, Mark> = {
   deepinfra: { src: deepinfraMark, monochrome: true },
   deepseek: { src: deepseekMark, monochrome: true },
   fireworks: { src: fireworksMark, monochrome: true },
-  groq: { src: groqMark, monochrome: true },
+  // Not a silhouette: this file paints a full-bleed background plate behind the
+  // glyph, so masking it yields a solid square of `currentColor`. Which is what
+  // it did. The distinction is "does the file carry a plate", not "is it one
+  // colour" — a plated mark has to be an image.
+  groq: { src: groqMark, monochrome: false },
   lmstudio: { src: lmstudioMark, monochrome: true },
   minimax: { src: minimaxMark, monochrome: true },
   modelscope: { src: modelscopeMark, monochrome: true },
@@ -126,8 +135,13 @@ export function ProviderMark({ slug, className }: { slug: string; className?: st
         aria-hidden
         className={cn("bg-current", className)}
         style={{
-          maskImage: `url(${mark.src})`,
-          WebkitMaskImage: `url(${mark.src})`,
+          // **Quoted.** Vite inlines a small SVG as a `data:` URI, and these
+          // files carry `fill:#7624F4` in a `<style>` block — an unquoted
+          // `url()` treats that `#` as a fragment delimiter and truncates the
+          // URI, so the mask fails to load and the element renders as a solid
+          // block of `currentColor`. Which is exactly what it did.
+          maskImage: `url("${mark.src}")`,
+          WebkitMaskImage: `url("${mark.src}")`,
           maskRepeat: "no-repeat",
           WebkitMaskRepeat: "no-repeat",
           maskPosition: "center",
