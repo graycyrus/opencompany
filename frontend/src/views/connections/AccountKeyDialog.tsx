@@ -32,10 +32,18 @@ interface Props {
  * and pastes a key perhaps twice in the life of a company.
  *
  * So the field moved behind the control that asks for it. What survives the cut
- * is the one thing the control does not say — that this is the **account** key
- * and not the model-provider key on the LLM page, which is the mistake the
- * `tinyhumans/key`-vs-`inference/key` split exists to prevent and the one an
- * admin standing in front of two password fields actually makes.
+ * is the one thing the control does not say: which of two password fields this
+ * is. The mistake the `tinyhumans/key`-vs-`inference/key` split exists to
+ * prevent is pasting a *provider's* key here, and an admin standing in front of
+ * two of them makes it.
+ *
+ * The wording this replaces overcorrected into something false — "not the model
+ * key", as though this credential had nothing to do with thinking. It does:
+ * `ops::company_key::finish_link` writes one granted value into **both** slots
+ * and declares the managed provider, so connecting TinyHumans is exactly what
+ * gives most companies a model. What is true is the direction, not the
+ * separation: an OpenRouter key belongs on the LLM page and will not serve as
+ * an identity here.
  *
  * Write-only, like every credential the console handles: the value goes out on
  * `PUT …/credential` and is never returned, so the field opens empty every time
@@ -60,8 +68,16 @@ export function AccountKeyDialog({ open, onOpenChange, replacing, busy, onSubmit
           <DialogTitle>{replacing ? "Replace the account key" : "Add an account key"}</DialogTitle>
           <DialogDescription>
             This company&apos;s TinyHumans account key — the identity its agents present when they
-            connect Gmail, Slack or anything else, and the account every turn is billed to. Not the
-            model-provider key on the LLM page; the two are stored separately on purpose.
+            connect Gmail, Slack or anything else.{" "}
+            {/* The billing consequence, before Save rather than after. Saving
+                arms the connecting half AND the expensive half, and nothing on
+                the old screen said so. */}
+            <strong className="font-medium text-foreground">
+              Saving it also moves every agent turn onto this account
+            </strong>
+            , so what the company thinks starts being billed here. Not a model provider&apos;s own
+            key: an OpenRouter key, or your own endpoint&apos;s, goes on the LLM page and will not
+            work here.
           </DialogDescription>
         </DialogHeader>
 

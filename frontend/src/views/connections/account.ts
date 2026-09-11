@@ -70,7 +70,12 @@ export function accountSubline(load: AccountLoad, status: CompanyCredentialStatu
     case "static":
       return "Billed to whoever runs this server";
     case "none":
-      return "Nothing resolves — agents cannot think and no app can be connected";
+      // Deliberately narrow. "Agents cannot think" is what this page used to
+      // say here, and it is **false** on a company whose LLM page holds a
+      // provider key of its own: `inference/key` resolves without this
+      // credential, so such a company thinks perfectly well while having no
+      // TinyHumans account at all. What is always true is the absence itself.
+      return "No TinyHumans account for this company";
     default:
       // An older or newer host naming a tier this build does not know. Saying
       // what the row *is* beats claiming a state nobody established.

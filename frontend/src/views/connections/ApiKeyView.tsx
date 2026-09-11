@@ -292,10 +292,18 @@ export function ApiKeyView({ client, company }: Props) {
               className="flex flex-col items-start gap-3 px-4 py-6"
               data-testid="account-empty"
             >
+              {/* Scoped to what this credential actually governs. The old page
+                  said "agents cannot think and no provider can be connected"
+                  here, which is false on a company whose LLM page holds a
+                  provider key of its own — `inference/key` resolves without
+                  this one, so such a company thinks perfectly well and would
+                  be sent to fix something that is not broken. The exception is
+                  named rather than denied. */}
               <p className="text-sm">
                 <span className="font-medium">No account connected yet.</span>{" "}
                 <span className="text-muted-foreground">
-                  Agents cannot think and no app can be connected until one is.
+                  Apps cannot be connected, and there is no TinyHumans balance to think
+                  against — though a provider key set on the LLM page still works.
                 </span>
               </p>
               <Button

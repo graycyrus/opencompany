@@ -65,15 +65,29 @@ describe("accountSubline says which tier actually answers", () => {
     }
   });
 
-  it("says plainly when nothing resolves", () => {
+  // Narrow on purpose. "Agents cannot think" is what this line said first, and
+  // it is **false** on a company whose LLM page holds a provider key of its
+  // own — `inference/key` resolves without this credential. The sub-line states
+  // the absence; the empty state carries the consequence with its exception
+  // named.
+  it("states the absence without claiming the company has stopped", () => {
     const line = accountSubline("ready", status({ configured: false, source: "none" }));
-    expect(line).toContain("agents cannot think");
+    expect(line).toBe("No TinyHumans account for this company");
+  });
+
+  it("never claims agents cannot think, in any state", () => {
+    for (const load of ["ready", "error", "loading"] as const) {
+      for (const source of ["company", "attested", "static", "none"] as const) {
+        const line = accountSubline(load, status({ source })).toLowerCase();
+        expect(line, `${load}/${source}`).not.toContain("cannot think");
+      }
+    }
   });
 
   it("does not claim there is no key when the host could not answer", () => {
     const line = accountSubline("error", null);
     expect(line).toContain("not the same as having no key");
-    expect(line).not.toContain("Nothing resolves");
+    expect(line).not.toContain("No TinyHumans account");
   });
 
   it("falls back to what the row is when a host names an unknown tier", () => {

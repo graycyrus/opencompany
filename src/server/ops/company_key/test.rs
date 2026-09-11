@@ -170,6 +170,24 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
         "the notice must say which key this is NOT: {notice}"
     );
 
+    // The billing move, stated before the save rather than discovered on the
+    // next invoice. Setting this key arms the connecting half AND the expensive
+    // half — `finish_link` writes the same value to `inference/key` and
+    // declares the managed provider — and neither string used to say so.
+    assert!(
+        notice.contains("every agent turn onto this account"),
+        "the notice must say that setting this key moves the thinking bill: {notice}"
+    );
+
+    // And it must not overshoot the other way. "It is not the model-provider
+    // key" was false: this credential very often IS what the agents think on,
+    // and denying it sends an admin hunting for a second key they do not need.
+    // The distinction that survives is narrower — not a *provider's* key.
+    assert!(
+        !notice.contains("not the model-provider key"),
+        "the notice must not claim this key has nothing to do with models: {notice}"
+    );
+
     // GET reflects it and still never carries the key.
     let (_, dto, raw) = send(&state, "acme", "GET", "/api/v1/company/credential", None).await;
     assert_eq!(dto["configured"], true);

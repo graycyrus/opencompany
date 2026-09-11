@@ -117,10 +117,9 @@ describe("ApiKeyView describes a fallback platform identity honestly", () => {
     const subline = container.querySelector('[data-testid="account-row-subline"]');
     expect(subline?.textContent).toBe("Billed to whoever runs this server");
     expect(container.querySelector('[data-testid="account-empty"]')).toBeNull();
-    expect(container.textContent ?? "").not.toContain("agents cannot think");
   });
 
-  it("still warns plainly when there is truly no identity at all", async () => {
+  it("still says plainly when there is no identity at all", async () => {
     const client = clientFor({
       credential: async () => credential({ configured: false, source: "none" }),
       billing: async () => ({ configured: false }),
@@ -129,8 +128,46 @@ describe("ApiKeyView describes a fallback platform identity honestly", () => {
     await mount(client);
 
     expect(container.querySelector('[data-testid="account-empty"]')).not.toBeNull();
+    expect(container.textContent ?? "").toContain("No account connected yet.");
+    expect(container.textContent ?? "").toContain("Apps cannot be connected");
+  });
+});
+
+describe("ApiKeyView never overstates what a missing account breaks", () => {
+  // QA, 2026-09-11. The old page said "Until one is set, agents cannot think
+  // and no provider can be connected", and it is **false** on a company whose
+  // LLM page holds a provider key of its own: `inference/key` resolves without
+  // this credential, so such a company thinks perfectly well at `source:
+  // "none"` — and the sentence sends its operator to fix something that is not
+  // broken. The page may say what this key governs; it may not claim the whole
+  // company has stopped.
+  it("never claims agents cannot think, in any state", async () => {
+    for (const source of ["none", "attested", "static", "company"] as const) {
+      const client = clientFor({
+        credential: async () => credential({ configured: source === "company", source }),
+        billing: async () => ({ configured: false }),
+      });
+
+      await mount(client);
+
+      const text = (container.textContent ?? "").toLowerCase();
+      expect(text, `source=${source}`).not.toContain("agents cannot think");
+      expect(text, `source=${source}`).not.toContain("cannot think");
+    }
+  });
+
+  // The exception is named rather than denied — an operator who has set a
+  // provider key on the LLM page must be able to see that it still applies.
+  it("names the LLM-page provider key as the thing that still works", async () => {
+    const client = clientFor({
+      credential: async () => credential({ configured: false, source: "none" }),
+      billing: async () => ({ configured: false }),
+    });
+
+    await mount(client);
+
     expect(container.textContent ?? "").toContain(
-      "Agents cannot think and no app can be connected until one is.",
+      "a provider key set on the LLM page still works",
     );
   });
 });

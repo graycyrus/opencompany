@@ -154,8 +154,18 @@ export function CompanyCredentialCard({
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Company credential
         </h2>
+        {/* "for connecting providers — not the model key" overshot. The
+            distinction is real and kept: this is not a model *provider's* key,
+            and pasting an OpenRouter key here is exactly the mistake the
+            `tinyhumans/key`-vs-`inference/key` split exists to prevent. What
+            was false is the compression into "nothing to do with models" —
+            `ops::company_key::finish_link` writes one granted value into
+            **both** slots and declares the managed provider, so this credential
+            is very often what the agents think on. A line denying that sends an
+            admin hunting for a second key they do not need. Both halves, one
+            line. */}
         <span className="text-xs text-muted-foreground">
-          for connecting providers — not the model key
+          connects your apps and pays for thinking — not an OpenRouter key
         </span>
       </div>
 
