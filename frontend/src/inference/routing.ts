@@ -118,9 +118,18 @@ export function managedModeBadge(configured: boolean | undefined): string {
   return configured ? "Available" : "Not set up";
 }
 
-/** The fallback line under the mode list, when the fallback actually exists. */
-export const MANAGED_FALLBACK_UNAVAILABLE =
-  "Managed is not set up on this company, so it is not a fallback. Connect it on the LLM Providers tab.";
+/**
+ * What managed's absence means — the statement, with no navigation in it.
+ *
+ * Used on the page that **holds the action**, where the button is already on
+ * screen. Telling an operator to go to the tab they are looking at is a sentence
+ * that has stopped reading its own surroundings.
+ */
+export const MANAGED_NOT_SET_UP =
+  "Managed is not set up on this company, so it is not a fallback.";
+
+/** The same statement plus where to fix it, for a page that does not hold the action. */
+export const MANAGED_NOT_SET_UP_ELSEWHERE = `${MANAGED_NOT_SET_UP} Connect it on the LLM Providers tab.`;
 
 /** What the shared-model row covers, said out loud rather than implied. */
 export const OWN_MODE_SCOPE =

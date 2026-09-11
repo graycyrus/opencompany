@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import { MANAGED_OPTION_SLUG, addOptions, offersManaged } from "@/inference/connect";
 import { managedRow } from "@/inference/ProviderList";
+import { MANAGED_NOT_SET_UP, MANAGED_NOT_SET_UP_ELSEWHERE } from "@/inference/routing";
 import type { ManagedState } from "@/api/inference";
 
 const managed = (source: ManagedState["source"]): ManagedState => ({
@@ -75,5 +76,21 @@ describe("where managed is offered", () => {
   it("is not offered when the host did not say", () => {
     // Offering a setup flow for a state nobody established would be a guess.
     expect(offersManaged(undefined)).toBe(false);
+  });
+});
+
+describe("the line that says managed is not set up", () => {
+  it("carries no navigation on the page that holds the action", () => {
+    // The Providers tab has the button at the top of it. Telling an operator to
+    // go to the tab they are looking at is a sentence that has stopped reading
+    // its own surroundings.
+    expect(MANAGED_NOT_SET_UP).not.toContain("tab");
+    expect(MANAGED_NOT_SET_UP).toContain("not a fallback");
+  });
+
+  it("says where to go from a page that does not", () => {
+    // On Routing the action is elsewhere, so naming it is the useful half.
+    expect(MANAGED_NOT_SET_UP_ELSEWHERE).toContain(MANAGED_NOT_SET_UP);
+    expect(MANAGED_NOT_SET_UP_ELSEWHERE).toContain("LLM Providers tab");
   });
 });

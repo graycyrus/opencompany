@@ -26,6 +26,7 @@ import {
   WORKLOADS,
   WORKLOAD_COPY,
   WORKLOAD_TIER,
+  MANAGED_NOT_SET_UP_ELSEWHERE,
   applyToEveryWorkload,
   managedModeBadge,
   formatRef,
@@ -108,6 +109,14 @@ export function RoutingTab({
           {/* The page's one h1 is its title; this section and the Providers tab's
               are peers under it, not one nested in the other. */}
           <h2 className="text-sm font-medium">Routing mode</h2>
+          {/* Here the navigation is not circular: the action lives on the other
+              tab, and this is the page where "Managed is always available as a
+              fallback" would otherwise be read as true. */}
+          {state.status?.managed?.configured === false && (
+            <p className="text-xs text-muted-foreground" data-testid="inference-managed-not-set-up">
+              {MANAGED_NOT_SET_UP_ELSEWHERE}
+            </p>
+          )}
           {(["managed", "own", "advanced"] as const).map((option) => (
             <ModeRow
               key={option}

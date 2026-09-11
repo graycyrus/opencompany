@@ -12,7 +12,7 @@ import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft } from "./ProviderConnectDialog";
 import { ProviderList } from "./ProviderList";
 import { MANAGED_OPTION_SLUG } from "./connect";
-import { MANAGED_FALLBACK_NOTE, MANAGED_FALLBACK_UNAVAILABLE } from "./routing";
+import { MANAGED_FALLBACK_NOTE, MANAGED_NOT_SET_UP } from "./routing";
 import type { InferenceActions, InferenceState } from "./use-inference";
 import type { Provider } from "./types";
 
@@ -153,16 +153,22 @@ export function ProvidersTab({
             onTest={(p) => void actions.test(p.slug)}
             onRemove={(p) => void actions.remove(p.slug)}
             onMakeDefault={(p) => void actions.makeDefault(p.slug)}
+            // The same handler the header's button uses, passed down rather
+            // than reimplemented: one way to add a provider, not two.
+            onAdd={() => setAdding(true)}
           />
         </CardContent>
       </Card>
 
       {/* Outside the card, because it is about the whole page rather than about
-          the list: managed stands behind every row in it. */}
+          the list: managed stands behind every row in it.
+
+          The "not set up" variant carries **no navigation** here. The action it
+          would point at is the button at the top of this same page, and a line
+          telling an operator to go where they already are has stopped reading
+          its own surroundings. */}
       <p className="text-xs text-muted-foreground">
-        {state.status?.managed?.configured === false
-          ? MANAGED_FALLBACK_UNAVAILABLE
-          : MANAGED_FALLBACK_NOTE}
+        {state.status?.managed?.configured === false ? MANAGED_NOT_SET_UP : MANAGED_FALLBACK_NOTE}
       </p>
 
       {state.note && (

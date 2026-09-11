@@ -1,4 +1,4 @@
-import { EllipsisVertical } from "lucide-react";
+import { EllipsisVertical, Plus } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -80,6 +80,7 @@ export function ProviderList({
   onTest,
   onRemove,
   onMakeDefault,
+  onAdd,
 }: {
   providers: readonly Provider[];
   /** What the managed chain resolves to. `undefined` when the host did not say. */
@@ -92,7 +93,33 @@ export function ProviderList({
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
   onMakeDefault: (provider: Provider) => void;
+  /**
+   * The same action the header card's button performs, passed in rather than
+   * reimplemented — one way to add a provider, not two that can drift.
+   */
+  onAdd: () => void;
 }) {
+  // Nothing connected at all: no records, and no managed chain behind them. The
+  // card would otherwise be a heading over blank space, which reads as a page
+  // that failed to load rather than a company that has not started.
+  if (providers.length === 0 && !managed?.configured) {
+    return (
+      <div
+        className="flex flex-col items-start gap-3 px-4 py-6"
+        data-testid="inference-providers-empty"
+      >
+        <p className="text-sm">
+          <span className="font-medium">No providers connected yet.</span>{" "}
+          <span className="text-muted-foreground">Connect one to get started.</span>
+        </p>
+        <Button type="button" disabled={!canManage} onClick={onAdd}>
+          <Plus className="size-4" />
+          Add a provider
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <ul className="divide-y divide-border" data-testid="inference-providers">
       {/* Always first and always present. It is not in `providers` because it is

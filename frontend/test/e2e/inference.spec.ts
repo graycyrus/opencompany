@@ -42,7 +42,12 @@ async function openInference(page: Page) {
     .catch(() => {
       /* already seen in this context — nothing to dismiss */
     });
-  await expect(page.getByTestId("inference-providers")).toBeVisible({ timeout: 30_000 });
+  // Either the list or its empty state — a company with nothing connected shows
+  // the second, and waiting only for the first would hang on exactly the
+  // company a first run starts from.
+  await expect(
+    page.getByTestId("inference-providers").or(page.getByTestId("inference-providers-empty")),
+  ).toBeVisible({ timeout: 30_000 });
 }
 
 /** Open the add dialog and choose one option out of a category. */
