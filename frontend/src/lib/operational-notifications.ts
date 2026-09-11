@@ -37,6 +37,19 @@ import { WEEK1_NUDGE_KIND } from "@/lib/week1-nudge";
  * durable — is still what holds the toast to one per row rather than one per
  * poll, and it never depended on the ack.
  *
+ * # What the caller does with the first poll
+ *
+ * Dropping the ack changes what an unread row *means*. It used to mean "nobody
+ * has seen this"; it now means "nobody has dismissed this", and those differ
+ * across a page load. So `app-shell` seeds this set from its first poll of a
+ * scope without toasting: rows already waiting when the console opened are
+ * backlog, and belong to the Activity tab and the bell's count rather than to a
+ * transient announcement. The toast is for what happens while somebody is here,
+ * looking at something else — which is the only claim it can honestly make.
+ *
+ * That rule lives in the caller because this module sees one poll at a time and
+ * cannot tell the first from the fiftieth.
+ *
  * [`WEEK1_NUDGE_KIND`] is excluded even though it is, mechanically, just
  * another non-mention row on this same feed (PR #1878 review, comment
  * 3893066248). `notifications()` on the host has no server-side kind

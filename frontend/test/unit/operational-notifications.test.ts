@@ -159,9 +159,9 @@ describe("announcing a row does not acknowledge it", () => {
   // "this is gone" rules the same way.
   const shell = readFileSync(resolve(process.cwd(), "src/components/app-shell.tsx"), "utf8");
 
-  /** The toast block, from the call that selects rows to the end of its `if`. */
+  /** The toast block, from the seed gate to the end of `refreshMentions`. */
   const announceBlock = (() => {
-    const start = shell.indexOf("const toAnnounce = operationalNotificationsToAnnounce(");
+    const start = shell.indexOf("const seeding = !operationalSeededRef.current");
     expect(start, "the announce block should still exist").toBeGreaterThan(-1);
     const end = shell.indexOf("\n      })\n      .catch(", start);
     expect(end, "the announce block should end inside refreshMentions").toBeGreaterThan(start);
@@ -183,6 +183,26 @@ describe("announcing a row does not acknowledge it", () => {
     // stops a poll every few seconds re-toasting the same dispatch failure,
     // and it is updated the moment a row is announced.
     expect(announceBlock).toContain("operationalAnnouncedRef.current.add");
+  });
+
+  it("seeds the first poll of a scope instead of announcing it", () => {
+    // Without the ack, an unread row no longer means "unseen" — only
+    // "undismissed" — so announcing the whole unread set on arrival re-toasts
+    // the backlog on every load. That is not hypothetical: a warning toast
+    // landed over the bottom of a 390px Settings page and covered the button
+    // `sidebar-toggle-reachable.spec.ts` hit-tests, on a row an earlier load
+    // had already announced.
+    expect(announceBlock).toContain("const seeding = !operationalSeededRef.current");
+    // Marked announced either way, or a seeded row toasts on the second poll
+    // instead of the first — the same bug, one tick later.
+    const add = announceBlock.indexOf("operationalAnnouncedRef.current.add");
+    const gate = announceBlock.indexOf("if (!seeding)");
+    expect(add, "the announced set is updated before the toast gate").toBeLessThan(gate);
+    expect(announceBlock).toContain("toast.error");
+
+    // And a company switch is a new backlog: its first poll seeds too, so
+    // switching does not announce everything the next company was sitting on.
+    expect(shell).toMatch(/operationalSeededRef\.current = false/);
   });
 
   it("leaves no scheduling machinery behind", () => {

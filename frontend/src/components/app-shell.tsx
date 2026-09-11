@@ -2142,11 +2142,22 @@ export function AppShell({
   // fails (offline) is retried by the next reload rather than hammered.
   const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
   // Ids of non-mention (`dispatch_failed` / `approval_expired` /
-  // `workflow_run_*`) rows this session has already toasted. These rows come
-  // back on every poll until marked read server-side, so this local guard is
-  // what keeps a single dispatch failure from toasting once per interval
-  // instead of once — see `@/lib/operational-notifications`.
+  // `workflow_run_*`) rows this console has already announced, or decided not
+  // to. These rows come back on every poll until somebody dismisses them, so
+  // this guard is what keeps a single dispatch failure from toasting once per
+  // interval instead of once — see `@/lib/operational-notifications`.
   const operationalAnnouncedRef = useRef<Set<string>>(new Set());
+  // Whether the first poll of the current scope has landed. Until it has,
+  // every operational row it returns is **backlog**: it happened before this
+  // console was open, so it is seeded into the set above rather than toasted.
+  //
+  // A toast is how a failure reaches somebody who is looking at something else
+  // — it is not a summary of what was already waiting. That is the Activity
+  // tab's job, and the bell carries the count. Toasting the backlog on arrival
+  // put a full-width warning over the bottom of a 390px page on *every* load
+  // (it covered a Settings card's button in `sidebar-toggle-reachable`), and it
+  // would do that once per reload for as long as a row went undismissed.
+  const operationalSeededRef = useRef(false);
   const refreshMentions = useCallback(() => {
     const requestCompany = company;
     const requestClient = client;
@@ -2217,17 +2228,33 @@ export function AppShell({
         // tab can never show: the page would be empty of precisely the events it
         // exists to make recoverable after a toast (Codex #2256 P1).
         //
-        // So a row stays unread until somebody dismisses it.
-        // `operationalAnnouncedRef` still holds the toast to one per row per
-        // session, so the poll does not re-announce it every few seconds; a
-        // reload announces once more, which is the honest reading of a failure
-        // nobody has acknowledged yet — and now a single click ends it.
+        // So a row stays unread until somebody dismisses it — and that makes
+        // *when* to toast a separate question from whether to keep the row.
+        //
+        // An unread row is no longer evidence that nobody has seen it; it is
+        // only evidence that nobody has dismissed it. Announcing the whole
+        // unread set on arrival therefore re-announces the backlog on every
+        // load, which is both wrong and loud: a full-width warning toast landed
+        // over the bottom of a 390px Settings page and covered the button
+        // `sidebar-toggle-reachable` hit-tests, on a row an earlier page load
+        // had already toasted.
+        //
+        // The first poll of a scope **seeds** instead of announcing. Rows that
+        // were already waiting when the console opened belong to the Activity
+        // tab and the bell's count, which is where a person goes to look; the
+        // toast is reserved for what happens while they are here, looking at
+        // something else. That is the sentence this consumer was written around
+        // and the only one a transient announcement can honestly make.
+        const seeding = !operationalSeededRef.current;
+        operationalSeededRef.current = true;
         const toAnnounce = operationalNotificationsToAnnounce(
           next,
           operationalAnnouncedRef.current,
         );
-        if (toAnnounce.length > 0) {
-          toAnnounce.forEach((n) => operationalAnnouncedRef.current.add(n.id));
+        // Marked announced either way: a seeded row must not toast on the
+        // second poll instead of the first.
+        toAnnounce.forEach((n) => operationalAnnouncedRef.current.add(n.id));
+        if (!seeding) {
           for (const n of toAnnounce) {
             if (operationalNotificationSeverity(n) === "error") toast.error(n.title);
             else toast.warning(n.title);
@@ -2244,6 +2271,12 @@ export function AppShell({
   useEffect(() => {
     mentionFeedRevision.current++;
     mentionReReadSubjectsRef.current = new Set();
+    // A new company (or a reseated client) is a new backlog: its first poll
+    // seeds rather than announcing, exactly as the first poll of the session
+    // does. Switching company must not toast everything that company has been
+    // sitting on.
+    operationalSeededRef.current = false;
+    operationalAnnouncedRef.current = new Set();
     setMentionFeed([]);
     refreshMentions();
     const onFocus = () => refreshMentions();
