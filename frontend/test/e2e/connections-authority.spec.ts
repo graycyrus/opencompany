@@ -140,18 +140,26 @@ test("a member sees what is connected but is offered nothing that changes it", a
     //
     // Its own page since issue #2259. The credential-field assertion below is
     // the one that matters most in this spec — a member must never be handed
-    // somewhere to paste a token — and it lived in the Apps block above until
+    // somewhere to paste a key — and it lived in the Apps block above until
     // the page split. Leaving it there would have left it passing for a reason
-    // that has nothing to do with authority: `#composio-token` is not on the
+    // that has nothing to do with authority: `#composio-api-key` is not on the
     // Apps page for an ADMIN either now, so the assertion would have read as
     // coverage while testing nothing. The admin half below asserts the field IS
     // here, which is what keeps this one honest.
+    //
+    // `#composio-api-key`, not the legacy `#composio-token`: `COMPOSIO_MANAGED_HIDDEN`
+    // (`src/product-scope.ts`) is `true` on every build, so `ComposioSection`'s
+    // `MODE_ORDER` never offers `managed` and its form never lands on the
+    // `mode === "managed"` token card `#composio-token` lives in — that card is
+    // unreachable UI on the shipped console. The BYOK tile is the only route on
+    // offer, so `#composio-api-key` is the credential field an operator actually
+    // sees, and the one a member must not be handed either.
     await openConnectionsPage(memberPage, "composio");
     await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({
       timeout: 30_000,
     });
-    await expect(memberPage.locator("#composio-token")).toHaveCount(0);
-    await expect(button("Save token")).toHaveCount(0);
+    await expect(memberPage.locator("#composio-api-key")).toHaveCount(0);
+    await expect(button("Save key")).toHaveCount(0);
 
     // ---- MCP: the tool servers, rows and the file both ---------------------
     await openSettingsPage(memberPage, "mcp");
