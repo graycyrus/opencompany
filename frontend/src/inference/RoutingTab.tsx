@@ -269,8 +269,9 @@ export function RoutingTab({
             .join(" ")}
         </p>
       )}
+      {/* The form's own failure stays in the form, where the thing to correct
+          is. Everything else a write says is a toast — see `write`. */}
       {error && <p className="text-xs text-status-blocked-text">{error}</p>}
-      {state.note && <p className="text-xs text-muted-foreground">{state.note}</p>}
 
       <WorkloadModelDialog
         client={client}

@@ -12,6 +12,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { toast } from "sonner";
+
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import {
@@ -53,8 +55,6 @@ export interface InferenceState {
   orphaned: [string, string][];
   /** The slug currently mid-request, so one row's controls settle rather than the page. */
   busySlug: string | null;
-  /** What the last write said, for a transient note under the card. */
-  note: string | null;
 }
 
 /** The mutations the page can perform. */
@@ -71,7 +71,6 @@ export interface InferenceActions {
   test: (slug: string, model?: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
-  clearNote: () => void;
 }
 
 /**
@@ -92,7 +91,7 @@ export function useInference(
   const [mode, setMode] = useState<RoutingMode>("managed");
   const [orphaned, setOrphaned] = useState<[string, string][]>([]);
   const [busySlug, setBusySlug] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+
 
   const reload = useCallback(async () => {
     try {
@@ -122,14 +121,28 @@ export function useInference(
     void reload();
   }, [reload]);
 
-  /** Runs a provider write, parking the row it touches and landing the result. */
+  /**
+   * Runs a provider write, parking the row it touches and landing the result.
+   *
+   * **The outcome is a toast, and a failure is never silent.** These used to
+   * land as one line of grey prose under the card — including "Anthropic is
+   * disconnected and its key is cleared", which is the most destructive thing
+   * this page does — while the callers invoked them as bare `void`, so a
+   * rejection went nowhere at all. An action's result belongs beside the action
+   * in time, not folded into the page as though it were a standing fact about
+   * the company.
+   *
+   * The error is re-thrown as well as toasted: a form that is still open shows
+   * its own failure inline, where the field the operator has to correct is.
+   */
   const write = useCallback(
     async (slug: string | null, run: () => Promise<ProviderMutation>) => {
       setBusySlug(slug);
       try {
         const result = await run();
         setStatus(result.status);
-        setNote(result.note);
+        // The host's own sentence, which already names the provider it is about.
+        toast.success(result.note);
         // A delete or a disable can move routes, so the table is re-read rather
         // than assumed unchanged. It is the one thing a provider write can
         // change that the provider write's own response does not carry.
@@ -143,6 +156,9 @@ export function useInference(
           // and the providers are still correct.
         }
         return result;
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "That change could not be saved.");
+        throw err;
       } finally {
         setBusySlug(null);
       }
@@ -158,9 +174,7 @@ export function useInference(
     mode,
     orphaned,
     busySlug,
-    note,
     reload,
-    clearNote: () => setNote(null),
     add: (input) => write(null, () => addProvider(client, company, input)),
     edit: (slug, input) => write(slug, () => editProvider(client, company, slug, input)),
     remove: (slug) => write(slug, () => deleteProvider(client, company, slug)),
@@ -199,12 +213,12 @@ export function useInference(
       setRoutes(table.routes);
       setMode(table.mode);
       setOrphaned(table.orphaned);
-      setNote("Routing saved. It takes effect on the next turn.");
+      toast.success("Routing saved. It takes effect on the next turn.");
     },
     restart: async () => {
       const result = await restartInference(client, company);
       setStatus(result.status);
-      setNote(result.note);
+      toast.success(result.note);
     },
   };
 }

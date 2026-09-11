@@ -49,6 +49,19 @@ export function stripEnvelopePrefix(message: string): string {
   return message.replace(/^(invalid request|conflict|not found):\s*/i, "");
 }
 
+/**
+ * Fires a write whose only failure surface is the toast `write` already raised.
+ *
+ * `void promise` on a rejecting call is an unhandled rejection, and these are
+ * the row controls — a switch, a default marker, a restart — with no form open
+ * to show an error in. Swallowing here is deliberate and narrow: the toast has
+ * already been raised by the time this runs, so the alternative is not "report
+ * it better", it is "report it twice, once as a console error nobody reads".
+ */
+function fireAndForget(run: Promise<unknown>): void {
+  void run.catch(() => {});
+}
+
 export function ProvidersTab({
   state,
   actions,
@@ -211,7 +224,7 @@ export function ProvidersTab({
       {state.status?.restartRequired && (
         <RestartNotice
           canRestart={canManage && state.status.canRebuildInPlace}
-          onRestart={() => void actions.restart()}
+          onRestart={() => fireAndForget(actions.restart())}
         />
       )}
 
@@ -245,7 +258,7 @@ export function ProvidersTab({
             managed={state.status?.managed}
             canManage={canManage}
             busySlug={state.busySlug}
-            onToggle={(p, enabled) => void actions.setEnabled(p.slug, enabled)}
+            onToggle={(p, enabled) => fireAndForget(actions.setEnabled(p.slug, enabled))}
             onEdit={(p) => {
               setEditing(p);
               setConnecting(p.kind);
@@ -262,11 +275,11 @@ export function ProvidersTab({
               setEditing(p);
               setConnecting(p.kind);
             }}
-            onMakeDefault={(p) => void actions.makeDefault(p.slug)}
+            onMakeDefault={(p) => fireAndForget(actions.makeDefault(p.slug))}
             // The same handler the header's button uses, passed down rather
             // than reimplemented: one way to add a provider, not two.
             onAdd={() => setAdding(true)}
-            onManagedToggle={(enabled) => void actions.setManagedOn(enabled)}
+            onManagedToggle={(enabled) => fireAndForget(actions.setManagedOn(enabled))}
             onManagedTest={() => runTest(MANAGED_SLUG, actions.testManagedChain)}
             // The same dialog the add flow opens on the managed option, so
             // adding a key and replacing one are one code path.
@@ -277,7 +290,7 @@ export function ProvidersTab({
             // An empty key is how the store clears a value — it has no delete —
             // and it removes step 1 alone. The response re-reads the chain, so
             // the row immediately says whichever step answers next.
-            onManagedRemoveKey={() => void actions.saveManagedKey("")}
+            onManagedRemoveKey={() => fireAndForget(actions.saveManagedKey(""))}
             testState={(slug) => tests[slug] ?? { kind: "idle" }}
           />
         </CardContent>
@@ -297,12 +310,6 @@ export function ProvidersTab({
       {managedFallbackNote(state.status?.managed) && (
         <p className="text-xs text-muted-foreground" data-testid="inference-managed-fallback">
           {managedFallbackNote(state.status?.managed)}
-        </p>
-      )}
-
-      {state.note && (
-        <p className="text-xs text-muted-foreground" data-testid="inference-note">
-          {state.note}
         </p>
       )}
 
@@ -345,7 +352,7 @@ export function ProvidersTab({
             ? () => {
                 const provider = confirming.provider;
                 setConfirming(null);
-                void actions.setEnabled(provider.slug, false);
+                fireAndForget(actions.setEnabled(provider.slug, false));
               }
             : undefined
         }
@@ -355,9 +362,11 @@ export function ProvidersTab({
           const { intent, provider } = confirming;
           setConfirming(null);
           // An empty key is how the store clears a value — it has no delete.
-          void (intent === "key"
-            ? actions.edit(provider.slug, { key: "" })
-            : actions.remove(provider.slug));
+          fireAndForget(
+            intent === "key"
+              ? actions.edit(provider.slug, { key: "" })
+              : actions.remove(provider.slug),
+          );
         }}
       />
     </div>
