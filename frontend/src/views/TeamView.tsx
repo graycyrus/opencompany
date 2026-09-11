@@ -628,6 +628,20 @@ export function agentDmHref(member: TeamMember): string {
   return withHostParam(`chat/${encodeURIComponent(dmChannelId(member))}`);
 }
 
+/**
+ * One agent on the Agent board.
+ *
+ * The card is a scanning surface first: the title is a stretched link to the
+ * agent's detail page (issue #1810), and the two controls that sit above that
+ * click target are the ones an operator reaches for *without* leaving the grid
+ * — Message on the face (issue #2252) and the destructive Remove behind an
+ * overflow (issue #1206). Everything a card only *reports* — workload, desk,
+ * daily budget — is read-only here and configured on the detail page.
+ *
+ * `onOpen` and `messageHref` are both undefined for a card with no host record,
+ * for the same reason: a starter-team placeholder has no agent behind it, so
+ * both addresses would resolve to nothing.
+ */
 function MemberCard({
   member,
   onRemove,

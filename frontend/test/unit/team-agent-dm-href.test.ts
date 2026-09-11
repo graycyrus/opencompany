@@ -35,6 +35,14 @@ import { agentDmHref } from "@/views/TeamView";
  * opened the wrong chat", not as a wrong function call. Hence this test.
  */
 
+/**
+ * A roster entry with only the fields a case actually varies spelled out.
+ *
+ * `id` and `name` are required because every assertion here is about one or the
+ * other — the id is what the address is built from, the name is what the
+ * control is labelled with — and a default for either would let a case pass
+ * while testing the default instead of its own subject.
+ */
 function member(over: Partial<TeamMember> & Pick<TeamMember, "id" | "name">): TeamMember {
   return {
     role: "Engineer",
