@@ -211,8 +211,9 @@ describe("which section an address belongs to", () => {
   it("claims nothing for the surfaces that are deliberately not in the nav", () => {
     // Settings and Feedback live in the sidebar's footer; Overview in the
     // window's title row; Observatory under Settings; Pages is direct-URL only
-    // (#1171, #1172); `not-found` is nowhere by design. Approvals has a row
-    // again and is therefore owned — asserted below rather than here.
+    // (#1171, #1172); `not-found` is nowhere by design. Approvals is absent
+    // from this list only because it shares a page with `notifications`: the
+    // two heads are asserted unowned together, below, rather than here.
     for (const view of [
       "settings",
       "feedback",
