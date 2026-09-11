@@ -85,8 +85,11 @@ export function NotificationsView({
    * host's `PUT` does with no `ids` field, and what "Dismiss all" means. An
    * explicitly empty array marks nothing, which is a real distinction and not
    * one this page ever wants: it must never send `[]` expecting a refresh.
+   *
+   * Returns when the write is over, so `ActivityTab` can stop hiding a row it
+   * optimistically removed. A caller with nothing to await may return nothing.
    */
-  onNotificationsRead: (ids?: readonly string[]) => void;
+  onNotificationsRead: (ids?: readonly string[]) => void | Promise<void>;
   /** `#/approvals` forces the queue and ignores `?tab=`. */
   forceApprovalsTab?: boolean;
   onResolved: (systemLine: string) => void;
@@ -126,6 +129,38 @@ export function NotificationsView({
     [feed.status.pending_approvals, unread],
   );
 
+  /**
+   * Selecting a tab, from either head.
+   *
+   * On `#/notifications` this is the hash setter and nothing more. On the
+   * legacy `#/approvals` head it cannot be: `tab` is forced to `"approvals"`
+   * there, so writing `?tab=activity` onto that hash changes the address and
+   * leaves the queue on screen — the operator clicks Activity, the URL moves
+   * and the page does not (Codex). Moving to the page's own address is what
+   * actually selects the tab.
+   *
+   * Only the move *away* redirects. Clicking Approvals on the forced head
+   * would otherwise navigate off `#/approvals/<taskId>` and drop the task id,
+   * which is the one thing that head exists to carry (#883).
+   */
+  const selectTab = useCallback(
+    (next: NotificationTab) => {
+      if (!forceApprovalsTab) {
+        setHashTab(next);
+        return;
+      }
+      if (next === "approvals") return;
+      // `?host=` and anything else riding the address survives the move — the
+      // same rule `useHashTab`'s own setter follows.
+      const [, query = ""] = window.location.hash.split("?");
+      const params = new URLSearchParams(query);
+      params.set("tab", next);
+      const qs = params.toString().replace(/=(?=&|$)/g, "");
+      window.location.hash = `#/notifications${qs ? `?${qs}` : ""}`;
+    },
+    [forceApprovalsTab, setHashTab],
+  );
+
   const dismiss = useCallback(
     (id: string) => onNotificationsRead([id]),
     [onNotificationsRead],
@@ -144,7 +179,7 @@ export function NotificationsView({
           <PageTabs
             tabs={tabs}
             value={tab}
-            onChange={setHashTab}
+            onChange={selectTab}
             idBase={ID_BASE}
             aria-label="Notification views"
           />

@@ -1,9 +1,11 @@
+// @vitest-environment jsdom
+
 /**
  * The Notifications page's two decidable halves: which tab an address resolves
  * to, and where a row on the Activity list sends you.
  *
- * The page's rendering is not pinned here — `routed-views.ts` already holds it
- * to drawing a `PageHeader`, and the approvals queue inside it is covered by
+ * The page's *appearance* is not pinned here — `routed-views.ts` already holds
+ * it to drawing a `PageHeader`, and the approvals queue inside it is covered by
  * the specs it already had. What is pinned is the two rules that are easy to
  * get subtly wrong and impossible to see in a screenshot:
  *
@@ -14,13 +16,24 @@
  *   - a row must never link somewhere that is not about it. The host's `kind`
  *     and `subjectKind` are free-form by design, so an unknown subject has to
  *     render inert rather than be guessed at.
+ *
+ * The first of those is asserted by **rendering the page at each address** and
+ * reading `aria-selected` off the strip, not by membership in `VIEWS`. Both
+ * names can stay in that union while the forced tab, the `?tab=` read or the
+ * task id is dropped — a routing regression the registry check cannot see
+ * (CodeRabbit).
  */
 
-import { describe, expect, it } from "vitest";
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { NotificationDto } from "@/api/types";
+import type { NotificationDto, ApprovalSummary } from "@/api/types";
+import type { OpenCompanyClient } from "@/api/client";
+import type { CompanyFeed } from "@/hooks/use-company";
 import { byNewestFirst, notificationHref } from "@/lib/notification-links";
 import { VIEWS } from "@/lib/console-routes";
+import { NotificationsView } from "@/views/NotificationsView";
 
 const CHANNELS = {
   rendered: new Set(["desk-design", "desk-ops"]),
@@ -40,6 +53,76 @@ function row(over: Partial<NotificationDto> = {}): NotificationDto {
   };
 }
 
+const NOW = new Date("2026-09-11T10:00:00Z").getTime();
+
+const approval: ApprovalSummary = {
+  id: "a1",
+  kind: "web_fetch",
+  amount_usd: null,
+  at_millis: NOW,
+};
+
+const client = {
+  get: async <T>(path: string): Promise<T> => (path.endsWith("/users") ? [] : null) as T,
+  listGrants: async () => [],
+  listTeam: async () => [],
+  revokeGrant: async () => undefined,
+  scopeFor: () => "/api/v1/company",
+} as unknown as OpenCompanyClient;
+
+const feed: CompanyFeed = {
+  status: { pending_approvals: 1 } as CompanyFeed["status"],
+  approvals: [approval],
+  queue: "ready",
+  now: NOW,
+  refresh: async () => undefined,
+};
+
+let container: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  window.location.hash = "";
+});
+
+/** Render the page as the shell would, at whatever hash is currently set. */
+function renderPage(over: { forceApprovalsTab?: boolean; sub?: string | null } = {}) {
+  act(() => {
+    root.render(
+      createElement(NotificationsView, {
+        client,
+        company: "acme",
+        feed,
+        notifications: [],
+        channels: CHANNELS,
+        onNotificationsRead: () => undefined,
+        onResolved: () => undefined,
+        onGoToConversation: () => undefined,
+        ...over,
+      }),
+    );
+  });
+}
+
+/** Which tab the strip reports as selected — the page's own answer, not ours. */
+function selectedTab(): string | undefined {
+  const tab = container.querySelector("[role=tab][aria-selected=true]");
+  return tab?.getAttribute("data-testid")?.replace("notifications-tab-", "");
+}
+
+function tabTrigger(id: string): HTMLButtonElement {
+  return container.querySelector(`[data-testid=notifications-tab-${id}]`) as HTMLButtonElement;
+}
+
 describe("both addresses the page answers", () => {
   it("routes #/notifications and keeps #/approvals alive beside it", () => {
     // Retiring `#/approvals` was the obvious move and is the wrong one:
@@ -49,6 +132,59 @@ describe("both addresses the page answers", () => {
     // renders one page for them.
     expect(VIEWS).toContain("notifications");
     expect(VIEWS).toContain("approvals");
+  });
+
+  it("opens on Approvals when the address names no tab", () => {
+    window.location.hash = "#/notifications";
+    renderPage();
+    expect(selectedTab()).toBe("approvals");
+  });
+
+  it("opens on Activity when the address asks for it", () => {
+    window.location.hash = "#/notifications?tab=activity";
+    renderPage();
+    expect(selectedTab()).toBe("activity");
+  });
+
+  it("ignores a stale ?tab= on the legacy approvals head", () => {
+    // The rule this file's header states, now actually exercised: a
+    // `?tab=activity` left over from a previous visit must not hijack a link
+    // minted at the queue.
+    window.location.hash = "#/approvals?tab=activity";
+    renderPage({ forceApprovalsTab: true });
+    expect(selectedTab()).toBe("approvals");
+  });
+});
+
+describe("choosing a tab from the legacy approvals head", () => {
+  it("moves to #/notifications rather than writing ?tab= onto a forced hash", () => {
+    // `tab` is forced to the queue on this head, so the hash setter alone
+    // changed the address and left the queue on screen — the operator clicked
+    // Activity and nothing happened (Codex).
+    window.location.hash = "#/approvals";
+    renderPage({ forceApprovalsTab: true });
+    act(() => tabTrigger("activity").click());
+    expect(window.location.hash).toBe("#/notifications?tab=activity");
+  });
+
+  it("carries the rest of the address across the move", () => {
+    // `?host=` rides every navigation (`use-host-route.ts`); dropping it here
+    // would strand the console rendering one host under an address naming none.
+    window.location.hash = "#/approvals?host=alpha";
+    renderPage({ forceApprovalsTab: true });
+    act(() => tabTrigger("activity").click());
+    expect(window.location.hash).toBe("#/notifications?host=alpha&tab=activity");
+  });
+
+  it("leaves #/approvals/<taskId> exactly where it is when Approvals is chosen", () => {
+    // Re-selecting the tab already on screen must not navigate: `#/approvals`
+    // is the only head that can carry a board task id (#883), and moving to
+    // `#/notifications` would drop it.
+    window.location.hash = "#/approvals/task-7";
+    renderPage({ forceApprovalsTab: true, sub: "task-7" });
+    act(() => tabTrigger("approvals").click());
+    expect(window.location.hash).toBe("#/approvals/task-7");
+    expect(selectedTab()).toBe("approvals");
   });
 });
 
