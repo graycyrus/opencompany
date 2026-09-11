@@ -99,3 +99,58 @@ test("the skip link reaches main content and the sidebar is the primary navigati
   await expect(page).toHaveURL(/#\/notifications$/);
   await expect(page.getByRole("heading", { name: "Notifications", level: 1 })).toBeVisible();
 });
+
+/**
+ * The title row has no scroll and no wrap: the switcher is a fixed 12rem, the
+ * glyph groups are all `flex-none`, and the search is the row's one elastic
+ * member. So the band has a hard minimum width, and past it the trailing
+ * controls simply fall under the shell's `overflow-hidden` — no scrollbar, no
+ * ellipsis, nothing on screen saying anything is missing.
+ *
+ * Adding the Notifications bell moved that minimum: measured in a browser, the
+ * profile group's right edge went from 447px to 483px, so a ~480px viewport
+ * that fit began clipping most of the profile control (Codex). The Discord
+ * glyph is `max-sm:hidden` to give those 36px back.
+ *
+ * Asserted at **480px**, which is the width that can tell the two apart. 640px
+ * cannot: the elastic search absorbs the slack there and the row fits with or
+ * without the fix, so a check at `sm` would have reported green against the
+ * clipping build — it was written that way first and did exactly that.
+ *
+ * `toBeInViewport` is not enough on its own either — a control one pixel inside
+ * counts — so each box is compared against the viewport's right edge.
+ */
+test("the title row's trailing controls stay inside a 480px viewport", async ({ page }) => {
+  const width = 480;
+  await page.setViewportSize({ width, height: 800 });
+  await page.goto("/#/company");
+
+  const bell = page.getByTestId("title-bar-notifications");
+  await bell.waitFor();
+
+  // Discord is deliberately absent at this width and is not in this list. Every
+  // control that remains is console function rather than an outbound link, and
+  // each one has to be wholly on screen.
+  for (const id of [
+    "title-bar-notifications",
+    "title-bar-overview",
+    "title-bar-settings",
+    "title-bar-group-you",
+  ]) {
+    const box = await page.getByTestId(id).first().boundingBox();
+    expect(box, `${id} should have a box`).not.toBeNull();
+    expect(box!.x, `${id} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+    expect(
+      Math.round(box!.x + box!.width),
+      `${id} ends inside the viewport, not under the shell's overflow-hidden`,
+    ).toBeLessThanOrEqual(width);
+  }
+
+  // And the page does not solve it by growing a horizontal scrollbar instead.
+  const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+  expect(scrollWidth, "the shell does not scroll horizontally").toBeLessThanOrEqual(width);
+
+  // The glyph that yields the width is still there once there is width for it.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.getByTestId("title-bar-discord")).toBeVisible();
+});
