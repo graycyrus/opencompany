@@ -695,7 +695,20 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Get, "/runs/{run_id}", Scoped, Ordinary, ""),
     r!(Get, "/search", Scoped, Ordinary, ""),
     r!(Put, "/search", Admin, Credential, ""),
+    // Which provider the teammates search through decides whose account is
+    // billed, so marking the default is an authority-level credential action
+    // rather than an ordinary edit.
+    r!(Put, "/search/default", Admin, Credential, ""),
     r!(Delete, "/search/key", Admin, Credential, ""),
+    r!(Post, "/search/providers", Admin, Credential, ""),
+    r!(Put, "/search/providers/{slug}", Admin, Credential, ""),
+    r!(Delete, "/search/providers/{slug}", Admin, Credential, ""),
+    r!(Put, "/search/providers/{slug}/key", Admin, Credential, ""),
+    // Admin rather than Scoped, unlike the inference probe it is modelled on:
+    // this check spends the company's money (no search provider publishes a
+    // free credential validator) and, for a self-hosted provider, fetches an
+    // operator-supplied address that is allowed to be on a private network.
+    r!(Post, "/search/test", Admin, Credential, ""),
     r!(Post, "/setup/roster", Scoped, Ordinary, ""),
     r!(Post, "/skills/{slug}/install", Admin, Authority, ""),
     r!(Post, "/skills/{slug}/uninstall", Admin, Destructive, ""),
