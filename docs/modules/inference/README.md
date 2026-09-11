@@ -9,6 +9,7 @@ spec for what ships today.
 | `README.md` | The case for the change, the target shape, and what must not regress |
 | [`current-state.md`](current-state.md) | What exists today, honestly — including what is already better than the thing we are copying |
 | [`data-model.md`](data-model.md) | The provider record, credential storage, and the migration constraint that shapes both |
+| [`credentials.md`](credentials.md) | **Which credential a call presents** — the identity-versus-vendor split, and why `inference/key` cannot mean two things |
 | [`catalogue.md`](catalogue.md) | **The provider list, verbatim** — 26 cloud, 3 local, 2 CLI, and the copy |
 | [`connect-flow.md`](connect-flow.md) | Adding a provider: the modal, the classified probe, the rollback rules |
 | [`routing.md`](routing.md) | **Manage Routing, verbatim** — three modes, nine workloads, the per-workload dialog |
