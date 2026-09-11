@@ -36,6 +36,8 @@ on:
     # something that is?
     paths:
       - 'src/**'
+      - 'crates/opencompany-core/**' # the host's manifest: features and dependencies
+      - 'crates/opencompany-tui/**' # a workspace member the builder has to COPY
       - 'frontend/**'
       - 'companies/**'
       - 'skills/**' # COPYed into the runtime image (Dockerfile) as the shared library
