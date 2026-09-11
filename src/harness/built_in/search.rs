@@ -304,6 +304,7 @@ pub fn search_tools(backend: &SearchBackend, metering: SearchMetering) -> Vec<Bo
     vec![Box::new(WebSearchTool {
         backend: backend.clone(),
         metering,
+        pre_dispatch: search_pre_dispatch,
     })]
 }
 
@@ -315,6 +316,30 @@ pub fn search_tools(backend: &SearchBackend, metering: SearchMetering) -> Vec<Bo
 struct WebSearchTool {
     backend: SearchBackend,
     metering: SearchMetering,
+    pre_dispatch: fn() -> anyhow::Result<()>,
+}
+
+enum SearchDispatchError {
+    BeforeDispatch(anyhow::Error),
+    AfterDispatchAttempt(anyhow::Error),
+}
+
+fn search_pre_dispatch() -> anyhow::Result<()> {
+    oh::security::egress::enforce_egress(&oh::security::egress::EgressDescriptor::integration(
+        SEARCH_PATH,
+    ))
+}
+
+async fn dispatch_search(
+    client: &IntegrationClient,
+    body: &Value,
+    pre_dispatch: fn() -> anyhow::Result<()>,
+) -> Result<SearchResponse, SearchDispatchError> {
+    pre_dispatch().map_err(SearchDispatchError::BeforeDispatch)?;
+    client
+        .post(SEARCH_PATH, body)
+        .await
+        .map_err(SearchDispatchError::AfterDispatchAttempt)
 }
 
 impl WebSearchTool {
@@ -477,9 +502,18 @@ impl Tool for WebSearchTool {
         });
 
         let client = IntegrationClient::new(self.backend.backend_url.clone(), token.clone());
-        let response: SearchResponse = match client.post(SEARCH_PATH, &body).await {
+        let response = match dispatch_search(&client, &body, self.pre_dispatch).await {
             Ok(response) => response,
-            Err(err) => {
+            Err(SearchDispatchError::BeforeDispatch(err)) => {
+                self.backend.calls.refund(company, now);
+                let detail = crate::harness::mcp_probe::scrub(&err.to_string(), &[token]);
+                return Ok(ToolResult::error(format!(
+                    "Web search was blocked before dispatch: {detail}. Its daily search slot was \
+                     refunded. Tell the operator search is unavailable — do not invent sources \
+                     or citations."
+                )));
+            }
+            Err(SearchDispatchError::AfterDispatchAttempt(err)) => {
                 let detail = crate::harness::mcp_probe::scrub(&err.to_string(), &[token]);
                 return Ok(ToolResult::error(format!(
                     "Web search returned no usable results: {detail}. The request may have \
@@ -1224,6 +1258,49 @@ mod tests {
                     .used_today(&company, crate::ports::now_millis()),
                 0,
                 "pre-dispatch failure must refund its slot"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proven_pre_dispatch_failure_refunds_the_search_reservation() {
+        fn blocked_before_dispatch() -> anyhow::Result<()> {
+            anyhow::bail!("pre-dispatch policy refusal")
+        }
+
+        let company = CompanyId::new("acme");
+        let backend = SearchBackend::new(
+            "http://127.0.0.1:1".to_string(),
+            Credential::from_value("managed-token"),
+            1,
+        );
+        let tool = WebSearchTool {
+            backend: backend.clone(),
+            metering: SearchMetering {
+                company: company.clone(),
+                agent: "ceo".into(),
+                meter: None,
+            },
+            pre_dispatch: blocked_before_dispatch,
+        };
+
+        for _ in 0..2 {
+            let result = tool
+                .execute(json!({"query": "competitor pricing"}))
+                .await
+                .unwrap();
+            assert!(result.is_error);
+            assert!(
+                result.output().contains("slot was refunded"),
+                "the accounting outcome must be explicit: {}",
+                result.output()
+            );
+            assert_eq!(
+                backend
+                    .ledger()
+                    .used_today(&company, crate::ports::now_millis()),
+                0,
+                "a failure proven to precede dispatch must refund its slot"
             );
         }
     }
