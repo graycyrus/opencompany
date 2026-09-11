@@ -294,15 +294,27 @@ export function slugify(label: string): string {
   return out.replace(/-+$/, "");
 }
 
+/**
+ * The longest a provider name may be, in characters.
+ *
+ * Mirrors `store::MAX_PROVIDER_NAME_CHARS` on the host, which is where the rule
+ * actually lives — the name becomes the address of a secret
+ * (`provider/<slug>/key`), and an unbounded name produced an unbounded path
+ * that 500ed a credential read and truncated a stored key on the way to failing
+ * the delete. This copy only spares the operator a round trip to find that out.
+ */
+export const MAX_PROVIDER_NAME_CHARS = 80;
+
 /** Why a slug cannot be used. */
-export type SlugError = "empty" | "taken" | "reserved";
+export type SlugError = "empty" | "taken" | "reserved" | "too-long";
 
 /**
  * Whether a derived slug may be used for a **custom** provider.
  *
- * Three named failures rather than a boolean, because they need three different
- * sentences: one is "pick another name", one is "you already have this", and one
- * is "that name belongs to something we ship".
+ * Four named failures rather than a boolean, because they need four different
+ * sentences: one is "pick another name", one is "you already have this", one
+ * is "that name belongs to something we ship", and one is "that name is too
+ * long".
  *
  * The catalogue check applies to custom providers only. Adding the catalogue's
  * own `groq` entry *should* take the slug `groq` — that is the same provider,
@@ -311,6 +323,7 @@ export type SlugError = "empty" | "taken" | "reserved";
 export function checkSlug(providers: readonly Provider[], slug: string): SlugError | null {
   const trimmed = slug.trim();
   if (!trimmed) return "empty";
+  if ([...trimmed].length > MAX_PROVIDER_NAME_CHARS) return "too-long";
   if (providers.some((p) => p.slug === trimmed)) return "taken";
   if (isReservedSlug(trimmed)) return "reserved";
   return null;
@@ -325,6 +338,8 @@ export function slugErrorCopy(error: SlugError): string {
       return "This company already has a provider with that name.";
     case "reserved":
       return "That name belongs to a built-in provider.";
+    case "too-long":
+      return `A provider name can be at most ${MAX_PROVIDER_NAME_CHARS} characters.`;
   }
 }
 
@@ -339,6 +354,7 @@ export function slugErrorCopy(error: SlugError): string {
  */
 export function normalizeEndpoint(raw: string): string | null {
   const trimmed = raw.trim().replace(/\/+$/, "");
+  if (endpointHasCredentials(trimmed)) return null;
   const split = trimmed.indexOf("://");
   if (split === -1) return null;
   const scheme = trimmed.slice(0, split).toLowerCase();
@@ -347,6 +363,28 @@ export function normalizeEndpoint(raw: string): string | null {
   if (!rest.trim()) return null;
   if (!rest.includes("/")) return `${trimmed}/v1`;
   return trimmed;
+}
+
+/**
+ * Whether an endpoint URL carries a credential in its authority
+ * (`http://user:password@host/v1`).
+ *
+ * Mirrors `catalogue::endpoint_has_credentials`. The host refuses such an
+ * endpoint at every point one can be set, and redacts it anywhere one is said;
+ * this copy exists so the operator is told *why* beside the field rather than
+ * after a round trip.
+ *
+ * The `@` has to be inside the authority — a path may legitimately contain one
+ * (`https://host/v1/@me`), and that is not a credential.
+ */
+export function endpointHasCredentials(raw: string): boolean {
+  const trimmed = raw.trim();
+  const split = trimmed.indexOf("://");
+  const start = split === -1 ? 0 : split + 3;
+  const rest = trimmed.slice(start);
+  const end = rest.search(/[/?#]/);
+  const authority = end === -1 ? rest : rest.slice(0, end);
+  return authority.includes("@");
 }
 
 /**
@@ -360,7 +398,22 @@ export function customProviderReady(
   draft: { label: string; baseUrl: string },
 ): boolean {
   return (
+    checkProviderName(draft.label) === null &&
     checkSlug(providers, slugify(draft.label)) === null &&
     normalizeEndpoint(draft.baseUrl) !== null
   );
+}
+
+/**
+ * Whether a typed provider **name** may be used, before any slug is derived.
+ *
+ * Mirrors `store::check_provider_name`. Separate from {@link checkSlug} for the
+ * same reason it is separate on the host: a name can be long while its slug is
+ * short, because `slugify` drops everything that is not alphanumeric.
+ */
+export function checkProviderName(label: string): SlugError | null {
+  const trimmed = label.trim();
+  if (!trimmed) return "empty";
+  if ([...trimmed].length > MAX_PROVIDER_NAME_CHARS) return "too-long";
+  return null;
 }

@@ -490,6 +490,72 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
+/// What [`redact_endpoint`] leaves where the userinfo was.
+///
+/// The `@` is kept so the shape still reads as a URL and the operator can see
+/// *that* something was embedded — which is the sentence they need in order to
+/// go and move it into the key field.
+pub const REDACTED_USERINFO: &str = "***";
+
+/// The byte range of an endpoint's userinfo — everything between `://` (or the
+/// start, for a scheme-less value) and the `@` that ends the credential.
+///
+/// `None` when there is none. The `@` must be inside the **authority**: a path
+/// may legitimately contain one (`https://host/v1/@me`), and that is not a
+/// credential.
+fn endpoint_userinfo_range(endpoint: &str) -> Option<std::ops::Range<usize>> {
+    let start = endpoint.find("://").map_or(0, |i| i + "://".len());
+    let rest = endpoint.get(start..)?;
+    let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    // `rfind`, not `find`: a password may itself contain an `@`, and the last
+    // one in the authority is the delimiter per RFC 3986.
+    let at = rest.get(..authority_len)?.rfind('@')?;
+    Some(start..start + at)
+}
+
+/// Whether an endpoint URL carries a credential in its authority
+/// (`http://user:password@host/v1`).
+///
+/// The check every place that **accepts** an endpoint makes, so that a
+/// credential in a URL never reaches storage. It is the same class of rule as
+/// the `[inference].api_key_secret` check in
+/// [`validate_parts`](super::validate_inference): a secret belongs in the
+/// credential slot, which is write-only to the console, and nowhere else. An
+/// endpoint is read back by every console reader on every page load, echoed
+/// into operator-facing failure text, and written to a plaintext store — so a
+/// password in one is a password in all three.
+pub fn endpoint_has_credentials(endpoint: &str) -> bool {
+    endpoint_userinfo_range(endpoint.trim()).is_some()
+}
+
+/// The same endpoint with any embedded credential replaced by
+/// [`REDACTED_USERINFO`].
+///
+/// The second, independent mechanism behind the same invariant as
+/// [`endpoint_has_credentials`]. Rejection keeps userinfo out of anything
+/// written from now on; this keeps it out of anything **said**, including about
+/// values stored before the rejection existed and values that arrived from a
+/// `company.toml` or an `OPENCOMPANY_INFERENCE_URL` this host does not own.
+///
+/// Every endpoint that reaches a response body, an operator-facing message or a
+/// log goes through here. The endpoint used to actually *make* a request does
+/// not — redacting there would break the request, which is the difference
+/// between the two call sites and the reason this is a separate function rather
+/// than something done at the point of storage.
+pub fn redact_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    match endpoint_userinfo_range(trimmed) {
+        None => trimmed.to_string(),
+        Some(range) => {
+            let mut out = String::with_capacity(trimmed.len());
+            out.push_str(&trimmed[..range.start]);
+            out.push_str(REDACTED_USERINFO);
+            out.push_str(&trimmed[range.end..]);
+            out
+        }
+    }
+}
+
 /// The catalogue row for `slug`, if it is a built-in cloud provider.
 pub fn cloud_provider(slug: &str) -> Option<&'static CloudProvider> {
     CLOUD_PROVIDERS.iter().find(|p| p.slug == slug)
@@ -543,8 +609,19 @@ pub fn auth_style_for(kind: &str) -> AuthStyle {
 /// OpenAI-compatible surface lives and `http://localhost:11434` is what the
 /// runtime's own documentation prints. Appending is not guessing: a path the
 /// operator supplied is left exactly as typed.
+///
+/// An endpoint carrying userinfo (`http://user:password@host/v1`) is **not**
+/// normalised — see [`endpoint_has_credentials`]. This is the point every
+/// stored endpoint passes through, so refusing here is what makes "no
+/// credential is ever stored in a `base_url`" a property of the store rather
+/// than of whichever handler remembered to check. Callers that have a sentence
+/// to give the operator ask [`endpoint_has_credentials`] first; this refusal is
+/// the backstop for the ones that do not.
 pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_end_matches('/');
+    if endpoint_has_credentials(trimmed) {
+        return None;
+    }
     let (scheme, rest) = trimmed.split_once("://")?;
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
         return None;
@@ -1313,6 +1390,72 @@ mod tests {
         assert_eq!(
             normalize_local_endpoint("http://127.0.0.1:1234/v1/").as_deref(),
             Some("http://127.0.0.1:1234/v1")
+        );
+    }
+
+    #[test]
+    fn an_endpoint_carrying_a_credential_is_not_an_endpoint() {
+        // The security half of the same refusal. `normalize_local_endpoint` is
+        // the funnel every stored endpoint passes through, so refusing here is
+        // what makes "no credential is ever stored in a `base_url`" a property
+        // of the store rather than of whichever handler remembered to check.
+        for bad in [
+            "http://alice:hunter2@127.0.0.1:8597/v1",
+            "https://alice@api.acme.example/v1",
+            "http://alice:hunter2@127.0.0.1:8597",
+            // A password may itself contain an `@`; the authority still has one.
+            "http://alice:hun@ter2@127.0.0.1:8597/v1",
+        ] {
+            assert!(endpoint_has_credentials(bad), "`{bad}` carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "`{bad}` must not normalise into something storable"
+            );
+        }
+    }
+
+    #[test]
+    fn an_at_sign_in_the_path_is_not_a_credential() {
+        // The `@` has to be inside the authority. A path may legitimately carry
+        // one, and refusing those would reject perfectly good endpoints.
+        for good in [
+            "https://api.acme.example/v1/@me",
+            "https://api.acme.example/v1?to=a@b",
+            "https://api.acme.example/v1#a@b",
+        ] {
+            assert!(!endpoint_has_credentials(good), "`{good}` has no userinfo");
+            assert_eq!(redact_endpoint(good), good);
+        }
+    }
+
+    #[test]
+    fn redacting_an_endpoint_removes_the_credential_and_nothing_else() {
+        // Observed in the incident: reqwest masks userinfo in its own error
+        // Display (`for url (http://127.0.0.1:8597/v1/models)`), and then the
+        // handler's own `format!` put it back from the endpoint we hold.
+        assert_eq!(
+            redact_endpoint("http://alice:hunter2@127.0.0.1:8597/v1"),
+            "http://***@127.0.0.1:8597/v1"
+        );
+        assert_eq!(
+            redact_endpoint("https://alice@api.acme.example/v1"),
+            "https://***@api.acme.example/v1"
+        );
+        // The last `@` in the authority is the delimiter, so a password
+        // containing one is removed whole rather than half-left behind.
+        assert_eq!(
+            redact_endpoint("http://alice:hun@ter2@127.0.0.1:8597/v1"),
+            "http://***@127.0.0.1:8597/v1"
+        );
+        // Scheme-less, as `normalize_setup_base_url` accepts.
+        assert_eq!(
+            redact_endpoint("alice:hunter2@localhost:1234/v1"),
+            "***@localhost:1234/v1"
+        );
+        // Nothing to redact: byte-for-byte the same endpoint, trimmed.
+        assert_eq!(
+            redact_endpoint("  https://api.openai.com/v1  "),
+            "https://api.openai.com/v1"
         );
     }
 

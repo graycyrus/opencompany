@@ -202,7 +202,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
                 models.iter().map(|model| model.id.as_str()),
             );
             Ok(Json(ModelCatalogDto {
-                base_url,
+                base_url: catalogue::redact_endpoint(&base_url),
                 models,
                 tier_vocabulary: Some(vocabulary.as_str()),
                 tier_defaults: vocabulary.tier_defaults(),
@@ -210,10 +210,15 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
             }))
         }
         Err(error) => Ok(Json(ModelCatalogDto {
+            // Redacted, not raw. `reqwest` masks userinfo in its own `Display`,
+            // but this `format!` re-adds it from the endpoint we hold — which
+            // is how a stored `http://user:password@host/v1` came to be printed
+            // in full in a banner an operator screenshots into a ticket.
             error: Some(format!(
-                "Could not list models from {base_url}: {error}. Enter model ids directly."
+                "Could not list models from {endpoint}: {error}. Enter model ids directly.",
+                endpoint = catalogue::redact_endpoint(&base_url)
             )),
-            base_url,
+            base_url: catalogue::redact_endpoint(&base_url),
             models: Vec::new(),
             tier_vocabulary: None,
             tier_defaults: BTreeMap::new(),
@@ -490,7 +495,7 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
             slug: provider.slug,
             label: provider.label,
             kind: provider.kind,
-            base_url: provider.base_url,
+            base_url: catalogue::redact_endpoint(&provider.base_url),
             models: provider.models,
             enabled: provider.enabled,
             key_configured,
@@ -827,6 +832,13 @@ async fn effective_status_with(
             |d| d.base_url.clone(),
         ),
     };
+    // This route is `ScopedCompany`, not admin — every console reader gets this
+    // field on every page load. A credential embedded in the endpoint is
+    // refused at every point one can be set, but an endpoint stored before that
+    // rule existed, or one arriving from a `company.toml` or
+    // `OPENCOMPANY_INFERENCE_URL` this host does not own, still has to be safe
+    // to *say*.
+    let base_url = catalogue::redact_endpoint(&base_url);
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
@@ -923,9 +935,11 @@ async fn managed_state(
     Ok(ManagedDto {
         source: source.as_str().to_string(),
         configured: source.resolves(),
-        base_url: platform
-            .map(|p| p.base_url.clone())
-            .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        base_url: catalogue::redact_endpoint(
+            &platform
+                .map(|p| p.base_url.clone())
+                .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        ),
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await
             .map_err(ApiError)?,
@@ -1165,7 +1179,7 @@ async fn unauthenticated_reason(
          fall back on — a request to {base} would carry no Authorization header and be rejected, \
          so none was sent. Save a key that {base} accepts above, or point this company at an \
          endpoint that needs none.",
-        base = decl.base_url
+        base = catalogue::redact_endpoint(&decl.base_url)
     )))
 }
 
@@ -1189,7 +1203,8 @@ fn probe_failure(decl: &inference::InferenceDecl, raw: &str) -> (String, &'stati
                  stored against the provider selected when it was saved, so a key for another \
                  vendor fails here even while this card reports one is set. Re-save the key under \
                  {}, or Remove key to fall back. The provider said: {raw}",
-                decl.base_url, decl.provider
+                catalogue::redact_endpoint(&decl.base_url),
+                decl.provider
             ),
             "credential_rejected",
         );

@@ -1489,13 +1489,18 @@ fn validate_parts(
     }
 
     let base_url = base_url.map(str::trim).filter(|s| !s.is_empty());
+    // Every echo of the typed URL below is redacted. A `base_url` is quoted back
+    // in a rejection the console renders, and a rejection is the one moment a
+    // malformed URL — the kind most likely to have been typed by hand with a
+    // password in it — is guaranteed to be shown to somebody.
     match provider {
         "ollama" | "openai_compatible" => match base_url {
             None => problems.push(format!(
                 "`[inference].base_url` is required for provider `{provider}` — give the OpenAI-compatible endpoint URL."
             )),
             Some(url) if !is_http_url(url) => problems.push(format!(
-                "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{url}`."
+                "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{}`.",
+                catalogue::redact_endpoint(url)
             )),
             _ => {}
         },
@@ -1504,10 +1509,28 @@ fn validate_parts(
                 && !is_http_url(url)
             {
                 problems.push(format!(
-                    "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{url}`."
+                    "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{}`.",
+                    catalogue::redact_endpoint(url)
                 ));
             }
         }
+    }
+
+    // A credential in the endpoint, refused for the same reason
+    // `api_key_secret` refuses a pasted token just below: a `base_url` is stored
+    // as written, returned to every console reader on the company status read,
+    // and interpolated into operator-facing failure text. The console's own
+    // endpoint fields refuse this before anything is written
+    // (`catalogue::normalize_local_endpoint`); this is the manifest and
+    // console-`PUT` half of the same rule, so the two ways to set an endpoint
+    // cannot disagree about it.
+    if let Some(url) = base_url
+        && catalogue::endpoint_has_credentials(url)
+    {
+        problems.push(format!(
+            "`[inference].base_url` carries a username or password in the URL — you wrote `{}`. Remove them and store the credential in the key slot instead; an endpoint is readable by everyone who can see this company's settings.",
+            catalogue::redact_endpoint(url)
+        ));
     }
 
     // The credential must be a *key name*, not the token itself. Reject values
@@ -2049,6 +2072,41 @@ mod tests {
         m.base_url = Some("ftp://x/v1".into());
         let problems = validate_inference(&m);
         assert!(problems.iter().any(|p| p.contains("http")), "{problems:?}");
+    }
+
+    #[test]
+    fn a_base_url_carrying_a_credential_is_rejected_and_never_echoed() {
+        // Same rule as `api_key_secret` below, one field over: a credential
+        // belongs in the write-only key slot, and a `base_url` is stored as
+        // written and read back by every console reader.
+        let mut m = inference("openai_compatible");
+        m.base_url = Some("http://alice:hunter2@127.0.0.1:8597/v1".into());
+        let problems = validate_inference(&m);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("username or password")),
+            "{problems:?}"
+        );
+        // The refusal is the one moment this value is guaranteed to be shown to
+        // somebody, so it must not quote the credential back.
+        for problem in &problems {
+            assert!(
+                !problem.contains("hunter2") && !problem.contains("alice"),
+                "a rejection echoed the credential it was rejecting: {problem}"
+            );
+        }
+
+        // A malformed URL is quoted back redacted too — and the malformed ones
+        // are the likeliest to have been typed by hand with a password in them.
+        let mut bad = inference("openai_compatible");
+        bad.base_url = Some("ftp://alice:hunter2@127.0.0.1/v1".into());
+        for problem in validate_inference(&bad) {
+            assert!(
+                !problem.contains("hunter2"),
+                "a rejection echoed the credential it was rejecting: {problem}"
+            );
+        }
     }
 
     #[test]

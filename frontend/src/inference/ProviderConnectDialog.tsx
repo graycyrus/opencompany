@@ -13,9 +13,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   MANAGED_OPTION_SLUG,
+  MAX_PROVIDER_NAME_CHARS,
+  checkProviderName,
   checkSlug,
   credentialAsk,
   customProviderReady,
+  endpointHasCredentials,
   normalizeEndpoint,
   slugErrorCopy,
   slugify,
@@ -104,7 +107,9 @@ export function ProviderConnectDialog({
   }, [optionSlug, open]);
 
   const slug = slugify(label);
-  const slugError = custom ? checkSlug(providers, slug) : null;
+  // The name's own bound is reported before the slug's, because a name past the
+  // limit is what the operator can actually see and fix — the slug is derived.
+  const slugError = custom ? (checkProviderName(label) ?? checkSlug(providers, slug)) : null;
   const endpointOk = !ask.needsEndpoint || normalizeEndpoint(baseUrl) !== null;
   const ready = custom
     ? customProviderReady(providers, { label, baseUrl })
@@ -143,6 +148,9 @@ export function ProviderConnectDialog({
                 value={label}
                 placeholder="My Provider"
                 autoComplete="off"
+                // The host holds this rule; the attribute only stops a paste
+                // becoming a 400 the operator has to read to understand.
+                maxLength={MAX_PROVIDER_NAME_CHARS}
                 onChange={(e) => setLabel(e.target.value)}
               />
               {/* The slug is what a routing entry will say, so the operator
@@ -179,7 +187,9 @@ export function ProviderConnectDialog({
               />
               {baseUrl.trim() && !endpointOk && (
                 <p className="text-xs text-status-blocked-text">
-                  That must be an http or https address.
+                  {endpointHasCredentials(baseUrl)
+                    ? "Remove the username and password from the URL and put the credential in the API key field — an endpoint is stored as written and is readable by everyone who can see this company's settings."
+                    : "That must be an http or https address."}
                 </p>
               )}
             </div>
