@@ -368,7 +368,7 @@ jobs:
       # copy at all, so a developer ran the DEFAULT build and every user
       # installed the release one. Here rather than in the `Desktop` job because
       # this is a text check on repo config that needs no toolchain, and because
-      # `Desktop` is path-filtered on `src-tauri/**` — a drift introduced by
+      # `Desktop` is path-filtered on `crates/opencompany-app/**` — a drift introduced by
       # editing only a workflow or only the dev script would not run that lane.
       - name: Assert desktop feature sets agree
         run: scripts/ci/assert-desktop-features.sh
@@ -1698,7 +1698,7 @@ jobs:
       #
       # Rides the `Console` job for the reason the cap above does: a policy
       # grep, no toolchain. It also guards `frontend/package.json`, this job's
-      # own file — and the `Desktop` lane is path-filtered on `src-tauri/**`, so
+      # own file — and the `Desktop` lane is path-filtered on `crates/opencompany-app/**`, so
       # a second app added under `frontend/` would not have triggered that lane
       # at all.
       - run: ./scripts/ci/assert-single-tauri-app.sh
@@ -2096,7 +2096,7 @@ jobs:
 
   # The desktop shell.
   #
-  # A SEPARATE JOB, and separate for the reason `src-tauri/Cargo.toml` explains
+  # A SEPARATE JOB, and separate for the reason `crates/opencompany-app/Cargo.toml` explains
   # at length: the crate is not a workspace member, so no `cargo` invocation in
   # the jobs above reaches it — not even `Check (--all-features)`, which
   # resolves only the root graph. Without this lane the desktop's Rust, its
@@ -2158,18 +2158,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
-            src-tauri
+            crates/opencompany-app
 
       # Issue #1298. This lane installs no toolchain of its own — unlike the
       # four `dtolnay/rust-toolchain` call sites elsewhere in this file — and
-      # does not need to: `src-tauri` has no `rust-toolchain.toml`, so rustup
+      # does not need to: `crates/opencompany-app` has no `rust-toolchain.toml`, so rustup
       # walks up to the repo root's and the cargo steps below run on the same
       # pinned version every other Rust lane uses. That is why
       # `assert-toolchain-pin.sh` finds nothing to check here; the pin still
       # applies. If this job ever grows an explicit install, it must pass the
       # same version, and the script will start covering it automatically.
       - name: Format
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+        run: cargo fmt --manifest-path crates/opencompany-app/Cargo.toml --all -- --check
 
       # `--no-deps`, matching the gated lane: the host is a path dependency and
       # its lints are that crate's business, not this one's.
@@ -2184,7 +2184,7 @@ jobs:
       # `--features` matches `DESKTOP_RELEASE_FEATURES` in
       # `release-desktop-macos.yml` — see that file for why `acp` and
       # `composio` are passed on the command line instead of being written into
-      # `src-tauri/Cargo.toml`. The short version: they are pure `cfg` switches
+      # `crates/opencompany-app/Cargo.toml`. The short version: they are pure `cfg` switches
       # that add no package, so the release build can turn them on and still
       # satisfy `--locked`, and the default build stays lean.
       #
@@ -2196,13 +2196,13 @@ jobs:
       # everybody reads as covered, selected by no lane. If the release
       # workflow's feature string changes, change it here in the same commit.
       - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --no-deps --features opencompany/acp,opencompany/composio -- -D warnings
+        run: cargo clippy --manifest-path crates/opencompany-app/Cargo.toml --locked --all-targets --no-deps --features opencompany-core/acp,opencompany-core/composio -- -D warnings
 
       # `--locked`, so a manifest edit whose lock was never regenerated is named
       # here rather than absorbed — the desktop keeps its own `Cargo.lock`. The
       # `--features` are the release set, for the reason above the clippy step.
       - name: Test
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --features opencompany/acp,opencompany/composio
+        run: cargo test --manifest-path crates/opencompany-app/Cargo.toml --locked --features opencompany-core/acp,opencompany-core/composio
 
       # There used to be a SECOND Tauri app here, `frontend/src-tauri/`, with
       # three more steps of its own. It is deleted, and its absence is the
@@ -2220,7 +2220,7 @@ jobs:
       # dead, and the working directory deciding which one a developer got.
       #
       # `frontend/package.json` now points `tauri:dev` at
-      # `scripts/desktop-dev.sh` and `tauri:build` at `src-tauri/`, and
+      # `scripts/desktop-dev.sh` and `tauri:build` at `crates/opencompany-app/`, and
       # `scripts/ci/assert-single-tauri-app.sh` in the `Console` job keeps both
       # halves from coming back.
 
@@ -2248,8 +2248,8 @@ jobs:
       # SUBMODULE's root once the hook lands inside one. So there is no hook: the
       # console is built explicitly, before packaging, by a step whose working
       # directory this file states outright. `frontendDist` stays relative to
-      # `src-tauri/`, which is where `tauri.conf.json` lives and is therefore the
-      # one path here that cannot drift.
+      # `crates/opencompany-app/`, which is where `tauri.conf.json` lives and is
+      # therefore the one path here that cannot drift.
       #
       # `--debug`, not a release build: this step exists to execute the config
       # and link a binary, and the `Test` step above already compiled that graph
@@ -2273,13 +2273,15 @@ jobs:
       # nearly free: same profile, same cache, everything already built.
       #
       # These two and no others: the CLI finds a project by searching SUBFOLDERS
-      # of the working directory rather than ancestors. That is what made the
-      # deleted `frontend/src-tauri/` wrapper reachable from `frontend/`, and
-      # running from these two directories is what keeps the shell the only app
-      # any invocation can find.
+      # of the working directory (to a depth of three) rather than ancestors.
+      # That is what made the deleted `frontend/src-tauri/` wrapper reachable
+      # from `frontend/`, and it is what still finds `crates/opencompany-app`
+      # from the root now that there is no `src-tauri/` short-circuit. Running
+      # from these two directories is what keeps the shell the only app any
+      # invocation can find.
       - name: Package (from the repository root)
         run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
 
-      - name: Package (from src-tauri)
-        working-directory: src-tauri
-        run: ../frontend/node_modules/.bin/tauri build --debug --no-bundle
+      - name: Package (from crates/opencompany-app)
+        working-directory: crates/opencompany-app
+        run: ../../frontend/node_modules/.bin/tauri build --debug --no-bundle
