@@ -51,6 +51,7 @@ const TICK: Duration = Duration::from_millis(250);
 /// Runs the client until the operator quits. Restores the terminal on every
 /// exit path, including a panic in the draw loop.
 pub fn run(cli: Cli) -> anyhow::Result<()> {
+    configure_journal_workspace(cli.data_dir.as_deref());
     install_logging(cli.log.clone())?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -61,6 +62,26 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     // waiting for it: the operator asked to leave.
     runtime.shutdown_timeout(Duration::from_secs(2));
     result
+}
+
+/// Set the OpenHuman journal root before Tokio (and therefore any host task)
+/// exists. An explicit `--data-dir` is authoritative; otherwise an operator's
+/// existing `OPENHUMAN_WORKSPACE` remains authoritative just as it is for
+/// `opencompany serve`.
+fn configure_journal_workspace(data_dir: Option<&std::path::Path>) {
+    let root = data_dir
+        .map(|path| path.join("openhuman"))
+        .or_else(|| {
+            std::env::var_os("OPENHUMAN_WORKSPACE")
+                .is_none()
+                .then(|| opencompany::app::config::data_dir_from_env().join("openhuman"))
+        });
+
+    if let Some(root) = root {
+        // Rust 2024 makes process-environment mutation explicitly unsafe.
+        // This is before any threads or Tokio runtime are started.
+        unsafe { std::env::set_var("OPENHUMAN_WORKSPACE", root) };
+    }
 }
 
 fn install_logging(path: Option<PathBuf>) -> anyhow::Result<()> {

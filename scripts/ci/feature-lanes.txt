@@ -71,6 +71,8 @@ sidecar        | partial      | sidecar                         | brain::sidecar
 analytics      | partial      | analytics                       | analytics
 crash-reporting | partial     | crash-reporting                 | observability
 webhooks       | partial      | webhooks                        | server::webhook
+opencompany-tui/harness | tested | harness | The `rust` lane runs the TUI with its embedded OpenHuman boot registrations.
+opencompany-tui/sqlite  | tested | sqlite  | The `rust` lane runs the TUI against the desktop's SQLite-backed host.
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------
 #

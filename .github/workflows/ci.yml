@@ -725,6 +725,15 @@ jobs:
       - name: Build the terminal client
         run: cargo build --locked -p opencompany-tui --bin opencompany-tui
 
+      # The TUI owns two package features that are not part of the host's
+      # feature matrix. Exercise both so its embedded boot path and desktop
+      # storage selection remain checked by a real test lane.
+      - name: Test the terminal client harness feature
+        run: cargo test --locked -p opencompany-tui --features harness --lib
+
+      - name: Test the terminal client SQLite feature
+        run: cargo test --locked -p opencompany-tui --features sqlite --lib
+
       - name: Upload the host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
