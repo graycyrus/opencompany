@@ -1,0 +1,663 @@
+//! Reading a failed provider check: what class of failure it is, what to say
+//! about it, and where a probe is allowed to point.
+//!
+//! Everything here is **pure**. The network call itself lives at the edge, in
+//! the route that performs it; what this module holds is the part with branches
+//! worth testing — and it is testable with a string and no host.
+//!
+//! ## Why classification is separate from wording
+//!
+//! [`classify`] decides, [`describe`] says. Splitting them is what makes the six
+//! classes testable without a copy deck, and it keeps strings where strings
+//! belong. It is also how the design being ported does it.
+//!
+//! ## Why only one class deletes the key
+//!
+//! Adding a provider writes the credential, then probes. If the probe fails, the
+//! naive answer is "roll everything back", and the naive answer **destroys valid
+//! credentials**: a corporate proxy, a WAF, a rate limit or a mistyped model id
+//! all fail a probe while the key is perfectly good.
+//!
+//! So only [`ProbeClass::Auth`] is destructive. Everything else keeps the key and
+//! the record and shows an amber advisory, because the key is plausibly fine and
+//! the *connection* is not. Colouring those as errors would be a lie about what
+//! happened — the save succeeded.
+//!
+//! ## The branch order is the whole design
+//!
+//! Two orderings exist because of real failures, and both are easy to
+//! "simplify" back into the bug:
+//!
+//! **Proxy and gateway rejections are checked FIRST.** The phrase `407 Proxy
+//! Authentication Required` contains the word *authentication*. Check the auth
+//! branch first and a corporate proxy deletes a valid key. A WAF's bare `403
+//! Forbidden` has the same shape, which is why a 403 counts as auth only when it
+//! co-occurs with credential wording, and why the status-code tests use word
+//! boundaries — so `401` and `403` do not match inside an id like `1403`.
+//!
+//! **`model` is checked BEFORE `endpoint`.** The endpoint branch matches a bare
+//! "not found", which would otherwise claim every provider that phrases a
+//! missing model as "model not found" and send the operator off to check their
+//! base URL instead of their model id.
+//!
+//! ## And the raw string never reaches the copy
+//!
+//! [`describe`] does not interpolate the upstream text. That text can echo
+//! request material — headers, key fragments — and it lands in a banner someone
+//! screenshots. The raw string belongs in a detail channel, not in the sentence.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+/// What a failed probe means.
+///
+/// Six named classes rather than a boolean, because each one has a different
+/// remedy and — more importantly — a different answer to "should the credential
+/// we just wrote be deleted?".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeClass {
+    /// The provider rejected the credential. **The only destructive class.**
+    Auth,
+    /// The endpoint answered but does not know that model id.
+    Model,
+    /// The account is out of credit, or rate limited.
+    Quota,
+    /// Nothing answered at that address.
+    Endpoint,
+    /// Something answered too slowly.
+    Timeout,
+    /// The check did not complete, and we will not guess why.
+    Unknown,
+}
+
+impl ProbeClass {
+    /// Whether meeting this class should roll back the credential that was just
+    /// written.
+    ///
+    /// Exactly one class says yes. If a second ever does, re-read the module
+    /// header first — every other class is a connection fact, not a key fact.
+    pub fn destroys_credential(self) -> bool {
+        matches!(self, Self::Auth)
+    }
+
+    /// The stable wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::Model => "model",
+            Self::Quota => "quota",
+            Self::Endpoint => "endpoint",
+            Self::Timeout => "timeout",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Whether `needle` appears in `haystack` delimited by non-word characters —
+/// the `\b…\b` a regex would give, without pulling in a regex.
+///
+/// This is what stops `403` matching inside `1403` or `4032`. It is not a
+/// nicety: a model id or a request id with those digits in it would otherwise
+/// be read as a status code and delete the operator's key.
+fn contains_token(haystack: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !is_word(bytes[start - 1] as char);
+        let after_ok = end == bytes.len() || !is_word(bytes[end] as char);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+        if from >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Which failure a raw provider error string represents.
+///
+/// Ported branch for branch — including the order — from the design this work
+/// follows. **Reordering these branches is a behaviour change**, not a
+/// refactor; the module header names the two that matter and what each prevents.
+pub fn classify(raw: &str) -> ProbeClass {
+    let haystack = raw.trim().to_ascii_lowercase();
+
+    // Network, gateway and proxy rejections are about the CONNECTION, not the
+    // key. They must not reach the auth branch, or the add flow deletes a valid
+    // key over a corporate proxy, a WAF, or a 407 challenge — the exact class
+    // this ordering exists to preserve keys through. Checked first so
+    // "authentication" inside "407 Proxy Authentication Required", and a
+    // WAF/Cloudflare "403 Forbidden", classify as `unknown`.
+    if contains_token(&haystack, "407")
+        || haystack.contains("proxy")
+        || haystack.contains("cloudflare")
+        || haystack.contains("bad gateway")
+        || haystack.contains("gateway timeout")
+    {
+        return ProbeClass::Unknown;
+    }
+
+    // A rejected credential: revoked, invalid, or without permission. A 403
+    // counts only when it co-occurs with credential wording — a bare 403 from an
+    // unidentified intermediary is not proof the key itself is bad.
+    let is_403_credential = contains_token(&haystack, "403")
+        && (haystack.contains("forbidden")
+            || haystack.contains("key")
+            || haystack.contains("credential")
+            || haystack.contains("permission"));
+    if contains_token(&haystack, "401")
+        || is_403_credential
+        || haystack.contains("invalid api key")
+        || haystack.contains("invalid_api_key")
+        || haystack.contains("incorrect api key")
+        || haystack.contains("unauthorized")
+        || haystack.contains("authentication")
+    {
+        return ProbeClass::Auth;
+    }
+
+    // Before `endpoint`, on purpose: the endpoint branch matches a bare "not
+    // found", which would otherwise claim every provider that phrases a missing
+    // model as "model not found" and send the operator off to check their base
+    // URL instead of their model id.
+    if haystack.contains("model_not_found")
+        || (haystack.contains("not found") && haystack.contains("model"))
+        || haystack.contains("does not exist")
+        || haystack.contains("is not available")
+        || haystack.contains("unknown model")
+        || haystack.contains("invalid model")
+    {
+        return ProbeClass::Model;
+    }
+
+    if haystack.contains("quota")
+        || haystack.contains("insufficient")
+        || haystack.contains("billing")
+        || haystack.contains("429")
+        || haystack.contains("rate limit")
+    {
+        return ProbeClass::Quota;
+    }
+
+    if haystack.contains("404") || haystack.contains("not found") {
+        return ProbeClass::Endpoint;
+    }
+
+    if haystack.contains("timeout") || haystack.contains("timed out") {
+        return ProbeClass::Timeout;
+    }
+
+    ProbeClass::Unknown
+}
+
+/// What to tell the operator, given a class and the provider's label.
+///
+/// **Never interpolates the raw upstream string.** That text can carry request
+/// material — headers, fragments of a key — and this sentence lands in a banner
+/// that gets screenshotted and pasted into a ticket. The raw text goes to a
+/// detail or console channel instead.
+///
+/// Every sentence but the first begins with "Saved", because every class but
+/// `auth` kept the record and the credential. The save is a fact; only
+/// reachability is in question.
+pub fn describe(class: ProbeClass, provider: &str) -> String {
+    match class {
+        ProbeClass::Auth => {
+            format!("Could not reach {provider}: the provider rejected the credential.")
+        }
+        ProbeClass::Endpoint => format!("Saved, but nothing answered at {provider}."),
+        ProbeClass::Model => "Saved. The endpoint did not recognise that model id.".to_string(),
+        ProbeClass::Quota => "Saved. The account is out of credit.".to_string(),
+        ProbeClass::Timeout => format!("Saved, but {provider} did not answer in time."),
+        ProbeClass::Unknown => "Saved, but the check did not complete.".to_string(),
+    }
+}
+
+/// Why an endpoint may not be probed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointRefusal {
+    /// Not a URL this can read a host out of.
+    Unparseable,
+    /// Something other than `http` or `https`.
+    Scheme,
+    /// Loopback, and this deployment does not offer local runtimes.
+    Loopback,
+    /// A link-local or cloud metadata address.
+    LinkLocal,
+    /// A private or otherwise non-routable address.
+    PrivateNetwork,
+}
+
+impl std::fmt::Display for EndpointRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unparseable => write!(f, "that is not an endpoint address"),
+            Self::Scheme => write!(f, "an endpoint must be http or https"),
+            Self::Loopback => write!(f, "this host does not offer local model runtimes"),
+            Self::LinkLocal => write!(f, "a model endpoint is never on a link-local address"),
+            Self::PrivateNetwork => {
+                write!(
+                    f,
+                    "a model endpoint is never on this host's private network"
+                )
+            }
+        }
+    }
+}
+
+/// Whether loopback is an acceptable probe target on this deployment.
+///
+/// It is an **explicit allowance**, made because the local-runtime category
+/// exists and `ollama` needs it — not a hole left open. A server-side
+/// deployment that offers no local runtimes passes `false` and loopback is
+/// refused like any other non-routable address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbePolicy {
+    /// Whether the local-runtime category is offered here at all.
+    pub allow_loopback: bool,
+}
+
+/// Whether `url` may be probed.
+///
+/// Generalising "test this credential against this URL" to company scope creates
+/// an authenticated *send a request to an arbitrary address* primitive, which is
+/// SSRF-shaped. This is the answer, made explicitly rather than inherited:
+///
+/// * the scheme must be `http` or `https`;
+/// * link-local and cloud metadata addresses (`169.254.0.0/16`, `fe80::/10`) are
+///   refused outright — a company's model endpoint is never there, and that
+///   range is where a container's credentials live;
+/// * other private ranges are refused, because a model endpoint reachable only
+///   from inside this host's network is this host's business, not a tenant's;
+/// * loopback is allowed only where local runtimes are offered.
+///
+/// A hostname that is not a literal IP is allowed: resolving it here would be a
+/// DNS lookup in a pure function, and a check performed before a resolve is
+/// defeated by the resolve changing underneath it anyway. **Apply this to every
+/// redirect target too** — a permitted host that redirects to the metadata
+/// address is the whole trick.
+pub fn check_endpoint(url: &str, policy: ProbePolicy) -> Result<(), EndpointRefusal> {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err(EndpointRefusal::Unparseable);
+    };
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return Err(EndpointRefusal::Scheme);
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    let host = if let Some(after) = host_port.strip_prefix('[') {
+        after.split_once(']').map(|(h, _)| h).unwrap_or(after)
+    } else {
+        host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(EndpointRefusal::Unparseable);
+    }
+    // A name, not a literal. See the doc comment: resolving here would make this
+    // impure and would not close the window anyway.
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return Ok(());
+    };
+    check_address(ip, policy)
+}
+
+/// The address half of [`check_endpoint`], exposed so a redirect target can be
+/// checked after it has been resolved.
+pub fn check_address(ip: IpAddr, policy: ProbePolicy) -> Result<(), EndpointRefusal> {
+    match ip {
+        IpAddr::V4(v4) => check_v4(v4, policy),
+        IpAddr::V6(v6) => {
+            // An IPv4-mapped address is the same machine wearing a longer name,
+            // so it gets the same answer. Checking only the v6 shape here is how
+            // `::ffff:169.254.169.254` reaches a metadata service.
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return check_v4(mapped, policy);
+            }
+            if v6.is_loopback() {
+                return loopback(policy);
+            }
+            // fe80::/10 link-local, and fec0::/10 site-local.
+            let first = v6.segments()[0];
+            if (first & 0xffc0) == 0xfe80 || (first & 0xffc0) == 0xfec0 {
+                return Err(EndpointRefusal::LinkLocal);
+            }
+            // fc00::/7 unique-local.
+            if (v6.segments()[0] & 0xfe00) == 0xfc00 {
+                return Err(EndpointRefusal::PrivateNetwork);
+            }
+            if v6 == Ipv6Addr::UNSPECIFIED {
+                return Err(EndpointRefusal::PrivateNetwork);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn check_v4(ip: Ipv4Addr, policy: ProbePolicy) -> Result<(), EndpointRefusal> {
+    if ip.is_loopback() {
+        return loopback(policy);
+    }
+    // 169.254.0.0/16 — link-local, and the address every cloud puts its
+    // instance credentials behind.
+    if ip.is_link_local() {
+        return Err(EndpointRefusal::LinkLocal);
+    }
+    if ip.is_private() || ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+        return Err(EndpointRefusal::PrivateNetwork);
+    }
+    // 100.64.0.0/10, carrier-grade NAT — where a container network often lives.
+    let [a, b, ..] = ip.octets();
+    if a == 100 && (64..128).contains(&b) {
+        return Err(EndpointRefusal::PrivateNetwork);
+    }
+    Ok(())
+}
+
+fn loopback(policy: ProbePolicy) -> Result<(), EndpointRefusal> {
+    if policy.allow_loopback {
+        Ok(())
+    } else {
+        Err(EndpointRefusal::Loopback)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- the four cases the branch order exists for -------------------------
+    //
+    // architecture.md names these four by hand, and they are the whole reason
+    // the ordering is what it is. If one of them starts failing, the ordering
+    // has been "simplified" back into a bug.
+
+    #[test]
+    fn a_407_proxy_challenge_is_unknown_not_auth() {
+        // It contains the word "authentication". Check auth first and a
+        // corporate proxy deletes a valid key.
+        assert_eq!(
+            classify("HTTP 407 Proxy Authentication Required"),
+            ProbeClass::Unknown
+        );
+        assert!(!classify("HTTP 407 Proxy Authentication Required").destroys_credential());
+    }
+
+    #[test]
+    fn a_bare_waf_403_is_unknown_not_auth() {
+        // An unidentified intermediary saying "forbidden" is not proof the key
+        // is bad. Cloudflare is named explicitly because it is the common one.
+        assert_eq!(classify("error from cloudflare: 403"), ProbeClass::Unknown);
+        assert_eq!(classify("502 Bad Gateway"), ProbeClass::Unknown);
+    }
+
+    #[test]
+    fn a_403_with_credential_wording_is_auth() {
+        assert_eq!(
+            classify("403 Forbidden: your api key does not have permission"),
+            ProbeClass::Auth
+        );
+        assert!(classify("403 Forbidden: invalid credential").destroys_credential());
+    }
+
+    #[test]
+    fn a_status_code_inside_an_id_does_not_match() {
+        // Word boundaries. Without them a request id or a model name carrying
+        // these digits reads as a status code and deletes the operator's key.
+        assert_eq!(classify("request id req_1403 failed"), ProbeClass::Unknown);
+        assert_eq!(classify("trace 4032 aborted"), ProbeClass::Unknown);
+        assert_eq!(classify("model gpt-4010 is odd"), ProbeClass::Unknown);
+    }
+
+    // ---- all six classes ----------------------------------------------------
+
+    #[test]
+    fn every_class_has_a_real_error_string_that_reaches_it() {
+        let cases: &[(&str, ProbeClass)] = &[
+            ("401 Unauthorized", ProbeClass::Auth),
+            ("Incorrect API key provided", ProbeClass::Auth),
+            ("invalid_api_key", ProbeClass::Auth),
+            (
+                "The model `gpt-5.6-sol-pro` does not exist",
+                ProbeClass::Model,
+            ),
+            ("model_not_found", ProbeClass::Model),
+            (
+                "Model 'anthropic/claude-sonnet-5' is not available",
+                ProbeClass::Model,
+            ),
+            ("You exceeded your current quota", ProbeClass::Quota),
+            ("429 Too Many Requests", ProbeClass::Quota),
+            ("insufficient credits", ProbeClass::Quota),
+            ("404 Not Found", ProbeClass::Endpoint),
+            ("dns error: not found", ProbeClass::Endpoint),
+            ("operation timed out", ProbeClass::Timeout),
+            ("request timeout after 10s", ProbeClass::Timeout),
+            ("something nobody has seen before", ProbeClass::Unknown),
+            ("", ProbeClass::Unknown),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(classify(raw), *expected, "classifying {raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_model_is_not_read_as_a_missing_endpoint() {
+        // The endpoint branch matches a bare "not found". Checked after `model`,
+        // so this sends the operator to their model id rather than their URL.
+        assert_eq!(
+            classify("The model `acme-1` was not found"),
+            ProbeClass::Model
+        );
+        // And a genuine endpoint miss still reaches `endpoint`.
+        assert_eq!(classify("404 page not found"), ProbeClass::Endpoint);
+    }
+
+    #[test]
+    fn exactly_one_class_deletes_the_credential() {
+        let destructive: Vec<&str> = [
+            ProbeClass::Auth,
+            ProbeClass::Model,
+            ProbeClass::Quota,
+            ProbeClass::Endpoint,
+            ProbeClass::Timeout,
+            ProbeClass::Unknown,
+        ]
+        .into_iter()
+        .filter(|c| c.destroys_credential())
+        .map(|c| c.as_str())
+        .collect();
+        assert_eq!(destructive, vec!["auth"]);
+    }
+
+    #[test]
+    fn classification_is_case_insensitive_and_ignores_surrounding_noise() {
+        assert_eq!(classify("  \n401 UNAUTHORIZED\n "), ProbeClass::Auth);
+    }
+
+    // ---- the copy -----------------------------------------------------------
+
+    #[test]
+    fn the_copy_never_echoes_the_upstream_string() {
+        // That text can carry headers or key fragments, and this sentence lands
+        // in a screenshot-able banner.
+        let raw = "401 Unauthorized: Bearer sk-not-a-real-key rejected";
+        let sentence = describe(classify(raw), "Acme");
+        assert!(!sentence.contains("sk-not-a-real-key"));
+        assert!(!sentence.contains(raw));
+    }
+
+    #[test]
+    fn only_the_destructive_class_fails_to_say_saved() {
+        for class in [
+            ProbeClass::Model,
+            ProbeClass::Quota,
+            ProbeClass::Endpoint,
+            ProbeClass::Timeout,
+            ProbeClass::Unknown,
+        ] {
+            assert!(
+                describe(class, "Acme").starts_with("Saved"),
+                "{class:?} kept the record, so its copy must say so"
+            );
+        }
+        assert!(describe(ProbeClass::Auth, "Acme").starts_with("Could not reach Acme"));
+    }
+
+    // ---- the SSRF guard -----------------------------------------------------
+
+    const LOCAL_OFFERED: ProbePolicy = ProbePolicy {
+        allow_loopback: true,
+    };
+    const SERVER_SIDE: ProbePolicy = ProbePolicy {
+        allow_loopback: false,
+    };
+
+    #[test]
+    fn an_ordinary_endpoint_is_allowed() {
+        assert_eq!(
+            check_endpoint("https://api.openai.com/v1", SERVER_SIDE),
+            Ok(())
+        );
+        assert_eq!(check_endpoint("https://8.8.8.8/v1", SERVER_SIDE), Ok(()));
+    }
+
+    #[test]
+    fn only_http_and_https_are_probeable() {
+        assert_eq!(
+            check_endpoint("file:///etc/passwd", SERVER_SIDE),
+            Err(EndpointRefusal::Scheme)
+        );
+        assert_eq!(
+            check_endpoint("gopher://acme.test/v1", SERVER_SIDE),
+            Err(EndpointRefusal::Scheme)
+        );
+        assert_eq!(
+            check_endpoint("api.openai.com/v1", SERVER_SIDE),
+            Err(EndpointRefusal::Unparseable)
+        );
+    }
+
+    #[test]
+    fn the_cloud_metadata_address_is_refused_wherever_it_is_offered() {
+        // 169.254.169.254 is where a container's credentials live. There is no
+        // deployment on which a company's model endpoint is there.
+        for policy in [LOCAL_OFFERED, SERVER_SIDE] {
+            assert_eq!(
+                check_endpoint("http://169.254.169.254/latest/meta-data/", policy),
+                Err(EndpointRefusal::LinkLocal)
+            );
+        }
+    }
+
+    #[test]
+    fn link_local_is_refused_in_both_address_families() {
+        assert_eq!(
+            check_endpoint("http://169.254.1.1/v1", LOCAL_OFFERED),
+            Err(EndpointRefusal::LinkLocal)
+        );
+        assert_eq!(
+            check_endpoint("http://[fe80::1]/v1", LOCAL_OFFERED),
+            Err(EndpointRefusal::LinkLocal)
+        );
+    }
+
+    #[test]
+    fn an_ipv4_mapped_ipv6_address_gets_the_ipv4_answer() {
+        // Checking only the v6 shape is how `::ffff:169.254.169.254` reaches a
+        // metadata service through a guard that looks like it works.
+        assert_eq!(
+            check_endpoint("http://[::ffff:169.254.169.254]/v1", LOCAL_OFFERED),
+            Err(EndpointRefusal::LinkLocal)
+        );
+        assert_eq!(
+            check_endpoint("http://[::ffff:127.0.0.1]:11434/v1", SERVER_SIDE),
+            Err(EndpointRefusal::Loopback)
+        );
+    }
+
+    #[test]
+    fn loopback_is_an_explicit_allowance_not_a_hole() {
+        // Allowed only where the local-runtime category is offered, because
+        // that is exactly what Ollama needs.
+        assert_eq!(
+            check_endpoint("http://127.0.0.1:11434/v1", LOCAL_OFFERED),
+            Ok(())
+        );
+        assert_eq!(
+            check_endpoint("http://[::1]:11434/v1", LOCAL_OFFERED),
+            Ok(())
+        );
+        assert_eq!(
+            check_endpoint("http://127.0.0.1:11434/v1", SERVER_SIDE),
+            Err(EndpointRefusal::Loopback)
+        );
+    }
+
+    #[test]
+    fn private_and_carrier_grade_ranges_are_refused() {
+        for addr in [
+            "http://10.0.0.5/v1",
+            "http://192.168.1.10/v1",
+            "http://172.16.0.1/v1",
+            "http://100.64.0.1/v1",
+            "http://0.0.0.0/v1",
+        ] {
+            assert_eq!(
+                check_endpoint(addr, LOCAL_OFFERED),
+                Err(EndpointRefusal::PrivateNetwork),
+                "{addr}"
+            );
+        }
+        assert_eq!(
+            check_endpoint("http://[fc00::1]/v1", LOCAL_OFFERED),
+            Err(EndpointRefusal::PrivateNetwork)
+        );
+    }
+
+    #[test]
+    fn a_redirect_target_gets_the_same_answer_as_the_first_hop() {
+        // A permitted host that redirects to the metadata address is the whole
+        // trick, so the address half is public for the redirect check to reuse.
+        assert_eq!(check_endpoint("https://acme.test/v1", SERVER_SIDE), Ok(()));
+        assert_eq!(
+            check_address("169.254.169.254".parse().unwrap(), SERVER_SIDE),
+            Err(EndpointRefusal::LinkLocal)
+        );
+    }
+
+    #[test]
+    fn userinfo_and_ports_do_not_hide_the_host() {
+        assert_eq!(
+            check_endpoint("http://user:pw@169.254.169.254:80/v1", SERVER_SIDE),
+            Err(EndpointRefusal::LinkLocal)
+        );
+        assert_eq!(
+            check_endpoint("http://169.254.169.254@example.test/v1", SERVER_SIDE),
+            Ok(()),
+            "the authority after the last @ is the real host"
+        );
+    }
+
+    #[test]
+    fn a_hostname_is_allowed_because_resolving_it_here_would_prove_nothing() {
+        // A name resolved in a pure check is a DNS lookup in a pure function,
+        // and the resolve can change underneath it anyway. The address check is
+        // applied where the connection is actually made.
+        assert_eq!(
+            check_endpoint("https://localhost.acme.test/v1", SERVER_SIDE),
+            Ok(())
+        );
+    }
+}
