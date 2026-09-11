@@ -24,12 +24,17 @@ function asBrowser() {
   delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
 }
 
-function clickAnchor(href: string, init: MouseEventInit = {}) {
+function clickAnchor(
+  href: string,
+  init: MouseEventInit = {},
+  opts: { target?: string | null; type?: "click" | "auxclick" } = {},
+) {
   const anchor = document.createElement("a");
   anchor.setAttribute("href", href);
-  anchor.setAttribute("target", "_blank");
+  const target = opts.target === undefined ? "_blank" : opts.target;
+  if (target !== null) anchor.setAttribute("target", target);
   document.body.append(anchor);
-  const event = new MouseEvent("click", {
+  const event = new MouseEvent(opts.type ?? "click", {
     bubbles: true,
     cancelable: true,
     button: 0,
@@ -206,5 +211,70 @@ describe("openOutward", () => {
     asBrowser();
 
     expect(openOutward("https://app.composio.dev")).toBe(false);
+  });
+});
+
+describe("what must not be intercepted", () => {
+  /**
+   * The hub sign-in buttons in `Login.tsx` are absolute anchors with **no**
+   * target: the OAuth start is a top-level navigation and the token is read
+   * back off this same window when the provider returns. Sending one to the
+   * system browser lands the callback there and leaves the desktop webview
+   * signed out for good (Codex review on #2283).
+   */
+  it("leaves an absolute anchor with no target to navigate in place", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    const event = clickAnchor(
+      "https://hub.example/oauth/start",
+      {},
+      { target: null },
+    );
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    dispose();
+  });
+
+  it("leaves an anchor targeting the same window alone", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    clickAnchor("https://example.com/x", {}, { target: "_self" });
+
+    expect(invoke).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  /** Middle-click asks for the same tab the webview cannot create. */
+  it("hands a middle-click to the shell in the desktop build", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    const event = clickAnchor(
+      "https://example.com/x",
+      { button: 1 },
+      { type: "auxclick" },
+    );
+
+    expect(invoke).toHaveBeenCalledWith("plugin:shell|open", {
+      path: "https://example.com/x",
+    });
+    expect(event.defaultPrevented).toBe(true);
+    dispose();
+  });
+
+  /** Leading whitespace must not reach the shell's URL matcher (CodeRabbit). */
+  it("passes a trimmed url to the shell", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    clickAnchor("  https://example.com/x  ");
+
+    expect(invoke).toHaveBeenCalledWith("plugin:shell|open", {
+      path: "https://example.com/x",
+    });
+    dispose();
   });
 });

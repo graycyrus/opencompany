@@ -35,13 +35,30 @@ import { tauriCore } from "@/api/transport/bridge";
 export function installExternalLinkOpener(
   doc: Document = document,
 ): () => void {
-  const onClick = (event: MouseEvent) => {
-    if (event.defaultPrevented || event.button !== 0) return;
+  /**
+   * `click` carries the primary button, `auxclick` the middle one. Both ask for
+   * a new tab on an anchor the webview cannot give one, so both are handled —
+   * dropping every non-primary event left middle-click inert (Codex review on
+   * #2283).
+   */
+  const onActivate = (event: MouseEvent) => {
+    if (event.defaultPrevented) return;
+    const wanted = event.type === "auxclick" ? 1 : 0;
+    if (event.button !== wanted) return;
 
     const anchor = (event.target as Element | null)?.closest?.("a");
-    const href = anchor?.getAttribute("href");
+    const href = anchor?.getAttribute("href")?.trim();
     if (!anchor || !href) return;
     if (!isOutwardHref(href)) return;
+
+    // ONLY a link that asked for a separate tab. An absolute `href` with no
+    // target is a top-level navigation the console means to perform in place,
+    // and the hub sign-in buttons are exactly that: `Login.tsx` sends the
+    // browser to the provider's OAuth start and reads the token back off this
+    // same window when it returns. Handing those to the system browser would
+    // land the callback there and leave the desktop webview permanently signed
+    // out — a worse bug than the one this module fixes (Codex review on #2283).
+    if (anchor.getAttribute("target")?.toLowerCase() !== "_blank") return;
 
     // The bridge is probed BEFORE the modifier keys are considered, and the
     // order is the point. A Cmd- or Ctrl-click asks for "open in a new tab",
@@ -60,8 +77,12 @@ export function installExternalLinkOpener(
     openOutward(href);
   };
 
-  doc.addEventListener("click", onClick, true);
-  return () => doc.removeEventListener("click", onClick, true);
+  doc.addEventListener("click", onActivate, true);
+  doc.addEventListener("auxclick", onActivate, true);
+  return () => {
+    doc.removeEventListener("click", onActivate, true);
+    doc.removeEventListener("auxclick", onActivate, true);
+  };
 }
 
 /**
