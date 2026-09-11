@@ -1,34 +1,49 @@
-// What is waiting on you, in the window's title row.
+// The way into the Notifications page, in the window's title row.
 //
-// # Why the count moved out of the sidebar
+// # Third position, and why this one is different
 //
-// It was a `SidebarMenuBadge` on the Approvals row, and `SidebarMenuBadge`
-// carries `group-data-[collapsible=icon]:hidden` — correct on its own terms, a
-// two-digit count does not fit a 32px rail, but it made the console's only
-// attention signal disappear exactly when the sidebar was collapsed. Issue
-// #1018 papered over that with a second element, `SidebarMenuDot`: the same
-// `pending` value rendered as a bare mark that survives 32px, mirrored so that
-// precisely one of the two ever showed.
+// The approvals count has lived in two places and this file has argued for
+// both. It was a `SidebarMenuBadge` on an Approvals row, plus a
+// `SidebarMenuDot` that existed *only* because that badge carries
+// `group-data-[collapsible=icon]:hidden` and so vanished at 32px (issue #1018)
+// — two mechanisms for one number, the second a workaround for the first
+// disappearing. It then spent a release as a shield glyph in this row, and went
+// back to the sidebar on the argument that a queue is a place you GO and that
+// one unlabelled square between an Overview glyph and an autonomy pill could
+// not say so.
 //
-// Two mechanisms for one fact, and the second existed only because the first
-// hid itself. In the title row neither problem exists: this band is chrome, it
-// never collapses, and it is on screen on every page in every sidebar state.
-// So the badge and the dot are both deleted rather than maintained — the dot
-// was protecting against a disappearance that can no longer happen.
+// Both of those were arguments about a *queue*. What this opens is a page:
+// Approvals and the durable notification feed, as two tabs (`#/notifications`).
+// A bell is the one glyph an operator already reads as "the things that
+// happened to you, gathered in one place", which is what the destination now
+// is — so the naming problem that sent the shield back downstairs does not
+// arise. And the disappearance #1018 was really about cannot happen here: this
+// band is chrome, it never collapses, and it is on screen on every page in
+// every sidebar state. So the badge and the dot are both deleted rather than
+// maintained.
 //
 // # What survives the move
 //
 // **The accessible name is the whole of what a screen reader gets** from an
-// icon-only control, so it says what is waiting and how many — the exact
-// sentence the dot's `aria-label` carried, verbatim, because that wording was
-// the deliberate answer to "colour alone is not a signal everyone receives".
+// icon-only control, so it says where it goes AND what is waiting — the count
+// and the word "approvals" together, the sentence the rail dot's `aria-label`
+// carried, because that wording was the deliberate answer to "colour alone is
+// not a signal everyone receives".
 //
 // **The count is one value, from one place.** `pending` is
 // `feed.status.pending_approvals`, threaded through the shell — never counted
 // again here. A second source is a second answer, and the contract issue #932
 // pins is that there is one.
+//
+// **The chip counts approvals, not notifications.** The Activity tab's feed is
+// unread-only by the host's own contract (`src/server/ops/notifications.rs`
+// drops every row that has a `read_at`), and it clears when a channel is read
+// or a toast is acknowledged — so a number built from it would fall to zero
+// while things were still waiting. `pending_approvals` is the fact that stays
+// true until somebody decides something, which is what a standing attention
+// signal has to be.
 
-import { ShieldCheck } from "lucide-react";
+import { Bell } from "lucide-react";
 
 import { TITLE_BAR_ICON_BUTTON } from "@/components/window-title-bar";
 import { cn } from "@/lib/utils";
@@ -39,25 +54,23 @@ import { cn } from "@/lib/utils";
  * The control grows with its count rather than carrying a mark on the glyph's
  * corner, so this is a ceiling on how far the row is allowed to stretch, not on
  * what fits — three digits are legible, four start pushing the switcher. The
- * true number stays in {@link approvalsLabel} and in `data-pending`, so nothing
- * is lost: the digits an operator cannot read are traded for an exact count a
- * screen reader still gets.
+ * true number stays in {@link notificationsLabel} and in `data-pending`, so
+ * nothing is lost: the digits an operator cannot read are traded for an exact
+ * count a screen reader still gets.
  *
  * The corner-mark arrangement was tried first and rejected at its real cap: at
- * 128 pending, `99+` sitting on a 32px glyph covered most of the shield and the
- * control stopped reading as approvals at all. A count that obscures the thing
+ * 128 pending, `99+` sitting on a 32px glyph covered most of the bell and the
+ * control stopped reading as anything at all. A count that obscures the thing
  * it is counting is worse than one that takes eighteen more pixels.
  */
 export const APPROVALS_COUNT_CAP = 99;
 
 /**
- * What this control is called, given how much is waiting.
+ * What is waiting, and how many — the sentence the collapsed-rail dot carried,
+ * kept word for word because it is what makes the signal reach someone who
+ * never sees the chip.
  *
- * The `pending > 0` sentence is the one the collapsed-rail dot carried before
- * this row existed, kept word for word: it names WHAT is waiting and HOW MANY,
- * which is what makes the signal reach someone who never sees the chip.
- *
- * At zero it is just the destination's name. "0 approvals need you" would be a
+ * At zero it is just the queue's name. "0 approvals need you" would be a
  * sentence about attention at the moment nothing wants any.
  */
 export function approvalsLabel(pending: number): string {
@@ -65,12 +78,25 @@ export function approvalsLabel(pending: number): string {
   return `${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`;
 }
 
+/**
+ * What this control is called, given how much is waiting.
+ *
+ * The destination's name leads, always, because that is what the control DOES —
+ * an operator who reaches a bell expects notifications whether or not anything
+ * is pending. What is waiting follows it when there is something, so the one
+ * accessible name answers both "where does this go" and "why is it lit".
+ */
+export function notificationsLabel(pending: number): string {
+  if (pending <= 0) return "Notifications";
+  return `Notifications — ${approvalsLabel(pending)}`;
+}
+
 /** What the chip prints — the count, or `99+` past {@link APPROVALS_COUNT_CAP}. */
 export function approvalsCount(pending: number): string {
   return pending > APPROVALS_COUNT_CAP ? `${APPROVALS_COUNT_CAP}+` : String(pending);
 }
 
-export function ApprovalsButton({
+export function NotificationsButton({
   pending,
   active = false,
   onNavigate,
@@ -82,16 +108,16 @@ export function ApprovalsButton({
    * does not appear.
    */
   pending: number;
-  /** Whether the approvals queue is the view on screen. */
+  /** Whether the Notifications page is the view on screen. */
   active?: boolean;
   onNavigate: () => void;
   className?: string;
 }) {
-  const label = approvalsLabel(pending);
+  const label = notificationsLabel(pending);
   return (
     <button
       type="button"
-      data-testid="title-bar-approvals"
+      data-testid="title-bar-notifications"
       // So a test can read the count off the closed control without depending
       // on the chip's text, which is capped and therefore not the number.
       data-pending={pending}
@@ -109,10 +135,10 @@ export function ApprovalsButton({
         className,
       )}
     >
-      <ShieldCheck aria-hidden="true" className="size-4 flex-none" />
+      <Bell aria-hidden="true" className="size-4 flex-none" />
       {pending > 0 && (
         <span
-          data-testid="title-bar-approvals-count"
+          data-testid="title-bar-notifications-count"
           // The digits are decoration for anyone reading the label: the button
           // already says "3 approvals need you", and announcing "3" again after
           // it is the same fact twice.
@@ -121,11 +147,11 @@ export function ApprovalsButton({
             "flex h-4 min-w-4 flex-none items-center justify-center rounded-full px-1",
             "text-3xs leading-none font-medium tabular-nums select-none",
             // `--status-blocked` is the token for "waiting on someone", which is
-            // exactly what a pending approval is; the dot this replaces used the
-            // same one. Soft fill plus the matching text tone rather than a solid
-            // block, because a solid fill has no foreground token that themes
-            // with it — and this pair is what `workflow-node` already uses for a
-            // blocked state in both light and dark.
+            // exactly what a pending approval is; the rail dot this replaces used
+            // the same one. Soft fill plus the matching text tone rather than a
+            // solid block, because a solid fill has no foreground token that
+            // themes with it — and this pair is what `workflow-node` already uses
+            // for a blocked state in both light and dark.
             //
             // This is the row's only piece of colour, and deliberately so: it is
             // the one thing here that ever asks for attention.

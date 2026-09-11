@@ -21,6 +21,7 @@ import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { NotificationsButton } from "@/components/notifications-button";
 import { OverviewButton } from "@/components/overview-button";
 import { TitleBarSearch } from "@/components/title-bar-search";
 import { TitleBarUtilities } from "@/components/title-bar-utilities";
@@ -159,7 +160,7 @@ import {
   type HistoryStatus,
 } from "@/views/room/model";
 import { TeamView } from "@/views/TeamView";
-import { ApprovalsView } from "@/views/ApprovalsView";
+import { NotificationsView } from "@/views/NotificationsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
@@ -2268,6 +2269,37 @@ export function AppShell({
     refreshMentions();
   }, [feed.now, refreshMentions]);
 
+  /**
+   * Mark notification rows read on behalf of the Notifications page.
+   *
+   * **`ids` absent means everything this person can see**, which is what the
+   * host does with no `ids` field and what "Dismiss all" means. An explicitly
+   * empty array marks *nothing* and is honoured as that instruction — so this
+   * never passes `[]` in place of "all", and the page never calls it with one.
+   *
+   * Optimistic, then reconciled by the next poll: the row leaves the list at
+   * the click, and a write that failed (offline, older host) brings it back
+   * rather than leaving the list permanently wrong. Exactly the shape the
+   * mention clear above already uses.
+   */
+  const markNotificationsRead = useCallback(
+    (ids?: readonly string[]) => {
+      const readAt = Date.now();
+      setMentionFeed((current) =>
+        current.map((n) =>
+          ids === undefined || ids.includes(n.id) ? { ...n, readAt } : n,
+        ),
+      );
+      void client
+        .markNotificationsRead(ids ? [...ids] : undefined, company)
+        .catch(() => {
+          // Older host, or offline. The refresh below restores the true state.
+        })
+        .finally(() => refreshMentions());
+    },
+    [client, company, refreshMentions],
+  );
+
   // The other half of the deferred ack above: flush whatever was toasted
   // while the tab was hidden the moment it is actually seen (Codex #1883
   // P2). `scopeRef.current.company`, not the `company` prop, so this effect
@@ -3688,15 +3720,22 @@ export function AppShell({
             onNavigate={() => setView("overview")}
           />
         }
-        // No `approvals` slot. It is a sidebar row again — a labelled place
-        // you go, rather than one unlabelled square between an Overview glyph
-        // and an autonomy pill. The count that kept it here (issue #1018: a
-        // signal must survive the rail collapsing) is answered in the column by
-        // `SidebarMenuBadge` and its icon-rail mirror `SidebarMenuDot`, so
-        // nothing about the signal depends on this row any more. See
-        // `NAV_SECTIONS`.
-        //
-        // No `autonomy` slot either. The tier is a control on the composer's
+        approvals={
+          // The bell, beside Overview and Settings in the same group: all
+          // three are about the console rather than about the page. It is a
+          // page now rather than a bare queue — Approvals and the activity
+          // feed, as two tabs — which is what answers the objection that sent
+          // the old shield glyph back to the sidebar (one unlabelled square
+          // could not say it was a destination; a bell says exactly what this
+          // one is). The count it carries is `pending_approvals`, unchanged,
+          // and the sidebar draws no second copy of it any more.
+          <NotificationsButton
+            pending={pending}
+            active={view === "notifications" || view === "approvals"}
+            onNavigate={() => setView("notifications")}
+          />
+        }
+        // No `autonomy` slot. The tier is a control on the composer's
         // toolbar row now (`views/chat/MessageComposer.tsx`): it is a fact
         // about what happens when you press Send, so it belongs beside Send
         // rather than in the band that holds facts about the console.
@@ -3734,7 +3773,7 @@ export function AppShell({
 
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} onNavigate={setView} pending={pending} />
+          <SidebarNavigation view={view} onNavigate={setView} />
         </SidebarContent>
         {/* The console's own utilities sit at the FOOT of the column, under the
             destinations rather than over them. They act on the console, not on
@@ -4118,8 +4157,13 @@ export function AppShell({
               <MemoryView client={client} company={company} sub={sub} />
             </Suspense>
           )}
-          {view === "approvals" && (
-            <ApprovalsView
+          {/* Two heads, one page. `#/notifications` is the address and `?tab=`
+              picks the half; `#/approvals` and `#/approvals/<taskId>` still
+              answer, land on the queue and keep their second segment, because
+              `REWRITE_RETIRED` has no query channel to have carried a task id
+              across (see `lib/console-routes.ts`). */}
+          {(view === "notifications" || view === "approvals") && (
+            <NotificationsView
               client={client}
               company={company}
               feed={feed}
@@ -4127,9 +4171,20 @@ export function AppShell({
               // card, so "Review" on a blocked card lands on its approvals
               // rather than on a page the operator has to search. Same
               // unvalidated second segment every other sub-page gets — only
-              // this view knows whether the id matches anything parked, so it
+              // the queue knows whether the id matches anything parked, so it
               // does that check itself and says so when it does not.
               sub={sub}
+              forceApprovalsTab={view === "approvals"}
+              // The feed the shell already polls, not a second poller: one
+              // request, one answer, so the bell and this list cannot disagree
+              // for a poll interval. The same `Array.isArray` guard that
+              // built it applies — `mentionFeed` is never anything else.
+              notifications={mentionFeed}
+              channels={{
+                rendered: new Set(Object.values(chatChannelByThread)),
+                mainChannelId: firstDeskChannelId ?? undefined,
+              }}
+              onNotificationsRead={markNotificationsRead}
               chatChannelByThread={chatChannelByThread}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
