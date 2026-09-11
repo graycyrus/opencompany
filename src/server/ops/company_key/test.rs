@@ -134,12 +134,19 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
     assert_eq!(status, StatusCode::OK, "{raw}");
     assert_eq!(dto["configured"], false);
     assert_eq!(dto["source"], "none");
+    let degraded = dto["notice"].as_str().unwrap_or_default();
     assert!(
-        dto["notice"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("cannot be connected"),
+        degraded.contains("no provider can be connected"),
         "the degraded state has to say what is unavailable: {dto}"
+    );
+    // …and must not overstate it. "Providers cannot be connected or used" read
+    // as "nothing works", and a company whose Inference card holds a provider
+    // key of its own goes on thinking perfectly well without this credential —
+    // `inference/key` resolves without it. Overstating the breakage sends that
+    // operator to fix something that is not broken.
+    assert!(
+        degraded.contains("can still think while this is unset"),
+        "the degraded state must not claim the whole company has stopped: {dto}"
     );
     assert!(dto.get("key").is_none(), "status must never carry the key");
 
