@@ -278,12 +278,48 @@ pub fn routing_targets(providers: &[Provider]) -> Vec<&Provider> {
     providers.iter().filter(|p| p.enabled).collect()
 }
 
-/// The provider an unset workload falls through to: the first enabled one.
+/// The provider an unset workload falls through to.
 ///
-/// Entry zero sorts first in [`list_providers`](super::store::list_providers),
-/// so a company that had one provider before this feature existed keeps sending
-/// its unset workloads exactly where it always did.
-pub fn primary(providers: &[Provider]) -> Option<&Provider> {
+/// **The marked default, and only then list order.** `marked` is the slug the
+/// company has said is its default
+/// ([`load_default_slug`](super::store::load_default_slug)); `None` is every
+/// company that has never said, which is every company that existed before the
+/// marker did.
+///
+/// The fallback is first-enabled, which is what this did unconditionally — and
+/// entry zero sorts first in
+/// [`list_providers`](super::store::list_providers), so a company that had one
+/// provider before any of this existed keeps sending its unset workloads exactly
+/// where it always did. No migration, no backfill.
+///
+/// ## Why the marker exists at all
+///
+/// First-enabled answers "which provider is my default" by **list order**. Add
+/// three providers, delete the first, and the default silently becomes the
+/// second — with nothing on screen having changed to say so, and the company's
+/// unrouted spend moving to a different account. An explicit marker makes that a
+/// thing the operator said rather than a thing that happened.
+///
+/// ## Two ways the marker can be stale, and one answer to both
+///
+/// A marked provider may be **disabled** or **gone**. Both are handled the same
+/// way — fall back to first-enabled — rather than by refusing to resolve, and
+/// deliberately: the routes the operator *did* set fail closed when they name a
+/// provider that is missing or off ([`Resolution::Missing`],
+/// [`Resolution::Disabled`]), because those are choices with a workload attached.
+/// An unset workload has no such choice behind it, and the alternative to
+/// falling back is a company that cannot think at all because of a marker it
+/// forgot about. The write paths keep this rare rather than relying on it: both
+/// disabling and deleting clear the marker in the same operation.
+///
+/// `None` means nothing enabled resolves, and every caller reads that as the
+/// managed brain — which is always available and is the right fallback.
+pub fn primary<'a>(providers: &'a [Provider], marked: Option<&str>) -> Option<&'a Provider> {
+    if let Some(marked) = marked.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(provider) = providers.iter().find(|p| p.slug == marked && p.enabled)
+    {
+        return Some(provider);
+    }
     providers.iter().find(|p| p.enabled)
 }
 
@@ -515,13 +551,89 @@ mod tests {
     }
 
     #[test]
-    fn the_primary_is_the_first_enabled_provider() {
+    fn with_no_marker_the_primary_is_the_first_enabled_provider() {
+        // Today's behaviour, unchanged for every company that existed before the
+        // marker did. No migration, no backfill.
         let providers = vec![
             provider("openrouter", "openrouter", false),
             provider("acme", "openai_compatible", true),
         ];
-        assert_eq!(primary(&providers).unwrap().slug, "acme");
-        assert!(primary(&[]).is_none());
+        assert_eq!(primary(&providers, None).unwrap().slug, "acme");
+        assert!(primary(&[], None).is_none());
+    }
+
+    #[test]
+    fn a_marked_default_wins_over_list_order() {
+        // The whole point. First-enabled answers "which provider is my default"
+        // by list order, so deleting the first silently moves a company's
+        // unrouted spend to a different account with nothing on screen saying so.
+        let providers = vec![
+            provider("openrouter", "openrouter", true),
+            provider("acme", "openai_compatible", true),
+        ];
+        assert_eq!(primary(&providers, Some("acme")).unwrap().slug, "acme");
+        // And an unset workload follows the marker when it moves.
+        assert_eq!(
+            primary(&providers, Some("openrouter")).unwrap().slug,
+            "openrouter"
+        );
+    }
+
+    #[test]
+    fn a_stale_marker_falls_back_rather_than_stranding_the_company() {
+        // Both ways it can go stale — disabled, and gone — get the same answer.
+        // A route the operator DID set fails closed when it names a provider
+        // that is missing or off, because that is a choice with a workload
+        // attached. An unset workload has no such choice behind it, and the
+        // alternative to falling back is a company that cannot think at all
+        // because of a marker it forgot about.
+        let providers = vec![
+            provider("openrouter", "openrouter", true),
+            provider("acme", "openai_compatible", false),
+        ];
+        assert_eq!(
+            primary(&providers, Some("acme")).unwrap().slug,
+            "openrouter",
+            "a disabled marked provider is not a routing target"
+        );
+        assert_eq!(
+            primary(&providers, Some("ghost")).unwrap().slug,
+            "openrouter",
+            "a marker naming nothing falls back"
+        );
+        // Nothing enabled at all is `None`, which every caller reads as the
+        // managed brain — always available, and the right fallback.
+        let all_off = vec![provider("acme", "openai_compatible", false)];
+        assert!(primary(&all_off, Some("acme")).is_none());
+    }
+
+    #[test]
+    fn an_unset_workload_follows_the_marker_when_it_moves() {
+        // The two halves together: `provider_for_workload` says "unset, use the
+        // primary" and `primary` says which that is. Moving the marker moves
+        // every unset workload with it, and nothing else.
+        let providers = vec![
+            provider("openrouter", "openrouter", true),
+            provider("acme", "openai_compatible", true),
+        ];
+        let routes = routes(&[("reasoning-v1", "acme:gpt-5")]);
+
+        for (marked, expected) in [(None, "openrouter"), (Some("acme"), "acme")] {
+            assert!(
+                matches!(
+                    provider_for_workload(Workload::Chat, &routes, &providers),
+                    Resolution::Primary
+                ),
+                "chat is unset whatever the marker says"
+            );
+            assert_eq!(primary(&providers, marked).unwrap().slug, expected);
+        }
+
+        // And the route that WAS set does not move.
+        match provider_for_workload(Workload::Reasoning, &routes, &providers) {
+            Resolution::Resolved { provider, .. } => assert_eq!(provider.slug, "acme"),
+            other => panic!("reasoning was set, got {other:?}"),
+        }
     }
 
     #[test]

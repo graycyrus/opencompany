@@ -146,6 +146,7 @@ export function ProvidersTab({
             }}
             onTest={(p) => void actions.test(p.slug)}
             onRemove={(p) => void actions.remove(p.slug)}
+            onMakeDefault={(p) => void actions.makeDefault(p.slug)}
           />
         </CardContent>
       </Card>

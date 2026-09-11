@@ -374,6 +374,14 @@ struct ProviderDto {
     enabled: bool,
     /// Whether a credential is stored. **Never the credential.**
     key_configured: bool,
+    /// Whether this is the provider an **unset** workload goes through.
+    ///
+    /// The *resolved* answer, not the raw marker: a company that has never said
+    /// reports its first enabled provider here, which is what it has always
+    /// resolved to. So the console can render "which provider is my default"
+    /// without knowing whether it was chosen or inherited — and the operator
+    /// sees the same answer either way.
+    is_default: bool,
     /// What was last learnt about reaching it, if anything.
     ///
     /// Absent when nothing has been learnt, which is the honest answer: a row
@@ -417,6 +425,13 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
     let health = store::load_health(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
+    // Resolved through the same function the turn path uses, so the row the
+    // console marks and the provider a turn actually reaches cannot disagree.
+    let marked = store::load_default_slug(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let primary = crate::company::inference::resolve::primary(&providers, marked.as_deref())
+        .map(|p| p.slug.clone());
     let mut out = Vec::with_capacity(providers.len());
     for provider in providers {
         let key_configured = store::provider_key_configured(runtime.id(), secrets, &provider)
@@ -427,6 +442,7 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
             at: h.at.clone(),
         });
         out.push(ProviderDto {
+            is_default: primary.as_deref() == Some(provider.slug.as_str()),
             id: provider.id.as_str().to_string(),
             slug: provider.slug,
             label: provider.label,
@@ -2442,15 +2458,26 @@ base_url = "https://byo.example/v1"
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
-        // The legacy name aliases through to what it now means.
+        // The legacy name still aliases onto the OpenRouter-shaped *kind* — that
+        // is what shape of API this is.
         assert_eq!(resp["status"]["provider"], "openrouter");
-        assert_eq!(resp["status"]["slug"], "openrouter");
         assert_eq!(resp["status"]["source"], "runtime");
         assert_eq!(resp["status"]["keyConfigured"], true);
-        // A key means the tenant's own OpenRouter account pays.
+        // But the **endpoint stays the platform's**, and this assertion is the
+        // fix. `managed` used to normalize onto `openrouter` before the managed
+        // branch was consulted, so a company that declared `managed` and stored
+        // a key had its requests sent to `openrouter.ai` — carrying, in the
+        // credential-link flow that writes exactly this blob, a TinyHumans
+        // token. Declaring `managed` means the company pays for its own agents
+        // on the TinyHumans brain, which is what this route's own header has
+        // said since #585 and what the code now does.
         assert_eq!(
             resp["status"]["baseUrl"],
-            crate::company::inference::OPENROUTER_BASE_URL
+            crate::company::inference::PLATFORM_BASE_URL
+        );
+        assert_eq!(
+            resp["status"]["slug"], "subscription",
+            "the telemetry slug separates the platform endpoint from a direct OpenRouter account"
         );
         assert!(!raw.contains(TOKEN), "PUT leaked the token: {raw}");
 
@@ -2871,6 +2898,160 @@ base_url = "https://byo.example/v1"
             acme["keyConfigured"], true,
             "a disabled provider keeps its credential"
         );
+    }
+
+    #[tokio::test]
+    async fn the_default_is_explicit_and_survives_a_delete_that_is_not_it() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        for label in ["First", "Second"] {
+            send(
+                &state,
+                "POST",
+                "/api/v1/company/inference/providers",
+                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE })),
+            )
+            .await;
+        }
+
+        // With no marker, the default is list order — today's behaviour, which
+        // is exactly what makes this change need no migration.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(default_slug(&dto).as_deref(), Some("first"));
+
+        // Marked, it is a thing the operator said rather than a thing that
+        // happened.
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(default_slug(&dto).as_deref(), Some("second"));
+
+        // Deleting the one that is NOT the default leaves the marker alone —
+        // the failure the marker exists to prevent is the default moving with
+        // list order, silently.
+        send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/first",
+            None,
+        )
+        .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(default_slug(&dto).as_deref(), Some("second"));
+    }
+
+    #[tokio::test]
+    async fn disabling_or_deleting_the_default_never_leaves_it_marked() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        for label in ["First", "Second"] {
+            send(
+                &state,
+                "POST",
+                "/api/v1/company/inference/providers",
+                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE })),
+            )
+            .await;
+        }
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/default",
+            None,
+        )
+        .await;
+
+        // Switched off, the marker is CLEARED rather than moved: moving it
+        // would mark something the operator never chose, which is the
+        // positional default this replaces.
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/enabled",
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(
+            default_slug(&dto).as_deref(),
+            Some("first"),
+            "a disabled provider is never the default"
+        );
+
+        // And a delete takes the marker with the record.
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/enabled",
+            Some(json!({ "enabled": true })),
+        )
+        .await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/default",
+            None,
+        )
+        .await;
+        send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/second",
+            None,
+        )
+        .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(default_slug(&dto).as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_is_switched_off_cannot_be_made_the_default() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+        )
+        .await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/acme/enabled",
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+
+        let (status, _, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/acme/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// The slug the status reports as the default, if any.
+    fn default_slug(dto: &Value) -> Option<String> {
+        dto["providers"]
+            .as_array()?
+            .iter()
+            .find(|p| p["isDefault"] == true)
+            .and_then(|p| p["slug"].as_str())
+            .map(str::to_string)
     }
 
     #[tokio::test]

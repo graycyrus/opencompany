@@ -48,6 +48,7 @@ export function ProviderList({
   onEdit,
   onTest,
   onRemove,
+  onMakeDefault,
 }: {
   providers: readonly Provider[];
   canManage: boolean;
@@ -57,6 +58,7 @@ export function ProviderList({
   onEdit: (provider: Provider) => void;
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
+  onMakeDefault: (provider: Provider) => void;
 }) {
   return (
     <ul className="divide-y divide-border" data-testid="inference-providers">
@@ -84,6 +86,7 @@ export function ProviderList({
           onEdit={onEdit}
           onTest={onTest}
           onRemove={onRemove}
+          onMakeDefault={onMakeDefault}
         />
       ))}
     </ul>
@@ -115,6 +118,7 @@ function ProviderRow({
   onEdit,
   onTest,
   onRemove,
+  onMakeDefault,
 }: {
   provider: Provider;
   canManage: boolean;
@@ -123,6 +127,7 @@ function ProviderRow({
   onEdit: (provider: Provider) => void;
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
+  onMakeDefault: (provider: Provider) => void;
 }) {
   return (
     <li
@@ -134,6 +139,15 @@ function ProviderRow({
         <span className="truncate text-sm font-medium">{provider.label}</span>
         <span className="truncate text-xs text-muted-foreground">{rowSubline(provider)}</span>
       </span>
+
+      {/* A word, not a sentence. What a default is, is not something this page
+          has to explain — where unrouted work goes is the only thing an
+          operator needs to be able to see, and moving it is a menu item. */}
+      {provider.isDefault && (
+        <Badge variant="secondary" data-testid={`inference-provider-${provider.slug}-default`}>
+          Default
+        </Badge>
+      )}
 
       <Health provider={provider} />
 
@@ -162,6 +176,14 @@ function ProviderRow({
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => onEdit(provider)}>Edit</DropdownMenuItem>
           <DropdownMenuItem onClick={() => onTest(provider)}>Test</DropdownMenuItem>
+          {/* Offered only where it would change something: a provider that is
+              already the default, or one that is switched off and so cannot be
+              a routing target at all. */}
+          {!provider.isDefault && provider.enabled && (
+            <DropdownMenuItem onClick={() => onMakeDefault(provider)}>
+              Make default
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem variant="destructive" onClick={() => onRemove(provider)}>
             Remove
           </DropdownMenuItem>

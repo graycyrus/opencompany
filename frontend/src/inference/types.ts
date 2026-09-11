@@ -40,6 +40,18 @@ export interface Provider {
   enabled: boolean;
   /** Whether a credential is stored — **never the credential**. */
   keyConfigured: boolean;
+  /**
+   * Whether an **unset** workload goes through this one.
+   *
+   * The resolved answer rather than the raw marker: a company that has never
+   * said which provider is its default reports its first enabled one here,
+   * because that is what it has always resolved to. So a row can say "Default"
+   * without the console knowing whether it was chosen or inherited — and the
+   * operator sees the same answer either way.
+   *
+   * Optional because an older host does not send it.
+   */
+  isDefault?: boolean;
   /** The last thing the system learnt about reaching it, if anything. */
   health?: ProviderHealth;
 }

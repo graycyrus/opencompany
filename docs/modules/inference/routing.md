@@ -173,6 +173,46 @@ because the UI path can be bypassed by a config edit or an older build — and a
 unresolvable route **hard-errors that workload's inference** rather than falling
 back.
 
+## The primary is chosen, not inherited from list order
+
+An unset workload resolves through the **primary**. Which provider that is used
+to be answered by list order — the first enabled one — and that is a default
+nobody said. Add three providers, delete the first, and the company's unrouted
+spend moves to a different account with nothing on screen having changed.
+
+So there is an explicit marker: one slot (`inference/default`) holding one slug.
+**Two defaults are not representable**, because one slot cannot hold two slugs —
+"setting a default clears the previous one" is the storage shape rather than an
+operation that could be forgotten.
+
+```
+primary(providers, marked):
+    the marked provider, if it exists and is enabled
+    else the first enabled provider          ← every company that has not said
+    else None                                ← the managed brain, always available
+```
+
+No migration and no backfill: an unmarked company behaves exactly as it did.
+
+Three rules the write paths keep:
+
+- **A disabled provider is never the default.** Disabling it **clears** the
+  marker rather than moving it to the next enabled provider — moving it would
+  mark something the operator never chose, which is the positional default this
+  replaces.
+- **Deleting the default clears the marker**, in the same operation that scrubs
+  the routes pointing at it, and for the same reason.
+- **A stale marker falls back rather than stranding the company.** A route the
+  operator *did* set fails closed when it names a provider that is missing or
+  off, because that is a choice with a workload attached; an unset workload has
+  no such choice behind it, and the alternative to falling back is a company
+  that cannot think because of a marker it forgot about.
+
+On screen: the Providers tab marks one row as the default and offers a menu item
+to move it. The Routing tab's unset rows read `Primary (OpenRouter)` — resolved
+through `primary()` on every render, never cached, so they move when the marker
+does.
+
 ## No workload inherits another's route
 
 openhuman shipped the opposite and had to undo it:

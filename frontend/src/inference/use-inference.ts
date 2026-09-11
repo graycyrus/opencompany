@@ -22,6 +22,7 @@ import {
   getRoutes,
   putRoutes,
   restartInference,
+  setDefaultProvider,
   setProviderEnabled,
   testProvider,
 } from "@/api/inference";
@@ -60,6 +61,7 @@ export interface InferenceActions {
   edit: (slug: string, input: EditProviderInput) => Promise<ProviderMutation>;
   remove: (slug: string) => Promise<ProviderMutation>;
   setEnabled: (slug: string, enabled: boolean) => Promise<ProviderMutation>;
+  makeDefault: (slug: string) => Promise<ProviderMutation>;
   test: (slug: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
@@ -158,6 +160,7 @@ export function useInference(
     remove: (slug) => write(slug, () => deleteProvider(client, company, slug)),
     setEnabled: (slug, enabled) =>
       write(slug, () => setProviderEnabled(client, company, slug, enabled)),
+    makeDefault: (slug) => write(slug, () => setDefaultProvider(client, company, slug)),
     test: async (slug) => {
       setBusySlug(slug);
       try {

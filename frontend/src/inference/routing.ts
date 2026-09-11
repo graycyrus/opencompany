@@ -266,6 +266,34 @@ export function orphanedRoutes(
   return out;
 }
 
+/**
+ * The provider an **unset** workload goes through.
+ *
+ * The marked default, and only then list order. `isDefault` is the host's
+ * resolved answer — a company that has never said reports its first enabled
+ * provider — so this reads the same fact the turn path resolves, rather than
+ * a second opinion about it.
+ *
+ * `undefined` means nothing enabled resolves, which every surface reads as the
+ * managed brain: always available, and the right fallback.
+ */
+export function primaryProvider(providers: readonly Provider[]): Provider | undefined {
+  return providers.find((p) => p.isDefault && p.enabled) ?? providers.find((p) => p.enabled);
+}
+
+/**
+ * What an unset row says it will actually use.
+ *
+ * `Primary (OpenRouter)` rather than a bare "Default", because "unset" is
+ * otherwise a mystery on the one screen whose job is to say where work goes.
+ * Read through {@link primaryProvider} on every render and never cached, so the
+ * rows move when the marked default does.
+ */
+export function primaryLabel(providers: readonly Provider[]): string {
+  const primary = primaryProvider(providers);
+  return primary ? `Primary (${primary.label})` : "Primary (Managed)";
+}
+
 /** The providers a row may be pointed at: enabled ones, in list order. */
 export function routingTargets(providers: readonly Provider[]): Provider[] {
   return providers.filter((p) => p.enabled);
@@ -283,7 +311,10 @@ export function rowValue(
 ): { value: string; action: "Change Model" | "Choose Model" } {
   switch (ref.kind) {
     case "default":
-      return { value: "No model selected", action: "Choose Model" };
+      // Not "No model selected". An unset row is not a gap — it resolves
+      // somewhere, and naming where is the difference between a screen that
+      // reports routing and one that hides half of it.
+      return { value: primaryLabel(providers), action: "Choose Model" };
     case "managed":
       return { value: "Managed", action: "Change Model" };
     case "cloud": {

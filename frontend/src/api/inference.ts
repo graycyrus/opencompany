@@ -465,6 +465,27 @@ export function probeDraft(
 }
 
 /**
+ * Say which provider an **unset** workload goes through.
+ *
+ * Explicit rather than positional. Without it the default is whatever sorts
+ * first: add three providers, delete the first, and the company's unrouted spend
+ * moves to a different account with nothing on screen having changed to say so.
+ *
+ * Setting one clears the previous one — not as a second call, but because the
+ * host keeps the marker in a single slot holding a single slug.
+ */
+export function setDefaultProvider(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+): Promise<ProviderMutation> {
+  return client.post<ProviderMutation>(
+    `${client.scopeFor(company)}/inference/providers/${encodeURIComponent(slug)}/default`,
+    {},
+  );
+}
+
+/**
  * Re-check a provider that is already connected.
  *
  * One of the three things that feed a row's health, and the only one an operator

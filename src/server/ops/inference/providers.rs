@@ -76,6 +76,10 @@ pub(super) fn router() -> Router<AppState> {
             "/inference/providers/{slug}/enabled",
             post(set_enabled),
         ))
+        .merge(scoped(
+            "/inference/providers/{slug}/default",
+            post(set_default),
+        ))
         // Deliberately **not** under `/inference/providers/…`: a draft has no
         // slug yet, and a literal segment sharing a prefix with a `{slug}`
         // capture is a routing ambiguity waiting to be resolved the wrong way by
@@ -660,6 +664,11 @@ async fn delete_provider(
             "removed a provider but could not clear its health record",
         );
     }
+    // The marker goes with the record, for the same reason the routes do: a
+    // marker naming a provider that is gone is a default nobody can see and
+    // nobody chose. `primary` would fall back correctly anyway — this is the
+    // write path keeping that rare rather than relying on it.
+    clear_default_if_marked(runtime, &provider.slug).await;
     crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 
     let note = if reset.is_empty() {
@@ -719,6 +728,13 @@ async fn set_enabled(
     let parked = if body.enabled {
         Vec::new()
     } else {
+        // A disabled provider cannot be the default. The marker is **cleared**
+        // rather than moved to the next enabled provider: moving it would mark
+        // something the operator never chose, which is precisely the positional
+        // default the marker exists to replace. Cleared, `primary` falls back to
+        // first-enabled — the same answer, but nothing on the page claims the
+        // operator decided it.
+        clear_default_if_marked(runtime, &provider.slug).await;
         parked_tiers(runtime, &provider).await?
     };
     let note = match (body.enabled, parked.is_empty()) {
@@ -736,6 +752,69 @@ async fn set_enabled(
         probe: None,
         affected_tiers: parked,
     }))
+}
+
+/// `POST …/inference/providers/{slug}/default` — say which provider an unset
+/// workload goes through.
+///
+/// Explicit rather than positional. Without it "which provider is my default" is
+/// answered by list order: add three, delete the first, and the company's
+/// unrouted spend moves to a different account with nothing on screen having
+/// changed to say so.
+///
+/// Setting one clears the previous one — not as a step, but because the marker
+/// is a single slot holding a slug. Two defaults are not representable.
+async fn set_default(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+    Path(params): Path<ProviderPath>,
+) -> Result<Json<ProviderMutation>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let provider = require_provider(runtime, &params.slug).await?;
+    if !provider.enabled {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "{} is switched off, so it cannot be the default. Switch it on first.",
+            provider.label
+        ))));
+    }
+    store::set_default_slug(runtime.id(), runtime.secrets().as_ref(), &provider.slug)
+        .await
+        .map_err(ApiError)?;
+
+    Ok(Json(ProviderMutation {
+        status: effective_status(&state, runtime).await?,
+        note: format!("Unrouted work now goes through {}.", provider.label),
+        probe: None,
+        affected_tiers: Vec::new(),
+    }))
+}
+
+/// Drops the default marker when it names `slug`.
+///
+/// Never fails the request it is part of: the marker is a preference, and a
+/// company left with a stale one still resolves — [`resolve::primary`] falls
+/// back. Losing a delete or a disable over it would be the tail wagging the dog.
+async fn clear_default_if_marked(runtime: &CompanyRuntime, slug: &str) {
+    let secrets = runtime.secrets().as_ref();
+    match store::load_default_slug(runtime.id(), secrets).await {
+        Ok(Some(marked)) if marked == slug => {
+            if let Err(err) = store::clear_default_slug(runtime.id(), secrets).await {
+                tracing::warn!(
+                    company = %runtime.id(),
+                    provider = %slug,
+                    error = %err,
+                    "could not clear the default marker; it now names a provider that is \
+                     gone or off, and unrouted work falls back to the first enabled one",
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(
+            company = %runtime.id(),
+            error = %err,
+            "could not read the default marker while changing a provider",
+        ),
+    }
 }
 
 /// The tiers whose route names `provider`, so switching it off can name them.

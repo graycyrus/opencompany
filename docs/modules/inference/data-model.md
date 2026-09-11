@@ -50,9 +50,9 @@ derived *from* the kind, so it cannot distinguish two OpenRouter accounts.
 ```
    Provider record                    SecretStore
    ┌──────────────────┐               ┌────────────────────────────────┐
-   │ id, slug, label  │               │ inference/key                  │  ← default
-   │ kind, base_url   │  ──names──▶   │ provider/<slug>/key            │  ← others
-   │ models, enabled  │               └────────────────────────────────┘
+   │ id, slug, label  │               │ provider/<slug>/key            │  ← ALL
+   │ kind, base_url   │  ──names──▶   │ inference/key                  │  ← legacy,
+   │ models, enabled  │               └────────────────────────────────┘    read-only
    │ scope            │                            │
    │                  │                            │ read once, at call time,
    │  NO KEY FIELD    │                            ▼ by exactly one function
@@ -68,10 +68,23 @@ The rules, each of which the current code already satisfies and must continue to
    never by storing a flag, which can go stale against a deleted secret.
 3. **The key is read per request, not captured at boot.** This is what allows the
    managed tier to be a rotating projected token.
-4. **One credential slot per provider**, keyed by slug. This is the change: today
-   there is one slot per company, which is why switching provider without
-   re-entering a key fails on the next turn with a 401 the host has to explain in
-   a paragraph.
+4. **One credential slot per provider**, keyed by slug, *with no exception*.
+   This is the change: there used to be one slot per company, which is why
+   switching provider without re-entering a key failed on the next turn with a
+   401 the host had to explain in a paragraph. The managed/TinyHumans provider
+   is keyed on the slug `tinyhumans` rather than on its OpenRouter-shaped kind —
+   the kind says what shape of API this is, the slug says whose account it is,
+   and a company holding both a managed credential and a real OpenRouter account
+   must not have one slot between them.
+
+   **Convergence rather than migration.** A write always goes to
+   `provider/<slug>/key` and clears `inference/key` in the same operation; a
+   read tries the new address and falls back to the old one. An existing company
+   keeps working untouched and the first save moves it. No flag day, no
+   half-migrated state, and the fallback is one line to delete once nothing
+   reads it. The clear must be *issued* — the store has no delete — and a
+   failure is logged loudly, because a key left at the old address after the new
+   one is written is an orphaned secret.
 5. **Deleting a provider clears its key.** openhuman does not do this — removing
    a provider leaves `provider:<slug>` on disk and re-adding silently reuses the
    old key. See [`known-defects.md`](known-defects.md).
@@ -139,6 +152,27 @@ authenticated one is not.
 entries per company per hour. The cache key must gain the provider slug, and the
 eviction rule ("every path that writes a credential evicts") must fire per
 provider, not per company.
+
+## The default provider is a marker, not a position
+
+Which provider an **unset** workload goes through is stored, not inferred from
+list order. One slot, `inference/default`, holding one slug:
+
+```
+inference/default  ──▶  "acme"        ← at most one; two are not representable
+```
+
+A flag per record could be true twice and would then need a rule for which wins.
+A slot cannot, so there is no rule to write down and no state to reconcile.
+
+`resolve::primary(providers, marked)` returns the marked provider when it exists
+and is enabled, and otherwise the first enabled one — which is what it returned
+unconditionally before, so an unmarked company is unchanged and nothing is
+backfilled. `None` means the managed brain, which is always available.
+
+Both write paths keep the marker honest: disabling the marked provider clears
+the marker (rather than moving it to something the operator never chose), and
+deleting it clears the marker in the same operation that scrubs its routes.
 
 ## The migration constraint
 

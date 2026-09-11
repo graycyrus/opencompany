@@ -215,11 +215,30 @@ describe("the second mechanism behind the same invariant", () => {
 
 describe("what a row offers and reads", () => {
   it("says Choose Model when nothing is set and Change Model when something is", () => {
+    // An unset row names where it will actually go. "No model selected" said
+    // nothing about a row that still resolves somewhere, on the one screen whose
+    // job is to say where work goes.
     expect(rowValue({ kind: "default" }, [])).toEqual({
-      value: "No model selected",
+      value: "Primary (Managed)",
       action: "Choose Model",
     });
     expect(rowValue({ kind: "managed" }, []).action).toBe("Change Model");
+  });
+
+  it("names the primary an unset row resolves through, and follows the marker", () => {
+    const openrouter = { ...provider("openrouter", "openrouter"), label: "OpenRouter" };
+    const acme = { ...provider("acme", "openai_compatible"), label: "Acme gateway" };
+    expect(rowValue({ kind: "default" }, [openrouter, acme]).value).toBe("Primary (OpenRouter)");
+    // Marked, it moves — read on every render rather than cached.
+    expect(
+      rowValue({ kind: "default" }, [openrouter, { ...acme, isDefault: true }]).value,
+    ).toBe("Primary (Acme gateway)");
+    // A disabled marked provider is not a routing target, so it is not the
+    // primary either.
+    expect(
+      rowValue({ kind: "default" }, [openrouter, { ...acme, isDefault: true, enabled: false }])
+        .value,
+    ).toBe("Primary (OpenRouter)");
   });
 
   it("names the provider by its label, not its slug", () => {
