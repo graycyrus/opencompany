@@ -27,7 +27,7 @@
 #
 # Optional:
 #   VERSION      the bare version. Defaults to TAG without its leading `v`, and
-#                is asserted against src-tauri/tauri.conf.json either way — a
+#                is asserted against crates/opencompany-app/tauri.conf.json either way — a
 #                manifest whose `version` does not match the application inside
 #                the archive is an update every client takes and then re-offers.
 set -euo pipefail
