@@ -140,18 +140,20 @@ test("a member sees what is connected but is offered nothing that changes it", a
     //
     // Its own page since issue #2259. The credential-field assertion below is
     // the one that matters most in this spec — a member must never be handed
-    // somewhere to paste a token — and it lived in the Apps block above until
-    // the page split. Leaving it there would have left it passing for a reason
-    // that has nothing to do with authority: `#composio-token` is not on the
-    // Apps page for an ADMIN either now, so the assertion would have read as
-    // coverage while testing nothing. The admin half below asserts the field IS
-    // here, which is what keeps this one honest.
+    // somewhere to paste a key — and it only means that while the same field
+    // is present for an admin, which the admin half below asserts.
+    //
+    // It names the BYOK key rather than the managed token: `src/product-scope.ts`
+    // leaves BYOK the only route this console offers, and with one route on
+    // offer the form settles there for every company, so the managed token card
+    // never renders for either role. Asserting its absence read as coverage
+    // while testing nothing.
     await openConnectionsPage(memberPage, "composio");
     await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({
       timeout: 30_000,
     });
-    await expect(memberPage.locator("#composio-token")).toHaveCount(0);
-    await expect(button("Save token")).toHaveCount(0);
+    await expect(memberPage.locator("#composio-api-key")).toHaveCount(0);
+    await expect(button("Save key")).toHaveCount(0);
 
     // ---- MCP: the tool servers, rows and the file both ---------------------
     await openSettingsPage(memberPage, "mcp");
@@ -197,9 +199,13 @@ test("an admin is still offered every control across the four pages", async ({ p
   // The credential the member above is refused, on the page it lives on. This
   // is what stops that assertion going vacuous: if the field ever stops
   // rendering here, this fails rather than the member case quietly passing.
+  //
+  // The BYOK key, for the reason given there: it is the write surface this
+  // console offers on every build, where the managed token card is offered on
+  // none.
   await openConnectionsPage(page, "composio");
   await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
-  await expect(page.locator("#composio-token")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#composio-api-key")).toBeVisible({ timeout: 30_000 });
 
   await openSettingsPage(page, "mcp");
   await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);
