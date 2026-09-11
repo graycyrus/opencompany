@@ -325,15 +325,15 @@ export function ApiKeyView({ client, company }: Props) {
                   against — though a provider key set on the LLM page still works.
                 </span>
               </p>
-              <Button
-                type="button"
-                disabled={!canManage}
-                onClick={() => setEditing(true)}
-                data-testid="account-empty-add"
-              >
-                <KeyRound className="size-4" />
-                Add a key
-              </Button>
+              {/* No button here, deliberately, though the list this borrows its
+                  shape from has one. The page it replaces carried the warning
+                  in its own source: two identical primary buttons on one screen
+                  leave a reader working out whether they do the same thing. On
+                  a list of providers the header action and the empty-state
+                  action are inches apart in a long card; on a page with one
+                  credential they are adjacent and identical, and the header
+                  card's action is already in view directly above this. The
+                  sentence stays — it is what the empty state is for. */}
             </div>
           ) : (
             <ul className="divide-y divide-border" data-testid="account-rows">
