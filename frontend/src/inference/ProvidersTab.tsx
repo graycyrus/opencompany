@@ -208,12 +208,30 @@ function RestartNotice({
   return (
     <Card data-testid="inference-restart-required">
       <CardContent className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm">
-          This company booted without a model, so agents are still on the offline brain. Its
-          runtime has to be rebuilt before the saved configuration takes effect.
-        </p>
+        <div className="grid min-w-0 flex-1 gap-1">
+          <p className="text-sm">
+            Restart required. This company booted without a model, so agents are still on the
+            offline brain and the saved configuration is not yet in effect.
+          </p>
+          {/* The remedy, in both spellings the host could mean. The capability
+              comes from the host, which does not know which shell it is
+              packaged in — and this is the case where the operator cannot infer
+              the next step from any control on the page, because there is no
+              control for it. */}
+          {!canRestart && (
+            <p className="text-xs text-muted-foreground" data-testid="inference-restart-manual">
+              This host cannot rebuild a company runtime in place: quit and reopen the app, or
+              restart the server process.
+            </p>
+          )}
+        </div>
         {canRestart && (
-          <Button type="button" variant="outline" onClick={onRestart}>
+          <Button
+            type="button"
+            variant="outline"
+            data-testid="inference-restart-now"
+            onClick={onRestart}
+          >
             Restart now
           </Button>
         )}

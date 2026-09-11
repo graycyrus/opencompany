@@ -1,0 +1,341 @@
+import { useState } from "react";
+
+import { ApiError } from "@/api/types";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
+import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
+import { WorkloadModelDialog } from "./WorkloadModelDialog";
+import {
+  ADVANCED_INTRO,
+  MANAGED_ALWAYS_ON,
+  MODE_COPY,
+  OWN_MODE_EMPTY,
+  OWN_MODE_SCOPE,
+  WORKLOADS,
+  WORKLOAD_COPY,
+  WORKLOAD_TIER,
+  applyToEveryWorkload,
+  formatRef,
+  parseRef,
+  routingTargets,
+  rowValue,
+} from "./routing";
+import type { InferenceActions, InferenceState } from "./use-inference";
+import type { ProviderRef, RoutingMap, RoutingMode, Workload } from "./types";
+
+/**
+ * Routing: which provider serves which workload.
+ *
+ * Three modes, and **the mode is inferred from the routes, never stored**. A
+ * mode field would be a fifth thing that can disagree with the four routes, and
+ * the routes are the truth.
+ *
+ * ## Four editable rows, not five
+ *
+ * The design this ports lists `coding` beside `agentic`. Here they are the same
+ * abstract tier — `agentic-v1` — so a fifth editable row would write one tier's
+ * route under two names, and setting one would silently change the other. That
+ * is the inheritance bug the same design forbids, wearing a different hat.
+ * `coding` gets a read-only row that says where it actually resolves, which is
+ * more honest than either omitting it or making it editable.
+ */
+export function RoutingTab({
+  state,
+  actions,
+  canManage,
+}: {
+  state: InferenceState;
+  actions: InferenceActions;
+  canManage: boolean;
+}) {
+  const [editing, setEditing] = useState<Workload | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  /** Which mode the operator has selected, when it differs from the inferred one. */
+  const [chosenMode, setChosenMode] = useState<RoutingMode | null>(null);
+  /** The Own-mode draft: one provider and one model for everything. */
+  const [ownSlug, setOwnSlug] = useState<string>("");
+  const [ownModel, setOwnModel] = useState<string>("");
+
+  if (state.load === "unavailable") return null;
+  if (state.load === "loading") return <Skeleton className="h-64 rounded-xl" />;
+  if (state.load === "error") {
+    return <SectionUnreachable label="Couldn't read this company's routing" />;
+  }
+
+  const routing: RoutingMap = Object.fromEntries(
+    WORKLOADS.map((w) => [w, parseRef(state.routes[WORKLOAD_TIER[w]] ?? "")]),
+  ) as RoutingMap;
+  const mode = chosenMode ?? state.mode;
+  const targets = routingTargets(state.providers);
+
+  async function save(next: RoutingMap) {
+    setError(null);
+    const wire: Record<string, string> = {};
+    for (const workload of WORKLOADS) {
+      wire[WORKLOAD_TIER[workload]] = formatRef(next[workload] ?? { kind: "default" });
+    }
+    try {
+      await actions.saveRoutes(wire);
+      setChosenMode(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "That routing could not be saved.");
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="space-y-3">
+          {/* The page's one h1 is its title; this section and the Providers tab's
+              are peers under it, not one nested in the other. */}
+          <h2 className="text-sm font-medium">Routing mode</h2>
+          {(["managed", "own", "advanced"] as const).map((option) => (
+            <ModeRow
+              key={option}
+              option={option}
+              selected={mode === option}
+              disabled={!canManage}
+              onSelect={() => {
+                setChosenMode(option);
+                // Managed is a whole-table statement, so it saves on selection.
+                // Own and Advanced need a choice before there is anything to
+                // write.
+                if (option === "managed") {
+                  void save(
+                    Object.fromEntries(
+                      WORKLOADS.map((w) => [w, { kind: "managed" } as ProviderRef]),
+                    ) as RoutingMap,
+                  );
+                }
+              }}
+            />
+          ))}
+        </CardContent>
+      </Card>
+
+      {mode === "own" && (
+        <Card>
+          <CardContent className="space-y-3">
+            {targets.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{OWN_MODE_EMPTY}</p>
+            ) : (
+              <>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="inference-own-provider">Provider</Label>
+                    <Select
+                      value={ownSlug || null}
+                      disabled={!canManage}
+                      onValueChange={(v) => v && setOwnSlug(String(v))}
+                    >
+                      <SelectTrigger id="inference-own-provider" className="w-full">
+                        <SelectValue placeholder="Choose a provider…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {targets.map((p) => (
+                          <SelectItem key={p.slug} value={p.slug}>
+                            {p.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="inference-own-model">Model id</Label>
+                    <Input
+                      id="inference-own-model"
+                      value={ownModel}
+                      disabled={!canManage}
+                      placeholder="Leave blank to send the tier"
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="font-mono text-xs"
+                      onChange={(e) => setOwnModel(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">{OWN_MODE_SCOPE}</p>
+                <Button
+                  type="button"
+                  disabled={!canManage || !ownSlug}
+                  data-testid="inference-own-save"
+                  onClick={() =>
+                    void save(applyToEveryWorkload(ownSlug, ownModel.trim() || undefined))
+                  }
+                >
+                  Save
+                </Button>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {mode === "advanced" && (
+        <Card>
+          <CardContent className="space-y-1">
+            <p className="pb-2 text-xs text-muted-foreground">{ADVANCED_INTRO}</p>
+            {WORKLOADS.map((workload) => (
+              <WorkloadRow
+                key={workload}
+                workload={workload}
+                ref_={routing[workload] ?? { kind: "default" }}
+                state={state}
+                canManage={canManage}
+                onEdit={() => {
+                  setTestResult(null);
+                  setEditing(workload);
+                }}
+              />
+            ))}
+            {/* Read-only, and present rather than omitted. Coding resolves
+                through the agentic route; saying so is more honest than a row
+                that is not there, and safer than one that can be set. */}
+            <div
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border pt-3"
+              data-testid="inference-workload-coding"
+            >
+              <span className="grid min-w-0 flex-1 leading-tight">
+                <span className="truncate text-sm font-medium">Coding</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  Code generation and refactor passes
+                </span>
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Follows Agentic — one tier, two names
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {state.orphaned.length > 0 && (
+        <p className="text-xs text-status-blocked-text" data-testid="inference-orphaned-routes">
+          {state.orphaned
+            .map(([tier, slug]) => `${tier} names ${slug}, which this company has no provider for.`)
+            .join(" ")}
+        </p>
+      )}
+      {error && <p className="text-xs text-status-blocked-text">{error}</p>}
+      {state.note && <p className="text-xs text-muted-foreground">{state.note}</p>}
+
+      <WorkloadModelDialog
+        workload={editing}
+        providers={state.providers}
+        current={editing ? (routing[editing] ?? { kind: "default" }) : { kind: "default" }}
+        testing={testing}
+        testResult={testResult}
+        onTest={(ref) => {
+          const slug = ref.kind === "cloud" ? ref.providerSlug : null;
+          if (!slug) return;
+          setTesting(true);
+          setTestResult(null);
+          void actions
+            .test(slug)
+            .then((result) =>
+              setTestResult(result.ok ? "Reached the provider." : (result.message ?? "No answer.")),
+            )
+            .finally(() => setTesting(false));
+        }}
+        onCancel={() => setEditing(null)}
+        onApply={(ref) => {
+          const next = { ...routing, [editing as Workload]: ref };
+          setEditing(null);
+          void save(next);
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * One mode.
+ *
+ * Managed carries a **badge, not a disabled toggle**. A locked switch reads as
+ * switchable-but-broken and invites a fight the operator cannot win.
+ */
+function ModeRow({
+  option,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  option: RoutingMode;
+  selected: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+}) {
+  const copy = MODE_COPY[option];
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      aria-pressed={selected}
+      data-testid={`inference-mode-${option}`}
+      onClick={onSelect}
+      className={cn(
+        "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left",
+        selected ? "border-primary bg-accent" : "border-border",
+        disabled && "opacity-60",
+      )}
+    >
+      <span className="grid min-w-0 flex-1 gap-0.5">
+        <span className="text-sm font-medium">{copy.label}</span>
+        <span className="text-xs text-muted-foreground">{copy.description}</span>
+      </span>
+      {option === "managed" && (
+        <Badge variant="outline" className="border-status-done text-status-done-text">
+          {MANAGED_ALWAYS_ON}
+        </Badge>
+      )}
+    </button>
+  );
+}
+
+function WorkloadRow({
+  workload,
+  ref_,
+  state,
+  canManage,
+  onEdit,
+}: {
+  workload: Workload;
+  ref_: ProviderRef;
+  state: InferenceState;
+  canManage: boolean;
+  onEdit: () => void;
+}) {
+  const copy = WORKLOAD_COPY[workload];
+  // `rowValue` decides both the text and the button's word; this file decides
+  // neither. An unset row names the primary it will actually resolve through.
+  const { value, action } = rowValue(ref_, state.providers);
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border py-3 first:border-t-0"
+      data-testid={`inference-workload-${workload}`}
+    >
+      <span className="grid min-w-0 flex-1 leading-tight">
+        <span className="truncate text-sm font-medium">{copy.label}</span>
+        <span className="truncate text-xs text-muted-foreground">{copy.description}</span>
+      </span>
+      <span className="truncate text-xs text-muted-foreground">{value}</span>
+      <Button type="button" variant="outline" size="sm" disabled={!canManage} onClick={onEdit}>
+        {action}
+      </Button>
+    </div>
+  );
+}
