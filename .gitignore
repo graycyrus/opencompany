@@ -5,7 +5,7 @@ target/
 # `frontend/src-tauri/` path is kept because older branches still write there;
 # that app is gone from this one.
 crates/opencompany-app/gen/
-frontend/crates/opencompany-app/gen/
+frontend/src-tauri/gen/
 *.profraw
 *.profdata
 lcov.info
