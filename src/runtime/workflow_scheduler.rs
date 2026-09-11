@@ -270,6 +270,10 @@ impl WorkflowScheduler {
     /// The flag is read from the record this tick already loaded for its overlay
     /// bodies, so the gate costs no extra store round-trip.
     pub async fn tick(&mut self) -> usize {
+        self.tick_with_globals(crate::globals::workflows()).await
+    }
+
+    async fn tick_with_globals(&mut self, _global_workflows: &[WorkflowFile]) -> usize {
         let now = self.clock.now_millis();
         let minute = now / MINUTE_MS;
         let civil = CivilTime::from_unix_millis(now);
@@ -1176,6 +1180,7 @@ mod test {
     struct Recorded {
         company: String,
         workflow: String,
+        global: bool,
         input: Value,
     }
 
@@ -1241,6 +1246,7 @@ mod test {
             self.started.lock().unwrap().push(Recorded {
                 company: company.as_ref().to_string(),
                 workflow: workflow.id.clone(),
+                global: workflow.global,
                 input,
             });
             if let Some(gate) = &self.gate {
@@ -1343,6 +1349,12 @@ to = "done"
             id: id.to_string(),
             toml: body(id, cron),
         }
+    }
+
+    fn global(id: &str, cron: &str) -> WorkflowFile {
+        let mut workflow = crate::company::parse_workflow(&body(id, Some(cron))).unwrap();
+        workflow.global = true;
+        workflow
     }
 
     /// Builds a registered company whose only workflows are record overlays —
@@ -1495,6 +1507,69 @@ to = "done"
         clock.set(millis_at(2026, 7, 20, 9, 0));
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| started.lock().unwrap().len() == 2).await;
+    }
+
+    #[tokio::test]
+    async fn fires_a_global_only_workflow() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry =
+            company_with_overlays(&home, "acme", Vec::new(), Some(runner), "running").await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+        let workflows = [global("global_digest", "* * * * *")];
+
+        assert_eq!(scheduler.tick_with_globals(&workflows).await, 1);
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        let run = started.lock().unwrap()[0].clone();
+        assert_eq!(run.workflow, "global_digest");
+        assert!(run.global);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_global_workflow_does_not_fire() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry =
+            company_with_overlays(&home, "acme", Vec::new(), Some(runner), "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+        let store = runtime.store().clone();
+        let mut record = store.load(&company).await.unwrap().unwrap();
+        record.manifest.globals.disable = vec!["workflow:global_digest".to_string()];
+        store.save(&record).await.unwrap();
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+        let workflows = [global("global_digest", "* * * * *")];
+
+        assert_eq!(scheduler.tick_with_globals(&workflows).await, 0);
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_company_workflow_shadows_a_scheduled_global() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+        let workflows = [global("digest", "* * * * *")];
+
+        assert_eq!(scheduler.tick_with_globals(&workflows).await, 1);
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        let run = started.lock().unwrap()[0].clone();
+        assert_eq!(run.workflow, "digest");
+        assert!(!run.global);
     }
 
     /// The seeded input tells the run — and every agent turn inside it — that a
