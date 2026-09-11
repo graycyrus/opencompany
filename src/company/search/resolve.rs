@@ -70,15 +70,15 @@ impl Candidate {
 /// first usable provider answers — which is what an unmarked company resolved to
 /// before any of this existed, so nothing is backfilled and nobody moves.
 pub fn active<'a>(candidates: &'a [Candidate], marked: Option<&str>) -> Option<&'a Candidate> {
+    // Falling out of this `if` is the disabled case, which is normally
+    // unreachable: both write paths clear the marker when they disable or delete
+    // the marked provider, so reaching it means the store was edited directly.
+    // Fall through to the first usable provider rather than failing.
     if let Some(slug) = marked
         && let Some(found) = candidates.iter().find(|c| c.provider.slug == slug)
+        && found.provider.enabled
     {
-        if found.provider.enabled {
-            return found.is_complete().then_some(found);
-        }
-        // Disabled is normally unreachable — both write paths clear the marker
-        // when they disable or delete the marked provider — so reaching it means
-        // the store was edited directly. Fall through rather than fail.
+        return found.is_complete().then_some(found);
     }
     candidates.iter().find(|candidate| candidate.is_usable())
 }

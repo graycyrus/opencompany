@@ -193,7 +193,12 @@ body contains it. **Extend it to each new route as that route is added**, before
 there is anything to leak — and assert on the **value**, so a field rename cannot
 make it pass.
 
-### The e2e flows
+### The browser flows
+
+Not shipped as Playwright specs in this change — they were driven by hand
+against a real host, and the list is here as the matrix that pass covers rather
+than as a claim about CI. Adding them as specs needs a lane that selects them
+(issue #475), which is a separate change.
 
 1. Add an account provider with a good key → row appears, marked ok.
 2. Add one with a bad key → rejected, **no row, no credential stored**.
