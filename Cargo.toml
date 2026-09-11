@@ -51,7 +51,7 @@ anyhow = "1"
 # tinymemory#18 §A1) re-exports the TinyMemory contract and therefore depends
 # on `tinymemory-api` by git URL. A git source is not redirected by
 # `[patch.crates-io]`, so without this section that git checkout joins the
-# graph BESIDE the vendored path copy declared above — and every shared
+# graph BESIDE the vendored path copy the core manifest declares — and every shared
 # contract type (`MemoryTaint`, `MemoryEntry`, ...) becomes two distinct
 # types, which stops `tinymemory-core` compiling. openhuman carries exactly
 # this entry for itself (`[patch."https://github.com/tinyhumansai/tinymemory"]`
