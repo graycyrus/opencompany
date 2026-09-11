@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { describeProbe, destroysCredential, healthLabel, offersAddAnyway, testOutcome } from "@/inference/classify";
+import {
+  checkOutcome,
+  describeProbe,
+  destroysCredential,
+  healthLabel,
+  offersAddAnyway,
+  testOutcome,
+} from "@/inference/classify";
 import type { ProbeClass } from "@/inference/types";
 
 const ALL_CLASSES: ProbeClass[] = ["auth", "model", "quota", "endpoint", "timeout", "unknown"];
@@ -120,5 +127,39 @@ describe("what a finished test reads as on a row", () => {
   it("shows nothing while idle or in flight", () => {
     expect(testOutcome({ kind: "idle" })).toBeNull();
     expect(testOutcome({ kind: "testing" })).toBeNull();
+  });
+});
+
+describe("checkOutcome", () => {
+  it("does not call a bogus model id a success", () => {
+    // The whole defect: the control answered "is the endpoint reachable" while
+    // the console asked "will this model answer", so `this-model-does-not-exist`
+    // came back as "Reached the provider."
+    const out = checkOutcome({ ok: true, modelCount: 51, modelKnown: false });
+    expect(out.message).toContain("does not publish that model id");
+  });
+
+  it("reports a listed model as settled", () => {
+    expect(checkOutcome({ ok: true, modelCount: 51, modelKnown: true }).message).toContain(
+      "publishes that model",
+    );
+  });
+
+  it("treats an unpublished id as a caution rather than a failure", () => {
+    // An Azure deployment name is never in `/models` by design. Failing it
+    // would make the only correct value at that endpoint unreachable.
+    expect(checkOutcome({ ok: true, modelCount: 51, modelKnown: false }).ok).toBe(true);
+  });
+
+  it("says nothing about a model when none was asked about", () => {
+    const out = checkOutcome({ ok: true, modelCount: 51 });
+    expect(out).toEqual({ ok: true, message: "Reached the provider." });
+  });
+
+  it("keeps the host's own sentence on a failure", () => {
+    // A 407 behind a corporate proxy has to read differently from a rejected
+    // key — collapsing it to "failed" throws that away at the last step.
+    const out = checkOutcome({ ok: false, message: "A proxy refused the request.", modelCount: 0 });
+    expect(out).toEqual({ ok: false, message: "A proxy refused the request." });
   });
 });

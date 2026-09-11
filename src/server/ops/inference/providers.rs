@@ -217,6 +217,22 @@ struct ProbeResultDto {
     /// How many models the endpoint published. Zero is not a failure: plenty of
     /// endpoints serve inference and publish no catalog.
     model_count: usize,
+    /// Whether the model the caller asked about is in that catalog.
+    ///
+    /// `None` when no model was named, or when the endpoint publishes no catalog
+    /// to check against. **Absent is not a failure**: an Azure deployment name
+    /// is never in `/models` by design, and a catalogue can be stale anywhere —
+    /// so this is reported as a caution beside a successful check, never as one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_known: Option<bool>,
+}
+
+/// What `POST …/providers/{slug}/test` may be asked.
+#[derive(Debug, Default, Deserialize)]
+struct TestProvider {
+    /// The model a routing row has chosen, when the caller is asking about one.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Every provider write answers with the whole status, so the console never has
@@ -335,6 +351,7 @@ async fn add_provider(
                     class: None,
                     message: None,
                     model_count: models.len(),
+                    model_known: None,
                 }),
                 format!("{} is connected and answering.", provider.label),
             )
@@ -370,6 +387,7 @@ async fn add_provider(
                     class: Some(failure.class.as_str().to_string()),
                     message: Some(message.clone()),
                     model_count: 0,
+                    model_known: None,
                 }),
                 message,
             )
@@ -986,6 +1004,7 @@ async fn test_managed(
                 class: None,
                 message: None,
                 model_count: models.len(),
+                model_known: None,
             }))
         }
         Err(failure) => {
@@ -1001,6 +1020,7 @@ async fn test_managed(
                 class: Some(failure.class.as_str().to_string()),
                 message: Some(probe::describe(failure.class, &subject)),
                 model_count: 0,
+                model_known: None,
             }))
         }
     }
@@ -1186,7 +1206,12 @@ async fn set_managed_key(
 async fn test_provider(
     company: crate::server::ops::ScopedCompany,
     Path(params): Path<ProviderPath>,
+    body: Option<Json<TestProvider>>,
 ) -> Result<Json<ProbeResultDto>, ApiError> {
+    let asked_model = body
+        .and_then(|Json(body)| body.model)
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let provider = require_provider(runtime, &params.slug).await?;
@@ -1204,11 +1229,20 @@ async fn test_provider(
     {
         Ok(models) => {
             record_health(runtime, &provider.slug, "ok").await;
+            // Whether the row's chosen id is one this endpoint publishes. The
+            // check used to answer "is the endpoint reachable" while the console
+            // asked "will this model answer", so `this-model-does-not-exist`
+            // came back as "Reached the provider." — a true sentence about a
+            // question nobody asked.
+            let model_known = asked_model
+                .as_deref()
+                .and_then(|asked| (!models.is_empty()).then(|| models.iter().any(|m| m == asked)));
             Ok(Json(ProbeResultDto {
                 ok: true,
                 class: None,
                 message: None,
                 model_count: models.len(),
+                model_known,
             }))
         }
         Err(failure) => {
@@ -1230,6 +1264,7 @@ async fn test_provider(
                 class: Some(failure.class.as_str().to_string()),
                 message: Some(probe::describe(failure.class, &advisory_subject(&provider))),
                 model_count: 0,
+                model_known: None,
             }))
         }
     }
@@ -1266,6 +1301,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
             class: None,
             message: None,
             model_count: models.len(),
+            model_known: None,
         })
         .into_response(),
         Err(failure) => {
@@ -1284,6 +1320,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
                 class: Some(failure.class.as_str().to_string()),
                 message: Some(probe::describe(failure.class, &subject)),
                 model_count: 0,
+                model_known: None,
             })
             .into_response()
         }

@@ -14,6 +14,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { checkOutcome } from "./classify";
+import type { TestState } from "./classify";
 import { cn } from "@/lib/utils";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { ModelField } from "./ModelField";
@@ -70,7 +72,8 @@ export function RoutingTab({
 }) {
   const [editing, setEditing] = useState<Workload | null>(null);
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<string | null>(null);
+  /** The dialog's own check result, with a tone — success and failure looked identical as prose. */
+  const [testResult, setTestResult] = useState<TestState>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
   /** Which mode the operator has selected, when it differs from the inferred one. */
   const [chosenMode, setChosenMode] = useState<RoutingMode | null>(null);
@@ -233,7 +236,7 @@ export function RoutingTab({
                 state={state}
                 canManage={canManage}
                 onEdit={() => {
-                  setTestResult(null);
+                  setTestResult({ kind: "idle" });
                   setEditing(workload);
                 }}
               />
@@ -281,11 +284,15 @@ export function RoutingTab({
           const slug = ref.kind === "cloud" ? ref.providerSlug : null;
           if (!slug) return;
           setTesting(true);
-          setTestResult(null);
+          setTestResult({ kind: "testing" });
+          // The chosen model goes with the request, so the check answers "will
+          // this row work" rather than "is this endpoint up" — see
+          // `checkOutcome`.
           void actions
-            .test(slug)
-            .then((result) =>
-              setTestResult(result.ok ? "Reached the provider." : (result.message ?? "No answer.")),
+            .test(slug, ref.kind === "cloud" ? ref.model : undefined)
+            .then((result) => setTestResult({ kind: "done", ...checkOutcome(result) }))
+            .catch(() =>
+              setTestResult({ kind: "done", ok: false, message: "The check did not complete." }),
             )
             .finally(() => setTesting(false));
         }}

@@ -386,6 +386,14 @@ export interface ProbeResult {
   message?: string;
   /** How many models the endpoint published. Zero is not a failure. */
   modelCount: number;
+  /**
+   * Whether the model that was asked about is in that catalog.
+   *
+   * Absent when none was asked about, or when the endpoint publishes no
+   * catalogue to check against. **Absent is not a failure** — an Azure
+   * deployment name is never published by design.
+   */
+  modelKnown?: boolean;
 }
 
 /** Every provider write answers with the whole status, so nothing has to be reconciled. */
@@ -638,10 +646,12 @@ export function testProvider(
   client: OpenCompanyClient,
   company: string | null,
   slug: string,
+  /** The model a routing row has chosen, so the check answers about that id. */
+  model?: string,
 ): Promise<ProbeResult> {
   return client.post<ProbeResult>(
     `${client.scopeFor(company)}/inference/providers/${encodeURIComponent(slug)}/test`,
-    {},
+    model ? { model } : {},
   );
 }
 

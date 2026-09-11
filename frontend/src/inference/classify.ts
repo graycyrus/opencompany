@@ -172,3 +172,38 @@ export function testOutcome(state: TestState): { tone: "ok" | "error"; message: 
   if (state.kind !== "done") return null;
   return { tone: state.ok ? "ok" : "error", message: state.message };
 }
+
+/**
+ * What a finished provider check actually established.
+ *
+ * **The control has to answer the question it is asked.** The routing dialog's
+ * Test promised "one real completion, your provider may charge for it" and sent
+ * `GET /models` — so a row pinned to `this-model-does-not-exist` came back
+ * "Reached the provider.", a true sentence about a question nobody asked. The
+ * check is a catalogue read, it is free, and it is now said to be one; what it
+ * can genuinely settle beyond reachability is whether the endpoint publishes the
+ * id the row has chosen.
+ *
+ * A model the catalogue does not list is a **caution, not a failure**: an Azure
+ * deployment name is never published by design, and a catalogue can be stale
+ * anywhere. Reporting it as a failure would make the honest case unreachable.
+ */
+export function checkOutcome(result: {
+  ok: boolean;
+  message?: string;
+  modelCount: number;
+  modelKnown?: boolean;
+}): { ok: boolean; message: string } {
+  if (!result.ok) return { ok: false, message: result.message ?? "The check did not complete." };
+  if (result.modelKnown === false) {
+    return {
+      ok: true,
+      message:
+        "Reached the provider, but it does not publish that model id. That is expected at an Azure deployment, and worth a second look anywhere else.",
+    };
+  }
+  if (result.modelKnown === true) {
+    return { ok: true, message: "Reached the provider, and it publishes that model." };
+  }
+  return { ok: true, message: "Reached the provider." };
+}

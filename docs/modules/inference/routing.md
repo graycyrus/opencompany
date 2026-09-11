@@ -228,9 +228,26 @@ hint, a provider select, a model select sourced from that provider's `/models`,
 a free-text escape hatch (**Enter model id**), and a **Test** button that sends
 one real one-turn completion for that workload and reports the result inline.
 
-This is the only place in openhuman that tests with a real completion rather than
-a catalog listing — and correctly so: the add flow wants "is this reachable", a
-routing row wants "will this model actually answer".
+openhuman tests here with a real completion rather than a catalog listing,
+because the add flow wants "is this reachable" and a routing row wants "will this
+model actually answer".
+
+**What shipped does not send a completion, and no longer claims to.** The button
+called the per-provider check, which is `GET /models` — so it cost nothing,
+charged nothing, and could not tell `this-model-does-not-exist` from a good id:
+it answered "Reached the provider." either way. That is a true sentence about a
+question nobody asked, and it is worse than a plain failure, because the operator
+has been told the row is fine.
+
+The check now carries the row's chosen model and reports whether the endpoint
+publishes it, and the copy says what it actually does — free, no turn. An id the
+catalogue does not list is a **caution, not a failure**: an Azure deployment name
+is never published by design, and failing it would make the only correct value at
+that endpoint unreachable.
+
+A real completion remains the stronger check and is the open decision here: it
+needs the `openhuman`-gated provider, which the default test lane does not
+compile, so it wants a feature-lane row of its own rather than a quiet `#[cfg]`.
 
 ### The select lists providers, and unset is a state
 

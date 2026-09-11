@@ -19,6 +19,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { testOutcome } from "./classify";
+import type { TestState } from "./classify";
+import { cn } from "@/lib/utils";
 import { ModelField } from "./ModelField";
 import { overrideIsSendable } from "./proxy-compat";
 import {
@@ -73,8 +76,8 @@ export function WorkloadModelDialog({
   providers: readonly Provider[];
   current: ProviderRef;
   testing: boolean;
-  /** What the last test said, if one has run. */
-  testResult: string | null;
+  /** What the last check said, with its tone. */
+  testResult: TestState;
   onTest: (ref: ProviderRef) => void;
   onCancel: () => void;
   onApply: (ref: ProviderRef) => void;
@@ -94,6 +97,7 @@ export function WorkloadModelDialog({
   const options = routingOptions(providers);
   /** Whose catalog the model field reads, and `null` when the row takes no id. */
   const modelSlug = modelTarget(target, providers);
+  const outcome = testOutcome(testResult);
   const ref: ProviderRef = refForTarget(target, model, providers);
 
   return (
@@ -196,25 +200,38 @@ export function WorkloadModelDialog({
             </p>
           )}
 
-          {testResult && (
-            <p className="text-xs text-muted-foreground" data-testid="inference-workload-test">
-              {testResult}
-            </p>
-          )}
+          {/* A tone as well as words. It was grey prose either way, so a
+              failure and a success read identically on the one control whose
+              whole job is to tell them apart. Always mounted and polite, because
+              a live region that appears with its text is frequently missed. */}
+          <p
+            aria-live="polite"
+            className={cn(
+              "text-xs",
+              outcome?.tone === "ok" ? "text-status-done-text" : "text-status-blocked-text",
+              !outcome && "text-muted-foreground",
+            )}
+            data-testid="inference-workload-test"
+          >
+            {testing ? "Checking…" : (outcome?.message ?? "")}
+          </p>
         </div>
 
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onCancel}>
             Cancel
           </Button>
-          {/* The cost warning lives on the button it applies to, not above the
-              fold: this sends one real completion and the provider may charge
-              for it. */}
+          {/* Says what it does. It promised "one real completion, your provider
+              may charge for it" and sent a catalogue read — so it cost nothing,
+              charged nothing, and could not tell a bogus model id from a good
+              one. The check is free and is now described as free; what it
+              settles is reachability plus whether the endpoint publishes this
+              id. */}
           <Button
             type="button"
             variant="outline"
             disabled={testing || ref.kind === "default" || ref.kind === "managed"}
-            title="Sends one real completion. Your provider may charge for it."
+            title="Reads this provider's model list. Free, and it does not send a turn."
             data-testid="inference-workload-test-button"
             onClick={() => onTest(ref)}
           >

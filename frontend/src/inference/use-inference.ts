@@ -68,7 +68,7 @@ export interface InferenceActions {
   saveManagedKey: (key: string) => Promise<ProviderMutation>;
   setManagedOn: (enabled: boolean) => Promise<ProviderMutation>;
   testManagedChain: () => Promise<ProbeResult>;
-  test: (slug: string) => Promise<ProbeResult>;
+  test: (slug: string, model?: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
   clearNote: () => void;
@@ -178,10 +178,10 @@ export function useInference(
       // Same rule as a provider's test: the answer is the row's, not the page's.
       return result;
     },
-    test: async (slug) => {
+    test: async (slug, model) => {
       setBusySlug(slug);
       try {
-        const result = await testProvider(client, company, slug);
+        const result = await testProvider(client, company, slug, model);
         // The test writes a health record, and the row renders it — so the
         // status has to be re-read or the row keeps showing what it knew before
         // the operator asked.
