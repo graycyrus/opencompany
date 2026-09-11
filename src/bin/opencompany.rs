@@ -19,7 +19,10 @@ use opencompany::{
 use tokio::sync::Notify;
 
 #[derive(Debug, Parser)]
-#[command(author, version, about)]
+// `name` is explicit: clap would otherwise take it from `CARGO_PKG_NAME`, which
+// became `opencompany-core` when the package moved under `crates/`. The binary,
+// its `--help` usage line and its `--version` banner stay `opencompany`.
+#[command(name = "opencompany", author, version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
