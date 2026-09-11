@@ -793,6 +793,51 @@ mod tests {
         assert_eq!(with_keys, vec!["omlx"]);
     }
 
+    #[test]
+    fn no_other_module_writes_its_own_openrouter_attribution_headers() {
+        // The failure this guards is not a wrong value, it is a SECOND value.
+        // `harness::built_in::provider` and `harness::roster_build` each spelled
+        // the referer out, with different hosts, so one company's turn traffic
+        // and its roster-build traffic reached OpenRouter's dashboard as two
+        // apps. Both copies looked right in isolation, which is why reading
+        // either one never found it.
+        //
+        // So the assertion is about shape rather than content: any file that
+        // mentions the header must reach this constant for its value.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if path.file_name().and_then(|n| n.to_str()) == Some("catalogue.rs") {
+                    continue;
+                }
+                if source.contains("\"HTTP-Referer\"") && !source.contains("OPENROUTER_REFERER") {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these files write an OpenRouter attribution header without reading \
+             `catalogue::OPENROUTER_REFERER`, which is how the two copies \
+             diverged the first time: {offenders:?}"
+        );
+    }
+
     // ── The cross-language check ────────────────────────────────────────────
     //
     // The console needs this table too, and TypeScript cannot read a Rust

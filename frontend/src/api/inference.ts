@@ -12,10 +12,36 @@
 
 import type { OpenCompanyClient } from "./client";
 
-/** Provider kinds the console offers. */
+/**
+ * Provider kinds the console offers.
+ *
+ * `"managed"` is deliberately here and is **not** a member of the host's
+ * `INFERENCE_PROVIDERS`, which is the manifest validator's allowlist
+ * (`openrouter`, `openai_compatible`, `ollama`). It is two other things at once:
+ * the sentinel the host answers with for a company that has configured nothing
+ * (`effective_status_with`'s `None` arm), and a legacy alias the host normalizes
+ * onto `openrouter` on the way in (`LEGACY_MANAGED`). The console still offers
+ * the card behind `INFERENCE_MANAGED_HIDDEN`.
+ *
+ * So this union being wider than the host's allowlist is correct, and it is not
+ * the six-copies duplication that `@/inference/catalogue` exists to collapse.
+ * Deleting `"managed"` for tidiness breaks the unconfigured card, which is the
+ * first thing a new operator sees. Two host tests pin the value on the wire:
+ * `unconfigured_company_reports_the_platform_url_not_the_built_in_default` and
+ * `status_defaults_to_managed_then_switches_to_runtime`.
+ */
 export type InferenceProvider = "managed" | "openrouter" | "openai_compatible" | "ollama";
 
-/** Where the effective config came from — drives the source badge. */
+/**
+ * Where the effective config came from — drives the source badge.
+ *
+ * `"default" | "manifest" | "runtime"` are the host's `InferenceSource`.
+ * `"managed"` is the fourth value the same field carries when nothing resolved
+ * at all, and it means something the other three cannot: *a platform endpoint is
+ * not tenant config*. Reporting that case as `"default"` would move the badge
+ * onto a config the tenant never wrote. Same reasoning, and the same tests, as
+ * {@link InferenceProvider} above.
+ */
 export type InferenceSource = "managed" | "default" | "manifest" | "runtime";
 
 /**

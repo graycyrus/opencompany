@@ -57,12 +57,17 @@ pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = "https://api.tinyhumans.ai/op
 /// Default hosted model/tier when none is configured.
 pub const DEFAULT_HOSTED_MODEL: &str = "chat-v1";
 
-/// The `HTTP-Referer` attribution header OpenRouter asks BYOK callers to send —
-/// it identifies the app in OpenRouter's dashboard/rankings.
-pub const OPENROUTER_REFERER: &str = "https://opencompany.tinyhumans.ai";
-
-/// The `X-Title` attribution header OpenRouter asks BYOK callers to send.
-pub const OPENROUTER_TITLE: &str = "OpenCompany";
+/// The OpenRouter attribution headers, re-exported from the catalogue so this
+/// module's long-standing spelling keeps resolving.
+///
+/// They used to be defined here, and a *second* pair was written out inline in
+/// [`roster_build`](crate::harness::roster_build) with a different `HTTP-Referer`
+/// — so a company's roster-build traffic and its turn traffic were attributed to
+/// two different apps in OpenRouter's dashboard. Nothing compared them, so
+/// nothing noticed. One constant now, in
+/// [`catalogue`](crate::company::inference::catalogue), with both callers
+/// reading it.
+pub use crate::company::inference::catalogue::{OPENROUTER_REFERER, OPENROUTER_TITLE};
 
 /// The key under which the managed billing/context metadata is stashed on
 /// [`ModelResponse::raw`] so openhuman's crate-native cost pipeline recovers the
