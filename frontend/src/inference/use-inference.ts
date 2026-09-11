@@ -23,8 +23,10 @@ import {
   putRoutes,
   restartInference,
   setDefaultProvider,
+  setManagedEnabled,
   setManagedKey,
   setProviderEnabled,
+  testManaged,
   testProvider,
 } from "@/api/inference";
 import type {
@@ -64,6 +66,8 @@ export interface InferenceActions {
   setEnabled: (slug: string, enabled: boolean) => Promise<ProviderMutation>;
   makeDefault: (slug: string) => Promise<ProviderMutation>;
   saveManagedKey: (key: string) => Promise<ProviderMutation>;
+  setManagedOn: (enabled: boolean) => Promise<ProviderMutation>;
+  testManagedChain: () => Promise<ProbeResult>;
   test: (slug: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
@@ -164,6 +168,16 @@ export function useInference(
       write(slug, () => setProviderEnabled(client, company, slug, enabled)),
     makeDefault: (slug) => write(slug, () => setDefaultProvider(client, company, slug)),
     saveManagedKey: (key) => write(null, () => setManagedKey(client, company, key)),
+    setManagedOn: (enabled) => write(null, () => setManagedEnabled(client, company, enabled)),
+    testManagedChain: async () => {
+      const result = await testManaged(client, company);
+      // The test records health against the managed slug, and the row renders
+      // it — so the status has to be re-read or the row keeps showing what it
+      // knew before the operator asked.
+      setStatus(await getInferenceStatus(client, company));
+      setNote(result.ok ? "Reached the managed brain." : (result.message ?? null));
+      return result;
+    },
     test: async (slug) => {
       setBusySlug(slug);
       try {

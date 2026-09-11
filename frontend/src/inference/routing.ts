@@ -131,6 +131,32 @@ export const MANAGED_NOT_SET_UP =
 /** The same statement plus where to fix it, for a page that does not hold the action. */
 export const MANAGED_NOT_SET_UP_ELSEWHERE = `${MANAGED_NOT_SET_UP} Connect it on the LLM Providers tab.`;
 
+/**
+ * What to say under the Connected list about managed being a fallback, or `null`
+ * when the row above has already said everything true.
+ *
+ * Three states, and only two of them need a sentence:
+ *
+ * - **Not set up** — nothing in the chain answers. Say so.
+ * - **Set up but switched off** — it resolves and is still not a fallback,
+ *   which is the one case the row's own "On" badge cannot express.
+ * - **Set up and on** — the row names the step that answers and who it bills.
+ *   Repeating it here would be duplication, and the sentence it used to repeat
+ *   ("always available") was not true besides.
+ */
+export function managedFallbackNote(
+  managed: { configured?: boolean; enabled?: boolean } | undefined,
+): string | null {
+  if (!managed) return null;
+  if (managed.configured === false) return MANAGED_NOT_SET_UP;
+  if (managed.enabled === false) return MANAGED_SWITCHED_OFF;
+  return null;
+}
+
+/** Set up, but switched out of routing — which is also not a fallback. */
+export const MANAGED_SWITCHED_OFF =
+  "Managed is switched off, so it is not a fallback. Its credential is untouched.";
+
 /** What the shared-model row covers, said out loud rather than implied. */
 export const OWN_MODE_SCOPE =
   "Applies the same provider + model to chat, reasoning, agentic and vision. Changes save when you click save.";
@@ -142,10 +168,6 @@ export const OWN_MODE_EMPTY =
 /** The line above the rows in Advanced. */
 export const ADVANCED_INTRO =
   "Fine-grained routing gives you the best cost optimization and the most control. Use the rows below to decide which workloads stay Managed, which use your shared default, and which pin to a specific model.";
-
-/** Managed's standing offer, whichever mode is selected. */
-export const MANAGED_FALLBACK_NOTE =
-  "Managed is always available as a fallback. To use your own model, choose a routing mode below.";
 
 /** The unset ref. Its own constant so the absence is a value, not a `null`. */
 export const UNSET: ProviderRef = { kind: "default" };

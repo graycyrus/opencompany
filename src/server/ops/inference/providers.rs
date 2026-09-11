@@ -110,6 +110,13 @@ pub(super) fn router() -> Router<AppState> {
         // would create a record whose slug collides with entry zero's whenever
         // the company's stored config is already managed.
         .merge(scoped("/inference/managed/key", put(set_managed_key)))
+        // Managed is a provider like any other in these two respects: its
+        // credential can be checked, and it can be excluded from routing.
+        .merge(scoped(
+            "/inference/managed/enabled",
+            post(set_managed_enabled),
+        ))
+        .merge(scoped("/inference/managed/test", post(test_managed)))
 }
 
 // ---- wire shapes ------------------------------------------------------------
@@ -870,6 +877,128 @@ async fn require_provider(
         })
 }
 
+/// `POST …/inference/managed/enabled` — switch managed in or out of routing.
+///
+/// **Not the credential.** Every step of the chain stays exactly where it is;
+/// what changes is whether a workload may be routed here, which is the same
+/// thing `enabled` means on any other provider. `Resolution::Disabled` already
+/// models a route naming a switched-off provider as *reported* rather than
+/// quietly demoted, and managed gets that treatment too.
+async fn set_managed_enabled(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+    Json(body): Json<SetEnabled>,
+) -> Result<Json<ProviderMutation>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    store::set_managed_enabled(runtime.id(), runtime.secrets().as_ref(), body.enabled)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(ProviderMutation {
+        status: effective_status(&state, runtime).await?,
+        note: if body.enabled {
+            "Managed is on.".to_string()
+        } else {
+            "Managed is off. Its credential is untouched.".to_string()
+        },
+        probe: None,
+        affected_tiers: Vec::new(),
+    }))
+}
+
+/// `POST …/inference/managed/test` — check whatever the managed chain resolves to.
+///
+/// The credential it presents is **whichever step answers**, not necessarily a
+/// key this company pasted: a company on the instance identity is testing the
+/// server's credential against the platform endpoint, which is exactly what its
+/// turns would do.
+///
+/// Like the per-provider test, it never deletes anything whatever the answer. A
+/// test is a question being asked; making the button that reports a problem the
+/// button that causes one would be a trap — and here it would be worse, because
+/// the credential it might destroy could be the instance's.
+async fn test_managed(
+    company: crate::server::ops::ScopedCompany,
+) -> Result<Json<ProbeResultDto>, ApiError> {
+    use crate::company::inference;
+
+    let runtime = company.runtime.as_ref();
+    let secrets = runtime.secrets().as_ref();
+    let platform = super::platform_default(&crate::app::config::ProcessEnv);
+    let inference_key = inference::load_inference_key_scoped(
+        runtime.id(),
+        secrets,
+        inference::MANAGED_SLUG,
+        None,
+        &inference::HarnessScope::default(),
+    )
+    .await
+    .map_err(ApiError)?;
+    let company_account = crate::company::company_key::load(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+
+    // The same four-branch decision the row renders, resolved to a value here.
+    let bearer = match inference::managed_source(
+        !inference_key.trim().is_empty(),
+        &company_account,
+        platform.as_ref(),
+    ) {
+        inference::ManagedSource::ProviderKey => Some(inference_key.trim().to_string()),
+        inference::ManagedSource::CompanyAccount => {
+            company_account.current().await.map_err(ApiError)?
+        }
+        inference::ManagedSource::Instance => match platform.as_ref() {
+            Some(env) => env.credential.current().await.map_err(ApiError)?,
+            None => None,
+        },
+        inference::ManagedSource::None => {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "Managed is not set up on this company, so there is nothing to check.".to_string(),
+            )));
+        }
+    };
+
+    let base_url = platform
+        .as_ref()
+        .map(|p| p.base_url.clone())
+        .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string());
+    let subject = catalogue::endpoint_host(&base_url).unwrap_or_else(|| "the managed brain".into());
+
+    match probe::probe_models(
+        &base_url,
+        bearer.as_deref(),
+        catalogue::AuthStyle::Bearer,
+        probe::default_policy(),
+    )
+    .await
+    {
+        Ok(models) => {
+            record_health(runtime, inference::MANAGED_SLUG, "ok").await;
+            Ok(Json(ProbeResultDto {
+                ok: true,
+                class: None,
+                message: None,
+                model_count: models.len(),
+            }))
+        }
+        Err(failure) => {
+            tracing::info!(
+                company = %runtime.id(),
+                class = failure.class.as_str(),
+                detail = %failure.raw,
+                "managed inference test failed",
+            );
+            record_health(runtime, inference::MANAGED_SLUG, failure.class.as_str()).await;
+            Ok(Json(ProbeResultDto {
+                ok: false,
+                class: Some(failure.class.as_str().to_string()),
+                message: Some(probe::describe(failure.class, &subject)),
+                model_count: 0,
+            }))
+        }
+    }
+}
+
 // ---- a provider's catalog ---------------------------------------------------
 
 /// What `GET …/inference/providers/{slug}/models` answers.
@@ -988,13 +1117,32 @@ async fn set_managed_key(
         )
         .await
         .map_err(ApiError)?;
-    if let Err(err) = secrets
-        .set(
-            runtime.id(),
-            crate::company::inference::KEY_KEY,
-            crate::ports::types::SecretValue(String::new()),
-        )
+
+    // **Only when the legacy slot is managed's to clear.**
+    //
+    // `inference/key` is one address that two different rows can read through
+    // their own fallback: entry zero's, and managed's. Which one it belongs to
+    // depends on what entry zero's kind normalises to. Clearing it
+    // unconditionally while writing a *different* slug's slot destroyed the
+    // credential of whatever else was reading it — on this company, removing
+    // the managed key silently took OpenRouter's key with it, and the row went
+    // from "•••• configured" to showing a bare host.
+    //
+    // Found in a browser, not by a test. The test is below it now.
+    let legacy_is_managed = store::list_providers(runtime.id(), secrets)
         .await
+        .map_err(ApiError)?
+        .iter()
+        .find(|p| p.origin == store::ProviderOrigin::EntryZero)
+        .is_none_or(|zero| zero.slug == crate::company::inference::MANAGED_SLUG);
+    if legacy_is_managed
+        && let Err(err) = secrets
+            .set(
+                runtime.id(),
+                crate::company::inference::KEY_KEY,
+                crate::ports::types::SecretValue(String::new()),
+            )
+            .await
     {
         tracing::error!(
             company = %runtime.id(),

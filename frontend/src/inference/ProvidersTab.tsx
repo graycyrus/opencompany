@@ -12,7 +12,7 @@ import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft } from "./ProviderConnectDialog";
 import { ProviderList } from "./ProviderList";
 import { MANAGED_OPTION_SLUG } from "./connect";
-import { MANAGED_FALLBACK_NOTE, MANAGED_NOT_SET_UP } from "./routing";
+import { managedFallbackNote } from "./routing";
 import type { InferenceActions, InferenceState } from "./use-inference";
 import type { Provider } from "./types";
 
@@ -156,20 +156,38 @@ export function ProvidersTab({
             // The same handler the header's button uses, passed down rather
             // than reimplemented: one way to add a provider, not two.
             onAdd={() => setAdding(true)}
+            onManagedToggle={(enabled) => void actions.setManagedOn(enabled)}
+            onManagedTest={() => void actions.testManagedChain()}
+            // The same dialog the add flow opens on the managed option, so
+            // adding a key and replacing one are one code path.
+            onManagedReplaceKey={() => {
+              setEditing(null);
+              setConnecting(MANAGED_OPTION_SLUG);
+            }}
+            // An empty key is how the store clears a value — it has no delete —
+            // and it removes step 1 alone. The response re-reads the chain, so
+            // the row immediately says whichever step answers next.
+            onManagedRemoveKey={() => void actions.saveManagedKey("")}
           />
         </CardContent>
       </Card>
 
-      {/* Outside the card, because it is about the whole page rather than about
-          the list: managed stands behind every row in it.
+      {/* Said only when it is worth saying, and never more than once.
+          "Managed is always available as a fallback" was **not true** here —
+          managed needs a credential and can resolve to nothing — and when it
+          does resolve, the row above already names the step that answers and
+          who it bills. A line repeating that is duplication; a line claiming
+          "always" is a lie. So this speaks in exactly the two cases the row
+          cannot cover on its own.
 
-          The "not set up" variant carries **no navigation** here. The action it
-          would point at is the button at the top of this same page, and a line
-          telling an operator to go where they already are has stopped reading
-          its own surroundings. */}
-      <p className="text-xs text-muted-foreground">
-        {state.status?.managed?.configured === false ? MANAGED_NOT_SET_UP : MANAGED_FALLBACK_NOTE}
-      </p>
+          No navigation in either: the action is the button at the top of this
+          same page, and telling an operator to go where they already are has
+          stopped reading its own surroundings. */}
+      {managedFallbackNote(state.status?.managed) && (
+        <p className="text-xs text-muted-foreground" data-testid="inference-managed-fallback">
+          {managedFallbackNote(state.status?.managed)}
+        </p>
+      )}
 
       {state.note && (
         <p className="text-xs text-muted-foreground" data-testid="inference-note">

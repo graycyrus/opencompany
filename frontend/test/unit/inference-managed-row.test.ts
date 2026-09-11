@@ -10,7 +10,12 @@ import { describe, expect, it } from "vitest";
 
 import { MANAGED_OPTION_SLUG, addOptions, offersManaged } from "@/inference/connect";
 import { managedRow } from "@/inference/ProviderList";
-import { MANAGED_NOT_SET_UP, MANAGED_NOT_SET_UP_ELSEWHERE } from "@/inference/routing";
+import {
+  MANAGED_NOT_SET_UP,
+  MANAGED_NOT_SET_UP_ELSEWHERE,
+  MANAGED_SWITCHED_OFF,
+  managedFallbackNote,
+} from "@/inference/routing";
 import type { ManagedState } from "@/api/inference";
 
 const managed = (source: ManagedState["source"]): ManagedState => ({
@@ -20,31 +25,25 @@ const managed = (source: ManagedState["source"]): ManagedState => ({
 });
 
 describe("what the managed row says", () => {
-  it("never says 'always on'", () => {
+  it("never claims permanent availability", () => {
+    // The badge that used to say "Always on" is gone — the row carries a real
+    // toggle now, like any other provider — and no sub-line may smuggle the
+    // same claim back in as prose.
     for (const source of ["provider_key", "company_account", "instance", "none"] as const) {
-      const row = managedRow(source);
-      expect(row.badge, source).not.toBe("Always on");
-      expect(row.detail.toLowerCase(), source).not.toContain("always");
+      expect(managedRow(source).toLowerCase(), source).not.toContain("always");
     }
   });
 
   it("keeps the two paying states apart", () => {
     // One bills the company's own account, the other bills whoever runs the
     // server, and that is the decision an operator is on this page to make.
-    expect(managedRow("company_account").detail).not.toBe(managedRow("instance").detail);
-    expect(managedRow("company_account").detail).toContain("company");
-    expect(managedRow("instance").detail).toContain("server");
+    expect(managedRow("company_account")).not.toBe(managedRow("instance"));
+    expect(managedRow("company_account")).toContain("company");
+    expect(managedRow("instance")).toContain("server");
   });
 
-  it("shows no badge at all when nothing resolves", () => {
-    // A green tick nobody established is worse than no tick.
-    expect(managedRow("none").badge).toBeNull();
-    expect(managedRow("none").detail).toContain("cannot think");
-  });
-
-  it("shows no badge when the host did not say", () => {
-    // "Unknown" is not "working".
-    expect(managedRow(undefined).badge).toBeNull();
+  it("says outright that agents cannot think when nothing resolves", () => {
+    expect(managedRow("none")).toContain("cannot think");
   });
 });
 
@@ -92,5 +91,31 @@ describe("the line that says managed is not set up", () => {
     // On Routing the action is elsewhere, so naming it is the useful half.
     expect(MANAGED_NOT_SET_UP_ELSEWHERE).toContain(MANAGED_NOT_SET_UP);
     expect(MANAGED_NOT_SET_UP_ELSEWHERE).toContain("LLM Providers tab");
+  });
+});
+
+describe("the fallback line under the Connected card", () => {
+  it("says nothing when the row above has already said it all", () => {
+    // Set up and on: the row names the step that answers and who it bills.
+    // Repeating that here is duplication, and the line it replaces claimed
+    // "always available", which was never true here.
+    expect(managedFallbackNote({ configured: true, enabled: true })).toBeNull();
+    expect(managedFallbackNote({ configured: true })).toBeNull();
+  });
+
+  it("covers the one state the row's badge cannot express", () => {
+    // Set up, resolving, and still not a fallback — because it is switched out
+    // of routing. The credential is untouched, and the line says so.
+    expect(managedFallbackNote({ configured: true, enabled: false })).toBe(MANAGED_SWITCHED_OFF);
+    expect(MANAGED_SWITCHED_OFF).toContain("credential is untouched");
+  });
+
+  it("says so when nothing in the chain answers", () => {
+    expect(managedFallbackNote({ configured: false })).toBe(MANAGED_NOT_SET_UP);
+  });
+
+  it("says nothing at all when the host did not say", () => {
+    // "Unknown" is not "unavailable", and it is not "on" either.
+    expect(managedFallbackNote(undefined)).toBeNull();
   });
 });

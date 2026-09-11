@@ -11,7 +11,7 @@
 // shared `api/types.ts` is needed.
 
 import type { OpenCompanyClient } from "./client";
-import type { ProbeClass, Provider, RoutingMode } from "@/inference/types";
+import type { ProbeClass, Provider, ProviderHealth, RoutingMode } from "@/inference/types";
 
 /**
  * Provider kinds the console offers.
@@ -206,6 +206,19 @@ export interface ManagedState {
   configured: boolean;
   /** The endpoint managed requests travel to. */
   baseUrl: string;
+  /**
+   * Whether it is a routing target.
+   *
+   * A provider like any other in this one respect. "Stop routing work here" and
+   * "remove the credential" are different statements, and switching managed off
+   * leaves every step of its chain where it was.
+   *
+   * Optional because an older host does not send it; absent reads as on, which
+   * is what managed always was.
+   */
+  enabled?: boolean;
+  /** What was last learnt about reaching it, if anything. */
+  health?: ProviderHealth;
 }
 
 /** The set-provider body. `key` is write-only (never returned). */
@@ -494,6 +507,36 @@ export function probeDraft(
   body: { baseUrl: string; key?: string; kind?: string },
 ): Promise<ProbeResult> {
   return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/probe`, body);
+}
+
+/**
+ * Switch the managed tier in or out of routing.
+ *
+ * **Not the credential.** Every step of its chain stays where it is; what
+ * changes is whether a workload may be routed there.
+ */
+export function setManagedEnabled(
+  client: OpenCompanyClient,
+  company: string | null,
+  enabled: boolean,
+): Promise<ProviderMutation> {
+  return client.post<ProviderMutation>(`${client.scopeFor(company)}/inference/managed/enabled`, {
+    enabled,
+  });
+}
+
+/**
+ * Check whatever the managed chain resolves to.
+ *
+ * The credential it presents is whichever step answers — which for a company on
+ * the instance identity is the server's, tested against the platform endpoint,
+ * exactly as its turns would. It never deletes anything, whatever the answer.
+ */
+export function testManaged(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<ProbeResult> {
+  return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/managed/test`, {});
 }
 
 /** One provider's own model catalog. */

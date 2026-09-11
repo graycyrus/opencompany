@@ -644,6 +644,46 @@ pub async fn provider_key_configured(
         .is_empty())
 }
 
+// ---- the managed tier's own switch ------------------------------------------
+
+/// Whether the managed tier is a routing target.
+///
+/// Its own key because managed has **no provider record** — it resolves through
+/// a chain rather than from a row, so there is no `enabled` field on anything to
+/// hang this off. Absent reads as **on**: every company that existed before this
+/// key did had managed available, and a missing key must not switch it off.
+pub const MANAGED_ENABLED_KEY: &str = "inference/managed/enabled";
+
+/// Whether managed may serve a workload. `true` unless explicitly switched off.
+pub async fn managed_enabled(company: &CompanyId, secrets: &dyn SecretStore) -> Result<bool> {
+    let Some(SecretValue(raw)) = secrets.get(company, MANAGED_ENABLED_KEY).await? else {
+        return Ok(true);
+    };
+    // Anything but a literal "false" is on, including the empty string a clear
+    // leaves behind — so a cleared key restores the default rather than
+    // silently disabling the one provider a company always has.
+    Ok(raw.trim() != "false")
+}
+
+/// Switches the managed tier on or off as a routing target.
+///
+/// **This is not the credential.** Switching managed off leaves every step of
+/// its chain exactly where it was; it stops being somewhere a workload can be
+/// routed, which is the same thing `enabled` means on any other provider.
+pub async fn set_managed_enabled(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    enabled: bool,
+) -> Result<()> {
+    secrets
+        .set(
+            company,
+            MANAGED_ENABLED_KEY,
+            SecretValue(if enabled { "true" } else { "false" }.to_string()),
+        )
+        .await
+}
+
 // ---- the default provider ---------------------------------------------------
 
 /// The [`SecretStore`] key naming the company's default provider.

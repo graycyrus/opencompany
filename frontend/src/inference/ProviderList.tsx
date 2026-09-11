@@ -13,10 +13,10 @@ import { Monogram } from "./AddProviderDialog";
 import { categoryOf, endpointHost } from "./catalogue";
 import { healthLabel } from "./classify";
 import type { ManagedState } from "@/api/inference";
-import type { Provider } from "./types";
+import type { Provider, ProviderHealth } from "./types";
 
 /**
- * What the managed row says about itself, given what its chain resolves to.
+ * The one sub-line the managed row shows, given what its chain resolves to.
  *
  * It used to say **"Always on"**, inherited from a design where the same company
  * runs the managed backend. Here the managed tier needs a credential and can
@@ -28,28 +28,28 @@ import type { Provider } from "./types";
  * account moves the bill for every turn, and a row that says only "on" hides
  * that it has not happened.
  */
-export function managedRow(source: ManagedState["source"] | undefined): {
-  detail: string;
-  badge: string | null;
-} {
+export function managedRow(source: ManagedState["source"] | undefined): string {
   switch (source) {
     case "provider_key":
-      return { detail: "Using the key saved for inference", badge: "On" };
+      return "Using the key saved for inference";
     case "company_account":
-      return { detail: "Billed to this company's TinyHumans account", badge: "On" };
+      return "Billed to this company's TinyHumans account";
     case "instance":
-      return { detail: "Billed to whoever runs this server", badge: "On" };
+      return "Billed to whoever runs this server";
     case "none":
-      return { detail: "No credential resolves — agents cannot think", badge: null };
-    // An older host did not say. "Unknown" is not "working", so it gets no
-    // badge either; the alternative is a green tick nobody established.
+      return "No credential resolves — agents cannot think";
+    // An older host did not say, and "unknown" is not "working" — so this says
+    // what managed is rather than claiming a state nobody established.
     default:
-      return { detail: "TinyHumans chooses a model for each task", badge: null };
+      return "TinyHumans chooses a model for each task";
   }
 }
 
 /** The managed row's name. */
 export const MANAGED_LABEL = "Managed";
+
+/** The slug its credential and its health are keyed on. */
+export const MANAGED_SLUG = "tinyhumans";
 
 /**
  * The Connected list: what this company can reach a model through.
@@ -81,6 +81,10 @@ export function ProviderList({
   onRemove,
   onMakeDefault,
   onAdd,
+  onManagedToggle,
+  onManagedTest,
+  onManagedReplaceKey,
+  onManagedRemoveKey,
 }: {
   providers: readonly Provider[];
   /** What the managed chain resolves to. `undefined` when the host did not say. */
@@ -98,6 +102,19 @@ export function ProviderList({
    * reimplemented — one way to add a provider, not two that can drift.
    */
   onAdd: () => void;
+  /** Switch managed in or out of routing — never its credential. */
+  onManagedToggle: (enabled: boolean) => void;
+  onManagedTest: () => void;
+  /** Open the managed key dialog, to add or replace step 1 of its chain. */
+  onManagedReplaceKey: () => void;
+  /**
+   * Clear the key stored **for this row**.
+   *
+   * It removes step 1 and nothing else. If the company account or the instance
+   * identity still answer, managed stays on — and the row then says which,
+   * rather than going blank or claiming to be off.
+   */
+  onManagedRemoveKey: () => void;
 }) {
   // Nothing connected at all: no records, and no managed chain behind them. The
   // card would otherwise be a heading over blank space, which reads as a page
@@ -137,20 +154,55 @@ export function ProviderList({
           <span className="grid min-w-0 flex-1 leading-tight">
             <span className="truncate text-sm font-medium">{MANAGED_LABEL}</span>
             <span className="truncate text-xs text-muted-foreground">
-              {managedRow(managed?.source).detail}
+              {managedRow(managed.source)}
             </span>
           </span>
-          {/* No toggle. Managed cannot be switched off, and a control that does
-              nothing is worse than no control. */}
-          {managedRow(managed?.source).badge && (
-            <Badge
-              variant="outline"
-              className="border-status-done text-status-done-text"
-              data-testid="inference-provider-managed-state"
-            >
-              {managedRow(managed?.source).badge}
-            </Badge>
-          )}
+
+          <Health slug={MANAGED_SLUG} health={managed.health} />
+
+          {/* The full set of row controls, because every one of them means
+              something here. The credential can be replaced or removed, the
+              chain can be checked, and managed can be excluded from routing —
+              which is a different statement from removing its key, and the one
+              the toggle makes. */}
+          <Switch
+            checked={managed.enabled !== false}
+            disabled={!canManage || busySlug === MANAGED_SLUG}
+            aria-label="Managed enabled"
+            data-testid="inference-provider-managed-toggle"
+            onCheckedChange={(next) => onManagedToggle(next)}
+          />
+
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  disabled={!canManage || busySlug === MANAGED_SLUG}
+                  aria-label="Managed actions"
+                  data-testid="inference-provider-managed-menu"
+                >
+                  <EllipsisVertical className="size-4" />
+                </Button>
+              }
+            />
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={onManagedTest}>Test</DropdownMenuItem>
+              <DropdownMenuItem onClick={onManagedReplaceKey}>
+                {managed.source === "provider_key" ? "Replace key" : "Add a key"}
+              </DropdownMenuItem>
+              {/* Offered only when there is a key of this row's own to remove.
+                  The company account and the instance identity are not this
+                  row's to take away — and the copy says what actually happens,
+                  which is a fall back rather than a switch-off. */}
+              {managed.source === "provider_key" && (
+                <DropdownMenuItem variant="destructive" onClick={onManagedRemoveKey}>
+                  Remove key
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </li>
       )}
 
@@ -227,7 +279,7 @@ function ProviderRow({
         </Badge>
       )}
 
-      <Health provider={provider} />
+      <Health slug={provider.slug} health={provider.health} />
 
       <Switch
         checked={provider.enabled}
@@ -283,14 +335,14 @@ function ProviderRow({
  * column: a list where every healthy row says "ok" spends a column saying
  * nothing, and the one row that is not healthy is harder to find for it.
  */
-function Health({ provider }: { provider: Provider }) {
-  if (!provider.health || provider.health.state === "ok") return null;
+function Health({ slug, health }: { slug: string; health?: ProviderHealth }) {
+  if (!health || health.state === "ok") return null;
   return (
     <span
       className="truncate text-xs text-status-blocked-text"
-      data-testid={`inference-provider-${provider.slug}-health`}
+      data-testid={`inference-provider-${slug}-health`}
     >
-      {healthLabel(provider.health.state)}
+      {healthLabel(health.state)}
     </span>
   );
 }

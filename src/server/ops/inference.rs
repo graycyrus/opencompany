@@ -365,6 +365,17 @@ struct ManagedDto {
     configured: bool,
     /// The endpoint managed requests travel to — the platform's own.
     base_url: String,
+    /// Whether it is a routing target.
+    ///
+    /// A provider like any other in this one respect: "stop routing work here"
+    /// and "remove the credential" are different statements, and managed can be
+    /// told the first without the second. Switching it off leaves every step of
+    /// its chain exactly where it was.
+    enabled: bool,
+    /// What was last learnt about reaching it, if anything. Same rule as a
+    /// provider row's: silent until something has actually been learnt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    health: Option<ProviderHealthDto>,
 }
 
 /// One provider on the wire.
@@ -895,13 +906,24 @@ async fn managed_state(
         .map_err(ApiError)?;
     let source =
         inference::managed_source(!inference_key.trim().is_empty(), &company_account, platform);
-    let _ = store::PROVIDER_INDEX_KEY;
+    let health = store::load_health(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?
+        .get(inference::MANAGED_SLUG)
+        .map(|h| ProviderHealthDto {
+            state: h.state.clone(),
+            at: h.at.clone(),
+        });
     Ok(ManagedDto {
         source: source.as_str().to_string(),
         configured: source.resolves(),
         base_url: platform
             .map(|p| p.base_url.clone())
             .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        enabled: store::managed_enabled(runtime.id(), secrets)
+            .await
+            .map_err(ApiError)?,
+        health,
     })
 }
 
@@ -2965,6 +2987,85 @@ base_url = "https://byo.example/v1"
         assert_eq!(
             acme["keyConfigured"], true,
             "a disabled provider keeps its credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_the_managed_key_does_not_take_another_row_s_key_with_it() {
+        // `inference/key` is ONE address that two rows can read through their
+        // own legacy fallback: entry zero's, and managed's. Which of them owns
+        // it depends on what entry zero's kind normalises to.
+        //
+        // Clearing it unconditionally while writing a *different* slug's slot
+        // destroyed whatever else was reading it — on a company configured for
+        // OpenRouter, removing the managed key silently took the OpenRouter key
+        // with it and the row went from "•••• configured" to a bare host. Found
+        // in a browser; pinned here.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        // Entry zero is OpenRouter, with its credential at the legacy address.
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openrouter", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/managed/key",
+            Some(json!({ "key": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let zero = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "openrouter")
+            .expect("entry zero is still listed");
+        assert_eq!(
+            zero["keyConfigured"], true,
+            "removing MANAGED's key must not clear a credential another row reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_managed_company_does_converge_off_the_legacy_address() {
+        // The other half: when entry zero IS managed, the legacy slot is its
+        // own, and writing the new address must retire the old one — otherwise
+        // a secret is orphaned at an address nothing will ever clear.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": TOKEN })),
+        )
+        .await;
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/managed/key",
+            Some(json!({ "key": "sk-not-a-real-key" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(
+            dto["managed"]["source"], "provider_key",
+            "the new address is what answers now"
         );
     }
 
