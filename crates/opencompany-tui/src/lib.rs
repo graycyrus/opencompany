@@ -154,7 +154,7 @@ async fn drive(cli: Cli) -> anyhow::Result<()> {
 fn rows_of(host: &host::EmbeddedHost) -> Vec<CompanyRow> {
     let registry = host.state().registry();
     let mut ids = registry.list();
-    ids.sort();
+    ids.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
     ids.into_iter()
         .map(|id| {
             let busy = registry.get(&id).map(|runtime| runtime.is_busy()).unwrap_or(false);
