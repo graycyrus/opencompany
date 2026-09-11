@@ -1,0 +1,141 @@
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { installExternalLinkOpener, isOutwardHref } from "@/lib/external-links";
+
+/**
+ * The desktop shell's bridge, as `tauriCore()` probes for it: `window.__TAURI__`
+ * carrying a callable `core.invoke`. Anything less is not a bridge, which is the
+ * web case.
+ */
+function asDesktop(invoke = vi.fn().mockResolvedValue(undefined)) {
+  (window as unknown as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+  return invoke;
+}
+
+function asBrowser() {
+  delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+}
+
+function clickAnchor(href: string, init: MouseEventInit = {}) {
+  const anchor = document.createElement("a");
+  anchor.setAttribute("href", href);
+  anchor.setAttribute("target", "_blank");
+  document.body.append(anchor);
+  const event = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ...init });
+  anchor.dispatchEvent(event);
+  return event;
+}
+
+afterEach(() => {
+  asBrowser();
+  document.body.innerHTML = "";
+  vi.restoreAllMocks();
+});
+
+describe("isOutwardHref", () => {
+  it("takes the schemes that leave the console", () => {
+    expect(isOutwardHref("https://openrouter.ai/keys")).toBe(true);
+    expect(isOutwardHref("http://localhost:8080/x")).toBe(true);
+    expect(isOutwardHref("mailto:someone@example.com")).toBe(true);
+  });
+
+  /**
+   * The console addresses itself with hash routes, and `WorkspaceView` and the
+   * chat surface both build relative hrefs. Handing either to the operating
+   * system would replace a working in-app link with a failed one — a worse bug
+   * than the one this fixes.
+   */
+  it("leaves in-app and embedded addresses alone", () => {
+    expect(isOutwardHref("#/company/workspace/n-1")).toBe(false);
+    expect(isOutwardHref("/api/v1/company")).toBe(false);
+    expect(isOutwardHref("blob:abc")).toBe(false);
+    expect(isOutwardHref("data:text/plain,x")).toBe(false);
+    expect(isOutwardHref("")).toBe(false);
+  });
+});
+
+describe("installExternalLinkOpener", () => {
+  /**
+   * The defect itself: in the desktop shell an outward anchor did nothing at
+   * all. The click must now reach the shell instead of being swallowed.
+   */
+  it("hands an outward link to the shell in the desktop build", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    const event = clickAnchor("https://openrouter.ai/keys");
+
+    expect(invoke).toHaveBeenCalledWith("plugin:shell|open", {
+      path: "https://openrouter.ai/keys",
+    });
+    expect(event.defaultPrevented).toBe(true);
+    dispose();
+  });
+
+  /**
+   * A browser already opens a tab. Intercepting there would be a regression
+   * dressed as a fix, and it is also what keeps the console E2E suite — which
+   * runs in a browser — a meaningful check of these links.
+   */
+  it("does nothing in a browser", () => {
+    asBrowser();
+    const dispose = installExternalLinkOpener();
+
+    const event = clickAnchor("https://openrouter.ai/keys");
+
+    expect(event.defaultPrevented).toBe(false);
+    dispose();
+  });
+
+  it("leaves an in-app hash route to the router", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    const event = clickAnchor("#/company/workspace/n-1");
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    dispose();
+  });
+
+  /** A modified click is the operator asking for the platform's own behaviour. */
+  it("leaves a modified click alone", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+
+    const event = clickAnchor("https://openrouter.ai/keys", { metaKey: true });
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    dispose();
+  });
+
+  /**
+   * A refusal from the shell must not surface as an unhandled rejection — the
+   * operator is left where they were, and nothing else breaks.
+   */
+  it("swallows a shell refusal", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("denied"));
+    asDesktop(invoke);
+    const dispose = installExternalLinkOpener();
+
+    clickAnchor("https://openrouter.ai/keys");
+    await Promise.resolve();
+
+    expect(invoke).toHaveBeenCalled();
+    dispose();
+  });
+
+  it("stops intercepting once disposed", () => {
+    const invoke = asDesktop();
+    const dispose = installExternalLinkOpener();
+    dispose();
+
+    const event = clickAnchor("https://openrouter.ai/keys");
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+});
