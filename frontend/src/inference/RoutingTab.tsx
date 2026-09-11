@@ -30,6 +30,7 @@ import {
   applyToEveryWorkload,
   managedModeBadge,
   formatRef,
+  ownModeDraft,
   parseRef,
   routingTargets,
   rowValue,
@@ -72,9 +73,17 @@ export function RoutingTab({
   const [error, setError] = useState<string | null>(null);
   /** Which mode the operator has selected, when it differs from the inferred one. */
   const [chosenMode, setChosenMode] = useState<RoutingMode | null>(null);
-  /** The Own-mode draft: one provider and one model for everything. */
-  const [ownSlug, setOwnSlug] = useState<string>("");
-  const [ownModel, setOwnModel] = useState<string>("");
+  /**
+   * The Own-mode form, **only once it has been edited**.
+   *
+   * `null` means "show what is saved", so the form hydrates from the routing
+   * table rather than starting blank over a table that already names a provider
+   * — the gap that made a correct save read as a lost one. An override rather
+   * than an effect that copies the saved value into state: a refetch landing
+   * mid-edit would otherwise overwrite what is being typed, which is the same
+   * class of bug as stripping a model id mid-keystroke.
+   */
+  const [ownDraft, setOwnDraft] = useState<{ slug: string; model: string } | null>(null);
 
   if (state.load === "unavailable") return null;
   if (state.load === "loading") return <Skeleton className="h-64 rounded-xl" />;
@@ -87,6 +96,9 @@ export function RoutingTab({
   ) as RoutingMap;
   const mode = chosenMode ?? state.mode;
   const targets = routingTargets(state.providers);
+  const ownSaved = ownModeDraft(routing);
+  const ownSlug = ownDraft?.slug ?? ownSaved.slug;
+  const ownModel = ownDraft?.model ?? ownSaved.model;
 
   async function save(next: RoutingMap) {
     setError(null);
@@ -97,6 +109,9 @@ export function RoutingTab({
     try {
       await actions.saveRoutes(wire);
       setChosenMode(null);
+      // Back to following the saved table, so the form reads what was written
+      // rather than a draft that now says the same thing by coincidence.
+      setOwnDraft(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "That routing could not be saved.");
     }
@@ -155,7 +170,7 @@ export function RoutingTab({
                     <Select
                       value={ownSlug || null}
                       disabled={!canManage}
-                      onValueChange={(v) => v && setOwnSlug(String(v))}
+                      onValueChange={(v) => v && setOwnDraft({ slug: String(v), model: ownModel })}
                     >
                       <SelectTrigger id="inference-own-provider" className="w-full">
                         <SelectValue placeholder="Choose a provider…" />
@@ -176,7 +191,7 @@ export function RoutingTab({
                     id="inference-own-model"
                     value={ownModel}
                     disabled={!canManage}
-                    onChange={setOwnModel}
+                    onChange={(next) => setOwnDraft({ slug: ownSlug, model: next })}
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">{OWN_MODE_SCOPE}</p>

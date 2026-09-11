@@ -381,6 +381,33 @@ export function rowValue(
  * "every row, not some rows" part is the function's contract instead of a
  * component's discipline.
  */
+/**
+ * The provider and model an **own**-mode table is describing — the inverse of
+ * {@link applyToEveryWorkload}.
+ *
+ * Without it the shared-model form saves correctly and then shows nothing back:
+ * an operator sets a provider and a model, saves, returns to the tab, and finds
+ * an empty select with Save disabled while the store holds exactly what they
+ * chose. Nothing is lost, but "my save did not stick" is what it reads as, and
+ * that is indistinguishable from the routing table being inert — which is the
+ * bug it sat next to.
+ *
+ * Blank when the rows do not agree, which is the same condition
+ * {@link inferRoutingMode} calls `advanced`: there is no single provider to show
+ * and inventing one from the first row would misreport the other three.
+ */
+export function ownModeDraft(routing: RoutingMap): { slug: string; model: string } {
+  const refs = WORKLOADS.map((w) => refFor(routing, w));
+  const first = refs[0];
+  if (!first || first.kind !== "cloud") return { slug: "", model: "" };
+  const signature = refSignature(first);
+  if (!refs.every((r) => refSignature(r) === signature)) return { slug: "", model: "" };
+  // `model` is optional and blank is meaningful — it means "send the tier and
+  // let the endpoint resolve it" — so an absent one becomes the empty string the
+  // field renders, never a placeholder.
+  return { slug: first.providerSlug, model: first.model ?? "" };
+}
+
 export function applyToEveryWorkload(providerSlug: string, model?: string): RoutingMap {
   const ref: ProviderRef = { kind: "cloud", providerSlug, model };
   return Object.fromEntries(WORKLOADS.map((w) => [w, ref])) as RoutingMap;

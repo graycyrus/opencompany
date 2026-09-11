@@ -11,6 +11,7 @@ import {
   formatRef,
   inferRoutingMode,
   orphanedRoutes,
+  ownModeDraft,
   parseRef,
   refSignature,
   routingTargets,
@@ -255,5 +256,42 @@ describe("what a row offers and reads", () => {
   it("does not offer a disabled provider as a routing target", () => {
     const providers = [provider("openrouter", "openrouter"), provider("acme", "openai_compatible", false)];
     expect(routingTargets(providers).map((p) => p.slug)).toEqual(["openrouter"]);
+  });
+});
+
+describe("ownModeDraft", () => {
+  it("reads back what applyToEveryWorkload wrote", () => {
+    // The round trip is the whole property: the shared-model form saved
+    // correctly and then rendered empty, which reads as a lost save and is
+    // indistinguishable from the routing table being inert.
+    const saved = applyToEveryWorkload("anthropic", "claude-sonnet-5");
+    expect(ownModeDraft(saved)).toEqual({ slug: "anthropic", model: "claude-sonnet-5" });
+    expect(inferRoutingMode(saved)).toBe("own");
+  });
+
+  it("keeps a blank model blank rather than inventing a placeholder", () => {
+    // Blank means "send the tier and let the endpoint resolve it" — a real
+    // state of the field, not an absence to be filled in.
+    const saved = applyToEveryWorkload("openrouter");
+    expect(ownModeDraft(saved)).toEqual({ slug: "openrouter", model: "" });
+  });
+
+  it("is blank when the rows disagree", () => {
+    // The same condition `inferRoutingMode` calls advanced. Showing the first
+    // row's provider here would misreport the other three.
+    const mixed = {
+      ...applyToEveryWorkload("openrouter", "gpt-5"),
+      vision: parseRef("anthropic:claude-sonnet-5"),
+    } as RoutingMap;
+    expect(inferRoutingMode(mixed)).toBe("advanced");
+    expect(ownModeDraft(mixed)).toEqual({ slug: "", model: "" });
+  });
+
+  it("is blank for a managed or unset table, which own mode does not describe", () => {
+    const managed = Object.fromEntries(
+      WORKLOADS.map((w) => [w, { kind: "managed" } as const]),
+    ) as RoutingMap;
+    expect(ownModeDraft(managed)).toEqual({ slug: "", model: "" });
+    expect(ownModeDraft({} as RoutingMap)).toEqual({ slug: "", model: "" });
   });
 });

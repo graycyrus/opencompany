@@ -135,8 +135,10 @@ export function ModelField({
         <Input
           id={id}
           value={value}
-          disabled={disabled}
-          placeholder="Leave blank to send the tier"
+          // A model id belongs to a provider. With none chosen there is nothing
+          // to type one against, and an id typed here could only be discarded.
+          disabled={disabled || !slug}
+          placeholder={slug ? "Leave blank to send the tier" : "Choose a provider first"}
           autoComplete="off"
           spellCheck={false}
           className="font-mono text-xs"
@@ -146,6 +148,7 @@ export function ModelField({
 
       <ModelFieldNote
         loading={loading}
+        chosen={Boolean(slug)}
         catalog={catalog}
         offersSelect={offersSelect}
         onUseCatalog={() => setTyped(false)}
@@ -163,17 +166,31 @@ export function ModelField({
  */
 function ModelFieldNote({
   loading,
+  chosen,
   catalog,
   offersSelect,
   onUseCatalog,
   onUseText,
 }: {
   loading: boolean;
+  /** Whether a provider has been chosen at all. */
+  chosen: boolean;
   catalog: ProviderCatalog | null;
   offersSelect: boolean;
   onUseCatalog: () => void;
   onUseText: () => void;
 }) {
+  // Its own state, and first, because the fallback below says "this provider
+  // publishes no model list" — an assertion about a provider that does not
+  // exist yet. No provider has been asked anything, so nothing is known about
+  // one, and saying otherwise is a screen inventing a fact.
+  if (!chosen) {
+    return (
+      <p className="text-xs text-muted-foreground" data-testid="inference-model-no-provider">
+        Choose a provider first — the model list is read from whichever one you pick.
+      </p>
+    );
+  }
   if (loading) {
     return <p className="text-xs text-muted-foreground">Reading this provider&apos;s models…</p>;
   }
