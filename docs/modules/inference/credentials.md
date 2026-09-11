@@ -51,33 +51,44 @@ its *app connections* onto its own account and leaves *every agent turn* on
 whoever runs the server. Nothing on screen says so, and thinking is the expensive
 half.
 
-**The one place the slots meet is a copy, not a resolution.**
-`POST {scope}/credential/link/finish` writes the hub-minted key into
-`tinyhumans/key` **and** into `inference/key`. So it looks like one key serving
-both — but rotating the account key afterwards through the normal route does not
-update the inference copy, which keeps presenting the old value until somebody
-replaces it separately.
+**The one place the slots met was a copy, not a resolution.** *(Fixed.)*
+`POST {scope}/credential/link/finish` used to write the hub-minted key into
+`tinyhumans/key` **and** into `inference/key`. It looked like one key serving
+both — but rotating the account key afterwards through the normal route did not
+update the inference copy, which kept presenting the old value until somebody
+replaced it separately. The copy is gone; step 3 of the chain above does the
+same job by resolution, so there is nothing to go stale.
 
-**That copy also misroutes.** `link/finish` stores the key with
-`provider: "managed"`. On resolve, `normalize_provider("managed")` yields
-`"openrouter"` *before* `is_managed_choice` is consulted, so with a key present
-both managed branches are skipped and the endpoint resolves to
-`https://openrouter.ai/api/v1`. A `th_…` key is then presented as a bearer to
-OpenRouter. The handler's own comment claims declaring `managed` is "what makes
-the stored key the one its turns are billed to"; the code does not do that.
+**That copy also misrouted.** *(Fixed.)* `link/finish` stored the key with
+`provider: "managed"`, and on resolve `normalize_provider("managed")` yielded
+`"openrouter"` *before* `is_managed_choice` was consulted — so with a key
+present both managed branches were skipped and the endpoint resolved to
+`https://openrouter.ai/api/v1`, presenting a `th_…` key as a bearer to
+OpenRouter. `resolve_effective_scoped` now passes the **raw** kind to
+`resolve_endpoint`, which consults `is_managed_choice` first, and the test for
+it asserts the `base_url` as well as the bearer. Checking the bearer alone is
+how the bug shipped.
 
-## The target
+## The target — **built**, not future work
 
 One identity, two surfaces, an optional vendor override above each — and a
 provider check that stops an identity reaching a vendor it means nothing to.
 
+This is the chain the code now resolves (`company::inference::resolve_effective`,
+`managed_identity`):
+
 ```
 INFERENCE
-  1. the provider entry's own credential        ← a vendor key (OpenRouter, BYOK…)
-  2. if that provider IS the managed/TinyHumans one:
-        tinyhumans/key                          ← this company's account
-        else the instance identity
-  3. nothing → agents cannot think, and the banner says which
+  1. provider/<slug>/key    ← a key pasted for this provider. For the managed
+                              provider the slug is `tinyhumans`.
+  2. inference/key          ← the legacy flat address, READ-ONLY. Same meaning
+                              as (1) at an older address; retires itself, see
+                              "Convergence" below.
+  3. tinyhumans/key         ← this company's account identity. ONLY when the
+                              provider is the managed/TinyHumans one.
+  4. instance identity      ← TINYHUMANS_TOKEN_FILE, else TINYHUMANS_API_KEY.
+                              Same condition as (3).
+  5. nothing → agents cannot think, and the banner says which
 
 COMPOSIO
   1. composio/token                             ← a pasted Composio credential
@@ -85,6 +96,27 @@ COMPOSIO
   3. the instance identity
   4. nothing → no app tools
 ```
+
+### Convergence, not migration
+
+Every provider's credential is **written** to `provider/<slug>/key`, the managed
+one included, and the legacy `inference/key` is **cleared in the same write**.
+Reads try the new address first and fall back to the old one.
+
+An existing company keeps working untouched; the first save of that provider
+moves its key and retires the old slot. There is no flag day and no
+half-migrated state on a store with no transaction — and the fallback is one
+readable line that can be deleted once nothing reaches it.
+
+The store has no delete, so "clear" is a write of the empty string. It has to be
+**issued** rather than inferred, and a failure is logged loudly: a key left at
+the old address after the new one is written is an orphaned secret, which is an
+incident shape rather than untidiness.
+
+Note what is *not* moving: `tinyhumans/key` — the company **identity** slot in
+`src/company/company_key.rs` — stays exactly where it is. It is a different
+thing from a key pasted for inference, which is why they are steps 1 and 3 of
+one chain rather than two names for one slot.
 
 ### The provider check is the whole safety property
 

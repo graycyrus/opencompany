@@ -186,14 +186,31 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// This provider's credential key.
+    /// Where this provider's credential is **written**: `provider/<slug>/key`,
+    /// for every provider without exception.
     ///
-    /// Entry zero keeps the flat legacy key; everything else is per slug. This
-    /// one method is where the entry-zero special case is paid for.
+    /// It used to branch on [`ProviderOrigin::EntryZero`] and answer the flat
+    /// `inference/key`, which made "which slot" a question about where the
+    /// *record* came from rather than about which provider the credential
+    /// belongs to. One address rule, no exception.
+    ///
+    /// The legacy slot has not stopped existing — see
+    /// [`legacy_key_key`](Self::legacy_key_key) and the convergence rule on
+    /// [`load_provider_key`].
     pub fn key_key(&self) -> String {
+        provider_key_key(&self.slug)
+    }
+
+    /// The address this provider's credential may **still** be at, from before
+    /// the addresses were made uniform.
+    ///
+    /// Only entry zero has one: it is the company whose single credential
+    /// predates the list. `None` for everything else, because nothing was ever
+    /// written anywhere but `provider/<slug>/key` for an indexed provider.
+    pub fn legacy_key_key(&self) -> Option<&'static str> {
         match self.origin {
-            ProviderOrigin::EntryZero => KEY_KEY.to_string(),
-            ProviderOrigin::Indexed => provider_key_key(&self.slug),
+            ProviderOrigin::EntryZero => Some(KEY_KEY),
+            ProviderOrigin::Indexed => None,
         }
     }
 }
@@ -353,13 +370,25 @@ async fn entry_zero(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Op
 /// without a store, and so the slug rule has one home.
 fn provider_from_runtime(config: &RuntimeInference) -> Provider {
     let kind = normalize_provider(&config.provider).to_string();
-    let label = catalogue::cloud_provider(&kind)
-        .map(|p| p.label.to_string())
-        .or_else(|| catalogue::local_runtime(&kind).map(|r| r.label.to_string()))
-        .unwrap_or_else(|| kind.clone());
+    // The **slug** is not always the kind. A managed/TinyHumans config has the
+    // OpenRouter-shaped kind and the TinyHumans account, and those are two
+    // different questions: the kind says what shape of API this is, the slug
+    // says whose account it is. Keyed on the kind, a managed credential would
+    // sit in the slot a real OpenRouter account belongs in — and a company with
+    // both would have one. It is also the address the resolver reads, through
+    // the same function, so the two cannot drift.
+    let slug = super::credential_slug(&config.provider).to_string();
+    let label = if super::is_managed_choice(&config.provider) {
+        "Managed".to_string()
+    } else {
+        catalogue::cloud_provider(&kind)
+            .map(|p| p.label.to_string())
+            .or_else(|| catalogue::local_runtime(&kind).map(|r| r.label.to_string()))
+            .unwrap_or_else(|| kind.clone())
+    };
     Provider {
         id: ProviderId::entry_zero(),
-        slug: kind.clone(),
+        slug,
         label,
         base_url: super::effective_base_url(&kind, config.base_url.as_deref()),
         kind,
@@ -529,8 +558,24 @@ pub async fn delete_provider(
     save_index(company, secrets, &index).await.map(|()| true)
 }
 
-/// Writes a provider's outbound credential. Write-only intake: nothing reads
-/// this back out to a caller that is not about to present it.
+/// Writes a provider's outbound credential, **and converges its address**.
+///
+/// Write-only intake: nothing reads this back out to a caller that is not about
+/// to present it.
+///
+/// ## Lazy convergence rather than a migration
+///
+/// The credential goes to `provider/<slug>/key` and the legacy `inference/key`
+/// is cleared in the same operation. There is no flag day and no half-migrated
+/// state: an existing company keeps working untouched on the read fallback in
+/// [`load_provider_key`], and the first save of that provider moves the key and
+/// retires the old slot. When nothing is left reading the fallback it is one
+/// line to delete.
+///
+/// The clear is a **write of the empty string**, because the port has no delete
+/// — and it has to be issued rather than inferred. A key left at the old address
+/// after the new one is written is an orphaned secret, which is why a failure
+/// here is logged loudly rather than swallowed.
 pub async fn store_provider_key(
     company: &CompanyId,
     secrets: &dyn SecretStore,
@@ -539,19 +584,47 @@ pub async fn store_provider_key(
 ) -> Result<()> {
     secrets
         .set(company, &provider.key_key(), SecretValue(key.to_string()))
-        .await
+        .await?;
+    if let Some(legacy) = provider.legacy_key_key()
+        && let Err(err) = secrets
+            .set(company, legacy, SecretValue(String::new()))
+            .await
+    {
+        tracing::error!(
+            company = %company,
+            provider = %provider.slug,
+            legacy_key = legacy,
+            error = %err,
+            "wrote a provider credential to its own address but could not clear the \
+             legacy slot; a secret is now orphaned there",
+        );
+    }
+    Ok(())
 }
 
 /// Reads a provider's outbound credential, or the empty string when unset.
+///
+/// `provider/<slug>/key` first, then the legacy flat slot for entry zero. The
+/// fallback is the whole of the backward compatibility story: a company that has
+/// never saved since the addresses were made uniform still resolves, and one
+/// save moves it. See [`store_provider_key`].
 pub async fn load_provider_key(
     company: &CompanyId,
     secrets: &dyn SecretStore,
     provider: &Provider,
 ) -> Result<String> {
-    let Some(SecretValue(raw)) = secrets.get(company, &provider.key_key()).await? else {
-        return Ok(String::new());
-    };
-    Ok(raw)
+    if let Some(SecretValue(raw)) = secrets.get(company, &provider.key_key()).await?
+        && !raw.trim().is_empty()
+    {
+        return Ok(raw);
+    }
+    if let Some(legacy) = provider.legacy_key_key()
+        && let Some(SecretValue(raw)) = secrets.get(company, legacy).await?
+        && !raw.trim().is_empty()
+    {
+        return Ok(raw);
+    }
+    Ok(String::new())
 }
 
 /// Whether a provider has a credential stored — the non-secret fact a read route
@@ -569,6 +642,58 @@ pub async fn provider_key_configured(
         .await?
         .trim()
         .is_empty())
+}
+
+// ---- the default provider ---------------------------------------------------
+
+/// The [`SecretStore`] key naming the company's default provider.
+pub const DEFAULT_PROVIDER_KEY: &str = "inference/default";
+
+/// Which provider this company has **said** is its default, if any.
+///
+/// A slug in a slot of its own rather than a flag on each record, and that shape
+/// is the point: **two defaults are not representable.** A boolean per record
+/// can be true twice, and then the reader has to pick — which is a rule nobody
+/// wrote down and everybody would have to agree on. One slot, one answer.
+///
+/// `None` is every company that has not said, which is every company that
+/// existed before this. There is no backfill: [`resolve::primary`] falls back to
+/// the first enabled provider, which is exactly what it did before.
+pub async fn load_default_slug(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<Option<String>> {
+    let Some(SecretValue(raw)) = secrets.get(company, DEFAULT_PROVIDER_KEY).await? else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+}
+
+/// Marks `slug` as this company's default, replacing whatever was marked.
+///
+/// "Setting a default clears the previous one" is not an operation here — it is
+/// the storage shape. One slot cannot hold two slugs.
+pub async fn set_default_slug(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+) -> Result<()> {
+    secrets
+        .set(
+            company,
+            DEFAULT_PROVIDER_KEY,
+            SecretValue(slug.trim().to_string()),
+        )
+        .await
+}
+
+/// Unmarks whatever is marked. A write of the empty string, because the port has
+/// no delete.
+pub async fn clear_default_slug(company: &CompanyId, secrets: &dyn SecretStore) -> Result<()> {
+    secrets
+        .set(company, DEFAULT_PROVIDER_KEY, SecretValue(String::new()))
+        .await
 }
 
 // ---- routes -----------------------------------------------------------------
@@ -831,8 +956,47 @@ mod tests {
         assert_eq!(zero.origin, ProviderOrigin::EntryZero);
         assert_eq!(zero.id.as_str(), ENTRY_ZERO_ID);
         assert!(zero.enabled);
-        // The whole point: its credential is still the flat legacy key.
-        assert_eq!(zero.key_key(), KEY_KEY);
+        // Written at the uniform address; still READ from the legacy one until
+        // the first save converges it. One address rule, one readable fallback.
+        assert_eq!(zero.key_key(), provider_key_key("openrouter"));
+        assert_eq!(zero.legacy_key_key(), Some(KEY_KEY));
+    }
+
+    #[tokio::test]
+    async fn a_legacy_credential_is_read_from_the_flat_slot_and_moved_by_one_save() {
+        // Lazy convergence. An existing company keeps working untouched, and the
+        // first save of that provider moves the key and clears the old slot —
+        // no flag day, and no half-migrated state on a store with no
+        // transaction.
+        let secrets = MemSecrets::default();
+        write_entry_zero(&secrets, "openrouter").await;
+        secrets
+            .set(&company(), KEY_KEY, SecretValue("sk-not-a-real-key".into()))
+            .await
+            .unwrap();
+
+        let zero = list_providers(&company(), &secrets).await.unwrap()[0].clone();
+        assert_eq!(
+            load_provider_key(&company(), &secrets, &zero)
+                .await
+                .unwrap(),
+            "sk-not-a-real-key",
+            "the fallback is what keeps an untouched company working"
+        );
+
+        store_provider_key(&company(), &secrets, &zero, "sk-not-a-real-key-2")
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company(), &zero.key_key()).await.unwrap(),
+            Some(SecretValue("sk-not-a-real-key-2".into())),
+        );
+        assert_eq!(
+            secrets.get(&company(), KEY_KEY).await.unwrap(),
+            Some(SecretValue(String::new())),
+            "the legacy slot is cleared in the same operation; a key left there \
+             after the new one is written is an orphaned secret"
+        );
     }
 
     #[tokio::test]
@@ -858,7 +1022,18 @@ mod tests {
         let secrets = MemSecrets::default();
         write_entry_zero(&secrets, "managed").await;
         let providers = list_providers(&company(), &secrets).await.unwrap();
-        assert_eq!(providers[0].slug, "openrouter");
+        // The **kind** normalizes onto OpenRouter — that is the shape of API it
+        // speaks. The **slug** does not: it says whose account this is, and a
+        // managed config is the TinyHumans account. Keyed on the kind, the
+        // managed credential would sit in the slot a real OpenRouter account
+        // belongs in, and a company holding both would have one.
+        assert_eq!(providers[0].kind, "openrouter");
+        assert_eq!(providers[0].slug, super::super::MANAGED_SLUG);
+        assert_eq!(providers[0].label, "Managed");
+        assert_eq!(
+            providers[0].key_key(),
+            provider_key_key(super::super::MANAGED_SLUG)
+        );
     }
 
     #[tokio::test]

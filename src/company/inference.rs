@@ -41,6 +41,8 @@ use crate::error::OpenCompanyError;
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
+use self::store::provider_key_key;
+
 /// The [`SecretStore`](crate::ports::SecretStore) key holding the JSON runtime
 /// inference override (a [`RuntimeInference`] the console writes).
 pub const RUNTIME_CONFIG_KEY: &str = "inference/config";
@@ -377,8 +379,35 @@ pub fn normalize_provider(provider: &str) -> &str {
 /// [`decl_for_probe`] passes the raw kind here; [`resolve_effective_scoped`]
 /// normalizes first, so runtime resolution of a legacy `managed` blob is
 /// unaffected.
-fn is_managed_choice(provider: &str) -> bool {
+pub fn is_managed_choice(provider: &str) -> bool {
     matches!(provider.trim(), LEGACY_MANAGED | "tinyhumans")
+}
+
+/// The slug the managed/TinyHumans provider's credential is keyed on.
+///
+/// `tinyhumans`, not `openrouter`, even though [`normalize_provider`] folds the
+/// managed kind onto `openrouter` for endpoint resolution. The two answer
+/// different questions: the kind says *what shape of API this is*, the slug says
+/// *whose account this is*. Keying the managed credential on `openrouter` would
+/// put a TinyHumans key in the slot a real OpenRouter account belongs in, and a
+/// company that had both would have one.
+///
+/// Not to be confused with [`company_key::KEY_KEY`](crate::company::company_key)
+/// (`tinyhumans/key`), which is the company's **identity**. This is a slot for a
+/// key pasted specifically for inference; that is the account the company signs
+/// in as. They are consulted in that order and they are not the same thing.
+pub const MANAGED_SLUG: &str = "tinyhumans";
+
+/// Which `provider/<slug>/key` slot a provider kind's credential lives in.
+///
+/// One rule, used by the resolver and by the store's entry-zero reader, so the
+/// address the turn path reads and the address the console writes cannot drift.
+pub fn credential_slug(provider_raw: &str) -> &str {
+    if is_managed_choice(provider_raw) {
+        MANAGED_SLUG
+    } else {
+        normalize_provider(provider_raw)
+    }
 }
 
 /// OpenRouter's OpenAI-compatible base URL — used when the `openrouter`
@@ -840,6 +869,75 @@ pub async fn load_key_scoped(
     Ok(String::new())
 }
 
+/// Reads the outbound inference credential for one provider slug.
+///
+/// ```text
+///   1. provider/<slug>/key    the address every provider's credential lives at
+///   2. inference/key          the legacy flat slot, read-only
+///   3. <manifest secret>      a commit-time key named by `[inference].api_key_secret`
+/// ```
+///
+/// Steps 1 and 2 are **the same meaning at two addresses**. Nothing writes step 2
+/// any more ([`store_provider_key`](super::inference::store::store_provider_key)
+/// clears it on the next save of that provider), so the fallback retires itself
+/// company by company and can be deleted outright once nothing reads it. That is
+/// lazy convergence rather than a migration: no flag day, and no half-migrated
+/// state on a store with no transaction.
+pub async fn load_inference_key_scoped(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    override_key: Option<&str>,
+    scope: &HarnessScope,
+) -> Result<String> {
+    if let Some(SecretValue(raw)) = secrets.get(company, &provider_key_key(slug)).await?
+        && !raw.trim().is_empty()
+    {
+        return Ok(raw);
+    }
+    load_key_scoped(company, secrets, override_key, scope).await
+}
+
+/// Steps 3 and 4 of the managed chain: the company's account identity, then this
+/// instance's.
+///
+/// **An identity flows to a surface only when the vendor at the other end is the
+/// identity's own vendor.** That is the whole safety property, and `proxied` is
+/// what enforces it: it is true exactly when the resolved endpoint is the
+/// platform's own, and false for OpenRouter, Anthropic, a custom endpoint or any
+/// other vendor. A `th_…` key presented as a bearer to `openrouter.ai` is a live
+/// bug in the credential-link path today, and this is the line that stops it
+/// being reproduced here.
+///
+/// `had_key` is the second gate: a key pasted for inference is a more specific
+/// answer than an identity, so it wins and this is not consulted at all.
+///
+/// A store read error **propagates**. An unreadable store means we do not know
+/// who this company is, and resolving that to the instance's identity would bill
+/// the company's thinking to the server's account, invisibly.
+async fn managed_identity(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    resolved: Credential,
+    proxied: bool,
+    had_key: bool,
+) -> Result<Credential> {
+    if !proxied || had_key {
+        return Ok(resolved);
+    }
+    Ok(
+        match crate::company::company_key::load(company, secrets).await? {
+            // The company's own TinyHumans account. Setting it used to move only
+            // the app connections and leave every agent turn on whoever runs the
+            // server — the expensive half, with nothing on screen saying so.
+            company_key @ Credential::Company(_) => company_key,
+            // Nothing of the company's own: the instance identity that
+            // `resolve_endpoint` already put here, or nothing at all.
+            _ => resolved,
+        },
+    )
+}
+
 /// Writes the company's outbound inference credential (write-only intake).
 pub async fn store_key(company: &CompanyId, secrets: &dyn SecretStore, key: &str) -> Result<()> {
     store_key_scoped(company, secrets, key, &HarnessScope::default()).await
@@ -924,9 +1022,28 @@ pub async fn resolve_effective_scoped(
     if let Some(runtime) = load_runtime_config_scoped(company, secrets, scope).await? {
         let provider = normalize_provider(&runtime.provider).to_string();
         reject_unknown_provider(&provider, "the stored runtime inference config")?;
-        let key = load_key_scoped(company, secrets, None, scope).await?;
-        let (base_url, credential, proxied) =
-            resolve_endpoint(&provider, runtime.base_url.as_deref(), key, env_default);
+        let key = load_inference_key_scoped(
+            company,
+            secrets,
+            credential_slug(&runtime.provider),
+            None,
+            scope,
+        )
+        .await?;
+        let had_key = !key.trim().is_empty();
+        // The **raw** kind, not the normalized one. `normalize_provider` folds
+        // `managed` onto `openrouter`, and resolving through the normalized
+        // value skipped both managed branches — so a company that declared
+        // `managed` and stored a key had its requests sent to `openrouter.ai`
+        // carrying a TinyHumans token. `resolve_endpoint` consults
+        // `is_managed_choice` first and needs the word the operator chose.
+        let (base_url, credential, proxied) = resolve_endpoint(
+            &runtime.provider,
+            runtime.base_url.as_deref(),
+            key,
+            env_default,
+        );
+        let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
             base_url,
@@ -943,10 +1060,33 @@ pub async fn resolve_effective_scoped(
         let provider =
             normalize_provider(manifest.provider.as_deref().unwrap_or_default()).to_string();
         reject_unknown_provider(&provider, "`[inference].provider`")?;
-        let key =
-            load_key_scoped(company, secrets, manifest.api_key_secret.as_deref(), scope).await?;
+        let raw = manifest.provider.as_deref().unwrap_or_default();
+        let key = load_inference_key_scoped(
+            company,
+            secrets,
+            credential_slug(raw),
+            manifest.api_key_secret.as_deref(),
+            scope,
+        )
+        .await?;
+        let had_key = !key.trim().is_empty();
+        // The **normalized** kind here, unlike the runtime branch above, and the
+        // difference is who wrote the value. A runtime blob comes from the
+        // console, whose managed card has no URL field — so a `base_url` beside
+        // `managed` there is a stale value a previously-picked provider left in
+        // the form, and honouring it would send the managed probe somewhere the
+        // operator never chose. A manifest is hand-authored and committed:
+        // `provider = "managed"` with a `base_url` is a sentence somebody typed
+        // on purpose, usually a gateway in front of the platform, and silently
+        // redirecting it to the platform endpoint would be the same disregard in
+        // the opposite direction.
+        //
+        // The credential chain is unaffected either way: an explicit endpoint
+        // resolves `proxied = false`, which is exactly what denies it both the
+        // platform credential and the company identity. A gateway is a vendor.
         let (base_url, credential, proxied) =
             resolve_endpoint(&provider, manifest.base_url.as_deref(), key, env_default);
+        let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
             base_url,
@@ -969,9 +1109,17 @@ pub async fn resolve_effective_scoped(
     //    take that key, store it, report it as configured — and then never send
     //    it anywhere.
     if let Some(env) = env_default {
-        let key = load_key_scoped(company, secrets, None, scope).await?;
+        let key =
+            load_inference_key_scoped(company, secrets, DEFAULT_PROVIDER, None, scope).await?;
+        let had_key = !key.trim().is_empty();
         let (base_url, credential, proxied) =
             resolve_endpoint(DEFAULT_PROVIDER, None, key, Some(env));
+        // A company that has configured nothing still lands on the platform's
+        // own endpoint, so its account key is the right credential for it — and
+        // this is the case where the silent billing split hurt most: an operator
+        // set a company key, watched Composio move onto their account, and left
+        // every agent turn on the server's.
+        let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider: DEFAULT_PROVIDER.to_string(),
             base_url,
@@ -2138,5 +2286,179 @@ mod tests {
         assert_eq!(decl.base_url, "https://attacker.example/v1");
         assert!(!decl.is_proxied());
         assert_eq!(bearer(&decl).await, None);
+    }
+
+    // ---- the managed credential chain (issue #2266) -------------------------
+    //
+    // ```text
+    //   1. provider/tinyhumans/key   a key pasted specifically for inference
+    //   2. inference/key             the legacy address, read-only
+    //   3. tinyhumans/key            the company's account identity
+    //   4. instance identity         TINYHUMANS_TOKEN_FILE, else TINYHUMANS_API_KEY
+    //   5. nothing                   fail closed
+    // ```
+    //
+    // Steps 3 and 4 apply **only** when the vendor at the other end is the
+    // identity's own vendor. The OpenRouter test below is the important one.
+
+    async fn write(secrets: &MemSecrets, key: &str, value: &str) {
+        secrets
+            .set(&CompanyId::new("acme"), key, SecretValue(value.into()))
+            .await
+            .unwrap();
+    }
+
+    async fn resolve_managed(secrets: &MemSecrets) -> InferenceDecl {
+        let company = CompanyId::new("acme");
+        let config = RuntimeInference {
+            provider: "managed".into(),
+            base_url: None,
+            models: BTreeMap::new(),
+        };
+        save_runtime_config(&company, secrets, &config)
+            .await
+            .unwrap();
+        resolve_effective(
+            &company,
+            &Inference::default(),
+            Some(&managed_env()),
+            secrets,
+        )
+        .await
+        .unwrap()
+        .expect("a managed config resolves")
+    }
+
+    #[tokio::test]
+    async fn managed_with_a_pasted_inference_key_uses_it() {
+        let secrets = MemSecrets::default();
+        write(
+            &secrets,
+            &store::provider_key_key(MANAGED_SLUG),
+            "sk-not-a-real-key",
+        )
+        .await;
+        // Present but outranked, so the ordering is actually exercised.
+        write(
+            &secrets,
+            &crate::company::company_key::KEY_KEY.to_string(),
+            "th-account",
+        )
+        .await;
+
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
+        assert_eq!(decl.base_url, managed_env().base_url);
+    }
+
+    #[tokio::test]
+    async fn managed_falls_back_to_the_company_account_key_and_keeps_the_platform_endpoint() {
+        // The substance of #2266: a company key set in the console reached
+        // Composio and never reached inference, so setting it moved the app
+        // connections onto the company's account and left every agent turn —
+        // the expensive half — on whoever runs the server.
+        let secrets = MemSecrets::default();
+        write(&secrets, crate::company::company_key::KEY_KEY, "th-account").await;
+
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(bearer(&decl).await.as_deref(), Some("th-account"));
+        // **Assert the endpoint, not only the bearer.** Sending a `th_…` key to
+        // openrouter.ai is the shipped bug this chain must not reproduce, and a
+        // test that checked the bearer alone is exactly how it shipped.
+        assert_eq!(decl.base_url, managed_env().base_url);
+        assert!(
+            !decl.base_url.contains("openrouter.ai"),
+            "{}",
+            decl.base_url
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_with_neither_uses_the_instance_identity() {
+        let secrets = MemSecrets::default();
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+        assert_eq!(decl.base_url, managed_env().base_url);
+    }
+
+    #[tokio::test]
+    async fn openrouter_never_receives_the_company_identity_or_the_instance_one() {
+        // THE test. An identity flows to a surface only when the vendor at the
+        // other end is the identity's own vendor: a `th_…` key means nothing to
+        // OpenRouter, and presenting it there is both a failed request and a
+        // credential disclosed to a third party.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        write(&secrets, crate::company::company_key::KEY_KEY, "th-account").await;
+
+        let config = RuntimeInference {
+            provider: "openrouter".into(),
+            // An explicit endpoint is what makes this unambiguously the tenant's
+            // own OpenRouter rather than the platform proxy in front of it.
+            base_url: Some(OPENROUTER_BASE_URL.into()),
+            models: BTreeMap::new(),
+        };
+        save_runtime_config(&company, &secrets, &config)
+            .await
+            .unwrap();
+        let decl = resolve_effective(
+            &company,
+            &Inference::default(),
+            Some(&managed_env()),
+            &secrets,
+        )
+        .await
+        .unwrap()
+        .expect("an openrouter config resolves");
+
+        assert_eq!(decl.base_url, OPENROUTER_BASE_URL);
+        assert!(!decl.is_proxied());
+        let presented = bearer(&decl).await;
+        assert_ne!(
+            presented.as_deref(),
+            Some("th-account"),
+            "the company identity leaked to a vendor"
+        );
+        assert_ne!(
+            presented.as_deref(),
+            Some("platform-key"),
+            "the instance identity leaked to a vendor"
+        );
+        assert_eq!(
+            presented, None,
+            "no credential at all is the correct answer here"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_company_reads_the_flat_slot_and_one_save_moves_it() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        write(&secrets, KEY_KEY, "sk-not-a-real-key").await;
+
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key"),
+            "the legacy address is still read, so an untouched company keeps working"
+        );
+
+        // One save through the provider store converges the address.
+        let zero = store::list_providers(&company, &secrets).await.unwrap()[0].clone();
+        store::store_provider_key(&company, &secrets, &zero, "sk-not-a-real-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company, KEY_KEY).await.unwrap(),
+            Some(SecretValue(String::new())),
+            "and clears the old one, so no secret is orphaned"
+        );
+        assert_eq!(
+            secrets
+                .get(&company, &store::provider_key_key(MANAGED_SLUG))
+                .await
+                .unwrap(),
+            Some(SecretValue("sk-not-a-real-key".into()))
+        );
     }
 }
