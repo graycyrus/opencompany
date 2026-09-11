@@ -22,10 +22,22 @@ The manifest can only ever *name* a slot (`[inference].api_key_secret`), never
 hold a value, and validation rejects a value there that looks like a pasted
 credential.
 
-## How resolution works today
+## How resolution worked before this rework
+
+**Superseded — kept because the defect it describes is why the chain exists.**
+The section below is the *old* behaviour. The shipped chain is
+[the target](#the-target--built-not-future-work), and it is built: `tinyhumans/key`
+**is** read by inference now, in `managed_identity` (`src/company/inference.rs`),
+which is the whole point of the convergence.
+
+An earlier revision of this file asserted the opposite — "`tinyhumans/key` is
+never read by inference, verified by grep" — and stayed that way after the
+behaviour changed, under a heading that said "today". A reader met the wrong
+answer first and the right one sixty lines later. That is worse than no document:
+a stale claim carrying its own evidence is one nobody re-checks.
 
 ```
-COMPOSIO                                  INFERENCE
+COMPOSIO                                  INFERENCE  (before)
   composio/token                            inference/config + inference/key
         │ absent                                  │ absent
         ▼                                         ▼
@@ -40,13 +52,12 @@ COMPOSIO                                  INFERENCE
                                             None → echo brain
 ```
 
-**`tinyhumans/key` is never read by inference.** `src/company/inference.rs`
-contains no reference to `company_key` — verified by grep, not assumed. There is
-no path by which a company key set in the console reaches a chat completion.
+The two columns never met. A company key set in the console reached its *app
+connections* and no chat completion, and there was no path by which it could.
 
-### Three consequences
+### Three consequences of that gap
 
-**Billing splits silently.** A company that sets its own TinyHumans key moves
+**Billing splits silently.** *(Fixed by the chain below.)* A company that sets its own TinyHumans key moves
 its *app connections* onto its own account and leaves *every agent turn* on
 whoever runs the server. Nothing on screen says so, and thinking is the expensive
 half.
