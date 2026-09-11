@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SectionContentRail } from "@/components/section-rail";
 import { grandchildActive, NAV_SECTIONS } from "@/components/sidebar-navigation";
 import type { View } from "@/lib/console-routes";
+import { DEFAULT_CONNECTION_PAGE } from "@/views/connection-pages";
 
 /**
  * A section's sub-navigation is the first column of its content area (#2130).
@@ -43,6 +44,20 @@ function render(view: View, sub: string | null = null, onNavigate = () => {}) {
       }),
     ),
   );
+}
+
+/**
+ * Renders with an address on the bar, for the rows that read the hash's query.
+ *
+ * A fresh root each time: the rail reads `?tab=` into state when it mounts
+ * (`useHashTabValue`), so setting the hash and re-rendering the same instance
+ * would assert against the tab the previous case left behind.
+ */
+function renderAt(hash: string, view: View, sub: string | null, onNavigate = () => {}) {
+  window.location.hash = hash;
+  act(() => root.unmount());
+  root = createRoot(container);
+  render(view, sub, onNavigate);
 }
 
 /** The rail's own rows, in document order — the `lg` column, not the chips. */
@@ -85,16 +100,40 @@ describe("which sections get a rail", () => {
   });
 
   it("draws one for Connections, with every page that section holds", () => {
+    // Three caption groups since issue #2259, so these buttons are the rows
+    // under them — the captions are `<div>`s, asserted separately below. Eight
+    // rows over seven pages: Apps and Composio are two questions asked of one
+    // page, through the tabs that page already had.
     render("connections", "mcp");
     expect(railRows()).toEqual([
       "Apps",
-      "API Key",
       "MCP Servers",
-      "Inference",
       "Skills",
-      "Hosting",
+      "LLM",
+      "Composio",
       "Search",
+      "Account",
+      "Hosting",
     ]);
+  });
+
+  it("heads those rows with three captions, in order, that nobody can press", () => {
+    // Issue #2259. Seven flat rows said nothing about the one distinction an
+    // operator had to reconstruct on every visit: Apps and MCP are things you
+    // connect *to*, LLM and Search are the credentials that authorise the work.
+    // The captions are the same shape Finance and the Settings rail already
+    // use — `<div>`s, not buttons and not headings, so the rail's keyboard
+    // order walks rows only and the document outline still opens on the page's
+    // own `h1` (issue #1392).
+    render("connections", "mcp");
+    const nav = container.querySelector("nav")!;
+    const captions = [...nav.querySelectorAll("div")]
+      .filter((el) => el.className.includes("uppercase"))
+      .map((el) => (el.textContent ?? "").trim());
+    expect(captions).toEqual(["Integrations", "API Keys", "Others"]);
+    // Eight rows, three captions, and not one caption among the pressables.
+    expect(nav.querySelectorAll("button")).toHaveLength(8);
+    for (const caption of captions) expect(railRows()).not.toContain(caption);
   });
 
   it("draws none for Room or Automations, so their pane keeps its full width", () => {
@@ -312,25 +351,27 @@ describe("clicking a row", () => {
 });
 
 describe("grandchildActive", () => {
-  const finance = NAV_SECTIONS.find((s) => s.view === "company")!.children!.find(
-    (c) => c.view === "finances",
-  )!;
+  // The SECTION, not the group. A caption is not a scope: the set an address is
+  // matched against is every row the rail draws, which is what keeps one address
+  // lighting one row once a section has more than one group (issue #2259).
+  const company = NAV_SECTIONS.find((s) => s.view === "company")!;
+  const finance = company.children!.find((c) => c.view === "finances")!;
   const page = (label: string) => finance.children!.find((c) => c.label === label)!;
 
   it("lights the first page for the bare address, as the sections do", () => {
     // `#/finances` is Overview for the same reason `#/connections` is Apps: the
     // parent row lands on the bare address and the first page is what it shows.
-    expect(grandchildActive(finance, page("Overview"), "finances", null)).toBe(true);
-    expect(grandchildActive(finance, page("Wallet"), "finances", null)).toBe(false);
+    expect(grandchildActive(company, page("Overview"), "finances", null)).toBe(true);
+    expect(grandchildActive(company, page("Wallet"), "finances", null)).toBe(false);
   });
 
   it("lights the page the segment names", () => {
-    expect(grandchildActive(finance, page("Wallet"), "finances", "wallet")).toBe(true);
-    expect(grandchildActive(finance, page("Overview"), "finances", "wallet")).toBe(false);
+    expect(grandchildActive(company, page("Wallet"), "finances", "wallet")).toBe(true);
+    expect(grandchildActive(company, page("Overview"), "finances", "wallet")).toBe(false);
   });
 
   it("lights nothing outside its own view", () => {
-    expect(grandchildActive(finance, page("Overview"), "brain", null)).toBe(false);
+    expect(grandchildActive(company, page("Overview"), "brain", null)).toBe(false);
   });
 
   it("lights the first page for a segment none of them names", () => {
@@ -340,7 +381,131 @@ describe("grandchildActive", () => {
     // rail marking only the Finance ancestor and the chip row naming the parent
     // while Overview was on screen. The resolver decides what renders and this
     // decides what is marked; they have to be one rule.
-    expect(grandchildActive(finance, page("Overview"), "finances", "old-page")).toBe(true);
-    expect(grandchildActive(finance, page("Wallet"), "finances", "old-page")).toBe(false);
+    expect(grandchildActive(company, page("Overview"), "finances", "old-page")).toBe(true);
+    expect(grandchildActive(company, page("Wallet"), "finances", "old-page")).toBe(false);
+  });
+});
+
+/**
+ * The one genuinely new mechanic in issue #2259.
+ *
+ * Two rows resolve to `#/connections/apps` — Apps and Composio — so the rail
+ * cannot decide what is open from the segment alone any more. Held here as
+ * `grandchildActive` calls rather than only as rendered output, because the
+ * failure it guards is quiet: both rows lighting at once still renders a rail
+ * that looks right at a glance.
+ */
+describe("two rows on one page, told apart by the tab", () => {
+  const connections = NAV_SECTIONS.find((s) => s.view === "connections")!;
+  const row = (label: string) =>
+    connections.children!.flatMap((group) => group.children ?? []).find((c) => c.label === label)!;
+
+  const lit = (sub: string | null, tab: string | null) =>
+    connections
+      .children!.flatMap((group) => group.children ?? [])
+      .filter((child) => grandchildActive(connections, child, "connections", sub, tab))
+      .map((child) => child.label);
+
+  it("lights Apps alone on the page's default tab, written or not", () => {
+    // `#/connections/apps` and `#/connections/apps?tab=providers` are the same
+    // place — `useHashTab` clears the key for the default rather than writing
+    // it — so both have to light the same single row.
+    expect(lit("apps", null)).toEqual(["Apps"]);
+    expect(lit("apps", "providers")).toEqual(["Apps"]);
+  });
+
+  it("lights Composio alone on the credentials tab", () => {
+    expect(lit("apps", "credentials")).toEqual(["Composio"]);
+  });
+
+  it("lights Apps for a tab neither row names", () => {
+    // The tab dimension of the same rule the segment already has: `OAuthView`
+    // validates `?tab=` against its own list and falls back to Providers, so a
+    // hand-edited tab renders Apps and the rail has to say Apps.
+    expect(lit("apps", "not-a-tab")).toEqual(["Apps"]);
+  });
+
+  it("lights one row per address across the whole section, groups included", () => {
+    // The bug a per-group set would have: "integrations" names no `inference`
+    // row, so its first row would claim the fallback and light Apps beside LLM.
+    for (const [sub, label] of [
+      [null, "Apps"],
+      ["mcp", "MCP Servers"],
+      ["skills", "Skills"],
+      ["inference", "LLM"],
+      ["search", "Search"],
+      ["api-key", "Account"],
+      ["hosting", "Hosting"],
+      ["not-a-page", "Apps"],
+    ] as const) {
+      expect(lit(sub, null), String(sub)).toEqual([label]);
+    }
+  });
+
+  it("keeps Apps the row a bare `#/connections` lands on", () => {
+    // `DEFAULT_CONNECTION_PAGE` and the first rail row have to agree, or every
+    // existing bookmark to the section quietly lands somewhere else.
+    expect(row("Apps").sub).toBe(DEFAULT_CONNECTION_PAGE);
+    expect(connections.children![0].children![0].label).toBe("Apps");
+  });
+
+  it("marks exactly one of them current on screen, rail and chips alike", () => {
+    const current = () =>
+      [...container.querySelectorAll('nav [aria-current="page"]')].map((el) =>
+        (el.textContent ?? "").trim(),
+      );
+
+    renderAt("#/connections/apps", "connections", "apps");
+    expect(current()).toEqual(["Apps"]);
+
+    renderAt("#/connections/apps?tab=providers", "connections", "apps");
+    expect(current()).toEqual(["Apps"]);
+
+    renderAt("#/connections/apps?tab=credentials", "connections", "apps");
+    expect(current()).toEqual(["Composio"]);
+    // And below `lg`, where a filled chip is the only thing saying where you
+    // are: one chip, not two, exactly as `#/finances/wallet` gets one.
+    const chips = container.querySelector(".lg\\:hidden")!;
+    expect(
+      [...chips.querySelectorAll("button")]
+        .filter((b) => b.className.includes("bg-accent"))
+        .map((b) => b.textContent?.trim()),
+    ).toEqual(["Composio"]);
+  });
+
+  it("navigates to the tab the row names, and clears it for the row that does not", () => {
+    const press = (label: string) =>
+      act(() => {
+        [...container.querySelectorAll<HTMLButtonElement>("nav button")]
+          .find((el) => el.textContent?.trim() === label)!
+          .click();
+      });
+
+    const onNavigate = vi.fn();
+    renderAt("#/connections/apps", "connections", "apps", onNavigate);
+    press("Composio");
+    expect(onNavigate).toHaveBeenLastCalledWith("connections", "apps", { tab: "credentials" });
+
+    press("Apps");
+    expect(onNavigate).toHaveBeenLastCalledWith("connections", "apps", { tab: null });
+
+    // A row that says nothing about tabs navigates by route alone — the same
+    // two-argument call every row made before this change, so a `?run=` or a
+    // `?host=` riding the address is not collateral.
+    press("MCP Servers");
+    expect(onNavigate).toHaveBeenLastCalledWith("connections", "mcp");
+  });
+
+  it("clears the tab when Apps is pressed, and sets it when Composio is", () => {
+    // Not decoration: a route-only navigation preserves the query while the
+    // path is unchanged (`useHashView`'s `navigate`), so pressing Apps from
+    // `?tab=credentials` would land on the Credentials tab under the Apps row.
+    expect(row("Apps").tab).toBeNull();
+    expect(row("Composio").tab).toBe("credentials");
+    expect(row("Composio").sub).toBe("apps");
+    // Every other row says nothing about tabs, and so navigates as it always did.
+    for (const label of ["MCP Servers", "Skills", "LLM", "Search", "Account", "Hosting"]) {
+      expect(row(label).tab, label).toBeUndefined();
+    }
   });
 });

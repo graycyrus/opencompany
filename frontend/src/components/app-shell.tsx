@@ -546,10 +546,21 @@ export function AppShell({
   // Most call sites only ever change the top-level view. Preserve the remembered
   // sub-segment for the target view so tab switches do not discard deep tab state.
   const setView = useCallback(
-    (next: View, nextSub?: string) => {
+    (
+      next: View,
+      nextSub?: string,
+      /**
+       * Query state the destination owns, passed straight through to the
+       * router. Rail rows that address one of a page's tabs use it (issue
+       * #2259): two rows resolve to `#/connections/apps` and the `?tab=` is
+       * what tells them apart. Omitting it leaves the route's query alone,
+       * which is what every other call site here has always wanted.
+       */
+      query?: Readonly<Record<string, string | null>>,
+    ) => {
       if (nextSub !== undefined) {
         lastSubByViewRef.current[next] = nextSub;
-        navigate(next, nextSub);
+        navigate(next, nextSub, query);
         return;
       }
       const remembered = NAV_ALWAYS_PARENT.has(next)

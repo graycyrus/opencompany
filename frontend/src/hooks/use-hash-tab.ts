@@ -13,12 +13,42 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-function readTab<T extends string>(key: string, tabs: readonly T[], fallback: T): T {
+/** The raw value the address carries for `key`, whatever it says. */
+function readRawTab(key: string): string | null {
   const [, query = ""] = window.location.hash.split("?");
-  const raw = new URLSearchParams(query).get(key);
+  return new URLSearchParams(query).get(key);
+}
+
+function readTab<T extends string>(key: string, tabs: readonly T[], fallback: T): T {
+  const raw = readRawTab(key);
   // Validated against the page's own list rather than trusted: a hand-edited or
   // stale `?tab=` must land on a real tab, not render an empty page.
   return tabs.includes(raw as T) ? (raw as T) : fallback;
+}
+
+/**
+ * The tab the address names, unvalidated, for a reader that is not the page.
+ *
+ * The section rail needs it (issue #2259) and cannot have {@link useHashTab}:
+ * that hook owns the value — it validates against one page's list and writes it
+ * back — and the rail does neither. It lists rows for every page in a section
+ * and has only to know which of two rows on one page is the open one.
+ *
+ * Unvalidated on purpose, and harmless: a `?tab=` naming no real tab lights the
+ * row that owns every tab none of the rows name, which is exactly the row the
+ * page's own fallback renders. The rail and the page agree by construction
+ * rather than by both keeping a copy of the list.
+ */
+export function useHashTabValue(key = "tab"): string | null {
+  const [value, setValue] = useState(() => readRawTab(key));
+
+  useEffect(() => {
+    const onHashChange = () => setValue(readRawTab(key));
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [key]);
+
+  return value;
 }
 
 /**

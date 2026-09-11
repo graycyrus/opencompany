@@ -9,6 +9,9 @@ import { TOUR } from "@/tour/steps";
 import { SETTINGS_PAGES } from "@/views/settings-pages";
 import {
   CONNECTION_PAGES,
+  CONNECTION_RAIL_GROUPS,
+  CONNECTION_RAIL_ROWS,
+  connectionRailRow,
   connectionsHref,
   DEFAULT_CONNECTION_PAGE,
   isConnectionPage,
@@ -29,13 +32,15 @@ const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf
  * nav row that now leads there.
  */
 describe("the Connections section", () => {
-  it("carries exactly the pages that left the Settings rail, in rail order", () => {
+  it("carries exactly the pages that left the Settings rail", () => {
+    // The ROUTING table, and since issue #2259 only that: what an operator sees
+    // is `CONNECTION_RAIL_GROUPS` below, and this order no longer decides it.
+    // Held all the same, because these are addresses — a page dropped or an id
+    // renamed here is a bookmark that stops working.
     expect(CONNECTION_PAGES.map((page) => page.id)).toEqual([
       "apps",
       // Not one of the pages that left Settings — this one was written for the
-      // rail, and sits under Apps because it is the account Apps spends from.
-      // Second rather than first: the first row is what a bare `#/connections`
-      // opens, and moving that would change where every existing bookmark lands.
+      // rail, and it is the account every other page here spends through.
       "api-key",
       "mcp",
       "inference",
@@ -102,6 +107,62 @@ describe("the Connections section", () => {
     expect(read("views/OAuthView.tsx")).not.toContain('title="OAuth"');
   });
 
+  it("keeps the rail and the page agreeing about the two rows that were renamed", () => {
+    // Issue #2259 relabels two rows and neither renames an id. The same trap the
+    // Apps rename had: a rename that reaches the rail and not the page leaves an
+    // operator clicking "LLM" and landing on a page headed "Inference".
+    const label = (id: string) => CONNECTION_PAGES.find((p) => p.id === id)?.label;
+    expect(label("inference")).toBe("LLM");
+    expect(read("views/InferenceView.tsx")).toContain('title="LLM"');
+    expect(read("views/InferenceView.tsx")).not.toContain('title="Inference"');
+    expect(label("api-key")).toBe("Account");
+    expect(read("views/connections/ApiKeyView.tsx")).toContain('title="Account"');
+    expect(read("views/connections/ApiKeyView.tsx")).not.toContain('title="API Key"');
+    // And the addresses they are reached at are untouched, which is the half a
+    // relabel is most likely to take with it.
+    expect(connectionsHref("inference")).toBe("#/connections/inference");
+    expect(connectionsHref("api-key")).toBe("#/connections/api-key");
+  });
+
+  it("gives every page exactly one row on the grouped rail", () => {
+    // The failure grouping invites: a page filed under no group is a page an
+    // operator can still reach by address and can no longer find. The other
+    // direction matters too — a row naming no page would be a dead address, and
+    // `ConnectionRailRow.page` is typed `ConnectionPage` so it cannot be one.
+    for (const page of CONNECTION_PAGES) {
+      expect(
+        CONNECTION_RAIL_ROWS.filter((row) => row.page === page.id).length,
+        `${page.id} has a row`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+    // Eight rows over seven pages, and the extra one is the second view of Apps.
+    expect(CONNECTION_RAIL_ROWS).toHaveLength(CONNECTION_PAGES.length + 1);
+    const twice = CONNECTION_RAIL_ROWS.filter((row) => row.page === "apps");
+    expect(twice.map((row) => row.tab)).toEqual([null, "credentials"]);
+  });
+
+  it("opens a bare `#/connections` on the first row of the first group", () => {
+    // `DEFAULT_CONNECTION_PAGE` and the rail's head have to agree, or every
+    // existing bookmark to the section quietly lands somewhere else. The rail's
+    // order is now `CONNECTION_RAIL_GROUPS`', not `CONNECTION_PAGES`', so this
+    // is the pair that has to be held rather than the page table's first entry.
+    expect(CONNECTION_RAIL_GROUPS[0].label).toBe("Integrations");
+    expect(CONNECTION_RAIL_GROUPS[0].rows[0].page).toBe(DEFAULT_CONNECTION_PAGE);
+    expect(DEFAULT_CONNECTION_PAGE).toBe("apps");
+  });
+
+  it("resolves a rail row's label, icon and hint from its page unless it overrides them", () => {
+    const mcp = connectionRailRow({ page: "mcp" });
+    expect(mcp.label).toBe("MCP Servers");
+    expect(mcp.hint).toBe("Tool servers and their tools");
+    // Composio overrides all three: the row is one view of the Apps page, so
+    // wearing the page's own name and glyph would put "Apps" on the rail twice.
+    const composio = CONNECTION_RAIL_ROWS.find((row) => row.label === "Composio")!;
+    expect(composio.page).toBe("apps");
+    expect(composio.label).toBe("Composio");
+    expect(composio.hint).not.toBe(CONNECTION_PAGES[0].hint);
+  });
+
   it("draws no rail of its own, whichever surface the sub-navigation is on", () => {
     // This section shipped with a `w-60` rail of its own, modelled on Finance's,
     // and gave it up for rows in the sidebar. Sub-navigation is a content rail
@@ -117,14 +178,34 @@ describe("the Connections section", () => {
     // `toContain` over a nav table is satisfied by a commented-out row that
     // renders nothing (#1311).
     const connections = NAV_SECTIONS.find((s) => s.view === "connections")!;
-    expect(connections.children?.map((child) => [child.label, child.sub])).toEqual([
-      ["Apps", "apps"],
-      ["API Key", "api-key"],
-      ["MCP Servers", "mcp"],
-      ["Inference", "inference"],
-      ["Skills", "skills"],
-      ["Hosting", "hosting"],
-      ["Search", "search"],
+    expect(
+      connections.children?.map((group) => [
+        group.label,
+        group.children?.map((child) => [child.label, child.sub]),
+      ]),
+    ).toEqual([
+      [
+        "Integrations",
+        [
+          ["Apps", "apps"],
+          ["MCP Servers", "mcp"],
+          ["Skills", "skills"],
+        ],
+      ],
+      [
+        "API Keys",
+        [
+          ["LLM", "inference"],
+          // Two rows, one page. The second points at the Credentials tab
+          // `OAuthView` already had, which is what lets the rail say
+          // "Composio is a key" without splitting `ComposioSection` off the
+          // page whose provider tiles read its credential.
+          ["Composio", "apps"],
+          ["Search", "search"],
+          ["Account", "api-key"],
+        ],
+      ],
+      ["Others", [["Hosting", "hosting"]]],
     ]);
   });
 
