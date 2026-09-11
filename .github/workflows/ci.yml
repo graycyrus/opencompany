@@ -1097,7 +1097,7 @@ jobs:
       # Issue #1524 (PR 1). The nested-vendor path deps must stay
       # byte-identical to openhuman's own, or cargo resolves the same crate
       # from two directories and two `MemoryProvider` traits exist in one
-      # process (the hazard recorded at `Cargo.toml:249-252`). `-d` prints
+      # process (the hazard the `[patch]` comment in the root `Cargo.toml` records). `-d` prints
       # duplicate versions of a package; any `tinymemory` line in that report
       # is the failure.
       - name: Assert no duplicated tinymemory crates
