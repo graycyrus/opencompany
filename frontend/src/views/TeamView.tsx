@@ -29,6 +29,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { withHostParam } from "@/hooks/use-host-route";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
 import {
@@ -607,9 +608,24 @@ const IDLE: Workload = { open: 0, status: "idle" };
  *
  * The same call, for the same reason, backs the console search results
  * (`search/sources.ts`).
+ *
+ * ## Why it carries the host scope
+ *
+ * Through {@link withHostParam} rather than as a bare `#/chat/…` fragment,
+ * because this addresses an *anchor* — and an anchor is copied, middle-clicked
+ * and Cmd-clicked as well as clicked, which is half of why it is an anchor at
+ * all. A same-tab click survives a dropped scope, since `useHostAddress`
+ * re-asserts it on the `hashchange` that follows. A new document has no
+ * selection to repair from: `useHostRoute` falls back to the bootstrap or
+ * embedded host and resolves this agent's id against whichever console that is
+ * — an unknown DM, or a different company's agent wearing the same id.
+ * `TaskCard`'s `detailsHref` carries the scope for exactly this reason.
+ *
+ * A console holding one host writes no scope at all, so this is the same
+ * string it has always been there.
  */
 export function agentDmHref(member: TeamMember): string {
-  return `#/chat/${encodeURIComponent(dmChannelId(member))}`;
+  return withHostParam(`chat/${encodeURIComponent(dmChannelId(member))}`);
 }
 
 function MemberCard({
