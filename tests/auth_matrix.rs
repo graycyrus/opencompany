@@ -449,6 +449,7 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Get, "/composio", Scoped, Ordinary, ""),
     r!(Put, "/composio/token", Admin, Credential, ""),
     r!(Put, "/composio/api-key", Admin, Credential, ""),
+    r!(Post, "/composio/api-key/test", Admin, Credential, ""),
     r!(Post, "/composio/authorize", Admin, Credential, ""),
     r!(Get, "/composio/connections", Scoped, Ordinary, ""),
     r!(
