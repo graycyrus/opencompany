@@ -272,6 +272,33 @@ English prose.
 explicit: *"your account-wide allowed providers act as the ceiling, and the
 request's `only` list narrows within it."* It can narrow, never widen.
 
+### What `/models/user` does not filter — a stated limit, not an approximation
+
+**It does not encode the account's allowed-providers ceiling.** Observed on an
+account whose Settings → Privacy list permits only `novita, openai, baseten,
+deepseek, deepinfra`: the scoped read returned **51** models rather than the
+public catalogue's ~444, and 23 `anthropic/*` and 5 `google/*` were still among
+them. Every one of those 404s at turn time. So the endpoint narrows the list a
+long way, and it does not narrow it to what the key can reach.
+
+That is consistent with its own wording — *"filtered by user provider
+preferences, privacy settings, and guardrails"* — if "provider preferences" means
+something other than the allowed-providers list. The docs do not say which, and
+**no API surface exposes that list** (see above), so there is nothing to
+cross-reference it against.
+
+We do not close the remaining gap by inference. Diffing `/models` against
+`/models/user` and attributing the difference via
+`/models/{author}/{slug}/endpoints` would yield a plausible-looking attribution
+that is unwarranted: a model can be absent for privacy settings or guardrails
+rather than provider preferences, and the response gives nothing to tell the
+three apart. Hiding a model the operator can actually use is a worse failure than
+showing one they cannot, so the picker stops where the documented API stops.
+
+What remains, therefore, is a turn-time failure for a subset of the list — which
+is why the routing row's check reports whether the endpoint *publishes* a model
+and says plainly that it does not send a turn.
+
 ### Why it is one host's rule
 
 `scoped_catalog_path` keys on OpenRouter's own host, the same way the Azure
