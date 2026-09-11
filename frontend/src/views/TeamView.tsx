@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MoreHorizontal, Network, Plus, Sparkles, UserPlus, Users } from "lucide-react";
+import {
+  MessageSquare,
+  MoreHorizontal,
+  Network,
+  Plus,
+  Sparkles,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -14,6 +22,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -32,6 +41,7 @@ import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { dmChannelId } from "@/views/room/channels";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AddMemberDialog, type NewMemberFields } from "@/views/room/AddMemberDialog";
 
@@ -532,6 +542,10 @@ export function TeamView({
                   // id would 404 and the detail view would report a teammate that
                   // was never removed.
                   onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
+                  // Same host-backed gate as `onOpen`, for the same reason: a
+                  // starter-team card is a local placeholder, and its DM would
+                  // address a thread the host has no agent behind.
+                  messageHref={fromHost ? agentDmHref(m) : undefined}
                   // Looked up by roster id, so a card the board assigned to a
                   // *desk* is never attributed to the people on it.
                   //
@@ -579,11 +593,30 @@ export function TeamView({
  */
 const IDLE: Workload = { open: 0, status: "idle" };
 
+/**
+ * The address of this teammate's direct conversation (issue #2252).
+ *
+ * Built on {@link dmChannelId} and **not** `dmThreadId`. The two are only the
+ * same string for most of the roster: `dmChannelId` is always `dm:<id>`, the
+ * console-local channel id the hash router resolves, while `dmThreadId` is the
+ * bare id — the *host* thread a DM is addressed on — for everyone except a
+ * teammate whose id itself spells General, where the host folds the bare key
+ * onto the company-wide line. Routing on the thread id therefore sends an
+ * operator who clicked that teammate to the company's General channel instead
+ * of the DM they asked for (issue #1743).
+ *
+ * The same call, for the same reason, backs the console search results
+ * (`search/sources.ts`).
+ */
+export function agentDmHref(member: TeamMember): string {
+  return `#/chat/${encodeURIComponent(dmChannelId(member))}`;
+}
 
 function MemberCard({
   member,
   onRemove,
   onOpen,
+  messageHref,
   workload,
   onNavigateToDesk,
 }: {
@@ -591,6 +624,12 @@ function MemberCard({
   onRemove: () => void;
   /** Open this agent's detail page. Undefined when the card has no host record. */
   onOpen?: () => void;
+  /**
+   * Address of this agent's direct conversation ({@link agentDmHref}).
+   * Undefined when the card has no host record, which is when a DM would
+   * address a thread with no agent behind it — the menu item is then omitted.
+   */
+  messageHref?: string;
   /**
    * What this teammate is on and carrying, or undefined when the board could
    * not be read — in which case the card says nothing about either.
@@ -691,10 +730,9 @@ function MemberCard({
                   via `DailyBudgetLine` below; only the controls that write
                   moved.
 
-                  That leaves exactly one item. It stays a menu rather than a
-                  bare button: Remove is destructive, and a deliberate extra
-                  click before it is worth keeping beside the title action.
-                  Unlike "View agent" it does
+                  What is left passes that same test. Remove is destructive,
+                  and a deliberate extra click before it is worth keeping
+                  beside the title action. Unlike "View agent" it does
                   not duplicate the card's own action, and unlike Budget it is
                   not per-agent configuration that reads better on a
                   detail page — it is the one roster-level action an operator
@@ -702,7 +740,30 @@ function MemberCard({
                   prune, and moving it off the grid would trade a fast,
                   discoverable one-hop delete for an extra full-page
                   navigation with no offsetting benefit.
+
+                  Message (issue #2252) joins it on the same grounds, and is
+                  the reason this reads "what is left" rather than "exactly one
+                  item" as it did after #1206. It is navigation to a
+                  conversation, not configuration of an agent, so the rule that
+                  sent Budget and Inbox to the detail page does not reach it —
+                  and "ask this one something" is exactly the thought an
+                  operator has *while* scanning the roster. The members pane
+                  already ships this menu verbatim (`room/MembersPane.tsx`:
+                  Message, separator, then the destructive item); the board was
+                  the odd surface out.
+
+                  It is an anchor rather than an onClick so the address is a
+                  real link — copyable, middle-clickable — and so the board
+                  needs no chat-navigation prop threaded down from the shell.
                 */}
+                {messageHref && (
+                  <>
+                    <DropdownMenuItem render={<a href={messageHref} />}>
+                      <MessageSquare className="size-4" aria-hidden /> Message
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
                 <DropdownMenuItem variant="destructive" onClick={onRemove}>
                   Remove
                 </DropdownMenuItem>
