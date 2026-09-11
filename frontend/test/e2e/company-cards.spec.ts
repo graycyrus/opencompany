@@ -6,7 +6,7 @@ import { expect, test, type Page } from "@playwright/test";
  * # The failure this reproduces
  *
  * Everything here already existed and none of it was reachable. `#/team`
- * rendered the teammate card grid and `#/team/<agentId>` opened a full detail
+ * rendered the teammate card grid and `#/company/agent/<agentId>` opened a full detail
  * sub-page, but `team` was routable *without a nav entry* — so the only way to
  * either was to type a URL nobody knew. The one nav entry that leads here,
  * Company, opened the org chart: the desks, not the people.
@@ -464,7 +464,7 @@ test("#1141 a card opens an agent, breadcrumbed and editable", async ({ page }) 
   await card(page, "Maya").getByTestId("team-card-open").click();
 
   // Still a linkable page rather than a modal (issue #264).
-  await expect.poll(() => page.url()).toContain("#/team/maya");
+  await expect.poll(() => page.url()).toContain("#/company/agent/maya");
   await expect(page.getByTestId("agent-name")).toHaveText("Maya", { timeout: 30_000 });
 
   // The breadcrumb says where the operator *is* — this page is linked into
@@ -486,13 +486,14 @@ test("#1141 a card opens an agent, breadcrumbed and editable", async ({ page }) 
   await expect(desk).toContainText("(lead)");
   await expect(desk).toHaveAttribute("href", "#/company/research");
   await expect(page.getByTestId("agent-open-task-t1")).toHaveText("Scan competitor pricing");
-  await expect(page.getByTestId("agent-open-task-t1")).toHaveAttribute("href", "#/tasks/t1");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveAttribute("href", "#/company/tasks/t1");
   await expect(page.getByTestId("agent-open-task-t2")).toHaveText("Draft the weekly brief");
-  await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/tasks/t2");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/company/tasks/t2");
   await expect(page.getByTestId("agent-open-task-t3")).toHaveCount(0);
 
-  // Edit is on the header row, not buried in a card halfway down, and this
-  // teammate is an overlay so it is live.
+  // Edit lives on the Instructions tab, not the Overview tab this arrival
+  // opens on; this teammate is an overlay so it is live once there.
+  await page.getByRole("tab", { name: "Instructions" }).click();
   const edit = page.getByTestId("agent-edit");
   await expect(edit).toBeEnabled();
   await edit.click();
@@ -527,14 +528,14 @@ test("#1433 switching agents drops the previous one's open tasks", async ({ page
     });
   });
 
-  await page.goto("/#/team/maya");
+  await page.goto("/#/company/agent/maya");
   await expect(page.getByTestId("agent-open-task-t1")).toBeVisible({ timeout: 30_000 });
 
   // Same-document navigation, which is what the operator's click does and what
   // keeps the view mounted. A full `goto` would remount it and prove nothing.
   stall = true;
   await page.evaluate(() => {
-    window.location.hash = "#/team/ravi";
+    window.location.hash = "#/company/agent/ravi";
   });
 
   // Ravi's page is ready…

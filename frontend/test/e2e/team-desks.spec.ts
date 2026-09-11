@@ -186,7 +186,7 @@ test("#1391 the agent action is a focused title button, not an interactive card"
   await open.focus();
   await expect(open).toBeFocused();
   await open.press("Enter");
-  await expect(page).toHaveURL(/#\/team\/maya$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/maya$/);
 });
 
 test("#1810 the agent card opens without swallowing its actions menu", async ({ page }) => {
@@ -201,7 +201,7 @@ test("#1810 the agent card opens without swallowing its actions menu", async ({ 
   const description = await maya.getByTestId("team-card-description").boundingBox();
   if (!description) throw new Error("Maya's description has no clickable bounds");
   await page.mouse.click(description.x + 4, description.y + 4);
-  await expect(page).toHaveURL(/#\/team\/maya$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/maya$/);
 
   await page.goto("/#/company");
   await expect(maya).toBeVisible({ timeout: 30_000 });

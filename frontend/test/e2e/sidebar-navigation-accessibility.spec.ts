@@ -41,60 +41,46 @@ test("the skip link reaches main content and the sidebar is the primary navigati
 
   const navigation = page.getByRole("navigation", { name: "Main navigation", exact: true });
   await expect(navigation).toBeVisible();
-  // Four sections, and the four are the whole list. Asserted by count as well
-  // as by name: a tenth row creeping back in is the thing this restructure
-  // exists to stop, and four `toBeVisible` calls would not notice it.
-  for (const name of ["Room", "Company", "Connections", "Flows"]) {
+  // Five sections, and the five are the whole list. Asserted by count as well
+  // as by name: a sixth row creeping back in is the thing this restructure
+  // exists to stop, and five `toBeVisible` calls would not notice it.
+  for (const name of ["Room", "Company", "Connections", "Automations", "Approvals"]) {
     await expect(navigation.getByRole("button", { name, exact: true })).toBeVisible();
   }
-  // Scoped to the FIRST group — the fixed four. The group after it holds the
+  // Scoped to the FIRST group — the fixed five. The group after it holds the
   // active section's contents, which is a different question and a different
-  // count. Asserted by count as well as by name: a tenth row creeping back in
-  // is the thing this restructure exists to stop, and four `toBeVisible` calls
+  // count. Asserted by count as well as by name: a sixth row creeping back in
+  // is the thing this restructure exists to stop, and five `toBeVisible` calls
   // would not notice it.
   await expect(
     page.locator("[data-slot=sidebar-content] [data-sidebar=group]").first()
       .locator("[data-sidebar=menu-button]"),
-  ).toHaveCount(4);
-  // Overview and Approvals are not among them: they are chrome in the window's
-  // title row now, not destinations in a list of destinations.
-  for (const name of ["Overview", "Approvals", "Observatory"]) {
+  ).toHaveCount(5);
+  // Overview is not among them: it is chrome in the window's title row now,
+  // not a destination in a list of destinations. Observatory never had a row
+  // here — it is filed under Settings (`settings-pages.ts`). Approvals is
+  // still a section row: unlike Overview it was never moved into the title
+  // row's chrome, so it stays asserted present above rather than absent here.
+  for (const name of ["Overview", "Observatory"]) {
     await expect(navigation.getByRole("button", { name, exact: true })).toHaveCount(0);
   }
 
-  // Settings, Feedback and Discord are utilities: things you do to the console
-  // rather than the places an operator works out of. They keep a named group of
-  // their own, and it is now in the sidebar's FOOTER — the header the bar used
-  // to sit in is gone, along with the host switcher that shared it, both moved
-  // into the window's title row.
-  //
-  // THREE, not four. The collapse control left this group entirely and now sits
-  // on the content card's leading seam, outside the sidebar; it is pinned there
-  // by `sidebar-toggle-reachable.spec.ts`, and asserted below only to the extent
-  // that it is no longer here.
-  const utilities = page.getByRole("group", { name: "Console utilities", exact: true });
-  await expect(utilities).toBeVisible();
-  for (const name of ["Settings", "Feedback", "Join our Discord"]) {
-    await expect(
-      utilities.getByRole(name === "Join our Discord" ? "link" : "button", { name, exact: true }),
-    ).toBeVisible();
-  }
-  await expect(
-    utilities.getByRole("button", { name: /sidebar$/ }),
-    "the collapse control is not one of the console's utilities any more",
-  ).toHaveCount(0);
+  // Settings and Discord are glyphs in the window's title row now
+  // (`title-bar-utilities.tsx`), not a labelled footer group in the sidebar —
+  // the sidebar footer this used to check is gone entirely ("No footer." per
+  // `app-shell.tsx`). Feedback went further: it left the title row too and is
+  // a plain row on the Settings rail (`#/settings/feedback`), so it is
+  // asserted absent from both chrome positions rather than present in either.
+  await expect(page.getByTestId("title-bar-settings")).toBeVisible();
+  await expect(page.getByTestId("title-bar-discord")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Feedback", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Feedback", exact: true })).toHaveCount(0);
 
-  // And they are not interleaved with the destinations. The three now carry
-  // visible labels and `aria-current`, so they belong INSIDE the navigation
-  // landmark in a way the old icon-only bar did not — what still has to hold is
-  // that they are a separate, separately named group under the list of places
-  // you go, rather than three more rows in it. `sidebar-content` is that list;
-  // `sidebar-footer` is the group.
+  // Not interleaved with the destinations: `sidebar-content` is the list of
+  // places inside this company, and none of the console's own chrome belongs
+  // in it.
   const destinations = page.locator("[data-slot=sidebar-content]");
   await expect(destinations.getByRole("button", { name: "Room", exact: true })).toBeVisible();
   await expect(destinations.getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
-  await expect(destinations.getByRole("button", { name: "Feedback", exact: true })).toHaveCount(0);
-  await expect(
-    page.locator("[data-slot=sidebar-footer]").getByTestId("sidebar-utilities"),
-  ).toHaveCount(1);
+  await expect(page.locator("[data-slot=sidebar-footer]")).toHaveCount(0);
 });

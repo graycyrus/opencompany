@@ -150,8 +150,8 @@ test("a member sees what Settings holds but is offered nothing that changes it",
     await expect(provider).toBeVisible();
     await expect(provider).toBeDisabled();
 
-    // ---- General: approvals --------------------------------------------------
-    await openSettingsPage(memberPage, "general");
+    // ---- Approvals: the policy-generated tier and always-ask list -----------
+    await openSettingsPage(memberPage, "approvals");
     await expect(memberPage.getByTestId("policy-read-only")).toBeVisible({ timeout: 30_000 });
     // The tiers stay readable — which one is in force decides what this
     // member's teammates may do without asking — but none of them is a choice.
@@ -190,7 +190,7 @@ test("an admin is still offered every Settings control", async ({ page }) => {
   await expect(page.getByTestId("search-provider")).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByTestId("search-save")).toBeVisible();
 
-  await openSettingsPage(page, "general");
+  await openSettingsPage(page, "approvals");
   await expect(page.getByTestId("policy-read-only")).toHaveCount(0);
   await expect(page.getByTestId("policy-tier-full")).toBeEnabled({ timeout: 30_000 });
   // Domain and SMTP assertions retired with the surface — see the matching
