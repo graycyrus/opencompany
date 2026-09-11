@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Monogram } from "./AddProviderDialog";
 import { cn } from "@/lib/utils";
 import { categoryOf, endpointHost } from "./catalogue";
+import { providerMenu } from "./connect";
 import { healthLabel, testOutcome } from "./classify";
 import type { TestState } from "./classify";
 import type { ManagedState } from "@/api/inference";
@@ -146,6 +147,8 @@ export function ProviderList({
   onEdit,
   onTest,
   onRemove,
+  onRemoveKey,
+  onReplaceKey,
   onMakeDefault,
   onAdd,
   onManagedToggle,
@@ -164,6 +167,8 @@ export function ProviderList({
   onEdit: (provider: Provider) => void;
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
+  onRemoveKey: (provider: Provider) => void;
+  onReplaceKey: (provider: Provider) => void;
   onMakeDefault: (provider: Provider) => void;
   /**
    * The same action the header card's button performs, passed in rather than
@@ -294,6 +299,8 @@ export function ProviderList({
           onEdit={onEdit}
           onTest={onTest}
           onRemove={onRemove}
+          onRemoveKey={onRemoveKey}
+          onReplaceKey={onReplaceKey}
           onMakeDefault={onMakeDefault}
           testState={testState}
         />
@@ -327,6 +334,8 @@ function ProviderRow({
   onEdit,
   onTest,
   onRemove,
+  onRemoveKey,
+  onReplaceKey,
   onMakeDefault,
   testState,
 }: {
@@ -337,6 +346,8 @@ function ProviderRow({
   onEdit: (provider: Provider) => void;
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
+  onRemoveKey: (provider: Provider) => void;
+  onReplaceKey: (provider: Provider) => void;
   onMakeDefault: (provider: Provider) => void;
   testState: (slug: string) => TestState;
 }) {
@@ -391,19 +402,33 @@ function ProviderRow({
             </Button>
           }
         />
+        {/* Which items, decided in `providerMenu` — per kind, and derived from
+            the same `credentialAsk` the connect dialog uses, so a local runtime
+            or a CLI login is never offered a key it does not have. */}
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={() => onEdit(provider)}>Edit</DropdownMenuItem>
-          {/* Offered only where it would change something: a provider that is
-              already the default, or one that is switched off and so cannot be
-              a routing target at all. */}
-          {!provider.isDefault && provider.enabled && (
-            <DropdownMenuItem onClick={() => onMakeDefault(provider)}>
-              Make default
+          {providerMenu(provider).map((action) => (
+            <DropdownMenuItem
+              key={action.id}
+              variant={action.destructive ? "destructive" : undefined}
+              data-testid={`inference-provider-${provider.slug}-${action.id}`}
+              onClick={() => {
+                switch (action.id) {
+                  case "edit":
+                    return onEdit(provider);
+                  case "default":
+                    return onMakeDefault(provider);
+                  case "replaceKey":
+                    return onReplaceKey(provider);
+                  case "removeKey":
+                    return onRemoveKey(provider);
+                  case "remove":
+                    return onRemove(provider);
+                }
+              }}
+            >
+              {action.label}
             </DropdownMenuItem>
-          )}
-          <DropdownMenuItem variant="destructive" onClick={() => onRemove(provider)}>
-            Remove
-          </DropdownMenuItem>
+          ))}
         </DropdownMenuContent>
       </DropdownMenu>
     </li>

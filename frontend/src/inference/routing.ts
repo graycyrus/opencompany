@@ -344,6 +344,131 @@ export function routingTargets(providers: readonly Provider[]): Provider[] {
   return providers.filter((p) => p.enabled);
 }
 
+/**
+ * The model id to carry when the provider changes.
+ *
+ * **A model id belongs to the provider it was chosen from.** Keeping
+ * `claude-haiku-4-5-20251001` when the select moves from Anthropic to OpenRouter
+ * leaves a value that is meaningless at the new endpoint — and worse, one the
+ * field then quietly presents as free text, because it is not in the new
+ * catalogue. That is the "wrong model at the wrong provider" failure the routing
+ * fix exists to prevent, arriving through the form instead of the resolver.
+ *
+ * Blank is not a broken state here: it means *send the tier and let the endpoint
+ * resolve it*, which is a working route at every provider. So clearing costs the
+ * operator one choice and never costs them a turn.
+ *
+ * This is **not** the rule the nine proxy regressions are about. Those are about
+ * discarding a value **mid-keystroke**, while it is still being typed. Changing
+ * the provider is a settled act with an explicit target.
+ */
+export function modelAfterProviderChange(model: string, from: string, to: string): string {
+  return from === to ? model : "";
+}
+
+/** What removing a provider — or just its key — would cost. */
+export interface RemovalImpact {
+  /** Workloads whose route would be reset to the primary. */
+  routed: Workload[];
+  /** Whether unrouted work goes through it today. */
+  isDefault: boolean;
+  /** Whether it is the last provider this company has switched on. */
+  lastEnabled: boolean;
+  /**
+   * The provider the default marker would move to, when removing this one moves
+   * it. `null` when it is not the default, or when nothing is left to hold it.
+   */
+  defaultMovesTo: string | null;
+}
+
+/**
+ * What a removal would cost, as facts rather than prose.
+ *
+ * Read through {@link scrubOnRemove} rather than by matching slugs here, so the
+ * confirmation names exactly the workloads the write will actually reset — all
+ * three of its matching rules included, which is what makes it right for a local
+ * runtime and a CLI login as well as a cloud row.
+ */
+export function removalImpact(
+  provider: Pick<Provider, "slug" | "kind" | "enabled"> & { isDefault?: boolean },
+  providers: readonly Provider[],
+  routing: RoutingMap,
+  categoryOf: (kind: string) => "cloud" | "local" | "cli",
+): RemovalImpact {
+  const remaining = providers.filter((p) => p.slug !== provider.slug);
+  const { reset } = scrubOnRemove(routing, provider, remaining, categoryOf);
+  const isDefault = Boolean(provider.isDefault);
+  return {
+    routed: reset,
+    isDefault,
+    lastEnabled: provider.enabled && !remaining.some((p) => p.enabled),
+    // Read through the same `primaryProvider` the rows render, so the sentence
+    // names the provider that will actually hold it rather than a guess at list
+    // order.
+    defaultMovesTo: isDefault ? (primaryProvider(remaining)?.label ?? null) : null,
+  };
+}
+
+/**
+ * The sentences a removal confirmation says, in the order they matter.
+ *
+ * A confirmation that only asks "are you sure?" is a speed bump, not a safeguard:
+ * it tells the operator nothing they did not already know and trains them to
+ * click through. These name what is actually about to change, and there is one
+ * per fact rather than a paragraph, so an operator can see at a glance whether
+ * any of them is the one they care about.
+ *
+ * **Removing a key is not removing a provider**, and the first sentence says so
+ * either way. The two are one menu apart and one is recoverable by retyping a
+ * credential while the other deletes a record, its endpoint and its routes.
+ */
+export function removalWarnings(
+  intent: "key" | "provider",
+  label: string,
+  impact: RemovalImpact,
+): string[] {
+  const lines: string[] =
+    intent === "key"
+      ? [
+          `${label} stays on this page, keeping its endpoint and every route that names it. It just has no credential, so it cannot answer until you add one.`,
+        ]
+      : [
+          `This deletes ${label} and clears its stored key in the same operation. Adding it again means entering the credential again.`,
+        ];
+  if (impact.isDefault) {
+    if (intent === "key") {
+      lines.push(
+        `It is this company's default, so every unrouted workload goes through it — and would start failing.`,
+      );
+    } else {
+      // **Named, not implied.** An operator removed their default provider, the
+      // marker relocated in silence, and re-adding the credential did not bring
+      // it back — so a setting they had chosen was reassigned by a delete and
+      // stayed reassigned. A removal that moves the default has to say where to
+      // and that it is one-way.
+      lines.push(
+        impact.defaultMovesTo
+          ? `It is this company's default. Removing it moves the default to ${impact.defaultMovesTo}, and adding this provider again will not move it back.`
+          : `It is this company's default, and nothing is left to take that over — unrouted work falls back to Managed.`,
+      );
+    }
+  }
+  if (impact.routed.length > 0) {
+    const named = impact.routed.map((w) => WORKLOAD_COPY[w].label).join(", ");
+    lines.push(
+      intent === "key"
+        ? `${impact.routed.length === 1 ? "One workload routes" : `${impact.routed.length} workloads route`} to it (${named}), and the route stays pointed here.`
+        : `${impact.routed.length === 1 ? "One workload routes" : `${impact.routed.length} workloads route`} to it (${named}). Those rows reset to the primary.`,
+    );
+  }
+  if (impact.lastEnabled && intent === "provider") {
+    lines.push(
+      `It is the only provider switched on, so removing it leaves Managed as the only thing that can answer.`,
+    );
+  }
+  return lines;
+}
+
 /** The managed brain's name wherever a row or a list has to say it. */
 export const MANAGED_TARGET_LABEL = "Managed";
 

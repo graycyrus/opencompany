@@ -15,6 +15,7 @@ import {
   customProviderReady,
   isConnected,
   normalizeEndpoint,
+  providerMenu,
   slugErrorCopy,
   slugify,
 } from "@/inference/connect";
@@ -170,5 +171,61 @@ describe("the message a refusal shows the operator", () => {
     expect(stripEnvelopePrefix("Could not reach Groq: the provider rejected it.")).toBe(
       "Could not reach Groq: the provider rejected it.",
     );
+  });
+});
+
+describe("providerMenu", () => {
+  const row = (over: Partial<Parameters<typeof providerMenu>[0]> = {}) => ({
+    kind: "openrouter",
+    enabled: true,
+    keyConfigured: true,
+    ...over,
+  });
+  const ids = (over = {}) => providerMenu(row(over)).map((a) => a.id);
+
+  it("offers key actions on a provider that has a key to act on", () => {
+    expect(ids()).toEqual(["edit", "default", "replaceKey", "removeKey", "remove"]);
+  });
+
+  it("never offers key actions to a local runtime or a CLI login", () => {
+    // Derived from `credentialAsk`, not from a list of kinds here — Ollama is
+    // asked for an endpoint and Claude Code holds its credential in another
+    // tool, so neither has a key this page could replace or remove.
+    expect(ids({ kind: "ollama", keyConfigured: false })).not.toContain("replaceKey");
+    expect(ids({ kind: "ollama", keyConfigured: false })).not.toContain("removeKey");
+    expect(ids({ kind: "claude-code", keyConfigured: false })).not.toContain("replaceKey");
+    expect(ids({ kind: "claude-code", keyConfigured: false })).not.toContain("removeKey");
+  });
+
+  it("asks a local runtime to edit its endpoint rather than its key", () => {
+    expect(providerMenu(row({ kind: "ollama" }))[0].label).toBe("Edit endpoint");
+    expect(providerMenu(row())[0].label).toBe("Edit");
+  });
+
+  it("does not offer to remove a key that is not there", () => {
+    // The store has no delete, so removing a key is a write of the empty
+    // string — offering it against nothing is a destructive-looking no-op.
+    expect(ids({ keyConfigured: false })).toContain("replaceKey");
+    expect(ids({ keyConfigured: false })).not.toContain("removeKey");
+    expect(providerMenu(row({ keyConfigured: false }))[2].label).toBe("Add a key");
+  });
+
+  it("omits Set as default where it would change nothing", () => {
+    expect(ids({ isDefault: true })).not.toContain("default");
+    // Switched off, so it cannot be a routing target at all.
+    expect(ids({ enabled: false })).not.toContain("default");
+  });
+
+  it("marks exactly the two removals as destructive", () => {
+    const destructive = providerMenu(row())
+      .filter((a) => a.destructive)
+      .map((a) => a.id);
+    expect(destructive).toEqual(["removeKey", "remove"]);
+  });
+
+  it("names the two removals differently, because they are different", () => {
+    const labels = Object.fromEntries(providerMenu(row()).map((a) => [a.id, a.label]));
+    expect(labels.removeKey).toBe("Remove key");
+    expect(labels.remove).toBe("Remove provider");
   });
 });

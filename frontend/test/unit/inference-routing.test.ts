@@ -16,7 +16,10 @@ import {
   orphanedRoutes,
   ownModeDraft,
   parseRef,
+  modelAfterProviderChange,
   refForTarget,
+  removalImpact,
+  removalWarnings,
   routingOptions,
   targetForRef,
   targetLabel,
@@ -25,6 +28,7 @@ import {
   rowValue,
   scrubOnRemove,
 } from "@/inference/routing";
+import type { RemovalImpact } from "@/inference/routing";
 import type { Provider, RoutingMap } from "@/inference/types";
 
 /**
@@ -374,5 +378,132 @@ describe("the per-workload select", () => {
     expect(targetLabel(UNSET_TARGET, connected)).toBe("Primary (openrouter)");
     expect(targetLabel("tinyhumans", connected)).toBe(MANAGED_TARGET_LABEL);
     expect(targetLabel("anthropic", connected)).toBe("anthropic");
+  });
+});
+
+describe("what a removal costs", () => {
+  const openrouter = { ...provider("openrouter", "openrouter"), isDefault: true };
+  const anthropic = provider("anthropic", "anthropic");
+  const providers = [openrouter, anthropic];
+
+  it("names the workloads whose routes would reset", () => {
+    const routing = {
+      ...applyToEveryWorkload("anthropic", "claude-sonnet-5"),
+      chat: parseRef("openrouter:gpt-5"),
+    } as RoutingMap;
+    const impact = removalImpact(anthropic, providers, routing, categoryOf);
+    expect(impact.routed).toEqual(["reasoning", "agentic", "vision"]);
+    expect(impact.isDefault).toBe(false);
+    expect(impact.lastEnabled).toBe(false);
+  });
+
+  it("notices the default and the last provider switched on", () => {
+    const impact = removalImpact(openrouter, [openrouter], {} as RoutingMap, categoryOf);
+    expect(impact.isDefault).toBe(true);
+    expect(impact.lastEnabled).toBe(true);
+  });
+
+  it("says removing a key is not removing a provider, either way round", () => {
+    const impact: RemovalImpact = {
+      routed: [],
+      isDefault: false,
+      lastEnabled: false,
+      defaultMovesTo: null,
+    };
+    const key = removalWarnings("key", "Anthropic", impact)[0];
+    const provider_ = removalWarnings("provider", "Anthropic", impact)[0];
+    expect(key).toContain("stays on this page");
+    expect(provider_).toContain("deletes Anthropic");
+    expect(key).not.toEqual(provider_);
+  });
+
+  it("warns about the default on the action that moves it", () => {
+    // The operator who removed their default provider was not told the default
+    // had relocated. Silence there is a company's unrouted spend moving accounts.
+    const lines = removalWarnings("provider", "Anthropic", {
+      routed: [],
+      isDefault: true,
+      lastEnabled: false,
+      defaultMovesTo: "OpenRouter",
+    });
+    expect(lines.some((l) => l.includes("default"))).toBe(true);
+  });
+
+  it("counts the routed workloads in words an operator can act on", () => {
+    const one = removalWarnings("provider", "Anthropic", {
+      routed: ["chat"],
+      isDefault: false,
+      lastEnabled: false,
+      defaultMovesTo: null,
+    });
+    expect(one.some((l) => l.includes("One workload routes") && l.includes("Chat"))).toBe(true);
+    const many = removalWarnings("provider", "Anthropic", {
+      routed: ["chat", "vision"],
+      isDefault: false,
+      lastEnabled: false,
+      defaultMovesTo: null,
+    });
+    expect(many.some((l) => l.includes("2 workloads route"))).toBe(true);
+  });
+
+  it("only mentions the last-provider case where it is true and relevant", () => {
+    const impact: RemovalImpact = {
+      routed: [],
+      isDefault: false,
+      lastEnabled: true,
+      defaultMovesTo: null,
+    };
+    expect(removalWarnings("provider", "Anthropic", impact).some((l) => l.includes("only provider"))).toBe(true);
+    // Clearing a credential does not remove the row, so it is still the only
+    // provider switched on afterwards.
+    expect(removalWarnings("key", "Anthropic", impact).some((l) => l.includes("only provider"))).toBe(false);
+  });
+});
+
+describe("modelAfterProviderChange", () => {
+  it("drops a model id when the provider changes", () => {
+    // `claude-haiku-4-5-20251001` is meaningless at OpenRouter, and the field
+    // was silently dropping into free-text mode rather than saying so — the
+    // "wrong model at the wrong provider" failure, arriving through the form.
+    expect(modelAfterProviderChange("claude-haiku-4-5-20251001", "anthropic", "openrouter")).toBe(
+      "",
+    );
+  });
+
+  it("keeps it when the provider has not changed", () => {
+    // Not the mid-keystroke rule: re-selecting the same provider is not an edit.
+    expect(modelAfterProviderChange("gpt-5", "openrouter", "openrouter")).toBe("gpt-5");
+  });
+
+  it("leaves blank blank, which is a working route everywhere", () => {
+    expect(modelAfterProviderChange("", "anthropic", "openrouter")).toBe("");
+  });
+});
+
+describe("where the default goes when a provider is removed", () => {
+  it("names the provider that will actually hold it", () => {
+    const anthropic = { ...provider("anthropic", "anthropic"), isDefault: true };
+    const openrouter = provider("openrouter", "openrouter");
+    const impact = removalImpact(
+      anthropic,
+      [anthropic, openrouter],
+      {} as RoutingMap,
+      categoryOf,
+    );
+    expect(impact.defaultMovesTo).toBe("openrouter");
+    const lines = removalWarnings("provider", "Anthropic", impact);
+    expect(lines.some((l) => l.includes("moves the default to openrouter"))).toBe(true);
+    // One-way, and said so: re-adding the credential did not bring the marker
+    // back, and nothing on screen admitted that.
+    expect(lines.some((l) => l.includes("will not move it back"))).toBe(true);
+  });
+
+  it("says so plainly when nothing is left to take it over", () => {
+    const only = { ...provider("anthropic", "anthropic"), isDefault: true };
+    const impact = removalImpact(only, [only], {} as RoutingMap, categoryOf);
+    expect(impact.defaultMovesTo).toBeNull();
+    expect(
+      removalWarnings("provider", "Anthropic", impact).some((l) => l.includes("Managed")),
+    ).toBe(true);
   });
 });

@@ -57,6 +57,55 @@ export function isConnected(providers: readonly Provider[], optionSlug: string):
   return providers.some((p) => p.slug === stored);
 }
 
+/** One entry in a connected provider's ⋯ menu. */
+export interface ProviderRowAction {
+  id: "edit" | "default" | "replaceKey" | "removeKey" | "remove";
+  label: string;
+  /** Rendered in the destructive style, and confirmed before it runs. */
+  destructive?: boolean;
+}
+
+/**
+ * What a connected provider's ⋯ menu offers.
+ *
+ * **Per kind, and derived rather than listed.** The key actions key on
+ * {@link credentialAsk}`.needsKey`, which is the same function the connect
+ * dialog uses to decide whether to show a key field — so a local runtime that
+ * asks for an endpoint and a CLI login whose credential lives in another tool
+ * cannot be offered "Replace key" for something they do not have. A hand-written
+ * list of kinds here would be a second opinion about that, and the two would
+ * drift the first time a row is added to the catalogue.
+ *
+ * Two entries are conditional for the same reason: an action that would change
+ * nothing does not belong in a menu. "Set as default" is absent on the provider
+ * that already is one, and on one switched off (which cannot be a routing target
+ * at all). "Remove key" is absent where there is no key to remove — the store
+ * has no delete, so removing one is a write of the empty string, and offering it
+ * against nothing would be a destructive-looking no-op.
+ */
+export function providerMenu(
+  provider: Pick<Provider, "kind" | "enabled" | "keyConfigured"> & { isDefault?: boolean },
+): ProviderRowAction[] {
+  const ask = credentialAsk(provider.kind);
+  const actions: ProviderRowAction[] = [
+    { id: "edit", label: ask.needsEndpoint ? "Edit endpoint" : "Edit" },
+  ];
+  if (!provider.isDefault && provider.enabled) {
+    actions.push({ id: "default", label: "Set as default" });
+  }
+  if (ask.needsKey) {
+    actions.push({
+      id: "replaceKey",
+      label: provider.keyConfigured ? "Replace key" : "Add a key",
+    });
+    if (provider.keyConfigured) {
+      actions.push({ id: "removeKey", label: "Remove key", destructive: true });
+    }
+  }
+  actions.push({ id: "remove", label: "Remove provider", destructive: true });
+  return actions;
+}
+
 /** The slug the managed tier is offered and keyed under. */
 export const MANAGED_OPTION_SLUG = "tinyhumans";
 

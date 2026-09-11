@@ -14,8 +14,12 @@ import { AddProviderDialog } from "./AddProviderDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft } from "./ProviderConnectDialog";
 import { MANAGED_SLUG, ProviderList } from "./ProviderList";
+import { RemoveProviderDialog } from "./RemoveProviderDialog";
+import type { RemovalIntent } from "./RemoveProviderDialog";
+import { categoryOf } from "./catalogue";
 import { MANAGED_OPTION_SLUG } from "./connect";
-import { managedFallbackNote } from "./routing";
+import { WORKLOADS, WORKLOAD_TIER, managedFallbackNote, parseRef, removalImpact } from "./routing";
+import type { RoutingMap } from "./types";
 import type { InferenceActions, InferenceState } from "./use-inference";
 import type { Provider } from "./types";
 
@@ -59,6 +63,17 @@ export function ProvidersTab({
   /** The provider the connect dialog is editing, if it is editing one. */
   const [editing, setEditing] = useState<Provider | null>(null);
   const [adding, setAdding] = useState(false);
+  /**
+   * The removal awaiting confirmation, if any.
+   *
+   * Both removals go through one piece of state because they are one decision
+   * with two answers, and holding them apart would be two ways to have a
+   * confirmation open at once.
+   */
+  const [confirming, setConfirming] = useState<{
+    intent: RemovalIntent;
+    provider: Provider;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /**
@@ -86,6 +101,17 @@ export function ProvidersTab({
     },
     [],
   );
+
+  /**
+   * The routes as refs, so a removal can say which workloads it would reset.
+   *
+   * Read from the same `state.routes` the Routing tab renders, rather than from
+   * a second fetch: the confirmation has to name what the write will actually
+   * scrub, and two reads are two chances to disagree about it.
+   */
+  const routingMap: RoutingMap = Object.fromEntries(
+    WORKLOADS.map((w) => [w, parseRef(state.routes[WORKLOAD_TIER[w]] ?? "")]),
+  ) as RoutingMap;
 
   /** Runs a test for one row and lands its answer on that row. */
   const runTest = (slug: string, run: () => Promise<ProbeResult>) => {
@@ -225,7 +251,17 @@ export function ProvidersTab({
               setConnecting(p.kind);
             }}
             onTest={(p) => runTest(p.slug, () => actions.test(p.slug))}
-            onRemove={(p) => void actions.remove(p.slug)}
+            // Both removals are confirmed rather than performed, because one
+            // deletes a record and its routes and the other only clears a
+            // credential — and they sit one menu item apart.
+            onRemove={(p) => setConfirming({ intent: "provider", provider: p })}
+            onRemoveKey={(p) => setConfirming({ intent: "key", provider: p })}
+            // The same dialog the add flow opens, in edit mode: adding a key and
+            // replacing one are one code path.
+            onReplaceKey={(p) => {
+              setEditing(p);
+              setConnecting(p.kind);
+            }}
             onMakeDefault={(p) => void actions.makeDefault(p.slug)}
             // The same handler the header's button uses, passed down rather
             // than reimplemented: one way to add a provider, not two.
@@ -289,6 +325,40 @@ export function ProvidersTab({
         offerAddAnyway={probeFailure !== null}
         onCancel={closeConnect}
         onSubmit={(draft) => void submitConnect(draft)}
+      />
+      <RemoveProviderDialog
+        intent={confirming?.intent ?? null}
+        label={confirming?.provider.label ?? ""}
+        impact={
+          confirming
+            ? removalImpact(confirming.provider, state.providers, routingMap, categoryOf)
+            : { routed: [], isDefault: false, lastEnabled: false, defaultMovesTo: null }
+        }
+        busy={busy}
+        // Offered only where it is genuinely the softer answer: switching a
+        // provider off keeps its endpoint, its credential and its routes, which
+        // is what somebody removing one usually wants. It is not an alternative
+        // to clearing a credential, and it is not one for a provider that is
+        // already off.
+        onDisable={
+          confirming?.intent === "provider" && confirming.provider.enabled
+            ? () => {
+                const provider = confirming.provider;
+                setConfirming(null);
+                void actions.setEnabled(provider.slug, false);
+              }
+            : undefined
+        }
+        onCancel={() => setConfirming(null)}
+        onConfirm={() => {
+          if (!confirming) return;
+          const { intent, provider } = confirming;
+          setConfirming(null);
+          // An empty key is how the store clears a value — it has no delete.
+          void (intent === "key"
+            ? actions.edit(provider.slug, { key: "" })
+            : actions.remove(provider.slug));
+        }}
       />
     </div>
   );
