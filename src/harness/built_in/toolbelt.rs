@@ -105,6 +105,10 @@ use oh::tools::traits::{
 
 trait ToolGuard: Send + Sync {
     fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult>;
+
+    fn timeout_policy(&self, inner: ToolTimeout) -> ToolTimeout {
+        inner
+    }
 }
 
 struct GuardedTool<T, G> {
@@ -195,7 +199,7 @@ impl<T: Tool, G: ToolGuard> Tool for GuardedTool<T, G> {
         self.inner.max_result_size_chars()
     }
     fn timeout_policy(&self, args: &serde_json::Value) -> ToolTimeout {
-        self.inner.timeout_policy(args)
+        self.guard.timeout_policy(self.inner.timeout_policy(args))
     }
     fn display_label(&self, args: &serde_json::Value) -> Option<String> {
         self.inner.display_label(args)
@@ -319,6 +323,13 @@ impl ShellTool {
 }
 
 impl ToolGuard for HighRiskCommands {
+    fn timeout_policy(&self, inner: ToolTimeout) -> ToolTimeout {
+        match inner {
+            ToolTimeout::Secs(secs @ 1..=3600) => ToolTimeout::Secs(secs),
+            _ => ToolTimeout::Inherit,
+        }
+    }
+
     fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult> {
         let command = args.get("command")?.as_str()?;
         if !self.0.block_high_risk_commands
@@ -1764,15 +1775,8 @@ mod tests {
         assert!(disabled.refusal(&json!({ "command": "sudo id" })).is_none());
     }
 
-    /// `ShellTool`'s own schema tells the model that an
-    /// omitted or out-of-range `timeout_secs` "falls back to the configured
-    /// tool timeout" — `ToolTimeout::Inherit`, the run's global deadline. What
-    /// `timeout_policy` actually returns for `None`/`0` is
-    /// `ToolTimeout::Unbounded`: no deadline at all. A model that reads only
-    /// the schema has no way to learn that omitting the field removes the
-    /// backstop rather than falling onto one.
     #[test]
-    fn shell_timeout_policy_contradicts_its_own_schema_fallback_claim() {
+    fn shell_timeout_policy_honors_its_schema_fallback_claim() {
         use oh::tools::traits::ToolTimeout;
 
         let ws = std::env::temp_dir();
@@ -1785,26 +1789,62 @@ mod tests {
             .expect("timeout_secs has a description");
         assert!(
             description.contains("falls back to the configured tool timeout"),
-            "pin the exact claim under test so a wording change re-opens this finding: {description}"
+            "the schema must describe the configured fallback: {description}"
         );
 
         assert_eq!(
             tool.timeout_policy(&json!({})),
-            ToolTimeout::Unbounded,
-            "an omitted timeout_secs must run unbounded per issue #4023 — the opposite of what \
-             the schema promises the model"
+            ToolTimeout::Inherit,
+            "an omitted timeout must inherit the configured deadline"
         );
         assert_eq!(
             tool.timeout_policy(&json!({ "timeout_secs": 0 })),
-            ToolTimeout::Unbounded,
-            "an explicit 0 disables the deadline the same way omitting it does"
-        );
-        assert_ne!(
-            tool.timeout_policy(&json!({})),
             ToolTimeout::Inherit,
-            "the schema's \"configured tool timeout\" is ToolTimeout::Inherit, which shell never \
-             returns"
+            "an invalid zero timeout must inherit the configured deadline"
         );
+    }
+
+    #[test]
+    fn shell_factory_preserves_explicit_deadlines_and_inherits_for_invalid_values() {
+        let ws = tempfile::tempdir().unwrap();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Full),
+            native_runtime(),
+            Some(ShellAudit::disabled()),
+            ws.path(),
+        );
+        let shell = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        for args in [
+            json!({}),
+            json!({"timeout_secs": null}),
+            json!({"timeout_secs": 0}),
+            json!({"timeout_secs": -1}),
+            json!({"timeout_secs": 1.5}),
+            json!({"timeout_secs": "17"}),
+            json!({"timeout_secs": 3601}),
+            json!({"timeout_secs": u64::MAX}),
+        ] {
+            assert_eq!(
+                shell.timeout_policy(&args),
+                ToolTimeout::Inherit,
+                "invalid or absent deadline must inherit: {args}"
+            );
+            let (deadline, seconds) =
+                oh::tools::timeout::resolve_tool_deadline(shell.timeout_policy(&args));
+            assert_eq!(
+                deadline,
+                Some(std::time::Duration::from_secs(seconds)),
+                "the execution adapter must resolve a finite inherited deadline"
+            );
+            assert!(seconds > 0);
+        }
+        for secs in [1, 17, 3600] {
+            assert_eq!(
+                shell.timeout_policy(&json!({"timeout_secs": secs})),
+                ToolTimeout::Secs(secs),
+                "valid explicit deadline must survive the audit wrapper"
+            );
+        }
     }
 
     #[tokio::test]
