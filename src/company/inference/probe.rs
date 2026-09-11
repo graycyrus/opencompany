@@ -186,7 +186,21 @@ pub fn classify(raw: &str) -> ProbeClass {
         return ProbeClass::Quota;
     }
 
-    if haystack.contains("404") || haystack.contains("not found") {
+    // "404 / not found / DNS / refused" — all four, not the first two. A
+    // connection that was refused and a name that did not resolve are the
+    // clearest possible evidence that nothing is at that address, and reading
+    // them as `unknown` sent the operator to look at their key instead of their
+    // URL for the most common typo there is.
+    if haystack.contains("404")
+        || haystack.contains("not found")
+        || haystack.contains("refused")
+        || haystack.contains("unreachable")
+        || haystack.contains("dns")
+        || haystack.contains("no such host")
+        || haystack.contains("could not resolve")
+        || haystack.contains("name resolution")
+        || haystack.contains("connection reset")
+    {
         return ProbeClass::Endpoint;
     }
 
@@ -446,6 +460,21 @@ impl ProbeFailure {
         }
     }
 
+    /// Classifies on one string and remembers another.
+    ///
+    /// The two are different because **this probe's own URL ends in `/models`**.
+    /// Interpolating it into the text the classifier reads makes every single
+    /// probe failure contain the word "model", so a refused connection to
+    /// `http://127.0.0.1:9/v1/models` classified as a missing *model id* and sent
+    /// the operator off to check a model they never typed. The URL is worth
+    /// having in a log and is poison in a classifier input.
+    fn classified_as(classify_on: &str, raw: String) -> Self {
+        Self {
+            class: classify(classify_on),
+            raw,
+        }
+    }
+
     /// A refusal by the SSRF guard, which is an endpoint fact rather than a
     /// credential one — so it keeps the key, like every class but `auth`.
     fn refused(refusal: EndpointRefusal) -> Self {
@@ -517,10 +546,11 @@ pub async fn probe_models(
         },
     };
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| ProbeFailure::from_raw(describe_transport(&e)))?;
+    let response = request.send().await.map_err(|e| {
+        // Classified on the condition alone; the full error, URL and all, is
+        // kept for the log. See `ProbeFailure::classified_as`.
+        ProbeFailure::classified_as(transport_condition(&e), format!("{url}: {e}"))
+    })?;
     let status = response.status();
     let body = read_capped(response).await;
     if !status.is_success() {
@@ -528,30 +558,43 @@ pub async fn probe_models(
         // there: vendors put "invalid api key" and "model not found" in the
         // body rather than the reason phrase, so classifying on the status
         // alone would read every one of them as `unknown`.
-        return Err(ProbeFailure::from_raw(format!(
+        let reason = format!(
             "{} {}: {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or("error"),
             body.trim()
-        )));
+        );
+        return Err(ProbeFailure::classified_as(
+            &reason,
+            format!("{url}: {reason}"),
+        ));
     }
     Ok(parse_model_ids(&body))
 }
 
-/// The text a transport failure classifies on.
+/// The condition a transport failure classifies on.
 ///
-/// `reqwest`'s own `Display` says "error sending request for url (...)" and
-/// buries the cause, so a DNS failure and a timeout read identically. Naming the
-/// two conditions it exposes directly is what lets [`classify`] tell an
-/// unreachable endpoint from a slow one.
-fn describe_transport(error: &reqwest::Error) -> String {
+/// Two problems with handing [`classify`] the error's own `Display`. It says
+/// "error sending request for url (...)" and buries the cause, so a DNS failure
+/// and a timeout read identically — and it **contains the URL**, which for this
+/// probe always ends in `/models`, so every failure would carry the word
+/// "model". Naming the condition in a short fixed phrase solves both.
+fn transport_condition(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
-        return format!("timeout: {error}");
+        return "timeout";
     }
     if error.is_connect() {
-        return format!("connection refused or not found: {error}");
+        // Covers DNS failure, connection refused and a TLS handshake that never
+        // completed. All three are the same answer to the operator: nothing
+        // usable is at that address.
+        return "connection refused";
     }
-    error.to_string()
+    if error.is_redirect() {
+        // The guard stopped the chain, or it was too long. Either way the
+        // endpoint did not serve a catalog where it said it would.
+        return "redirect not followed: unreachable";
+    }
+    "the check did not complete"
 }
 
 /// Reads at most [`PROBE_BODY_CAP`] bytes, discarding the rest.
@@ -935,15 +978,50 @@ mod tests {
     #[test]
     fn a_transport_failure_says_which_condition_it_was() {
         // `reqwest`'s own Display buries the cause, so a DNS failure and a
-        // timeout read identically and both classify as `unknown`. These two
-        // strings are what let `classify` tell them apart.
+        // timeout read identically and both classify as `unknown`. These fixed
+        // phrases are what let `classify` tell them apart.
+        assert_eq!(classify("timeout"), ProbeClass::Timeout);
+        assert_eq!(classify("connection refused"), ProbeClass::Endpoint);
         assert_eq!(
-            classify("timeout: error sending request"),
-            ProbeClass::Timeout
-        );
-        assert_eq!(
-            classify("connection refused or not found: error sending request"),
+            classify("redirect not followed: unreachable"),
             ProbeClass::Endpoint
         );
+        assert_eq!(classify("the check did not complete"), ProbeClass::Unknown);
+    }
+
+    #[test]
+    fn the_probes_own_url_never_reaches_the_classifier() {
+        // This probe's URL always ends in `/models`, so interpolating it into
+        // the classifier's input makes EVERY failure contain the word "model" —
+        // and a refused connection classified as a missing model id, sending the
+        // operator to check a model they never typed.
+        let failure = ProbeFailure::classified_as(
+            "connection refused",
+            "http://127.0.0.1:9/v1/models: error sending request".to_string(),
+        );
+        assert_eq!(failure.class, ProbeClass::Endpoint);
+        assert!(
+            failure.raw.contains("/models"),
+            "the URL is still worth having in a log"
+        );
+    }
+
+    #[test]
+    fn dns_and_refusal_are_endpoint_facts_not_unknowns() {
+        for raw in [
+            "connection refused",
+            "no such host",
+            "could not resolve host",
+            "temporary failure in name resolution",
+            "dns error",
+            "network is unreachable",
+            "connection reset by peer",
+        ] {
+            assert_eq!(
+                classify(raw),
+                ProbeClass::Endpoint,
+                "`{raw}` is the clearest evidence there is that nothing is at that address"
+            );
+        }
     }
 }

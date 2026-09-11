@@ -1280,11 +1280,10 @@ mod tests {
             .unwrap();
         forget_health(&company(), &secrets, "acme").await.unwrap();
         assert!(
-            load_health(&company(), &secrets)
+            !load_health(&company(), &secrets)
                 .await
                 .unwrap()
-                .get("acme")
-                .is_none()
+                .contains_key("acme")
         );
         // Forgetting something that was never there is not an error.
         forget_health(&company(), &secrets, "ghost").await.unwrap();

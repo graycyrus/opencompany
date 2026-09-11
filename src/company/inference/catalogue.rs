@@ -505,6 +505,61 @@ pub fn cli_login(option_slug: &str) -> Option<&'static CliLogin> {
     CLI_LOGINS.iter().find(|c| c.option_slug == option_slug)
 }
 
+/// How a credential must be presented to a provider of this kind.
+///
+/// A decision rather than a lookup, because three of the four cases are not in
+/// the table: a local runtime that takes no key sends no header, `omlx` takes a
+/// bearer even though it is local, and an unknown kind is a custom
+/// OpenAI-compatible endpoint, which by definition speaks bearer.
+///
+/// Getting this wrong is not cosmetic. A probe that presents a bearer to
+/// Anthropic is rejected, the rejection classifies as `auth`, and the connect
+/// flow deletes a key that was never wrong — on the one provider most people
+/// try first.
+pub fn auth_style_for(kind: &str) -> AuthStyle {
+    let kind = kind.trim();
+    if let Some(cloud) = cloud_provider(kind) {
+        return cloud.auth;
+    }
+    if let Some(local) = local_runtime(kind) {
+        return if local.needs_key {
+            AuthStyle::Bearer
+        } else {
+            AuthStyle::None
+        };
+    }
+    AuthStyle::Bearer
+}
+
+/// The endpoint an operator typed for a **local runtime**, normalised.
+///
+/// `None` when it is not usable: empty, or not `http`/`https`. The scheme check
+/// is here rather than left to the probe because this is the one category whose
+/// endpoint the operator types — a cloud provider's comes from the preset and
+/// cannot be wrong, and rejecting before any write is what the connect flow's
+/// ordering asks for.
+///
+/// `/v1` is appended when the path is empty or `/`, because that is where an
+/// OpenAI-compatible surface lives and `http://localhost:11434` is what the
+/// runtime's own documentation prints. Appending is not guessing: a path the
+/// operator supplied is left exactly as typed.
+pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let (scheme, rest) = trimmed.split_once("://")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
+    if rest.trim().is_empty() {
+        return None;
+    }
+    // No path segment at all (the trailing slash is already gone), so the
+    // operator gave a bare origin.
+    if !rest.contains('/') {
+        return Some(format!("{trimmed}/v1"));
+    }
+    Some(trimmed.to_string())
+}
+
 /// Whether an endpoint points at an Azure Foundry / Azure OpenAI resource, i.e.
 /// a provider whose `model` field must carry a deployment name.
 pub fn is_azure_endpoint(endpoint: &str) -> bool {
@@ -1151,5 +1206,87 @@ mod tests {
         assert_eq!(lookup("detailLocal"), copy::DETAIL_LOCAL);
         assert_eq!(lookup("detailCli"), copy::DETAIL_CLI);
         assert_eq!(pairs.len(), 11, "a copy string was added to one side only");
+    }
+
+    // ---- auth style and endpoint normalisation ------------------------------
+
+    #[test]
+    fn anthropic_is_the_only_non_bearer_entry_in_the_catalogue() {
+        // A port that assumes one auth style breaks exactly one provider, and it
+        // is the one people try first. Worse, the rejection classifies as `auth`
+        // — the one destructive class — so the connect flow would delete a key
+        // that was never wrong.
+        assert_eq!(auth_style_for("anthropic"), AuthStyle::Anthropic);
+        for provider in CLOUD_PROVIDERS.iter().filter(|p| p.slug != "anthropic") {
+            assert_eq!(
+                auth_style_for(provider.slug),
+                AuthStyle::Bearer,
+                "{} should be bearer",
+                provider.slug
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyless_local_runtime_sends_no_auth_header_and_omlx_does() {
+        assert_eq!(auth_style_for("ollama"), AuthStyle::None);
+        assert_eq!(auth_style_for("lmstudio"), AuthStyle::None);
+        // The only local runtime that wants both an endpoint and a key.
+        assert_eq!(auth_style_for("omlx"), AuthStyle::Bearer);
+    }
+
+    #[test]
+    fn an_unknown_kind_is_a_custom_openai_compatible_endpoint() {
+        // Which by definition speaks bearer — that is what "OpenAI-compatible"
+        // means in the field the operator typed it into.
+        assert_eq!(auth_style_for("my-gateway"), AuthStyle::Bearer);
+        assert_eq!(auth_style_for("custom"), AuthStyle::Bearer);
+    }
+
+    #[test]
+    fn a_bare_origin_gains_the_v1_an_openai_surface_lives_at() {
+        // `http://localhost:11434` is what Ollama's own documentation prints,
+        // and it is not where the OpenAI-compatible surface is.
+        assert_eq!(
+            normalize_local_endpoint("http://localhost:11434").as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            normalize_local_endpoint("  http://localhost:11434/  ").as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+    }
+
+    #[test]
+    fn a_path_the_operator_supplied_is_left_exactly_as_typed() {
+        // Appending is not guessing. Someone who typed a path meant it.
+        assert_eq!(
+            normalize_local_endpoint("https://acme.example/api/gateway").as_deref(),
+            Some("https://acme.example/api/gateway")
+        );
+        assert_eq!(
+            normalize_local_endpoint("http://127.0.0.1:1234/v1/").as_deref(),
+            Some("http://127.0.0.1:1234/v1")
+        );
+    }
+
+    #[test]
+    fn only_http_and_https_are_endpoints() {
+        // Rejected here rather than at the probe, because this is the one
+        // category whose endpoint the operator types — and the connect flow's
+        // ordering says reject before any write.
+        for bad in [
+            "file:///etc/passwd",
+            "ftp://acme.example/v1",
+            "localhost:11434",
+            "",
+            "   ",
+            "http://",
+        ] {
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "`{bad}` is not an endpoint"
+            );
+        }
     }
 }
