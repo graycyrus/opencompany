@@ -5,7 +5,7 @@
 #
 # A debug build of the shell loads `devUrl` (`http://localhost:5173`) rather
 # than the embedded bundle, so without a dev server the window is blank. The
-# obvious fix is `build.beforeDevCommand` in `src-tauri/tauri.conf.json`, and
+# obvious fix is `build.beforeDevCommand` in `crates/opencompany-app/tauri.conf.json`, and
 # it is wrong: the Tauri CLI runs that hook from a directory it *derives* by
 # scanning for a `package.json`, and which one it picks is not stable — on a
 # macOS checkout it lands in `frontend/`, on CI's runner it landed in
@@ -180,7 +180,7 @@ else
 fi
 
 # The CLI from `frontend/node_modules`, as `ci.yml` uses, falling back to a
-# `cargo install`ed one. Run from `src-tauri` so the CLI finds this project:
+# `cargo install`ed one. Run from `crates/opencompany-app` so the CLI finds this project:
 # it searches *subfolders* of the working directory, so from `frontend/` it
 # would pick the console wrapper in `frontend/src-tauri/` instead — a different
 # application that happens to share this one's `productName`.

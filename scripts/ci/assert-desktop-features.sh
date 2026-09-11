@@ -3,7 +3,7 @@
 # Fail if the desktop's shipped cargo feature set is not the one CI compiles and
 # not the one `scripts/desktop-dev.sh` runs.
 #
-# Issue #1738. `src-tauri/Cargo.toml`'s feature list is NOT what the desktop
+# Issue #1738. `crates/opencompany-app/Cargo.toml`'s feature list is NOT what the desktop
 # ships. `acp` and `composio` are passed on the `tauri` command line — both are
 # `= ["openhuman"]` in the root manifest, pure `cfg` switches adding no package,
 # so a release can turn them on and still build `--locked`; the argument is on

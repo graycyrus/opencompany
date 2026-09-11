@@ -7,7 +7,7 @@
 # directory, not ancestors. That makes "which app am I running" a property of
 # where the command was typed, and it is invisible in the command itself.
 #
-# The tree had two: the shell in `src-tauri/`, and a leftover console wrapper in
+# The tree had two: the shell in `crates/opencompany-app/`, and a leftover console wrapper in
 # `frontend/src-tauri/` that shared its `productName`. Because `tauri:dev` and
 # `tauri:build` live in `frontend/package.json`, and npm runs a script from its
 # manifest's own directory, `npm run tauri:dev` — the obvious way to start the
@@ -20,7 +20,7 @@
 #
 # Two rules, because either alone lets the failure back:
 #
-#   1. Exactly one `tauri.conf.json`, and it is `src-tauri/tauri.conf.json`. A
+#   1. Exactly one `tauri.conf.json`, and it is `crates/opencompany-app/tauri.conf.json`. A
 #      second app is the ambiguity itself; there is no version of it that is
 #      safe just because it is currently correct.
 #   2. No `package.json` script invokes the CLI without first establishing a
@@ -65,7 +65,7 @@ fi
 # a package name like `@tauri-apps/cli` is not a command at all.
 #
 # A `cd` in an earlier segment clears the rest of the value: the whole point of
-# `cd ../src-tauri && … tauri build` is that it names the app, and a rule that
+# `cd ../crates/opencompany-app && … tauri build` is that it names the app, and a rule that
 # rejected it would have nothing left to recommend.
 unqualified_tauri() {
     local value=$1

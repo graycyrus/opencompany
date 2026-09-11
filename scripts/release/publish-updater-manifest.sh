@@ -2,7 +2,7 @@
 # Assemble latest.json — the file every installed desktop client polls.
 #
 # The Tauri updater fetches the JSON manifest named by `plugins.updater.endpoints`
-# in `src-tauri/tauri.conf.json`, compares its `version` with the running
+# in `crates/opencompany-app/tauri.conf.json`, compares its `version` with the running
 # application's, and — when it is newer — downloads the entry for this machine's
 # platform and verifies it against the signature in the same entry.
 #
