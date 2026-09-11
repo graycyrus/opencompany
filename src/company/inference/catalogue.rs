@@ -563,6 +563,41 @@ pub fn is_reserved_slug(slug: &str) -> bool {
         || CLI_LOGINS.iter().any(|c| c.stored_slug == slug)
 }
 
+/// Which of the three questions a provider answers.
+///
+/// A category is a fact about the provider, not a routing decision, so it lives
+/// with the table rather than in [`resolve`](super::resolve). It is load-bearing
+/// there: the rule for scrubbing a removed provider out of the routing map
+/// differs per category, because only the cloud refs carry a slug.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Category {
+    /// A hosted account, addressed by slug.
+    Cloud,
+    /// A runtime reachable at an endpoint.
+    Local,
+    /// A credential another command-line tool holds.
+    Cli,
+}
+
+/// The category a provider kind belongs to.
+///
+/// Unknown kinds are [`Category::Cloud`]: a custom provider is an
+/// OpenAI-compatible endpoint someone pays for, addressed by the slug they
+/// named, which is exactly how a cloud row behaves.
+pub fn category_of(kind: &str) -> Category {
+    let kind = kind.trim();
+    if local_runtime(kind).is_some() {
+        return Category::Local;
+    }
+    if CLI_LOGINS
+        .iter()
+        .any(|c| c.option_slug == kind || (c.stored_slug == kind && c.stored_slug != "openai"))
+    {
+        return Category::Cli;
+    }
+    Category::Cloud
+}
+
 /// Copy for the add-provider dialog, ported verbatim.
 ///
 /// Strings live beside the table they describe because they *are* part of the
@@ -781,6 +816,20 @@ mod tests {
         // Codex stores under `openai`, which is already reserved as a cloud row.
         assert!(is_reserved_slug("openai"));
         assert!(!is_reserved_slug("acme-gateway"));
+    }
+
+    #[test]
+    fn a_kind_lands_in_the_category_its_scrub_rule_needs() {
+        assert_eq!(category_of("openrouter"), Category::Cloud);
+        assert_eq!(category_of("ollama"), Category::Local);
+        assert_eq!(category_of("lmstudio"), Category::Local);
+        assert_eq!(category_of("claude-code"), Category::Cli);
+        // Codex stores under `openai`, and `openai` is a cloud row in its own
+        // right — so the shared slug stays Cloud. Reading it as a CLI login
+        // would give the OpenAI row the CLI's slug-less scrub rule and orphan
+        // every route naming it.
+        assert_eq!(category_of("openai"), Category::Cloud);
+        assert_eq!(category_of("acme-gateway"), Category::Cloud);
     }
 
     #[test]

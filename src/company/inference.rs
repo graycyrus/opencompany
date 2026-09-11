@@ -26,6 +26,7 @@
 //! and its `Debug` redacts the credential.
 
 pub mod catalogue;
+pub mod resolve;
 pub mod store;
 
 use std::collections::BTreeMap;
