@@ -205,9 +205,14 @@ test("an admin is still offered every control across the four pages", async ({ p
   // The credential the member above is refused, on the page it lives on. This
   // is what stops that assertion going vacuous: if the field ever stops
   // rendering here, this fails rather than the member case quietly passing.
+  //
+  // `#composio-api-key`, not `#composio-token`: see the matching comment in the
+  // member test above. `COMPOSIO_MANAGED_HIDDEN` keeps `ComposioSection` on the
+  // BYOK route on every build, so the field an admin actually gets here is the
+  // Composio API key input, not the legacy managed-route token card.
   await openConnectionsPage(page, "composio");
   await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
-  await expect(page.locator("#composio-token")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#composio-api-key")).toBeVisible({ timeout: 30_000 });
 
   await openSettingsPage(page, "mcp");
   await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);
