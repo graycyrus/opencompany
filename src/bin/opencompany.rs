@@ -2987,7 +2987,10 @@ mod test {
     async fn register_company_loads_manifest_and_registers() {
         let home = std::env::temp_dir().join(format!("oc-bin-{}", std::process::id()));
         let state = AppState::new(AppConfig::default());
-        let dir = std::path::Path::new("companies/law_firm");
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../companies/law_firm"
+        ));
 
         let (id, name, _schedules) = register_company(&state, &home, dir, false).await.unwrap();
 
@@ -3008,7 +3011,10 @@ mod test {
 
     #[test]
     fn company_source_dir_normalizes_manifest_file_to_its_directory() {
-        let dir = std::path::Path::new("companies/law_firm");
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../companies/law_firm"
+        ));
         // A directory argument is returned unchanged.
         assert_eq!(company_source_dir(dir), dir);
         // A manifest-file argument resolves to its parent company directory, so
@@ -3021,7 +3027,10 @@ mod test {
         let home = std::env::temp_dir().join(format!("oc-bin-file-{}", std::process::id()));
         let state = AppState::new(AppConfig::default());
         // `--company` also accepts the manifest file inside the company dir.
-        let file = std::path::Path::new("companies/law_firm/company.toml");
+        let file = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../companies/law_firm/company.toml"
+        ));
 
         let (_id, name, _schedules) = register_company(&state, &home, file, false).await.unwrap();
 
@@ -3030,7 +3039,10 @@ mod test {
         // The recorded source dir is the company directory, not `company.toml`.
         assert_eq!(
             runtime.source_dir(),
-            Some(std::path::Path::new("companies/law_firm"))
+            Some(std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../companies/law_firm"
+            )))
         );
         assert!(
             !runtime.workspace().is_empty(runtime.id()).await.unwrap(),
@@ -3049,7 +3061,10 @@ mod test {
     async fn register_company_stamps_provenance_from_directory() {
         let home = std::env::temp_dir().join(format!("oc-prov-dir-{}", std::process::id()));
         let state = AppState::new(AppConfig::default());
-        let dir = std::path::Path::new("companies/law_firm");
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../companies/law_firm"
+        ));
 
         register_company(&state, &home, dir, false).await.unwrap();
 
@@ -3082,7 +3097,10 @@ mod test {
     async fn register_company_stamps_provenance_from_manifest_file() {
         let home = std::env::temp_dir().join(format!("oc-prov-file-{}", std::process::id()));
         let state = AppState::new(AppConfig::default());
-        let file = std::path::Path::new("companies/law_firm/company.toml");
+        let file = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../companies/law_firm/company.toml"
+        ));
 
         register_company(&state, &home, file, false).await.unwrap();
 
