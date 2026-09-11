@@ -459,9 +459,8 @@ fn plan_add(
                     local.label
                 ))
             })?;
-        let base_url = catalogue::normalize_local_endpoint(&typed).ok_or_else(|| {
-            invalid(endpoint_refusal(&typed))
-        })?;
+        let base_url = catalogue::normalize_local_endpoint(&typed)
+            .ok_or_else(|| invalid(endpoint_refusal(&typed)))?;
         // **The catalogue says whether this runtime wants a credential, and the
         // host has to hold that rule too.** OMLX declares `needs_key: true`; the
         // console's dialog showed and required the field, and the handler
@@ -645,7 +644,12 @@ async fn edit_provider(
     // A rename goes through the same bound an add does. The slug is fixed here,
     // so this bounds only the label — but an edit that could set a name an add
     // would refuse is a rule the host does not actually hold.
-    let label = match body.label.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+    let label = match body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
         Some(typed) => {
             store::check_provider_name(typed)
                 .map_err(|e| ApiError(OpenCompanyError::InvalidRequest(e.to_string())))?;

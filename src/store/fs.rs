@@ -6541,7 +6541,9 @@ mod test {
     fn only_absence_like_errors_are_read_as_a_missing_legacy_file() {
         use std::io::{Error, ErrorKind};
         assert!(legacy_secret_absent(&Error::from(ErrorKind::NotFound)));
-        assert!(legacy_secret_absent(&Error::from(ErrorKind::InvalidFilename)));
+        assert!(legacy_secret_absent(&Error::from(
+            ErrorKind::InvalidFilename
+        )));
         // Everything else stays loud: a secrets directory that cannot be read
         // must not be mistaken for one holding nothing.
         assert!(!legacy_secret_absent(&Error::from(

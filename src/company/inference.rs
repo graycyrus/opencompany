@@ -2083,9 +2083,7 @@ mod tests {
         m.base_url = Some("http://alice:hunter2@127.0.0.1:8597/v1".into());
         let problems = validate_inference(&m);
         assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("username or password")),
+            problems.iter().any(|p| p.contains("username or password")),
             "{problems:?}"
         );
         // The refusal is the one moment this value is guaranteed to be shown to

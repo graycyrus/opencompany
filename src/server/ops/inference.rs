@@ -2138,8 +2138,7 @@ base_url = "https://byo.example/v1"
     const EMBEDDED_PASSWORD: &str = "hunter2";
     /// Loopback discard: refuses immediately, offline and deterministically.
     const CREDENTIALED_ENDPOINT: &str = "http://alice:hunter2@127.0.0.1:9/unreachable/v1";
-    const CREDENTIALED_MANIFEST: &str =
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+    const CREDENTIALED_MANIFEST: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
          [inference]\nprovider = \"openai_compatible\"\n\
          base_url = \"http://alice:hunter2@127.0.0.1:9/unreachable/v1\"\n";
 
@@ -2330,7 +2329,11 @@ base_url = "https://byo.example/v1"
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "a name at the bound is legal: {raw}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a name at the bound is legal: {raw}"
+        );
         let (status, _, raw) = send_as(
             &state,
             "longname",
