@@ -222,9 +222,11 @@ pub struct InferenceReadyDto {
     /// The provider slug behind it, for the picker's initial value. Always
     /// `managed` today: the injected path is the platform's own endpoint.
     pub provider: Option<&'static str>,
-    /// The endpoint it resolves to. Shown, not secret — it is a URL, and seeing
-    /// which one a test is about to hit is the difference between a green tick
-    /// and a green tick you can trust.
+    /// The endpoint it resolves to, with any embedded credential redacted.
+    /// Seeing which endpoint a test is about to hit is the difference between a
+    /// green tick and a green tick you can trust — but a URL is not
+    /// automatically safe to show, because it can carry userinfo. See
+    /// [`redact_endpoint`](crate::company::inference::catalogue::redact_endpoint).
     pub base_url: Option<String>,
 }
 
@@ -239,7 +241,12 @@ pub struct InferenceReadyDto {
 /// The credential itself never leaves this function.
 #[cfg(feature = "openhuman")]
 fn house_credential(env: &dyn EnvSource) -> Option<String> {
-    crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| config.base_url)
+    crate::harness::provider::harness_inference_from_env(env)
+        // Redacted, because "it is a URL" is not the same as "it is not a
+        // secret": `OPENCOMPANY_INFERENCE_URL` can carry userinfo, and this
+        // one is the deployer's own endpoint rather than a tenant's, so no
+        // input rule this workload holds can have kept it out.
+        .map(|(config, _)| crate::company::inference::catalogue::redact_endpoint(&config.base_url))
 }
 
 /// Without the harness there is no inference path at all, so the host holds

@@ -492,9 +492,10 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
 
 /// What [`redact_endpoint`] leaves where the userinfo was.
 ///
-/// The `@` is kept so the shape still reads as a URL and the operator can see
-/// *that* something was embedded — which is the sentence they need in order to
-/// go and move it into the key field.
+/// It replaces the userinfo only; the delimiting `@` survives, so the result
+/// still reads as a URL and the operator can see *that* something was embedded
+/// — which is the sentence they need in order to go and move it into the key
+/// field.
 pub const REDACTED_USERINFO: &str = "***";
 
 /// The byte range of an endpoint's userinfo — everything between `://` (or the
