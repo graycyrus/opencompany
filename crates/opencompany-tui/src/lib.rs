@@ -157,7 +157,10 @@ fn rows_of(host: &host::EmbeddedHost) -> Vec<CompanyRow> {
     ids.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
     ids.into_iter()
         .map(|id| {
-            let busy = registry.get(&id).map(|runtime| runtime.is_busy()).unwrap_or(false);
+            let busy = registry
+                .get(&id)
+                .map(|runtime| runtime.is_busy())
+                .unwrap_or(false);
             CompanyRow {
                 id: id.as_ref().to_string(),
                 busy,
@@ -179,10 +182,7 @@ impl TerminalGuard {
         }
     }
 
-    fn draw(
-        &mut self,
-        render: impl FnOnce(&mut ratatui::Frame<'_>),
-    ) -> std::io::Result<()> {
+    fn draw(&mut self, render: impl FnOnce(&mut ratatui::Frame<'_>)) -> std::io::Result<()> {
         self.terminal.draw(render).map(|_| ())
     }
 }

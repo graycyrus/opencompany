@@ -50,7 +50,10 @@ fn host_block(app: &App) -> Paragraph<'_> {
             home,
         } => vec![
             Line::from(vec![Span::raw("api       "), Span::raw(address.as_str())]),
-            Line::from(vec![Span::raw("instance  "), Span::raw(instance_id.as_str())]),
+            Line::from(vec![
+                Span::raw("instance  "),
+                Span::raw(instance_id.as_str()),
+            ]),
             Line::from(vec![Span::raw("home      "), Span::raw(home.as_str())]),
         ],
         HostStatus::Failed(reason) => vec![Line::from(Span::styled(
