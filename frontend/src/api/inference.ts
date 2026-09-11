@@ -11,7 +11,7 @@
 // shared `api/types.ts` is needed.
 
 import type { OpenCompanyClient } from "./client";
-import type { Provider } from "@/inference/types";
+import type { ProbeClass, Provider, RoutingMode } from "@/inference/types";
 
 /**
  * Provider kinds the console offers.
@@ -321,6 +321,170 @@ export function restartInference(
   company: string | null,
 ): Promise<InferenceMutation> {
   return client.post<InferenceMutation>(`${client.scopeFor(company)}/inference/restart`, {});
+}
+
+// ---- the provider list, and writing it ---------------------------------------
+
+/**
+ * What a connect attempt learnt.
+ *
+ * **Never carries the raw upstream error.** That text can echo request material
+ * — headers, fragments of a key — and the sentence it would land in is one
+ * someone screenshots into a ticket. The host logs it and sends the class plus a
+ * chosen sentence instead.
+ */
+export interface ProbeResult {
+  ok: boolean;
+  /** The failure class, absent on success. */
+  class?: ProbeClass;
+  /** One sentence, chosen host-side by the same `describe` the console mirrors. */
+  message?: string;
+  /** How many models the endpoint published. Zero is not a failure. */
+  modelCount: number;
+}
+
+/** Every provider write answers with the whole status, so nothing has to be reconciled. */
+export interface ProviderMutation {
+  status: InferenceStatus;
+  note: string;
+  /** The probe's verdict, when one ran. Absent when there was nothing to check. */
+  probe?: ProbeResult;
+  /** Tiers this change moved or parked, so the console can say which rows changed. */
+  affectedTiers?: string[];
+}
+
+/** The add-provider body. `key` is write-only (never returned). */
+export interface AddProviderInput {
+  /** A catalogue slug, a CLI option slug, or `custom`. */
+  kind: string;
+  /** The operator's name, for a custom provider only. */
+  label?: string;
+  /** The endpoint, for a local runtime or a custom provider. */
+  baseUrl?: string;
+  /** The outbound credential. */
+  key?: string;
+  /**
+   * Add despite a probe failure that would otherwise be destructive.
+   *
+   * Offered only after a **typed probe failure**, never after a slug collision
+   * or a failed key write, and cleared on every retry — so an attempt that fails
+   * for an unrelated reason does not still offer to skip verification.
+   */
+  addAnyway?: boolean;
+}
+
+/** The edit body. Omit a field to leave it; send `key: ""` to clear the key. */
+export interface EditProviderInput {
+  label?: string;
+  baseUrl?: string;
+  models?: Record<string, string>;
+  key?: string;
+}
+
+/** The routing table as the host holds it. */
+export interface RoutesResponse {
+  /** Tier → route string (`acme:gpt-5`, `managed`, `local:llava`). */
+  routes: Record<string, string>;
+  /** The mode these routes describe. **Inferred host-side, never stored.** */
+  mode: RoutingMode;
+  /** Routes naming a provider this company does not hold, as `[tier, slug]`. */
+  orphaned: [string, string][];
+}
+
+/** Connect a provider. */
+export function addProvider(
+  client: OpenCompanyClient,
+  company: string | null,
+  body: AddProviderInput,
+): Promise<ProviderMutation> {
+  return client.post<ProviderMutation>(`${client.scopeFor(company)}/inference/providers`, body);
+}
+
+/** Change a connected provider. The slug is fixed; the kind cannot change. */
+export function editProvider(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+  body: EditProviderInput,
+): Promise<ProviderMutation> {
+  return client.put<ProviderMutation>(
+    `${client.scopeFor(company)}/inference/providers/${encodeURIComponent(slug)}`,
+    body,
+  );
+}
+
+/**
+ * Disconnect a provider.
+ *
+ * Clears its credential, removes the record and resets every route pointing at
+ * it, as one operation. The response names the tiers that moved.
+ */
+export function deleteProvider(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+): Promise<ProviderMutation> {
+  return client.del<ProviderMutation>(
+    `${client.scopeFor(company)}/inference/providers/${encodeURIComponent(slug)}`,
+  );
+}
+
+/**
+ * Switch a provider on or off.
+ *
+ * Distinct from deleting it: a disabled provider keeps its endpoint, its label
+ * and its credential, and is simply not a routing target. Routes pointing at it
+ * are **parked, not scrubbed**, so switching it back on restores them — the
+ * response names which ones.
+ */
+export function setProviderEnabled(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+  enabled: boolean,
+): Promise<ProviderMutation> {
+  return client.post<ProviderMutation>(
+    `${client.scopeFor(company)}/inference/providers/${encodeURIComponent(slug)}/enabled`,
+    { enabled },
+  );
+}
+
+/**
+ * Test an endpoint and a key that are **not stored yet**.
+ *
+ * `POST …/inference/test` probes the *saved* config, which by definition does
+ * not exist at the moment an operator wants to know whether what they have typed
+ * will work.
+ */
+export function probeDraft(
+  client: OpenCompanyClient,
+  company: string | null,
+  body: { baseUrl: string; key?: string; kind?: string },
+): Promise<ProbeResult> {
+  return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/probe`, body);
+}
+
+/** The routing table, its inferred mode, and any route naming a provider that is gone. */
+export function getRoutes(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<RoutesResponse> {
+  return client.get<RoutesResponse>(`${client.scopeFor(company)}/inference/routes`);
+}
+
+/**
+ * Replace the routing table.
+ *
+ * A whole-table write, because the modes are whole-table statements: "route
+ * everything through one model" is not four independent edits, and applying it
+ * as four would leave a visible state where two rows have moved and two have not.
+ */
+export function putRoutes(
+  client: OpenCompanyClient,
+  company: string | null,
+  routes: Record<string, string>,
+): Promise<RoutesResponse> {
+  return client.put<RoutesResponse>(`${client.scopeFor(company)}/inference/routes`, { routes });
 }
 
 /** Live-probe the resolved provider (one `ping` turn). */
