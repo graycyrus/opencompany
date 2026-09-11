@@ -281,6 +281,12 @@ export function SearchView({ client, company }: Props) {
     );
   }
 
+  // Defaulted rather than assumed. These fields arrived with the provider list,
+  // and a console that throws on a response from an older host turns a missing
+  // field into a white screen — which is how a status page stops being able to
+  // report that anything is wrong at all.
+  const providers = status.providers ?? [];
+
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="search-view">
       {header}
@@ -348,10 +354,10 @@ export function SearchView({ client, company }: Props) {
               Connected
             </p>
             <ProviderList
-              providers={status.providers}
+              providers={providers}
               inBuild={status.inBuild}
-              managedConfigured={status.managedConfigured}
-              managedDailyCallCap={status.managedDailyCallCap}
+              managedConfigured={status.managedConfigured ?? false}
+              managedDailyCallCap={status.managedDailyCallCap ?? 0}
               canManage={canManage}
               busySlug={busySlug}
               health={(slug) => health[slug]}
@@ -401,7 +407,7 @@ export function SearchView({ client, company }: Props) {
           {COPY.defaultIsTheOnlyOne}
         </p>
 
-        {status.providers.length > 0 && canManage && (
+        {providers.length > 0 && canManage && (
           <Button
             type="button"
             variant="outline"
@@ -455,7 +461,7 @@ export function SearchView({ client, company }: Props) {
       <AddProviderDialog
         open={adding}
         onOpenChange={setAdding}
-        providers={status.providers}
+        providers={providers}
         onChoose={(slug) => {
           setAdding(false);
           setIntent({ kind: "connect", slug });
