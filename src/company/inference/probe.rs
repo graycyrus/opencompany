@@ -47,6 +47,9 @@
 //! screenshots. The raw string belongs in a detail channel, not in the sentence.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
+
+use super::catalogue;
 
 /// What a failed probe means.
 ///
@@ -373,6 +376,233 @@ fn loopback(policy: ProbePolicy) -> Result<(), EndpointRefusal> {
     }
 }
 
+// ---- the IO half ------------------------------------------------------------
+//
+// Everything above this line is pure and testable with a string. Below it is the
+// one network call this module makes, kept here rather than in a handler so that
+// the guard, the caps and the classification travel together: a second caller
+// that reached for `reqwest` directly would be a second, unguarded probe.
+
+/// How long a probe may take in total, including connect, TLS and body.
+///
+/// The operator is watching a dialog spinner while this runs, so it is short. A
+/// provider that cannot answer a catalog listing in ten seconds is a `timeout`,
+/// which is a non-destructive class — nothing is lost by giving up early.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How much of a response body is read before the rest is discarded.
+///
+/// The body is wanted for one thing only — the wording a vendor puts in an error
+/// — and 64 KiB is far more than any of them use. Without a cap, an endpoint
+/// that streams indefinitely holds this connection open for the whole timeout
+/// and buffers whatever it sent into this process's memory, once per probe.
+const PROBE_BODY_CAP: usize = 64 * 1024;
+
+/// How many redirects a probe will follow.
+///
+/// Three rather than `reqwest`'s default ten: a model catalog is a leaf
+/// document, and a chain longer than a vendor's http→https plus a host move is
+/// not a catalog, it is something worth refusing. **Every hop is re-checked
+/// against [`check_endpoint`]** — a permitted host that redirects to the
+/// metadata address is the entire SSRF trick, and a policy applied only to the
+/// first URL would wave it through.
+const PROBE_MAX_REDIRECTS: usize = 3;
+
+/// Whether this deployment permits a probe at a loopback address.
+///
+/// **An explicit allowance, made because the local-runtime category exists.**
+/// `ollama` and `lmstudio` are in the catalogue, an operator may genuinely run
+/// one beside the host, and refusing loopback would make that category
+/// unreachable. It is one function so that a deployment which drops the category
+/// has one place to say so, rather than a boolean threaded through five call
+/// sites and defaulted wrong in one of them.
+pub fn default_policy() -> ProbePolicy {
+    ProbePolicy {
+        allow_loopback: !catalogue::LOCAL_RUNTIMES.is_empty(),
+    }
+}
+
+/// A probe that did not succeed.
+///
+/// Carries the class *and* the raw upstream text, because they go to two
+/// different places: the class decides what happens to the credential and what
+/// the operator is told, while the raw text goes to a log and **never** into the
+/// copy. It can echo request material — headers, fragments of a key — and the
+/// sentence it would land in is one someone screenshots into a ticket.
+#[derive(Clone, Debug)]
+pub struct ProbeFailure {
+    /// What the failure means.
+    pub class: ProbeClass,
+    /// The upstream text, for a detail or console channel only.
+    pub raw: String,
+}
+
+impl ProbeFailure {
+    /// Classifies a raw error string.
+    fn from_raw(raw: String) -> Self {
+        Self {
+            class: classify(&raw),
+            raw,
+        }
+    }
+
+    /// A refusal by the SSRF guard, which is an endpoint fact rather than a
+    /// credential one — so it keeps the key, like every class but `auth`.
+    fn refused(refusal: EndpointRefusal) -> Self {
+        Self {
+            class: ProbeClass::Endpoint,
+            raw: refusal.to_string(),
+        }
+    }
+}
+
+/// Asks `{base_url}/models` what the endpoint serves.
+///
+/// This is the same cheap, read-only call the model picker needs anyway, which
+/// is why it is the probe: connecting a provider and listing its models are the
+/// same question asked twice, and a heavier "send a real completion" check would
+/// charge the operator for the privilege of finding out their key works.
+///
+/// Returns the model ids on success. On failure the error is **classified**, and
+/// only [`ProbeClass::Auth`] means the credential should be rolled back — see
+/// the module header for why the naive "roll everything back" answer destroys
+/// valid keys.
+pub async fn probe_models(
+    base_url: &str,
+    credential: Option<&str>,
+    auth: catalogue::AuthStyle,
+    policy: ProbePolicy,
+) -> Result<Vec<String>, ProbeFailure> {
+    check_endpoint(base_url, policy).map_err(ProbeFailure::refused)?;
+    let url = format!("{}/models", base_url.trim().trim_end_matches('/'));
+
+    // The redirect policy is where the guard earns its keep. `reqwest` resolves
+    // and connects on our behalf, so the only place a redirect target can be
+    // inspected is here, before the next request goes out.
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= PROBE_MAX_REDIRECTS {
+            return attempt.stop();
+        }
+        match check_endpoint(attempt.url().as_str(), policy) {
+            Ok(()) => attempt.follow(),
+            // `stop` rather than `error`: the caller then sees the redirect's
+            // own status, which classifies as an endpoint problem — which is
+            // what it is. Either way the request is never sent.
+            Err(_) => attempt.stop(),
+        }
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(PROBE_TIMEOUT)
+        .redirect(redirect_policy)
+        .build()
+        .map_err(|e| ProbeFailure::from_raw(format!("could not build the probe client: {e}")))?;
+
+    let mut request = client.get(&url);
+    request = match auth {
+        catalogue::AuthStyle::None => request,
+        catalogue::AuthStyle::Bearer => match credential.filter(|c| !c.trim().is_empty()) {
+            Some(key) => request.bearer_auth(key),
+            None => request,
+        },
+        // The one non-bearer entry in the whole catalogue. A probe that assumed
+        // one auth style would fail exactly one provider — the one people try
+        // first — and would classify the result as `auth`, deleting a perfectly
+        // good key.
+        catalogue::AuthStyle::Anthropic => match credential.filter(|c| !c.trim().is_empty()) {
+            Some(key) => request
+                .header("x-api-key", key)
+                .header("anthropic-version", catalogue::ANTHROPIC_VERSION),
+            None => request,
+        },
+    };
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| ProbeFailure::from_raw(describe_transport(&e)))?;
+    let status = response.status();
+    let body = read_capped(response).await;
+    if !status.is_success() {
+        // The body is included in the string the classifier reads, and only
+        // there: vendors put "invalid api key" and "model not found" in the
+        // body rather than the reason phrase, so classifying on the status
+        // alone would read every one of them as `unknown`.
+        return Err(ProbeFailure::from_raw(format!(
+            "{} {}: {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("error"),
+            body.trim()
+        )));
+    }
+    Ok(parse_model_ids(&body))
+}
+
+/// The text a transport failure classifies on.
+///
+/// `reqwest`'s own `Display` says "error sending request for url (...)" and
+/// buries the cause, so a DNS failure and a timeout read identically. Naming the
+/// two conditions it exposes directly is what lets [`classify`] tell an
+/// unreachable endpoint from a slow one.
+fn describe_transport(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        return format!("timeout: {error}");
+    }
+    if error.is_connect() {
+        return format!("connection refused or not found: {error}");
+    }
+    error.to_string()
+}
+
+/// Reads at most [`PROBE_BODY_CAP`] bytes, discarding the rest.
+///
+/// Chunk by chunk rather than `text()`, because `text()` trusts the endpoint to
+/// stop sending. A `Content-Length` header is not a promise either — it is
+/// whatever the far side wrote.
+async fn read_capped(mut response: reqwest::Response) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < PROBE_BODY_CAP {
+        match response.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            // A body that stops mid-stream is still worth classifying on what
+            // did arrive — the status code is usually the whole signal anyway.
+            Ok(None) | Err(_) => break,
+        }
+    }
+    buf.truncate(PROBE_BODY_CAP);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// The model ids in an OpenAI-compatible `{ "data": [{ "id": ... }] }` body.
+///
+/// Deliberately forgiving: a probe asks *did this endpoint answer as a model
+/// catalog*, and a body it cannot parse is a successful connection to something
+/// that is not one. That is still a reachable endpoint, so it is not a failure —
+/// the model field simply has nothing to offer, which the console already
+/// handles for every endpoint that publishes no catalog.
+fn parse_model_ids(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let entries = value
+        .get("data")
+        .and_then(|d| d.as_array())
+        .or_else(|| value.as_array());
+    entries
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .map(|id| id.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +888,62 @@ mod tests {
         assert_eq!(
             check_endpoint("https://localhost.acme.test/v1", SERVER_SIDE),
             Ok(())
+        );
+    }
+
+    // ---- the IO half's pure helpers ----------------------------------------
+
+    #[test]
+    fn the_loopback_allowance_is_tied_to_the_local_runtime_category() {
+        // Not a free-standing `true`. If the catalogue ever stops offering a
+        // local runtime, the reason for the allowance is gone and so is the
+        // allowance — one place to change rather than five call sites.
+        assert_eq!(
+            default_policy().allow_loopback,
+            !catalogue::LOCAL_RUNTIMES.is_empty()
+        );
+    }
+
+    #[test]
+    fn a_guard_refusal_keeps_the_credential() {
+        // The SSRF guard answers a question about the address. Treating it as
+        // an auth failure would delete a key over a typo in a URL.
+        let failure = ProbeFailure::refused(EndpointRefusal::LinkLocal);
+        assert_eq!(failure.class, ProbeClass::Endpoint);
+        assert!(!failure.class.destroys_credential());
+    }
+
+    #[test]
+    fn model_ids_are_read_from_the_openai_shape_and_from_a_bare_array() {
+        let wrapped = r#"{"data":[{"id":"gpt-5"},{"id":"gpt-5-mini"}]}"#;
+        assert_eq!(parse_model_ids(wrapped), vec!["gpt-5", "gpt-5-mini"]);
+        let bare = r#"[{"id":"llama3"}]"#;
+        assert_eq!(parse_model_ids(bare), vec!["llama3"]);
+    }
+
+    #[test]
+    fn a_body_that_is_not_a_catalog_is_an_empty_list_rather_than_a_failure() {
+        // A 200 from something that is not a model listing is still a reachable
+        // endpoint. Failing here would refuse every provider that does not
+        // publish an OpenAI-shaped catalog, which the connect flow explicitly
+        // supports adding.
+        assert!(parse_model_ids("not json at all").is_empty());
+        assert!(parse_model_ids(r#"{"models":["a"]}"#).is_empty());
+        assert!(parse_model_ids(r#"{"data":[{"name":"no id here"}]}"#).is_empty());
+    }
+
+    #[test]
+    fn a_transport_failure_says_which_condition_it_was() {
+        // `reqwest`'s own Display buries the cause, so a DNS failure and a
+        // timeout read identically and both classify as `unknown`. These two
+        // strings are what let `classify` tell them apart.
+        assert_eq!(
+            classify("timeout: error sending request"),
+            ProbeClass::Timeout
+        );
+        assert_eq!(
+            classify("connection refused or not found: error sending request"),
+            ProbeClass::Endpoint
         );
     }
 }
