@@ -7,16 +7,25 @@ import {
   getComposioStatus,
   setComposioApiKey,
   setComposioToken,
+  testComposioApiKey,
   type ComposioMutation,
   type ComposioStatus,
 } from "@/api/composio";
 import { ApiError } from "@/api/types";
-import { advisoryMessage, offersSkipVerify } from "@/composio/classify";
+import {
+  advisoryMessage,
+  offersSkipVerify,
+  verdictMessage,
+} from "@/composio/classify";
 import type { ComposioSubmitOutcome } from "@/composio/classify";
 import { ComposioRowList } from "@/composio/ComposioRowList";
 import { ProbeAdvisory } from "@/composio/ProbeAdvisory";
 import { composioForm, composioRows, modeOf } from "@/composio/rows";
-import type { ComposioPending, ComposioRow } from "@/composio/types";
+import type {
+  ComposioPending,
+  ComposioRow,
+  ComposioRowId,
+} from "@/composio/types";
 import { grantStanding } from "@/lib/provider-grid";
 import { classifyLoadFailure } from "@/lib/section-load";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
@@ -97,7 +106,12 @@ interface Props {
  * clear takes effect on the agents' next turn, no restart. Hidden entirely when
  * the feature is not in the build.
  */
-export function ComposioSection({ client, company, canManage, onChanged }: Props) {
+export function ComposioSection({
+  client,
+  company,
+  canManage,
+  onChanged,
+}: Props) {
   const [load, setLoad] = useState<
     "loading" | "ready" | "unavailable" | "unconfigured" | "error"
   >("loading");
@@ -118,6 +132,16 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
   // — every provider connected through the managed route becoming invisible —
   // is not readable off a row.
   const [confirmSwitch, setConfirmSwitch] = useState(false);
+  // The check's verdict, kept apart from `outcome` on purpose. A check writes
+  // nothing, so it must not reach `offersSkipVerify` — "add anyway" answers a
+  // refused *write*, and offering it after a failed check would propose storing
+  // a key that is already stored.
+  const [testOutcome, setTestOutcome] = useState<ComposioSubmitOutcome | null>(
+    null,
+  );
+  // Which row's check is in flight. Not folded into `busy`: `busy` disables the
+  // controls that write, and a check changes nothing.
+  const [testingRow, setTestingRow] = useState<ComposioRowId | null>(null);
 
   const requestGeneration = useRef(0);
   // Focus in and back out of the inline confirmation. It is `role="alertdialog"`
@@ -241,9 +265,53 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     );
   }
 
+  /**
+   * Check the credential stored for `row`, in place.
+   *
+   * Writes nothing, on any path — the host does not either, and this is the
+   * console half of the same rule: the page is not refreshed, no status is
+   * replaced, and a rejected key is left exactly where it is. `auth` is the one
+   * class shown as an error, because it is the one class that is a statement
+   * about the key; the rest are amber, since the key is plausibly fine and only
+   * the connection is in question.
+   */
+  async function runTest(row: ComposioRow) {
+    setTestingRow(row.id);
+    setTestOutcome(null);
+    try {
+      const verdict = await testComposioApiKey(client, company);
+      if (verdict.ok) {
+        toast.success(
+          `Composio accepted the ${row.keyNoun} stored for ${row.label}.`,
+        );
+        return;
+      }
+      const message = verdictMessage(verdict.probeClass, verdict.message);
+      setTestOutcome(
+        verdict.probeClass === "auth"
+          ? { kind: "rejected", message }
+          : { kind: "advisory", probeClass: verdict.probeClass, message },
+      );
+    } catch (err) {
+      setTestOutcome({
+        kind: "rejected",
+        status: err instanceof ApiError ? err.status : undefined,
+        message:
+          err instanceof ApiError
+            ? err.message
+            : "Could not check the Composio API key.",
+      });
+    } finally {
+      setTestingRow(null);
+    }
+  }
+
   /** Clear the Composio token stored for the managed route, falling back to whatever remains. */
   function clearManagedToken() {
-    void run(() => setComposioToken(client, company, ""), "Could not clear the Composio token.");
+    void run(
+      () => setComposioToken(client, company, ""),
+      "Could not clear the Composio token.",
+    );
   }
 
   /**
@@ -262,7 +330,10 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
         "Could not save the Composio API key.",
       );
     } else {
-      void run(() => setComposioToken(client, company, value), "Could not save the token.");
+      void run(
+        () => setComposioToken(client, company, value),
+        "Could not save the token.",
+      );
     }
   }
 
@@ -277,9 +348,14 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
    * strands anything the operator cannot immediately undo.
    */
   function requestSubmit() {
-    if (form?.credential === "composio-api-key" && persistedMode === "managed") {
+    if (
+      form?.credential === "composio-api-key" &&
+      persistedMode === "managed"
+    ) {
       confirmOpenerRef.current =
-        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
       setConfirmSwitch(true);
       return;
     }
@@ -363,6 +439,8 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                 onRemoveKey={(row) => {
                   if (row.id === "managed") clearManagedToken();
                 }}
+                onTest={(row) => void runTest(row)}
+                testingRow={testingRow}
               />
             </CardContent>
           </Card>
@@ -371,7 +449,8 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
               says it: a credential that has landed and a credential that is in
               effect look identical, and here they differ by one turn. */}
           <p className="text-xs text-muted-foreground">
-            A change here takes effect on the agents&apos; next turn. No restart.
+            A change here takes effect on the agents&apos; next turn. No
+            restart.
           </p>
 
           {/* Rendered outside the form as well, because an advisory outlives it:
@@ -387,6 +466,21 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
             />
           )}
 
+          {/* The check's verdict, with its own test-id namespace: it and a
+              write's outcome are separate state and can be on screen together.
+              Never offers "add anyway" — that answers a refused write, and this
+              route wrote nothing to refuse. */}
+          {testOutcome && (
+            <ProbeAdvisory
+              outcome={testOutcome}
+              skipOffered={false}
+              busy={testingRow !== null}
+              onSkip={() => {}}
+              onDismiss={() => setTestOutcome(null)}
+              testIdPrefix="composio-test"
+            />
+          )}
+
           {form && canManage && (
             <Card>
               <CardContent className="space-y-4">
@@ -396,14 +490,22 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     className="text-xs"
                     data-testid="composio-form-label"
                   >
-                    {form.row === "byok" ? "Composio API key" : "Composio token"}
-                    {form.rotating ? " — stored; paste a new value to rotate" : ""}
+                    {form.row === "byok"
+                      ? "Composio API key"
+                      : "Composio token"}
+                    {form.rotating
+                      ? " — stored; paste a new value to rotate"
+                      : ""}
                   </Label>
                   <Input
                     id={form.credential}
                     type="password"
                     autoComplete="off"
-                    placeholder={form.row === "byok" ? "ak_…" : "paste the company's Composio token"}
+                    placeholder={
+                      form.row === "byok"
+                        ? "ak_…"
+                        : "paste the company's Composio token"
+                    }
                     value={secret}
                     onChange={(e) => setSecret(e.target.value)}
                   />
@@ -432,9 +534,10 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       Providers connected before this stay where they are
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      They live in the Composio account this company reached before, not in this
-                      one, so the grid will look empty until you connect them again here. Choosing
-                      OpenHuman-managed again puts this company back where it is now.
+                      They live in the Composio account this company reached
+                      before, not in this one, so the grid will look empty until
+                      you connect them again here. Choosing OpenHuman-managed
+                      again puts this company back where it is now.
                     </p>
                     <div className="flex flex-wrap gap-2">
                       <Button
@@ -444,7 +547,11 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                         data-testid="composio-confirm-switch"
                         onClick={() => submit()}
                       >
-                        {busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+                        {busy ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Save className="size-4" />
+                        )}
                         Use this company&apos;s account
                       </Button>
                       <Button
@@ -464,8 +571,14 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       data-testid="composio-form-save"
                       onClick={requestSubmit}
                     >
-                      {busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                      {form.rotating ? `Rotate ${form.keyNoun}` : `Save ${form.keyNoun}`}
+                      {busy ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Save className="size-4" />
+                      )}
+                      {form.rotating
+                        ? `Rotate ${form.keyNoun}`
+                        : `Save ${form.keyNoun}`}
                     </Button>
                     <Button
                       variant="outline"

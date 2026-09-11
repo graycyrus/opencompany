@@ -34,7 +34,9 @@ export const ACTIVE_BADGE = "Active";
  * kept it and its test reached it through an import of a `.tsx`, which is the
  * shape this whole module exists to stop.
  */
-export function modeOf(status: ComposioStatus | null | undefined): ComposioMode {
+export function modeOf(
+  status: ComposioStatus | null | undefined,
+): ComposioMode {
   const mode = status?.mode;
   return mode === "managed" || mode === "byok" ? mode : "managed";
 }
@@ -69,7 +71,9 @@ export function managedSourceOf(
  * that is the decision an operator is on this page to make — a row that says
  * only "connected" hides that the move has not happened.
  */
-export function managedSubline(source: ComposioCredentialSource | undefined): string {
+export function managedSubline(
+  source: ComposioCredentialSource | undefined,
+): string {
   switch (source) {
     case "static":
       return "Using the Composio token saved for this company";
@@ -122,14 +126,8 @@ export function endpointHost(url: string | undefined): string {
  *
  * # What is deliberately not offered
  *
- * Two controls in {@link ComposioRowControls} are permanently `false` today,
- * and each names a host capability that does not exist rather than a decision
- * anybody is free to reverse:
- *
- * - **`test` on either row.** The host exposes no Composio probe route; the
- *   check happens inside `PUT …/composio/api-key` and nowhere else. A Test
- *   button would have nothing to call.
- * - **`removeKey` on the own-account row.** Clearing a BYOK key is not "the key
+ * - **`removeKey` on the own-account row** is permanently `false`, and it names
+ *   a shape of the host rather than a decision anybody is free to reverse. Clearing a BYOK key is not "the key
  *   goes away": the host derives the route from whether a key exists, so
  *   `setComposioApiKey("")` writes the mode back to `managed` as a side effect.
  *   That is the same call the managed row's `Use this` makes, and rendering one
@@ -138,7 +136,9 @@ export function endpointHost(url: string | undefined): string {
  *   stored for that route falls back to the company key or the instance
  *   identity and leaves the route where it was.
  */
-export function composioRows(status: ComposioStatus | null | undefined): ComposioRow[] {
+export function composioRows(
+  status: ComposioStatus | null | undefined,
+): ComposioRow[] {
   const mode = modeOf(status);
   const managedSource = managedSourceOf(status);
   const onManaged = mode === "managed";
@@ -174,6 +174,13 @@ export function composioRows(status: ComposioStatus | null | undefined): Composi
       addKey: onManaged && !managedTokenStored,
       replaceKey: onManaged && managedTokenStored,
       removeKey: onManaged && managedTokenStored,
+      // Not offered on this row, and not for want of a button. The host's
+      // check (`POST …/composio/api-key/test`) probes the **BYOK key** against
+      // Composio; the managed route's credential is a bearer the TinyHumans
+      // backend recognises, and there is no cheap call that tells a bad bearer
+      // apart from a backend that is down. A Test here would report an outage
+      // as a rejected credential, which is the exact misclassification the
+      // whole probe design exists to avoid.
       test: false,
     },
   };
@@ -199,7 +206,11 @@ export function composioRows(status: ComposioStatus | null | undefined): Composi
       addKey: !onManaged && !byokKeyStored,
       replaceKey: !onManaged && byokKeyStored,
       removeKey: false,
-      test: false,
+      // Offered exactly when there is a stored key to check. On the managed
+      // route, or on this one with a blank slot, the host answers `409
+      // not_configured` — a permanent state, so the honest rendering is no
+      // control rather than one that can only fail.
+      test: !onManaged && byokKeyStored,
     },
   };
 

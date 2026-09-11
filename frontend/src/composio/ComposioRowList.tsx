@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Check, KeyRound, ShieldCheck, Trash2 } from "lucide-react";
+import { Check, KeyRound, PlugZap, ShieldCheck, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -56,6 +56,8 @@ export function ComposioRowList({
   onAddKey,
   onReplaceKey,
   onRemoveKey,
+  onTest,
+  testingRow,
 }: {
   rows: readonly ComposioRow[];
   /**
@@ -73,6 +75,17 @@ export function ComposioRowList({
   onAddKey: (row: ComposioRow) => void;
   onReplaceKey: (row: ComposioRow) => void;
   onRemoveKey: (row: ComposioRow) => void;
+  /** Check this row's stored credential in place. Writes nothing. */
+  onTest: (row: ComposioRow) => void;
+  /**
+   * The row whose check is in flight, or `null`.
+   *
+   * Per-row rather than folded into `busy`, because a check is the one action
+   * here that changes nothing: disabling the whole card for it would tell the
+   * operator a write is happening. Only the button that was pressed reports
+   * itself.
+   */
+  testingRow: ComposioRowId | null;
 }) {
   const radios = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -95,8 +108,12 @@ export function ComposioRowList({
    */
   function handleKeyDown(event: React.KeyboardEvent<HTMLUListElement>) {
     if (busy || !canManage) return;
-    if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(event.key)) return;
-    const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
+    if (
+      !["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(event.key)
+    )
+      return;
+    const step =
+      event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
     const focused = radios.current.indexOf(event.target as HTMLButtonElement);
     if (focused === -1) return;
     event.preventDefault();
@@ -131,7 +148,9 @@ export function ComposioRowList({
               <span
                 className={cn(
                   "truncate text-xs",
-                  row.tone === "warning" ? "text-status-blocked-text" : "text-muted-foreground",
+                  row.tone === "warning"
+                    ? "text-status-blocked-text"
+                    : "text-muted-foreground",
                 )}
                 data-testid={`composio-row-${row.id}-subline`}
               >
@@ -170,13 +189,23 @@ export function ComposioRowList({
 
             {canManage && (
               <span className="flex shrink-0 flex-wrap items-center gap-2">
-                {/* No Test control, deliberately. `ComposioRowControls.test`
-                    is permanently false — the host exposes no Composio probe
-                    route, and the only check that exists runs inside
-                    `PUT …/composio/api-key`. A button here could only fail to
-                    call anything. The field survives on the view model so the
-                    decision is pinned by a test rather than rediscovered; this
-                    is where its renderer goes if the route ever lands. */}
+                {/* Test comes first: it is the only control here that changes
+                    nothing, so it sits before the two that do and well away
+                    from Remove. `row.controls.test` is the decision — it is
+                    false wherever the host would answer "nothing to check", so
+                    this is never a button that can only fail. */}
+                {row.controls.test && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy || testingRow !== null}
+                    data-testid={`composio-row-${row.id}-test`}
+                    onClick={() => onTest(row)}
+                  >
+                    <PlugZap className="size-3.5" />
+                    {testingRow === row.id ? "Testing…" : "Test"}
+                  </Button>
+                )}
                 {row.controls.addKey && (
                   <Button
                     variant="outline"

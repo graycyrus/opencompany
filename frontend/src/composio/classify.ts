@@ -34,7 +34,9 @@ export function storesKey(probeClass: ComposioProbeClass): boolean {
 }
 
 /** The tone a class is rendered in. Follows {@link storesKey} exactly. */
-export function probeTone(probeClass: ComposioProbeClass): ComposioAdvisoryTone {
+export function probeTone(
+  probeClass: ComposioProbeClass,
+): ComposioAdvisoryTone {
   return storesKey(probeClass) ? "warning" : "error";
 }
 
@@ -65,6 +67,54 @@ export function probeCopy(probeClass: ComposioProbeClass): string {
     case "unknown":
       return "Saved, but the check did not complete.";
   }
+}
+
+/**
+ * The console's sentence for a probe class on a route that **stored nothing**.
+ *
+ * A second table rather than a reuse of {@link probeCopy}, and the reason is a
+ * filed defect on the sibling LLM surface: its manual Test reuses the add-path
+ * advisory copy, so five of its six classes open with "Saved" — a statement
+ * about an event that did not happen. `POST …/composio/api-key/test` writes
+ * nothing on any path, including `auth`, so none of these may claim a save.
+ *
+ * Only a fallback in practice — that route sends its own verdict copy, and
+ * {@link verdictMessage} prefers it. This is what an older host, or a host that
+ * classified without explaining, degrades to.
+ *
+ * Same class vocabulary as {@link probeCopy}; only the framing differs. A class
+ * added to `ComposioProbeClass` needs a row in both, and the unit tests assert
+ * that no sentence here says "Saved" and that the two tables never converge.
+ */
+export function verdictCopy(probeClass: ComposioProbeClass): string {
+  switch (probeClass) {
+    case "auth":
+      return "Composio rejected this key. Check it at app.composio.dev.";
+    case "endpoint":
+      return "Nothing answered at Composio.";
+    case "quota":
+      return "The Composio account is out of credit, or is being rate-limited.";
+    case "timeout":
+      return "Composio did not answer in time.";
+    case "unknown":
+      return "The check did not complete.";
+  }
+}
+
+/**
+ * The sentence to show for a **check** — {@link verdictCopy}'s analogue of
+ * {@link advisoryMessage}, and it applies the same rule for the same reason:
+ * prefer the host's own sentence, except for `unknown`, whose text is by
+ * definition the upstream string nobody classified.
+ */
+export function verdictMessage(
+  probeClass: ComposioProbeClass | undefined,
+  message: string | undefined,
+): string {
+  const cls = probeClass ?? "unknown";
+  if (cls === "unknown") return verdictCopy("unknown");
+  const own = message?.trim();
+  return own && own.length > 0 ? own : verdictCopy(cls);
 }
 
 /**
@@ -132,7 +182,9 @@ export type ComposioSubmitOutcome =
  * attempt that fails for an unrelated reason does not still offer to skip a
  * check.
  */
-export function offersSkipVerify(outcome: ComposioSubmitOutcome | null): boolean {
+export function offersSkipVerify(
+  outcome: ComposioSubmitOutcome | null,
+): boolean {
   if (outcome?.kind !== "rejected") return false;
   return outcome.status !== 401 && outcome.status !== 403;
 }

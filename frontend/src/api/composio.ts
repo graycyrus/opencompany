@@ -27,7 +27,8 @@ import type { OpenCompanyClient, RequestOptions } from "./client";
  * - `static` — a Composio token this company pasted, or a static instance key.
  * - `none` — no credential can be obtained, so agents get no Composio tools.
  */
-export type ComposioCredentialSource = "attested" | "company" | "static" | "none";
+export type ComposioCredentialSource =
+  "attested" | "company" | "static" | "none";
 
 /**
  * Which host this company's Composio calls go to.
@@ -184,7 +185,8 @@ export interface ComposioStatus {
  * rate limit and a slow upstream all fail a probe while the key is perfectly
  * good — and the naive roll-back-on-any-failure flow destroys valid credentials.
  */
-export type ComposioProbeClass = "auth" | "endpoint" | "quota" | "timeout" | "unknown";
+export type ComposioProbeClass =
+  "auth" | "endpoint" | "quota" | "timeout" | "unknown";
 
 /** A mutating response: the resulting status plus a plain-language note. */
 export interface ComposioMutation {
@@ -200,6 +202,30 @@ export interface ComposioMutation {
   advisory?: string;
   /** Which class of failure {@link advisory} is about. Absent when there was none. */
   probeClass?: ComposioProbeClass;
+}
+
+/**
+ * The `POST …/composio/api-key/test` verdict — the stored key, checked in place.
+ *
+ * A different shape from {@link ComposioMutation} on purpose, because it is a
+ * different act. That one reports on a write that happened and hangs an
+ * advisory off it; this one writes nothing at all, on any path — **including
+ * `auth`**. A Test that cleared a rejected key would be the worst control on
+ * the page: the operator pressed the one thing that promised to be safe.
+ *
+ * `probeClass` and `message` are **omitted** rather than nulled when `ok` is
+ * true, matching every other optional field the host sends. The copy comes from
+ * the host rather than from `composio/classify.ts`: the advisory copy there is
+ * framed for a write that landed ("Saved, but …") and saying that about a check
+ * which stored nothing is a statement about an event that did not happen.
+ */
+export interface ComposioApiKeyTest {
+  /** Whether Composio answered the check. */
+  ok: boolean;
+  /** Why it did not, when it did not. Absent when `ok`. */
+  probeClass?: ComposioProbeClass;
+  /** The host's verdict sentence for {@link probeClass}. Absent when `ok`. */
+  message?: string;
 }
 
 /** The `POST …/composio/authorize` response: the hosted connect URL to open. */
@@ -318,7 +344,10 @@ export function getComposioStatus(
   company: string | null,
   options?: RequestOptions,
 ): Promise<ComposioStatus> {
-  return client.get<ComposioStatus>(`${client.scopeFor(company)}/composio`, options);
+  return client.get<ComposioStatus>(
+    `${client.scopeFor(company)}/composio`,
+    options,
+  );
 }
 
 /**
@@ -331,7 +360,10 @@ export function setComposioToken(
   company: string | null,
   token: string,
 ): Promise<ComposioMutation> {
-  return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/token`, { token });
+  return client.put<ComposioMutation>(
+    `${client.scopeFor(company)}/composio/token`,
+    { token },
+  );
 }
 
 /**
@@ -368,10 +400,41 @@ export function setComposioApiKey(
    */
   skipVerify = false,
 ): Promise<ComposioMutation> {
-  return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/api-key`, {
-    apiKey,
-    skipVerify,
-  });
+  return client.put<ComposioMutation>(
+    `${client.scopeFor(company)}/composio/api-key`,
+    {
+      apiKey,
+      skipVerify,
+    },
+  );
+}
+
+/**
+ * Check the Composio API key this company already has stored, and report the
+ * verdict. Changes nothing.
+ *
+ * **No arguments beyond the scope.** The key is read from the company's own
+ * store and the endpoint is a compile-time constant on the host, so there is
+ * nothing here that could point a credential at a caller-chosen address. A
+ * *draft* key is checked by {@link setComposioApiKey}, which has to be handed
+ * one anyway.
+ *
+ * Admin-only: it spends the company's credential against a third party, and the
+ * answer is about the company's standing with a vendor. A member gets a 403.
+ *
+ * Answers `409 not_configured` when there is nothing to check — the company is
+ * on the managed route, or it is on BYOK with a blank slot. That is a permanent
+ * state rather than a failed check, which is why the rows hide the control
+ * instead of offering one that can only fail.
+ */
+export function testComposioApiKey(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<ComposioApiKeyTest> {
+  return client.post<ComposioApiKeyTest>(
+    `${client.scopeFor(company)}/composio/api-key/test`,
+    {},
+  );
 }
 
 /**
@@ -386,9 +449,12 @@ export function startComposioAuthorize(
   company: string | null,
   toolkit: string,
 ): Promise<ComposioAuthorize> {
-  return client.post<ComposioAuthorize>(`${client.scopeFor(company)}/composio/authorize`, {
-    toolkit,
-  });
+  return client.post<ComposioAuthorize>(
+    `${client.scopeFor(company)}/composio/authorize`,
+    {
+      toolkit,
+    },
+  );
 }
 
 /**
@@ -401,7 +467,9 @@ export function listComposioConnections(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<ComposioConnection[]> {
-  return client.get<ComposioConnection[]>(`${client.scopeFor(company)}/composio/connections`);
+  return client.get<ComposioConnection[]>(
+    `${client.scopeFor(company)}/composio/connections`,
+  );
 }
 
 /** What the host says it revoked, in its own words. */

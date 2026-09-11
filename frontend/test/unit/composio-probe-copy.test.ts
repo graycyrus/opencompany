@@ -7,6 +7,8 @@ import {
   probeCopy,
   probeTone,
   storesKey,
+  verdictCopy,
+  verdictMessage,
 } from "@/composio/classify";
 
 /**
@@ -19,7 +21,13 @@ import {
  * forbidden from echoing anything the host sent.
  */
 
-const CLASSES: ComposioProbeClass[] = ["auth", "endpoint", "quota", "timeout", "unknown"];
+const CLASSES: ComposioProbeClass[] = [
+  "auth",
+  "endpoint",
+  "quota",
+  "timeout",
+  "unknown",
+];
 
 /**
  * A plausible upstream body, with the two things that make this dangerous: a
@@ -82,9 +90,9 @@ describe("storesKey / probeTone", () => {
 
 describe("advisoryMessage", () => {
   it("prefers the host's own sentence, which knows what the console does not", () => {
-    expect(advisoryMessage("quota", "Composio says this account is out of credit.")).toBe(
-      "Composio says this account is out of credit.",
-    );
+    expect(
+      advisoryMessage("quota", "Composio says this account is out of credit."),
+    ).toBe("Composio says this account is out of credit.");
   });
 
   it("falls back to the console's copy when the host sent none", () => {
@@ -122,7 +130,13 @@ describe("offersSkipVerify", () => {
   it("does not offer to add a key that was already added", () => {
     // An advisory means the write landed. A button offering to add it again
     // would invite a second write of a credential that is already stored.
-    expect(offersSkipVerify({ kind: "advisory", probeClass: "timeout", message: "x" })).toBe(false);
+    expect(
+      offersSkipVerify({
+        kind: "advisory",
+        probeClass: "timeout",
+        message: "x",
+      }),
+    ).toBe(false);
     expect(offersSkipVerify({ kind: "advisory", message: "x" })).toBe(false);
   });
 
@@ -130,8 +144,12 @@ describe("offersSkipVerify", () => {
     // Including an `auth` class: a Composio account behind a proxy that
     // rewrites 401s is exactly the operator who cannot otherwise get past a
     // check that is wrong about them.
-    expect(offersSkipVerify({ kind: "rejected", status: 400, message: "x" })).toBe(true);
-    expect(offersSkipVerify({ kind: "rejected", status: 422, message: "x" })).toBe(true);
+    expect(
+      offersSkipVerify({ kind: "rejected", status: 400, message: "x" }),
+    ).toBe(true);
+    expect(
+      offersSkipVerify({ kind: "rejected", status: 422, message: "x" }),
+    ).toBe(true);
     // A transport failure with no status: still worth a retry without the probe.
     expect(offersSkipVerify({ kind: "rejected", message: "x" })).toBe(true);
   });
@@ -139,7 +157,71 @@ describe("offersSkipVerify", () => {
   it("never offers it after a permission refusal", () => {
     // The viewer may not write this credential at all, and skipping the check
     // would only turn one refusal into two.
-    expect(offersSkipVerify({ kind: "rejected", status: 401, message: "x" })).toBe(false);
-    expect(offersSkipVerify({ kind: "rejected", status: 403, message: "x" })).toBe(false);
+    expect(
+      offersSkipVerify({ kind: "rejected", status: 401, message: "x" }),
+    ).toBe(false);
+    expect(
+      offersSkipVerify({ kind: "rejected", status: 403, message: "x" }),
+    ).toBe(false);
+  });
+});
+
+/**
+ * The check's copy — a separate table from the add path's, because a route that
+ * stores nothing must not say it saved.
+ *
+ * This is a filed defect one surface over (the LLM page's manual Test reuses
+ * its add-path advisory copy, so five of six classes open with "Saved" about an
+ * event that did not happen). These assertions are what stop someone
+ * "deduplicating" the two tables here and reintroducing it.
+ */
+describe("verdictCopy", () => {
+  const CLASSES: ComposioProbeClass[] = [
+    "auth",
+    "endpoint",
+    "quota",
+    "timeout",
+    "unknown",
+  ];
+
+  it("never claims anything was saved", () => {
+    for (const cls of CLASSES) {
+      expect(verdictCopy(cls), cls).not.toMatch(/saved/i);
+    }
+  });
+
+  it("says something different from the add path for every class", () => {
+    for (const cls of CLASSES) {
+      expect(verdictCopy(cls), cls).not.toBe(probeCopy(cls));
+      expect(verdictCopy(cls).trim().length, cls).toBeGreaterThan(0);
+    }
+  });
+
+  it("gives every class its own sentence", () => {
+    expect(new Set(CLASSES.map(verdictCopy)).size).toBe(CLASSES.length);
+  });
+});
+
+describe("verdictMessage", () => {
+  it("prefers the host's own sentence", () => {
+    expect(verdictMessage("auth", "Composio rejected this key.")).toBe(
+      "Composio rejected this key.",
+    );
+  });
+
+  it("falls back to the console's copy when the host said nothing", () => {
+    expect(verdictMessage("timeout", undefined)).toBe(verdictCopy("timeout"));
+    expect(verdictMessage("timeout", "   ")).toBe(verdictCopy("timeout"));
+  });
+
+  it("never prints the host's text for an unclassified failure", () => {
+    // `unknown` is by definition the upstream string nobody classified, and it
+    // can echo request headers or a fragment of the key.
+    expect(
+      verdictMessage("unknown", "x-api-key: ak_not_a_real_key_0123456789"),
+    ).toBe(verdictCopy("unknown"));
+    expect(
+      verdictMessage(undefined, "x-api-key: ak_not_a_real_key_0123456789"),
+    ).toBe(verdictCopy("unknown"));
   });
 });

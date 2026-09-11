@@ -40,11 +40,19 @@ function status(over: Partial<ComposioStatus> = {}): ComposioStatus {
   };
 }
 
-const row = (rows: ComposioRow[], id: ComposioRowId) => rows.find((r) => r.id === id)!;
-const managedOf = (over: Partial<ComposioStatus> = {}) => row(composioRows(status(over)), "managed");
-const byokOf = (over: Partial<ComposioStatus> = {}) => row(composioRows(status(over)), "byok");
+const row = (rows: ComposioRow[], id: ComposioRowId) =>
+  rows.find((r) => r.id === id)!;
+const managedOf = (over: Partial<ComposioStatus> = {}) =>
+  row(composioRows(status(over)), "managed");
+const byokOf = (over: Partial<ComposioStatus> = {}) =>
+  row(composioRows(status(over)), "byok");
 
-const SOURCES: ComposioCredentialSource[] = ["attested", "company", "static", "none"];
+const SOURCES: ComposioCredentialSource[] = [
+  "attested",
+  "company",
+  "static",
+  "none",
+];
 
 describe("modeOf", () => {
   it("reads a host that never heard of BYOK as managed", () => {
@@ -65,16 +73,24 @@ describe("modeOf", () => {
 describe("managedSourceOf", () => {
   it("prefers the host's own answer about the managed chain", () => {
     expect(
-      managedSourceOf(status({ mode: "byok", credentialSource: "static", managedCredentialSource: "company" })),
+      managedSourceOf(
+        status({
+          mode: "byok",
+          credentialSource: "static",
+          managedCredentialSource: "company",
+        }),
+      ),
     ).toBe("company");
   });
 
   it("falls back to credentialSource only where the two are defined to agree", () => {
     // Under `managed` the host defines them equal, so an older wire's
     // `credentialSource` is a correct stand-in.
-    expect(managedSourceOf(status({ mode: "managed", credentialSource: "attested" }))).toBe(
-      "attested",
-    );
+    expect(
+      managedSourceOf(
+        status({ mode: "managed", credentialSource: "attested" }),
+      ),
+    ).toBe("attested");
   });
 
   it("says nothing about the managed chain when a BYOK host predates the field", () => {
@@ -96,10 +112,18 @@ describe("managedSubline", () => {
    * below is a tier, and each says which account pays.
    */
   it("names the tier the managed chain resolves at", () => {
-    expect(managedSubline("static")).toBe("Using the Composio token saved for this company");
-    expect(managedSubline("company")).toBe("Billed to this company's TinyHumans account");
-    expect(managedSubline("attested")).toBe("Billed to whoever runs this server");
-    expect(managedSubline("none")).toBe("No credential resolves — agents cannot connect apps");
+    expect(managedSubline("static")).toBe(
+      "Using the Composio token saved for this company",
+    );
+    expect(managedSubline("company")).toBe(
+      "Billed to this company's TinyHumans account",
+    );
+    expect(managedSubline("attested")).toBe(
+      "Billed to whoever runs this server",
+    );
+    expect(managedSubline("none")).toBe(
+      "No credential resolves — agents cannot connect apps",
+    );
   });
 
   it("keeps company and attested apart", () => {
@@ -119,7 +143,9 @@ describe("managedSubline", () => {
 
 describe("endpointHost", () => {
   it("reduces a URL to the host an operator can check", () => {
-    expect(endpointHost("https://backend.composio.dev/api/v3")).toBe("backend.composio.dev");
+    expect(endpointHost("https://backend.composio.dev/api/v3")).toBe(
+      "backend.composio.dev",
+    );
   });
 
   it("hands back anything it cannot parse rather than swallowing it", () => {
@@ -152,7 +178,9 @@ describe("composioRows — the shape of the card", () => {
     for (const mode of ["managed", "byok", undefined] as const) {
       for (const source of SOURCES) {
         for (const managedCredentialSource of [...SOURCES, undefined]) {
-          const rows = composioRows(status({ mode, credentialSource: source, managedCredentialSource }));
+          const rows = composioRows(
+            status({ mode, credentialSource: source, managedCredentialSource }),
+          );
           expect(rows.filter((r) => r.active)).toHaveLength(1);
         }
       }
@@ -160,7 +188,9 @@ describe("composioRows — the shape of the card", () => {
   });
 
   it("badges the active row and only the active row", () => {
-    const rows = composioRows(status({ mode: "byok", credentialSource: "static" }));
+    const rows = composioRows(
+      status({ mode: "byok", credentialSource: "static" }),
+    );
     expect(row(rows, "byok").badge).toBe(ACTIVE_BADGE);
     expect(row(rows, "managed").badge).toBeNull();
   });
@@ -189,7 +219,9 @@ describe("composioRows — the managed row", () => {
       managedCredentialSource: "none",
     });
     expect(managed.controls.select).toBe(false);
-    expect(managed.subline).toBe("No credential resolves — agents cannot connect apps");
+    expect(managed.subline).toBe(
+      "No credential resolves — agents cannot connect apps",
+    );
     expect(managed.tone).toBe("warning");
   });
 
@@ -201,14 +233,21 @@ describe("composioRows — the managed row", () => {
   });
 
   it("offers no Use this on the row the company is already on", () => {
-    expect(managedOf({ mode: "managed", credentialSource: "attested" }).controls.select).toBe(false);
+    expect(
+      managedOf({ mode: "managed", credentialSource: "attested" }).controls
+        .select,
+    ).toBe(false);
   });
 
   it("offers the token controls only where a token can be added or is stored", () => {
     // `static` is the one tier that means a Composio token is stored for this
     // route; the others resolve from an identity there is nothing to remove.
     const stored = managedOf({ mode: "managed", credentialSource: "static" });
-    expect(stored.controls).toMatchObject({ addKey: false, replaceKey: true, removeKey: true });
+    expect(stored.controls).toMatchObject({
+      addKey: false,
+      replaceKey: true,
+      removeKey: true,
+    });
 
     for (const source of ["attested", "company", "none"] as const) {
       const bare = managedOf({ mode: "managed", credentialSource: source });
@@ -226,7 +265,11 @@ describe("composioRows — the managed row", () => {
       credentialSource: "static",
       managedCredentialSource: "static",
     });
-    expect(managed.controls).toMatchObject({ addKey: false, replaceKey: false, removeKey: false });
+    expect(managed.controls).toMatchObject({
+      addKey: false,
+      replaceKey: false,
+      removeKey: false,
+    });
   });
 
   it("calls the managed credential a token", () => {
@@ -243,7 +286,10 @@ describe("composioRows — the #886 trap", () => {
     // whose agents are calling Composio tools successfully through the
     // instance's platform identity. A row driven off "did somebody paste a
     // token" reports it as unconfigured, in the alarm colour.
-    const managed = managedOf({ mode: "managed", credentialSource: "attested" });
+    const managed = managedOf({
+      mode: "managed",
+      credentialSource: "attested",
+    });
 
     expect(managed.active).toBe(true);
     expect(managed.tone).toBe("muted");
@@ -267,7 +313,11 @@ describe("composioRows — the own-account row", () => {
     });
     expect(byok.subline).toBe("•••• configured · backend.composio.dev");
     expect(byok.tone).toBe("muted");
-    expect(byok.controls).toMatchObject({ select: false, addKey: false, replaceKey: true });
+    expect(byok.controls).toMatchObject({
+      select: false,
+      addKey: false,
+      replaceKey: true,
+    });
   });
 
   it("warns when BYOK is selected with no key stored", () => {
@@ -277,7 +327,9 @@ describe("composioRows — the own-account row", () => {
     const byok = byokOf({ mode: "byok", credentialSource: "none" });
     expect(byok.active).toBe(true);
     expect(byok.tone).toBe("warning");
-    expect(byok.subline).toBe("No API key stored — agents get no Composio tools");
+    expect(byok.subline).toBe(
+      "No API key stored — agents get no Composio tools",
+    );
     expect(byok.controls).toMatchObject({ addKey: true, replaceKey: false });
   });
 
@@ -300,24 +352,49 @@ describe("composioRows — the own-account row", () => {
     // comes to believe they are two.
     for (const mode of ["managed", "byok"] as const) {
       for (const source of SOURCES) {
-        expect(byokOf({ mode, credentialSource: source }).controls.removeKey, `${mode}/${source}`).toBe(
-          false,
-        );
+        expect(
+          byokOf({ mode, credentialSource: source }).controls.removeKey,
+          `${mode}/${source}`,
+        ).toBe(false);
       }
     }
   });
 });
 
 describe("composioRows — controls that cannot act are not offered", () => {
-  it("never offers Test on either row", () => {
-    // The host exposes no Composio probe route; the only check that exists runs
-    // inside `PUT …/composio/api-key`. Pinned rather than left to be
-    // rediscovered as a missing button.
+  it("never offers Test on the managed row", () => {
+    // `POST …/composio/api-key/test` probes the BYOK key against Composio. The
+    // managed route's credential is a bearer the TinyHumans backend
+    // recognises, and there is no cheap call that tells a bad bearer apart from
+    // a backend that is down — so a Test here could only report an outage as a
+    // rejected credential, which is the misclassification the whole probe
+    // design exists to avoid. Pinned rather than left to be rediscovered.
     for (const mode of ["managed", "byok"] as const) {
       for (const source of SOURCES) {
-        for (const r of composioRows(status({ mode, credentialSource: source }))) {
-          expect(r.controls.test, `${r.id} ${mode}/${source}`).toBe(false);
+        for (const managedCredentialSource of [...SOURCES, undefined]) {
+          const [managed] = composioRows(
+            status({ mode, credentialSource: source, managedCredentialSource }),
+          );
+          expect(
+            managed?.controls.test,
+            `${mode}/${source}/${managedCredentialSource}`,
+          ).toBe(false);
         }
+      }
+    }
+  });
+
+  it("offers Test on the own-account row exactly where there is a key to check", () => {
+    // The host answers `409 not_configured` when the company is on the managed
+    // route or is on BYOK with a blank slot. Both are permanent states, so the
+    // honest rendering is no control rather than one that can only fail — which
+    // is the same rule every other `false` in this object follows.
+    for (const mode of ["managed", "byok"] as const) {
+      for (const source of SOURCES) {
+        const row = byokOf({ mode, credentialSource: source });
+        expect(row.controls.test, `${mode}/${source}`).toBe(
+          mode === "byok" && source !== "none",
+        );
       }
     }
   });
@@ -326,10 +403,14 @@ describe("composioRows — controls that cannot act are not offered", () => {
     for (const mode of ["managed", "byok"] as const) {
       for (const source of SOURCES) {
         for (const managedCredentialSource of [...SOURCES, undefined]) {
-          for (const r of composioRows(status({ mode, credentialSource: source, managedCredentialSource }))) {
+          for (const r of composioRows(
+            status({ mode, credentialSource: source, managedCredentialSource }),
+          )) {
             if (r.active) continue;
             expect(
-              r.controls.addKey || r.controls.replaceKey || r.controls.removeKey,
+              r.controls.addKey ||
+                r.controls.replaceKey ||
+                r.controls.removeKey,
               `${r.id} ${mode}/${source}/${managedCredentialSource}`,
             ).toBe(false);
           }
@@ -347,7 +428,9 @@ describe("composioForm", () => {
   it("opens the API key field from the own-account row's Use this", () => {
     // That route cannot be chosen without the key that makes it resolve, so its
     // select is a hand-off to this form rather than a write.
-    const rows = composioRows(status({ mode: "managed", credentialSource: "attested" }));
+    const rows = composioRows(
+      status({ mode: "managed", credentialSource: "attested" }),
+    );
     expect(composioForm({ row: "byok", action: "add" }, rows)).toEqual({
       row: "byok",
       credential: "composio-api-key",
@@ -357,7 +440,9 @@ describe("composioForm", () => {
   });
 
   it("opens the token field from the managed row", () => {
-    const rows = composioRows(status({ mode: "managed", credentialSource: "attested" }));
+    const rows = composioRows(
+      status({ mode: "managed", credentialSource: "attested" }),
+    );
     expect(composioForm({ row: "managed", action: "add" }, rows)).toEqual({
       row: "managed",
       credential: "composio-token",
@@ -367,8 +452,12 @@ describe("composioForm", () => {
   });
 
   it("marks a rotation as one", () => {
-    const rows = composioRows(status({ mode: "byok", credentialSource: "static" }));
-    expect(composioForm({ row: "byok", action: "replace" }, rows)?.rotating).toBe(true);
+    const rows = composioRows(
+      status({ mode: "byok", credentialSource: "static" }),
+    );
+    expect(
+      composioForm({ row: "byok", action: "replace" }, rows)?.rotating,
+    ).toBe(true);
   });
 
   it("drops a form the rows no longer permit", () => {
@@ -376,12 +465,18 @@ describe("composioForm", () => {
     // the own-account row", the status moves underneath them — a refresh,
     // another admin — and the field's Save would write a credential for a route
     // the company is no longer on.
-    const moved = composioRows(status({ mode: "managed", credentialSource: "attested" }));
+    const moved = composioRows(
+      status({ mode: "managed", credentialSource: "attested" }),
+    );
     expect(composioForm({ row: "byok", action: "replace" }, moved)).toBeNull();
   });
 
   it("drops a managed replace once the token it would rotate is gone", () => {
-    const cleared = composioRows(status({ mode: "managed", credentialSource: "attested" }));
-    expect(composioForm({ row: "managed", action: "replace" }, cleared)).toBeNull();
+    const cleared = composioRows(
+      status({ mode: "managed", credentialSource: "attested" }),
+    );
+    expect(
+      composioForm({ row: "managed", action: "replace" }, cleared),
+    ).toBeNull();
   });
 });

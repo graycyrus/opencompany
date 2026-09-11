@@ -22,19 +22,28 @@ export function ProbeAdvisory({
   busy,
   onSkip,
   onDismiss,
+  testIdPrefix = "composio-probe",
 }: {
   outcome: ComposioSubmitOutcome;
   skipOffered: boolean;
   busy: boolean;
   onSkip: () => void;
   onDismiss: () => void;
+  /**
+   * Namespace for this banner's test ids.
+   *
+   * A write's outcome and a check's verdict can be on screen at once — they are
+   * separate state, cleared on separate actions — and two banners answering to
+   * one id is a selector that silently picks whichever rendered first.
+   */
+  testIdPrefix?: string;
 }) {
   const error = outcome.kind === "rejected";
   return (
     <div
       role="status"
       aria-live="polite"
-      data-testid={error ? "composio-probe-error" : "composio-probe-advisory"}
+      data-testid={error ? `${testIdPrefix}-error` : `${testIdPrefix}-advisory`}
       className={cn(
         "flex flex-wrap items-start gap-2 rounded-md border p-3 text-xs",
         error
@@ -43,7 +52,10 @@ export function ProbeAdvisory({
       )}
     >
       <AlertTriangle
-        className={cn("mt-0.5 size-3.5 shrink-0", error ? "text-status-failed-text" : "text-status-blocked-text")}
+        className={cn(
+          "mt-0.5 size-3.5 shrink-0",
+          error ? "text-status-failed-text" : "text-status-blocked-text",
+        )}
       />
       <span className="min-w-0 flex-1">
         {/* Never the raw upstream string for an unclassified failure — see
@@ -52,7 +64,13 @@ export function ProbeAdvisory({
         {outcome.message || probeCopy("unknown")}
       </span>
       {skipOffered && (
-        <Button variant="outline" size="sm" disabled={busy} data-testid="composio-skip-verify" onClick={onSkip}>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          data-testid="composio-skip-verify"
+          onClick={onSkip}
+        >
           Add anyway
         </Button>
       )}
@@ -60,7 +78,7 @@ export function ProbeAdvisory({
         variant="ghost"
         size="icon"
         aria-label="Dismiss"
-        data-testid="composio-probe-dismiss"
+        data-testid={`${testIdPrefix}-dismiss`}
         onClick={onDismiss}
       >
         <X className="size-4" />
