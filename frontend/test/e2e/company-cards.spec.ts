@@ -447,6 +447,27 @@ test("#1190 the card carries no switch; the inbox lives on the agent", async ({ 
   await expect(page.getByTestId("agent-inbox-toggle")).toBeVisible({ timeout: 30_000 });
 });
 
+test("#2252 a card opens a direct conversation with that agent", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // The action lives in the overflow the card already had, above Remove.
+  await maya.getByRole("button", { name: "Agent actions" }).click();
+  const message = page.getByRole("menuitem", { name: "Message" });
+  await expect(message).toBeVisible();
+
+  // The address is the DM *channel* id (`dm:maya`), which is what the hash
+  // router resolves — not the bare host thread id. The two are the same string
+  // for an ordinary agent and differ for a teammate whose id spells General, so
+  // `test/unit/team-agent-dm-href.test.ts` pins that half; this pins that the
+  // menu item actually lands in the room.
+  await message.click();
+  await expect.poll(() => page.url()).toContain("#/chat/dm%3Amaya");
+});
+
 test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await mockApi(page);
 
