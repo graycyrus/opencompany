@@ -363,8 +363,10 @@ mod roster_burst_tests {
             registry.insert(CompanyId::new(format!("active-{index}")), burst);
         }
 
-        assert!(
-            roster_burst_for_in(&mut registry, &CompanyId::new("overflow"), now).is_err(),
+        let refused = roster_burst_for_in(&mut registry, &CompanyId::new("overflow"), now).is_err();
+        assert_eq!(
+            usize::from(refused),
+            1,
             "a full registry of active bursts must refuse a new key"
         );
         assert_eq!(
