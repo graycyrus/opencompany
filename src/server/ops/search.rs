@@ -221,6 +221,30 @@ fn invalid(message: impl Into<String>) -> ApiError {
     ))
 }
 
+/// The longest instance address this will store.
+///
+/// An address is an operator-supplied value that becomes a stored secret and is
+/// rendered back on every page load. A sibling surface learned the hard way that
+/// an unbounded operator-supplied string reaching the store is a way to leave a
+/// row that cannot be deleted; a cap costs nothing and closes the class.
+const MAX_ENDPOINT_LEN: usize = 2048;
+
+/// Whether `slug` is safe to build a secret-store key out of.
+///
+/// Credential addresses are `search/provider/<slug>/key`, so a slug carrying a
+/// slash, a control character or an unbounded run of text is a slug that writes
+/// somewhere other than where it claims. Every route that *adds* something
+/// checks catalogue membership, which is stricter; this exists for the routes
+/// that address an existing row, where refusing a slug the catalogue no longer
+/// knows would leave the operator unable to delete it.
+fn slug_is_addressable(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 32
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// The catalogue entry for `slug`, or a refusal naming what this build knows.
 ///
 /// Refused here rather than stored and discovered later: a slug this build
@@ -263,7 +287,22 @@ async fn status_of(runtime: &CompanyRuntime) -> Result<SearchStatus, ApiError> {
         .collect();
 
     let effective = resolve::effective_slug(active).to_string();
-    let (api_key_configured, endpoint, needs_api_key, needs_endpoint) = match active {
+
+    // `provider` is the SELECTION and `effective_provider` is what answers, and
+    // the two must not be collapsed: "I connected Exa and pasted no key" has to
+    // read differently from "I connected nothing". So the selection is the
+    // marked slug when there is one — even when it resolves to nothing — and
+    // only falls back to the active provider for a company that never marked
+    // one.
+    let selected = marked
+        .clone()
+        .filter(|slug| candidates.iter().any(|c| &c.provider.slug == slug))
+        .or_else(|| active_slug.clone());
+    let selected_candidate = selected
+        .as_deref()
+        .and_then(|slug| candidates.iter().find(|c| c.provider.slug == slug));
+
+    let (api_key_configured, endpoint, needs_api_key, needs_endpoint) = match selected_candidate {
         Some(candidate) => (
             candidate.has_key,
             candidate.provider.endpoint.clone(),
@@ -271,26 +310,11 @@ async fn status_of(runtime: &CompanyRuntime) -> Result<SearchStatus, ApiError> {
             provider_requires_endpoint(&candidate.provider.slug)
                 && candidate.provider.endpoint.is_none(),
         ),
-        None => {
-            // Nothing resolves, so report the *first* incomplete provider's gap
-            // if there is one: "connected Exa, pasted no key" has to read
-            // differently from "connected nothing".
-            let stalled = candidates.iter().find(|candidate| !candidate.is_complete());
-            match stalled {
-                Some(candidate) => (
-                    candidate.has_key,
-                    candidate.provider.endpoint.clone(),
-                    provider_requires_key(&candidate.provider.slug) && !candidate.has_key,
-                    provider_requires_endpoint(&candidate.provider.slug)
-                        && candidate.provider.endpoint.is_none(),
-                ),
-                None => (false, None, false, false),
-            }
-        }
+        None => (false, None, false, false),
     };
 
     Ok(SearchStatus {
-        provider: active_slug.unwrap_or_else(|| MANAGED_PROVIDER.to_string()),
+        provider: selected.unwrap_or_else(|| MANAGED_PROVIDER.to_string()),
         effective_provider: effective,
         providers,
         api_key_configured,
@@ -389,6 +413,14 @@ fn validate_draft(
     }
     let endpoint =
         endpoint.ok_or_else(|| invalid(format!("{} needs an instance address", info.label)))?;
+    if endpoint.len() > MAX_ENDPOINT_LEN {
+        return Err(invalid("that instance address is too long"));
+    }
+    if endpoint.chars().any(char::is_control) {
+        return Err(invalid(
+            "that instance address contains a control character",
+        ));
+    }
     // Checked at the door rather than turned into a connection error the
     // operator has to read a log to find.
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
@@ -556,6 +588,12 @@ async fn remove_provider(
 ) -> Result<Json<SearchStatus>, ApiError> {
     let runtime = &company.runtime;
     let slug = slug.trim().to_ascii_lowercase();
+    // Checked rather than looked up: a row whose slug this build no longer has
+    // in its catalogue must still be removable, but a slug that could address
+    // something other than its own credential must not reach the store.
+    if !slug_is_addressable(&slug) {
+        return Err(invalid("that is not a provider slug"));
+    }
     store::delete_provider(runtime.id(), runtime.secrets().as_ref(), &slug).await?;
     Ok(Json(status_of(runtime).await?))
 }
@@ -1174,9 +1212,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_providers_leaves_a_stored_key_alone() {
-        // A patch, not a replace: an operator switching provider must not have
-        // to re-enter a key they can never see again.
+    async fn switching_providers_does_not_hand_one_providers_key_to_another() {
+        // This test used to assert the opposite, and that assertion WAS the bug.
+        //
+        // With one `search/api_key` for the whole company, switching to Querit
+        // without pasting a key left Exa's key in the slot — and every layer
+        // then agreed the company was correctly configured, because a key was
+        // present: `configuration_complete` said yes, the badge said Querit, and
+        // the harness wired Querit's tools around Exa's credential. The first
+        // agent to search got a 401 that nothing on the page could explain.
+        //
+        // Each provider holds its own credential now, so the switch reports
+        // Querit as selected with no key, and searches stay on managed until one
+        // is pasted. Exa keeps its key and its row.
         let home = ::tempfile::tempdir().expect("tempdir");
         let state = state_with_company(home.path(), true).await;
         let admin = crate::server::test_support::seed_admin(&state, "acme").await;
@@ -1186,7 +1234,7 @@ mod tests {
             "PUT",
             "/api/v1/companies/acme/search",
             &admin,
-            Some(json!({"provider": "exa", "apiKey": "exa_key"})),
+            Some(json!({"provider": "exa", "apiKey": "exa-not-a-real-key"})),
         )
         .await;
         let (_, after) = call(
@@ -1199,6 +1247,100 @@ mod tests {
         .await;
 
         assert_eq!(after["provider"], "querit", "{after}");
-        assert_eq!(after["apiKeyConfigured"], true, "{after}");
+        assert_eq!(
+            after["apiKeyConfigured"], false,
+            "querit must not inherit exa's key: {after}"
+        );
+        assert_eq!(
+            after["effectiveProvider"], "managed",
+            "a keyless selection searches through managed, not through a borrowed key: {after}"
+        );
+
+        let rows = after["providers"].as_array().expect("providers");
+        let exa = rows
+            .iter()
+            .find(|row| row["slug"] == "exa")
+            .expect("exa row survives the switch");
+        assert_eq!(
+            exa["keyConfigured"], true,
+            "exa keeps its own credential: {after}"
+        );
+        let querit = rows
+            .iter()
+            .find(|row| row["slug"] == "querit")
+            .expect("querit row");
+        assert_eq!(querit["keyConfigured"], false, "{after}");
+    }
+
+    #[tokio::test]
+    async fn two_providers_hold_two_independent_credentials() {
+        // The central claim of the rework, asserted end to end through the
+        // routes rather than only against the store.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        for (slug, key) in [
+            ("exa", "exa-not-a-real-key"),
+            ("brave", "brave-not-a-real-key"),
+        ] {
+            call(
+                &state,
+                "PUT",
+                "/api/v1/companies/acme/search",
+                &admin,
+                Some(json!({"provider": slug, "apiKey": key})),
+            )
+            .await;
+        }
+
+        let (_, body) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        let rows = body["providers"].as_array().expect("providers");
+        assert_eq!(rows.len(), 2, "{body}");
+        for row in rows {
+            assert_eq!(row["keyConfigured"], true, "{body}");
+        }
+
+        // Clearing one leaves the other untouched. Under the old single slot
+        // this was not expressible at all.
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa/key",
+            &admin,
+            Some(json!({"apiKey": ""})),
+        )
+        .await;
+
+        let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        let rows = after["providers"].as_array().expect("providers");
+        let keyed: Vec<&str> = rows
+            .iter()
+            .filter(|row| row["keyConfigured"] == true)
+            .map(|row| row["slug"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(keyed, vec!["brave"], "{after}");
+    }
+
+    #[tokio::test]
+    async fn a_hostile_slug_never_reaches_the_secret_store() {
+        // Credential addresses are `search/provider/<slug>/key`, so a slug
+        // carrying a slash or an unbounded run of text is a slug that writes
+        // somewhere other than where it claims.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        for slug in ["%2e%2e%2fexa", &"x".repeat(300), "%E6%A4%9C%E7%B4%A2"] {
+            let (status, body) = call(
+                &state,
+                "DELETE",
+                &format!("/api/v1/companies/acme/search/providers/{slug}"),
+                &admin,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{slug}: {body}");
+        }
     }
 }

@@ -180,6 +180,51 @@ mod tests {
         assert!(entry(super::super::MANAGED_PROVIDER).is_none());
     }
 
+    /// The Rust table and its TypeScript mirror must not drift.
+    ///
+    /// The inference rework's fourth known defect is a provider table duplicated
+    /// by hand across the language boundary with nothing noticing when the
+    /// copies disagree — a provider added to one and not the other half-works.
+    /// This catalogue is four rows, so there is no excuse for repeating it.
+    ///
+    /// Reads the mirror as text rather than parsing TypeScript: the property
+    /// this holds is that the same four slugs, labels and categories appear on
+    /// both sides, and a regex over a `const` array is enough to fail loudly
+    /// when one is added to only one of them.
+    #[test]
+    fn the_console_mirror_lists_the_same_providers() {
+        let mirror = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("frontend/src/search-providers/catalogue.ts");
+        let source = std::fs::read_to_string(&mirror)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", mirror.display()));
+
+        for info in CATALOGUE {
+            assert!(
+                source.contains(&format!("slug: \"{}\"", info.slug)),
+                "`{}` is in the Rust catalogue and not in the console mirror",
+                info.slug
+            );
+            assert!(
+                source.contains(&format!("label: \"{}\"", info.label)),
+                "`{}` has a different label in the console mirror",
+                info.slug
+            );
+            assert!(
+                source.contains(&format!("category: \"{}\"", info.category.as_str())),
+                "`{}`'s category is missing from the console mirror",
+                info.slug
+            );
+        }
+
+        let mirrored = source.matches("slug: \"").count();
+        assert_eq!(
+            mirrored,
+            CATALOGUE.len(),
+            "the console mirror lists {mirrored} providers and the Rust catalogue lists {}",
+            CATALOGUE.len()
+        );
+    }
+
     #[test]
     fn every_catalogue_slug_is_a_supported_provider() {
         for info in CATALOGUE {
