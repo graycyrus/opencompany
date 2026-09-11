@@ -1085,6 +1085,51 @@ pub async fn resolve_effective_scoped(
     secrets: &dyn SecretStore,
     scope: &HarnessScope,
 ) -> Result<Option<InferenceDecl>> {
+    // 0. The provider list — what the console's Connected rows actually hold.
+    //
+    // **This is the seam the whole feature hung off and nobody connected.** The
+    // write routes populated `inference/providers`, the status route rendered
+    // it, and the resolver began at `inference/config` — so a company that added
+    // a provider through the console had configured its *display*, not itself,
+    // and the chat pane's "no model configured" was telling the truth.
+    //
+    // Entry zero is why this sits ABOVE the legacy read rather than replacing
+    // it: `inference/config` is the first element of this list, so a company
+    // that predates the list resolves through the same branch it always did —
+    // which is exactly what entry zero was designed to make true without a
+    // migration. The `EntryZero` arm below therefore falls through to step 1
+    // deliberately, so the legacy path keeps every rule it has (the proxy
+    // inheritance, the managed chain, `reject_unknown_provider`) rather than a
+    // reimplementation of them here.
+    {
+        let providers = store::list_providers(company, secrets).await?;
+        let marked = store::load_default_slug(company, secrets).await?;
+        if let Some(provider) = resolve::primary(&providers, marked.as_deref())
+            && provider.origin == store::ProviderOrigin::Indexed
+        {
+            let key = store::load_provider_key(company, secrets, provider).await?;
+            let had_key = !key.trim().is_empty();
+            // A provider the operator added names its own endpoint. It is a
+            // vendor account, never the platform proxy, so `proxied` is false —
+            // and that is what denies it both the instance identity and the
+            // company's, which is the safety property the credential chain is
+            // built on.
+            let credential = Credential::from_value(key);
+            let proxied = is_managed_choice(&provider.kind);
+            let credential =
+                managed_identity(company, secrets, credential, proxied, had_key).await?;
+            return Ok(Some(InferenceDecl {
+                provider: normalize_provider(&provider.kind).to_string(),
+                base_url: provider.base_url.clone(),
+                models: provider.models.clone(),
+                source: InferenceSource::Runtime,
+                credential,
+                proxied,
+                vocabulary: None,
+            }));
+        }
+    }
+
     // 1. Runtime override (console) wins.
     if let Some(runtime) = load_runtime_config_scoped(company, secrets, scope).await? {
         let provider = normalize_provider(&runtime.provider).to_string();
@@ -2583,6 +2628,158 @@ mod tests {
         assert_eq!(
             managed_source(false, &Credential::None, Some(&empty)),
             ManagedSource::None
+        );
+    }
+
+    // ---- the provider list actually reaches the resolver ---------------------
+    //
+    // Every other test in this module seeds `inference/config` or exercises the
+    // store in isolation, which is exactly how a feature comes to be fully built
+    // on both sides and connected in neither: the write routes populated
+    // `inference/providers`, the status route rendered it, and nothing on the
+    // turn path ever read it. A company that added a provider through the
+    // console had configured its *display*, not its company — the chat pane said
+    // "no model configured" and was telling the truth.
+    //
+    // These write a provider through the store with NO legacy blob anywhere and
+    // assert a turn resolves to it.
+
+    async fn add_indexed(secrets: &MemSecrets, slug: &str, key: &str) {
+        let company = CompanyId::new("acme");
+        store::put_provider(
+            &company,
+            secrets,
+            store::ProviderDraft {
+                slug: slug.to_string(),
+                label: slug.to_string(),
+                kind: "openai_compatible".to_string(),
+                base_url: format!("https://{slug}.example/v1"),
+                models: BTreeMap::new(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                &company,
+                &store::provider_key_key(slug),
+                SecretValue(key.to_string()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_provider_added_through_the_console_resolves_for_a_turn() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "acme", "sk-not-a-real-key").await;
+        // Deliberately no `inference/config`: this is what a company that only
+        // ever used the provider list looks like on disk.
+        assert!(
+            load_runtime_config(&company, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "the legacy blob must be absent for this test to mean anything"
+        );
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("a company with a provider resolves");
+        assert_eq!(decl.base_url, "https://acme.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
+        assert!(decl.key_configured());
+    }
+
+    #[tokio::test]
+    async fn the_marked_default_is_the_one_a_turn_reaches() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+
+        // No marker: list order, which is the behaviour that predates the marker.
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://first.example/v1");
+
+        store::set_default_slug(&company, &secrets, "second")
+            .await
+            .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decl.base_url, "https://second.example/v1",
+            "marking a default has to move where a turn actually goes, not just a badge"
+        );
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-2"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_provider_is_not_where_a_turn_goes() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "off", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "on", "sk-not-a-real-key-2").await;
+        store::set_enabled(&company, &secrets, "off", false)
+            .await
+            .unwrap();
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://on.example/v1");
+    }
+
+    #[tokio::test]
+    async fn the_legacy_blob_still_wins_when_it_is_the_only_thing_there() {
+        // Entry zero sorts first in the list, so a company that had one provider
+        // before any of this existed keeps resolving exactly where it did. The
+        // whole entry-zero design exists to make that true without a migration.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openai_compatible".into(),
+                base_url: Some("https://legacy.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        store_key(&company, &secrets, "sk-not-a-real-key")
+            .await
+            .unwrap();
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://legacy.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
+        assert_eq!(decl.source, InferenceSource::Runtime);
+    }
+
+    #[tokio::test]
+    async fn nothing_configured_still_resolves_to_nothing() {
+        // The list being empty must not become a way to resolve *something*.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 }
