@@ -70,7 +70,7 @@ discover ourselves.
 │                                                                          │
 │   Connected                                      [ + Add provider ]      │
 │   ─────────────────────────────────────────────────────────────────      │
-│   ⬤  Managed (TinyHumans)      on the subscription      ┃ Always on ┃    │
+│   ⬤  Managed (TinyHumans)      billed to your account         ┃ On ┃    │
 │   ⬤  OpenRouter                •••• configured   ✓ ok   ┃   ▣ on   ┃ ⋯   │
 │   ⬤  Acme gateway   (custom)   api.acme.dev/v1   ⚠ 401  ┃   ▣ on   ┃ ⋯   │
 │   ⬤  Ollama         (local)    127.0.0.1:11434   ✓ ok   ┃   ▣ on   ┃ ⋯   │

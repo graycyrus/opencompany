@@ -18,8 +18,10 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { COPY } from "./catalogue";
+import { ProviderMark, hasMark } from "./provider-icon";
 import { CLI_LOGINS_REACHABLE, CLI_LOGINS_UNAVAILABLE, addOptions } from "./connect";
 import type { AddOption } from "./connect";
+import type { ManagedState } from "@/api/inference";
 import type { Provider } from "./types";
 
 /**
@@ -57,15 +59,18 @@ export function AddProviderDialog({
   open,
   onOpenChange,
   providers,
+  managed,
   onChoose,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   providers: readonly Provider[];
+  /** What the managed chain resolves to — it decides whether Managed is listed. */
+  managed?: ManagedState;
   /** The chosen option slug, or `custom`. */
   onChoose: (optionSlug: string) => void;
 }) {
-  const options = addOptions(providers);
+  const options = addOptions(providers, managed);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -161,7 +166,7 @@ function Category({
           {options.map((option) => (
             <SelectItem key={option.value} value={option.value}>
               <span className="flex min-w-0 items-center gap-2">
-                <Monogram label={option.label} />
+                <Monogram label={option.label} slug={option.value} />
                 <span className="grid min-w-0 text-left leading-tight">
                   <span className="truncate">{option.label}</span>
                   {/* Monospace, because every one of these is an address or a
@@ -189,20 +194,29 @@ function Category({
 }
 
 /**
- * A provider's mark.
+ * A provider's mark: its brand logo where we ship one, its initial where we do
+ * not.
  *
- * A monogram rather than a brand logo: shipping thirty vendors' trademarks would
- * be a licensing question this feature has no need to open, and a missing one
- * would leave a hole in the row. The tile is a design token, so it reads in both
- * themes without a hex value anywhere.
+ * The swatch behind it is a **single neutral token** rather than a per-provider
+ * tint. openhuman keys a colour off each slug, with literal hex in places, which
+ * `scripts/ci/assert-design-tokens.sh` rejects here — and the mark is the
+ * information, the tint is decoration.
+ *
+ * The letter is not a fallback to be embarrassed about; see `provider-icon.tsx`.
+ * Both branches are `aria-hidden`, because the provider's name is right beside
+ * this and announcing "O, OpenAI" helps nobody.
  */
-export function Monogram({ label }: { label: string }) {
+export function Monogram({ label, slug }: { label: string; slug?: string }) {
   return (
     <span
       aria-hidden
       className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-3xs font-semibold text-muted-foreground"
     >
-      {label.trim().slice(0, 1).toUpperCase()}
+      {slug && hasMark(slug) ? (
+        <ProviderMark slug={slug} className="size-3.5" />
+      ) : (
+        label.trim().slice(0, 1).toUpperCase()
+      )}
     </span>
   );
 }

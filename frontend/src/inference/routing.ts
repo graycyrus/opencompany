@@ -107,8 +107,20 @@ export const MODE_COPY: Record<RoutingMode, { label: string; description: string
  *
  * A locked switch reads as switchable-but-broken and invites a fight the
  * operator cannot win. A badge says the same thing and is honest about it.
+ *
+ * **What it says depends on whether managed actually resolves.** The design this
+ * ports says `Always on`, which is true there — they run the managed backend.
+ * Here it needs a credential, so a badge claiming permanent availability on a
+ * company whose chain resolves to nothing would be the same lie the provider row
+ * was carrying.
  */
-export const MANAGED_ALWAYS_ON = "Always on";
+export function managedModeBadge(configured: boolean | undefined): string {
+  return configured ? "Available" : "Not set up";
+}
+
+/** The fallback line under the mode list, when the fallback actually exists. */
+export const MANAGED_FALLBACK_UNAVAILABLE =
+  "Managed is not set up on this company, so it is not a fallback. Connect it on the LLM Providers tab.";
 
 /** What the shared-model row covers, said out loud rather than implied. */
 export const OWN_MODE_SCOPE =

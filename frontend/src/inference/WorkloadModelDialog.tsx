@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import type { OpenCompanyClient } from "@/api/client";
+
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -9,7 +11,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -18,6 +19,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ModelField } from "./ModelField";
 import { overrideIsSendable } from "./proxy-compat";
 import { WORKLOAD_COPY, formatRef, parseRef, primaryLabel, routingTargets } from "./routing";
 import type { Provider, ProviderRef, Workload } from "./types";
@@ -46,6 +48,8 @@ const MANAGED = "__managed__";
  * ids — and a typed id is honoured verbatim at every endpoint anyway.
  */
 export function WorkloadModelDialog({
+  client,
+  company,
   workload,
   providers,
   current,
@@ -55,6 +59,8 @@ export function WorkloadModelDialog({
   onCancel,
   onApply,
 }: {
+  client: OpenCompanyClient;
+  company: string | null;
   /** The workload being edited, or `null` when the dialog is closed. */
   workload: Workload | null;
   providers: readonly Provider[];
@@ -111,7 +117,11 @@ export function WorkloadModelDialog({
               onValueChange={(v) => v && setTarget(String(v))}
             >
               <SelectTrigger id="inference-workload-provider" className="w-full">
-                <SelectValue />
+                {/* The trigger renders the raw value unless told otherwise, and
+                    these values are sentinels — `__unset__` is not a thing to
+                    show an operator. The same trap `TaskEditDialog` documents
+                    for a column id versus its label. */}
+                <SelectValue>{() => targetLabel(target, providers)}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {/* Unset and Managed are different states on purpose: one is an
@@ -129,18 +139,14 @@ export function WorkloadModelDialog({
           </div>
 
           {target !== UNSET && target !== MANAGED && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="inference-workload-model">Model id</Label>
-              <Input
-                id="inference-workload-model"
-                value={model}
-                placeholder="Leave blank to send the tier"
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono text-xs"
-                onChange={(e) => setModel(e.target.value)}
-              />
-            </div>
+            <ModelField
+              client={client}
+              company={company}
+              slug={target}
+              id="inference-workload-model"
+              value={model}
+              onChange={setModel}
+            />
           )}
 
           {/* Judged on a SETTLED value, never on a keystroke: six of this
@@ -190,6 +196,19 @@ export function WorkloadModelDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * What the provider trigger reads for a chosen value.
+ *
+ * A function rather than an inline ternary because the two sentinels and the
+ * slug lookup are three cases, and a select that shows `__unset__` to an
+ * operator is the failure this exists to prevent.
+ */
+function targetLabel(target: string, providers: readonly Provider[]): string {
+  if (target === UNSET) return primaryLabel(providers);
+  if (target === MANAGED) return "Managed";
+  return providers.find((p) => p.slug === target)?.label ?? target;
 }
 
 /** The route string a ref writes, exported so the tab can compare drafts. */

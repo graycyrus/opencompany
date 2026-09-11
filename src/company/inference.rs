@@ -898,6 +898,73 @@ pub async fn load_inference_key_scoped(
     load_key_scoped(company, secrets, override_key, scope).await
 }
 
+/// Which step of the managed chain a request would actually resolve at.
+///
+/// The managed row on the console has to say this, and it has to say it
+/// honestly. The design this is ported from renders a permanent `Always on`
+/// badge, which is true **there** — they run the managed backend — and is a lie
+/// here: our managed tier needs a credential and can resolve to nothing. A row
+/// claiming availability while agents cannot think is the failure
+/// `CognitionState`'s five states exist to prevent.
+///
+/// Steps 3 and 4 are kept apart because they answer different questions for the
+/// operator: one bills the company's own account, the other bills whoever runs
+/// the server. Collapsing them into "on" hides the decision they would make.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedSource {
+    /// A key pasted for inference — `provider/tinyhumans/key`, or the legacy
+    /// `inference/key`. These are two addresses for one meaning.
+    ProviderKey,
+    /// The company's own TinyHumans account.
+    CompanyAccount,
+    /// This instance's identity — so the server's account pays.
+    Instance,
+    /// Nothing resolves. The managed brain is **not set up**.
+    None,
+}
+
+impl ManagedSource {
+    /// The stable wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderKey => "provider_key",
+            Self::CompanyAccount => "company_account",
+            Self::Instance => "instance",
+            Self::None => "none",
+        }
+    }
+
+    /// Whether the managed brain can be reached at all.
+    pub fn resolves(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// [`ManagedSource`] from the three facts that decide it.
+///
+/// Pure, because it is a decision with four branches and every one of them is a
+/// different sentence on screen. The inputs are read where a store is available;
+/// the reasoning is here, where it can be tested with three booleans.
+pub fn managed_source(
+    inference_key_set: bool,
+    company_account: &Credential,
+    env_default: Option<&EnvDefault>,
+) -> ManagedSource {
+    if inference_key_set {
+        return ManagedSource::ProviderKey;
+    }
+    if matches!(company_account, Credential::Company(_)) {
+        return ManagedSource::CompanyAccount;
+    }
+    match env_default {
+        // `configured()` rather than presence: a projected-token source reports
+        // itself configured while its file can still yield nothing, and what
+        // decides availability is whether a value would reach the wire.
+        Some(env) if env.credential.configured() => ManagedSource::Instance,
+        _ => ManagedSource::None,
+    }
+}
+
 /// Steps 3 and 4 of the managed chain: the company's account identity, then this
 /// instance's.
 ///
@@ -2339,12 +2406,7 @@ mod tests {
         )
         .await;
         // Present but outranked, so the ordering is actually exercised.
-        write(
-            &secrets,
-            &crate::company::company_key::KEY_KEY.to_string(),
-            "th-account",
-        )
-        .await;
+        write(&secrets, crate::company::company_key::KEY_KEY, "th-account").await;
 
         let decl = resolve_managed(&secrets).await;
         assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
@@ -2459,6 +2521,68 @@ mod tests {
                 .await
                 .unwrap(),
             Some(SecretValue("sk-not-a-real-key".into()))
+        );
+    }
+
+    // ---- the managed row's honest state -------------------------------------
+
+    #[test]
+    fn managed_reports_which_step_of_the_chain_answers() {
+        // Not a boolean, and not "always on". The row that renders this used to
+        // claim permanent availability, inherited from a design where the same
+        // company runs the managed backend — here it needs a credential and can
+        // resolve to nothing.
+        let env = managed_env();
+        let company = Credential::from_company_key("th-account");
+
+        assert_eq!(
+            managed_source(true, &company, Some(&env)),
+            ManagedSource::ProviderKey,
+            "a key pasted for inference outranks everything below it"
+        );
+        assert_eq!(
+            managed_source(false, &company, Some(&env)),
+            ManagedSource::CompanyAccount,
+        );
+        assert_eq!(
+            managed_source(false, &Credential::None, Some(&env)),
+            ManagedSource::Instance,
+            "the server's account pays, and the row has to say so"
+        );
+        assert_eq!(
+            managed_source(false, &Credential::None, None),
+            ManagedSource::None,
+            "nothing resolves — not set up, and not a green badge"
+        );
+    }
+
+    #[test]
+    fn the_two_paying_states_are_not_collapsed() {
+        // An operator deciding whether to connect their account needs to know
+        // which one they are on. "On" for both hides the decision.
+        let env = managed_env();
+        assert_ne!(
+            managed_source(
+                false,
+                &Credential::from_company_key("th-account"),
+                Some(&env)
+            ),
+            managed_source(false, &Credential::None, Some(&env)),
+        );
+    }
+
+    #[test]
+    fn an_env_default_that_would_yield_nothing_is_not_availability() {
+        // `configured()` rather than presence: a projected-token source reports
+        // itself present while its file can still yield nothing, and what
+        // decides availability is whether a value would reach the wire.
+        let empty = EnvDefault {
+            base_url: "https://env.example/openai/v1".into(),
+            credential: Credential::None,
+        };
+        assert_eq!(
+            managed_source(false, &Credential::None, Some(&empty)),
+            ManagedSource::None
         );
     }
 }

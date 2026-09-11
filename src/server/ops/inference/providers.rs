@@ -95,7 +95,21 @@ pub(super) fn router() -> Router<AppState> {
             "/inference/providers/{slug}/test",
             post(test_provider),
         ))
+        // Per provider, not per company: two providers are two catalogs, and a
+        // routing row picking a model needs the list of the one it is pointed
+        // at. The existing `…/inference/models` answers for the *configured*
+        // endpoint, which is a different question once there is a list.
+        .merge(scoped(
+            "/inference/providers/{slug}/models",
+            get(list_provider_models),
+        ))
         .merge(scoped("/inference/routes", get(get_routes).put(put_routes)))
+        // The managed tier has no provider record — it resolves from a chain
+        // rather than from a row — so its credential is written by a route of
+        // its own rather than through `add_provider`. Putting it in the index
+        // would create a record whose slug collides with entry zero's whenever
+        // the company's stored config is already managed.
+        .merge(scoped("/inference/managed/key", put(set_managed_key)))
 }
 
 // ---- wire shapes ------------------------------------------------------------
@@ -845,6 +859,153 @@ async fn require_provider(
                 "this company has no provider `{slug}`"
             )))
         })
+}
+
+// ---- a provider's catalog ---------------------------------------------------
+
+/// What `GET …/inference/providers/{slug}/models` answers.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderCatalogDto {
+    /// The endpoint the catalog was read from.
+    base_url: String,
+    /// Every model that endpoint publishes, sorted. Empty when `error` is set.
+    models: Vec<String>,
+    /// Whether the endpoint's `model` field keys on a **deployment name** rather
+    /// than a published model id.
+    ///
+    /// Azure separates the base model a deployment was made from
+    /// (`gpt-5.6-terra-2026-07-09`) from the deployment name (`gpt-5.6-terra`)
+    /// that actually routes the request — and `/models` publishes the first
+    /// while the request body wants the second. So a closed dropdown sourced
+    /// from the catalog makes the only correct value unreachable, and the
+    /// console defaults such an endpoint to free text.
+    free_text_only: bool,
+    /// Why the list is empty, naming the endpoint.
+    ///
+    /// A **200** rather than a 5xx, because an empty picker with no explanation
+    /// reads as "this provider has no models", which nobody established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `GET …/inference/providers/{slug}/models` — that provider's own catalog.
+///
+/// The stored key is presented **host-side**: it is write-only to the console,
+/// so this route is the only thing that can ask an authenticated endpoint what
+/// it serves.
+///
+/// The cache is scoped `company + slug`, not `company` alone. Two providers on
+/// one endpoint with two keys would otherwise share an entry, and an endpoint
+/// that publishes an entitlement-scoped catalog would hand one account's list to
+/// the other for the rest of the hour.
+async fn list_provider_models(
+    company: crate::server::ops::ScopedCompany,
+    Path(params): Path<ProviderPath>,
+) -> Result<Json<ProviderCatalogDto>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let secrets = runtime.secrets().as_ref();
+    let provider = require_provider(runtime, &params.slug).await?;
+    let key = store::load_provider_key(runtime.id(), secrets, &provider)
+        .await
+        .map_err(ApiError)?;
+    let scope = format!("{}\u{1}{}", runtime.id().as_ref(), provider.slug);
+
+    let free_text_only = catalogue::is_azure_endpoint(&provider.base_url);
+    match crate::server::inference_models::catalog_models(
+        &provider.base_url,
+        (!key.trim().is_empty()).then(|| key.trim()),
+        Some(&scope),
+    )
+    .await
+    {
+        Ok(models) => Ok(Json(ProviderCatalogDto {
+            base_url: provider.base_url,
+            models: models.into_iter().map(|m| m.id).collect(),
+            free_text_only,
+            error: None,
+        })),
+        Err(error) => Ok(Json(ProviderCatalogDto {
+            error: Some(format!(
+                "Could not list models from {}: {error}. Enter a model id directly.",
+                provider.base_url
+            )),
+            base_url: provider.base_url,
+            models: Vec::new(),
+            free_text_only,
+        })),
+    }
+}
+
+// ---- the managed credential -------------------------------------------------
+
+/// The managed key on the way in. Write-only, like every other credential body.
+#[derive(Debug, Deserialize)]
+struct SetManagedKey {
+    /// Send `""` to clear it and fall back down the chain.
+    key: String,
+}
+
+/// `PUT …/inference/managed/key` — paste a key for the managed tier.
+///
+/// Step 1 of the managed chain: a credential pasted specifically for inference,
+/// which outranks the company's account identity and the instance's.
+///
+/// Writes `provider/tinyhumans/key` and **clears the legacy `inference/key`** in
+/// the same operation, which is the convergence rule every other provider's
+/// write follows. The store has no delete, so the clear is a write of the empty
+/// string and it is issued rather than inferred: a key left at the old address
+/// after the new one is written is an orphaned secret.
+///
+/// The other half of setting managed up is the hub link flow, which writes the
+/// company's *account* — step 3. That one is not here, and deliberately: it
+/// already exists on the Account page and a second credential form for one
+/// credential is how two surfaces come to disagree about whether a company has
+/// one.
+async fn set_managed_key(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+    Json(body): Json<SetManagedKey>,
+) -> Result<Json<ProviderMutation>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let secrets = runtime.secrets().as_ref();
+    let key = body.key.trim();
+
+    secrets
+        .set(
+            runtime.id(),
+            &store::provider_key_key(crate::company::inference::MANAGED_SLUG),
+            crate::ports::types::SecretValue(key.to_string()),
+        )
+        .await
+        .map_err(ApiError)?;
+    if let Err(err) = secrets
+        .set(
+            runtime.id(),
+            crate::company::inference::KEY_KEY,
+            crate::ports::types::SecretValue(String::new()),
+        )
+        .await
+    {
+        tracing::error!(
+            company = %runtime.id(),
+            error = %err,
+            "wrote the managed credential to its own address but could not clear the \
+             legacy slot; a secret is now orphaned there",
+        );
+    }
+    crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
+
+    Ok(Json(ProviderMutation {
+        status: effective_status(&state, runtime).await?,
+        note: if key.is_empty() {
+            "Cleared the managed key.".to_string()
+        } else {
+            "Saved. Managed turns are billed to that key.".to_string()
+        },
+        probe: None,
+        affected_tiers: Vec::new(),
+    }))
 }
 
 // ---- testing a stored provider ----------------------------------------------

@@ -53,7 +53,14 @@ The 27th Rust entry is `openhuman` (`https://api.openhuman.ai/v1`, auth style
 `openhuman_jwt`) — their managed first-party backend, always present, never
 removable, not offered in the add list. **Our equivalent is the managed
 TinyHumans brain**, which is already modelled and must keep its own auth path;
-do not port `openhuman` as a row.
+do not port `openhuman` as a row of this table.
+
+It **is** offered in the add dialog, though — as an entry the console injects
+into the Cloud list rather than as a row of `CLOUD_PROVIDERS`, because it is a
+resolution chain rather than a vendor account and has no preset endpoint of its
+own. It appears there only while its chain resolves to nothing or to the
+*instance's* identity; see [`connect-flow.md`](connect-flow.md) for why the
+second case is deliberate.
 
 ### Endpoint paths are not uniform, and that is the point
 

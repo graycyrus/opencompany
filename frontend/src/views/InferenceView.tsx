@@ -81,7 +81,13 @@ export function InferenceView({ client, company }: Props) {
           {tab === "connect" ? (
             <ProvidersTab state={inference} actions={inference} canManage={canManage} />
           ) : (
-            <RoutingTab state={inference} actions={inference} canManage={canManage} />
+            <RoutingTab
+              client={client}
+              company={company}
+              state={inference}
+              actions={inference}
+              canManage={canManage}
+            />
           )}
         </div>
       </div>

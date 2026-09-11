@@ -12,14 +12,44 @@ import { Switch } from "@/components/ui/switch";
 import { Monogram } from "./AddProviderDialog";
 import { categoryOf, endpointHost } from "./catalogue";
 import { healthLabel } from "./classify";
+import type { ManagedState } from "@/api/inference";
 import type { Provider } from "./types";
 
-/** What the always-present managed row says about itself. */
-export const MANAGED_ROW = {
-  label: "Managed",
-  detail: "TinyHumans chooses a model for each task",
-  badge: "Always on",
-} as const;
+/**
+ * What the managed row says about itself, given what its chain resolves to.
+ *
+ * It used to say **"Always on"**, inherited from a design where the same company
+ * runs the managed backend. Here the managed tier needs a credential and can
+ * resolve to nothing, so that badge was a claim of availability the row could
+ * not back — the failure a five-state cognition model exists to prevent.
+ *
+ * The two "on" states that bill different accounts are kept apart, because that
+ * is the decision the operator is on this page to make: connecting their own
+ * account moves the bill for every turn, and a row that says only "on" hides
+ * that it has not happened.
+ */
+export function managedRow(source: ManagedState["source"] | undefined): {
+  detail: string;
+  badge: string | null;
+} {
+  switch (source) {
+    case "provider_key":
+      return { detail: "Using the key saved for inference", badge: "On" };
+    case "company_account":
+      return { detail: "Billed to this company's TinyHumans account", badge: "On" };
+    case "instance":
+      return { detail: "Billed to whoever runs this server", badge: "On" };
+    case "none":
+      return { detail: "No credential resolves — agents cannot think", badge: null };
+    // An older host did not say. "Unknown" is not "working", so it gets no
+    // badge either; the alternative is a green tick nobody established.
+    default:
+      return { detail: "TinyHumans chooses a model for each task", badge: null };
+  }
+}
+
+/** The managed row's name. */
+export const MANAGED_LABEL = "Managed";
 
 /**
  * The Connected list: what this company can reach a model through.
@@ -42,6 +72,7 @@ export const MANAGED_ROW = {
  */
 export function ProviderList({
   providers,
+  managed,
   canManage,
   busySlug,
   onToggle,
@@ -51,6 +82,8 @@ export function ProviderList({
   onMakeDefault,
 }: {
   providers: readonly Provider[];
+  /** What the managed chain resolves to. `undefined` when the host did not say. */
+  managed?: ManagedState;
   canManage: boolean;
   /** The slug currently mid-request, so its own controls settle rather than the whole list. */
   busySlug?: string | null;
@@ -65,16 +98,34 @@ export function ProviderList({
       {/* Always first and always present. It is not in `providers` because it is
           not a record — it is the fallback every company has whether or not it
           has configured anything. */}
-      <li className="flex items-center gap-3 px-4 py-3" data-testid="inference-provider-managed">
-        <Monogram label={MANAGED_ROW.label} />
-        <span className="grid min-w-0 flex-1 leading-tight">
-          <span className="truncate text-sm font-medium">{MANAGED_ROW.label}</span>
-          <span className="truncate text-xs text-muted-foreground">{MANAGED_ROW.detail}</span>
-        </span>
-        <Badge variant="outline" className="border-status-done text-status-done-text">
-          {MANAGED_ROW.badge}
-        </Badge>
-      </li>
+      {/* Present only when the chain actually resolves. **Not** keyed on a
+          provider record existing: steps 3 and 4 answer from the company
+          identity or the instance environment, neither of which is a record, so
+          a hosted tenant has a working managed provider nobody ever added. When
+          nothing resolves it is not a connected row — it is an entry in the add
+          dialog's Cloud list, like anything else that is not connected. */}
+      {managed?.configured && (
+        <li className="flex items-center gap-3 px-4 py-3" data-testid="inference-provider-managed">
+          <Monogram label={MANAGED_LABEL} />
+          <span className="grid min-w-0 flex-1 leading-tight">
+            <span className="truncate text-sm font-medium">{MANAGED_LABEL}</span>
+            <span className="truncate text-xs text-muted-foreground">
+              {managedRow(managed?.source).detail}
+            </span>
+          </span>
+          {/* No toggle. Managed cannot be switched off, and a control that does
+              nothing is worse than no control. */}
+          {managedRow(managed?.source).badge && (
+            <Badge
+              variant="outline"
+              className="border-status-done text-status-done-text"
+              data-testid="inference-provider-managed-state"
+            >
+              {managedRow(managed?.source).badge}
+            </Badge>
+          )}
+        </li>
+      )}
 
       {providers.map((provider) => (
         <ProviderRow
@@ -134,7 +185,7 @@ function ProviderRow({
       className="flex items-center gap-3 px-4 py-3"
       data-testid={`inference-provider-${provider.slug}`}
     >
-      <Monogram label={provider.label} />
+      <Monogram label={provider.label} slug={provider.slug} />
       <span className="grid min-w-0 flex-1 leading-tight">
         <span className="truncate text-sm font-medium">{provider.label}</span>
         <span className="truncate text-xs text-muted-foreground">{rowSubline(provider)}</span>

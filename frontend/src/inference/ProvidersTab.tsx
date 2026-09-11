@@ -11,7 +11,8 @@ import { AddProviderDialog } from "./AddProviderDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft } from "./ProviderConnectDialog";
 import { ProviderList } from "./ProviderList";
-import { MANAGED_FALLBACK_NOTE } from "./routing";
+import { MANAGED_OPTION_SLUG } from "./connect";
+import { MANAGED_FALLBACK_NOTE, MANAGED_FALLBACK_UNAVAILABLE } from "./routing";
 import type { InferenceActions, InferenceState } from "./use-inference";
 import type { Provider } from "./types";
 
@@ -79,6 +80,10 @@ export function ProvidersTab({
           baseUrl: draft.baseUrl,
           key: draft.key,
         });
+      } else if (draft.kind === MANAGED_OPTION_SLUG) {
+        // Managed has no provider record — it resolves from a chain — so its
+        // credential goes to its own route rather than through `add`.
+        await actions.saveManagedKey(draft.key ?? "");
       } else {
         const result = await actions.add(draft);
         // A non-destructive probe failure saved the row and kept the key. The
@@ -137,6 +142,7 @@ export function ProvidersTab({
           </h3>
           <ProviderList
             providers={state.providers}
+            managed={state.status?.managed}
             canManage={canManage}
             busySlug={state.busySlug}
             onToggle={(p, enabled) => void actions.setEnabled(p.slug, enabled)}
@@ -153,7 +159,11 @@ export function ProvidersTab({
 
       {/* Outside the card, because it is about the whole page rather than about
           the list: managed stands behind every row in it. */}
-      <p className="text-xs text-muted-foreground">{MANAGED_FALLBACK_NOTE}</p>
+      <p className="text-xs text-muted-foreground">
+        {state.status?.managed?.configured === false
+          ? MANAGED_FALLBACK_UNAVAILABLE
+          : MANAGED_FALLBACK_NOTE}
+      </p>
 
       {state.note && (
         <p className="text-xs text-muted-foreground" data-testid="inference-note">
@@ -165,6 +175,7 @@ export function ProvidersTab({
         open={adding}
         onOpenChange={setAdding}
         providers={state.providers}
+        managed={state.status?.managed}
         onChoose={(option) => {
           setAdding(false);
           setEditing(null);

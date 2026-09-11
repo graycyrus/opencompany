@@ -21,6 +21,7 @@ import {
   isReservedSlug,
   localRuntime,
 } from "./catalogue";
+import type { ManagedState } from "@/api/inference";
 import type { Provider } from "./types";
 
 /** One choosable row in the add dialog. */
@@ -56,6 +57,38 @@ export function isConnected(providers: readonly Provider[], optionSlug: string):
   return providers.some((p) => p.slug === stored);
 }
 
+/** The slug the managed tier is offered and keyed under. */
+export const MANAGED_OPTION_SLUG = "tinyhumans";
+
+/**
+ * Whether the managed tier belongs in the Cloud list.
+ *
+ * The list rule is "only what is not yet connected", and it is applied here
+ * without an exception — but **managed resolves through a chain rather than a
+ * record**, so "connected" is a question about resolution, not about a row
+ * existing. A hosted tenant has a working managed provider nobody ever added.
+ *
+ * ## The one place the simple rule does not settle the product question
+ *
+ * At step 4 the chain resolves against the **instance's** identity: it works,
+ * and the server is paying. On the plain rule that is "connected", so the entry
+ * would disappear — and with it the only route from *the server pays* to *we
+ * pay*, which is a decision an operator actively wants to make.
+ *
+ * So it stays listed at step 4. The cost is that one entry can appear in the
+ * list while a row for it is also on the page; the benefit is that a capability
+ * does not vanish. The Connected row carries the sentence that explains it
+ * ("Billed to whoever runs this server"), so the list itself stays uniform.
+ *
+ * Steps 1-3 are the company's own credential in one form or another, and there
+ * is nothing left to upgrade to — so it is hidden, exactly like OpenRouter once
+ * you have added it.
+ */
+export function offersManaged(managed: ManagedState | undefined): boolean {
+  if (!managed) return false;
+  return managed.source === "none" || managed.source === "instance";
+}
+
 /**
  * What each category offers, minus what is already connected.
  *
@@ -68,15 +101,31 @@ export function isConnected(providers: readonly Provider[], optionSlug: string):
  * to, a local runtime by the fact that it is local, and a CLI login by whose
  * credential it borrows.
  */
-export function addOptions(providers: readonly Provider[]): AddOptions {
+export function addOptions(
+  providers: readonly Provider[],
+  managed?: ManagedState,
+): AddOptions {
+  const managedEntry: AddOption[] = offersManaged(managed)
+    ? [
+        {
+          value: MANAGED_OPTION_SLUG,
+          label: "Managed (TinyHumans)",
+          // The endpoint host, like every other cloud row. The reason it is
+          // still offered belongs on the Connected row, not in this list.
+          detail: endpointHost(managed?.baseUrl),
+        },
+      ]
+    : [];
   return {
-    cloud: CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map((p) => ({
-      value: p.slug,
-      label: p.label,
-      // The host, not the whole URL: the path is noise at a glance and the host
-      // is the part an operator recognises.
-      detail: endpointHost(p.endpoint),
-    })),
+    cloud: managedEntry.concat(
+      CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map((p) => ({
+        value: p.slug,
+        label: p.label,
+        // The host, not the whole URL: the path is noise at a glance and the
+        // host is the part an operator recognises.
+        detail: endpointHost(p.endpoint),
+      })),
+    ),
     local: LOCAL_RUNTIMES.filter((r) => !isConnected(providers, r.slug)).map((r) => ({
       value: r.slug,
       label: r.label,
@@ -154,6 +203,17 @@ export function credentialAsk(optionSlug: string): CredentialAsk {
   const cli = CLI_LOGINS.find((c) => c.optionSlug === optionSlug);
   if (cli) {
     return { title: `Connect ${cli.label}`, needsKey: false, needsEndpoint: false };
+  }
+  if (optionSlug === MANAGED_OPTION_SLUG) {
+    // Its own shape: the endpoint is the platform's and is not typed, and the
+    // *other* way to set it up is an account link rather than a key — which the
+    // dialog offers beside the field rather than duplicating here.
+    return {
+      title: "Connect TinyHumans",
+      needsKey: true,
+      needsEndpoint: false,
+      keyPlaceholder: "th-...",
+    };
   }
   return {
     title: "Add cloud provider",

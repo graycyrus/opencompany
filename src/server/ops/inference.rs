@@ -339,6 +339,32 @@ struct InferenceStatusDto {
     /// **Additive, like `providers`.** The four non-inference readers of this
     /// DTO do not look at it, and every field above keeps its exact meaning.
     routes: BTreeMap<String, String>,
+    /// What the **managed** brain would resolve to, and who pays for it.
+    managed: ManagedDto,
+}
+
+/// The managed tier's honest state.
+///
+/// It exists because the row for it used to carry a permanent "Always on"
+/// badge, inherited from a design where the same company runs the managed
+/// backend. Here the managed tier needs a credential and can resolve to
+/// nothing — and a row claiming availability while agents cannot think is the
+/// failure the five-state `CognitionState` exists to prevent.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedDto {
+    /// `provider_key` / `company_account` / `instance` / `none`.
+    ///
+    /// The last two are kept apart on purpose: one bills the company's own
+    /// account and the other bills whoever runs the server, and an operator
+    /// deciding whether to connect their account needs to know which they are
+    /// on.
+    source: String,
+    /// Whether it can be reached at all. Derived from `source`, carried so the
+    /// console does not re-derive it and disagree.
+    configured: bool,
+    /// The endpoint managed requests travel to — the platform's own.
+    base_url: String,
 }
 
 /// One provider on the wire.
@@ -789,6 +815,7 @@ async fn effective_status_with(
     let restart_required = restart_pending(runtime, decl.is_some());
     let providers = provider_list(runtime).await?;
     let routes = routing_table(runtime).await?;
+    let managed = managed_state(runtime, platform).await?;
     // Independent of `decl`: the shipped defaults are the same regardless of
     // what (if anything) this company has configured.
     let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
@@ -812,6 +839,7 @@ async fn effective_status_with(
             can_rebuild_in_place,
             providers,
             routes,
+            managed,
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -833,7 +861,47 @@ async fn effective_status_with(
             can_rebuild_in_place,
             providers,
             routes,
+            managed,
         },
+    })
+}
+
+/// What the managed brain would resolve to for this company.
+///
+/// Reads the three facts and hands them to
+/// [`inference::managed_source`](crate::company::inference::managed_source),
+/// which holds the branching. The inputs are a store read each; the decision is
+/// pure and tested with three booleans.
+async fn managed_state(
+    runtime: &CompanyRuntime,
+    platform: Option<&EnvDefault>,
+) -> Result<ManagedDto, ApiError> {
+    use crate::company::inference::store;
+
+    let secrets = runtime.secrets().as_ref();
+    // Both addresses for the one meaning: the new per-provider slot and the
+    // legacy flat slot it converges from.
+    let inference_key = inference::load_inference_key_scoped(
+        runtime.id(),
+        secrets,
+        inference::MANAGED_SLUG,
+        None,
+        &inference::HarnessScope::default(),
+    )
+    .await
+    .map_err(ApiError)?;
+    let company_account = crate::company::company_key::load(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let source =
+        inference::managed_source(!inference_key.trim().is_empty(), &company_account, platform);
+    let _ = store::PROVIDER_INDEX_KEY;
+    Ok(ManagedDto {
+        source: source.as_str().to_string(),
+        configured: source.resolves(),
+        base_url: platform
+            .map(|p| p.base_url.clone())
+            .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
     })
 }
 

@@ -12,6 +12,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  MANAGED_OPTION_SLUG,
   checkSlug,
   credentialAsk,
   customProviderReady,
@@ -83,6 +84,7 @@ export function ProviderConnectDialog({
   const open = optionSlug !== null;
   const ask = credentialAsk(optionSlug ?? "custom");
   const custom = optionSlug === "custom";
+  const managed = optionSlug === MANAGED_OPTION_SLUG;
 
   const [label, setLabel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -195,6 +197,31 @@ export function ProviderConnectDialog({
                 className="font-mono text-xs"
                 onChange={(e) => setKey(e.target.value)}
               />
+            </div>
+          )}
+
+          {/* Managed has two ways in, and only one of them is a key. The other
+              writes the company's TinyHumans **account**, which is a different
+              credential with a different lifecycle — it is rotated, and it moves
+              every brokered surface at once, not just this one. It already has a
+              home on Connections → Account, and a second form for one credential
+              is how two surfaces come to disagree about whether a company has
+              it. So this links there rather than duplicating it. */}
+          {managed && (
+            <div className="grid gap-1.5 rounded-md border border-border px-3 py-2">
+              <p className="text-sm font-medium">Or connect your TinyHumans account</p>
+              <p className="text-xs text-muted-foreground">
+                One account key pays for thinking and for app connections, and rotating it
+                reaches both. Set it up on Connections → Account.
+              </p>
+              <a
+                className="text-xs font-medium underline underline-offset-4"
+                href="#/connections/api-key"
+                data-testid="inference-managed-account-link"
+                onClick={onCancel}
+              >
+                Go to Account
+              </a>
             </div>
           )}
 

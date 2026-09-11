@@ -30,7 +30,7 @@ while it was being read.
 
   ┌────────────────────────────────────────────────────────────────────┐
   │ CONNECTED                                                          │
-  │ ◼ Managed                                        ┃ Always on ┃     │
+  │ ◼ Managed                                                 ┃ On ┃    │
   │   TinyHumans chooses a model for each task                         │
   │ ◼ OpenRouter                        Default        [ ▮▬ ]   ⋯      │
   │   •••• configured                                                  │
@@ -57,6 +57,60 @@ on the page does: the **restart notice**, because a save that has landed and is
 not yet in effect looks exactly like one that is, and the **cost warning** on the
 routing dialog's Test — which sits on the button it applies to rather than above
 the fold.
+
+## The Managed row tells the truth about itself
+
+The design this ports renders Managed with a permanent `Always on` badge, and
+**there that is true** — the same company runs the managed backend. Here the
+managed tier needs a credential and can resolve to nothing, so the badge was a
+claim of availability the row could not back. That is the failure
+`CognitionState`'s five states exist to prevent, on the one row an operator
+looks at to answer "can my agents think".
+
+The chain already answers it, so the row reports which step did:
+
+| Resolves at | Badge | Sub-line |
+|---|---|---|
+| `provider/tinyhumans/key`, or legacy `inference/key` | `On` | Using the key saved for inference |
+| `tinyhumans/key` — the company's account | `On` | Billed to this company's TinyHumans account |
+| the instance identity | `On` | Billed to whoever runs this server |
+| nothing | *(none)* | No credential resolves — agents cannot think |
+
+The last two "on" states are **not collapsed**. One bills the company's own
+account and the other bills whoever runs the server, and that is the decision an
+operator is on this page to make.
+
+**No toggle on this row.** Managed cannot be switched off, and a control that
+does nothing is worse than no control — the same reasoning the read-only rows
+already follow.
+
+### Setting it up is the ordinary add flow
+
+The row is present **only while the chain resolves**, and it is keyed on
+resolution rather than on a provider record existing — steps 3 and 4 answer from
+the company identity and the instance environment, neither of which is a record,
+so a hosted tenant has a working managed provider nobody ever added.
+
+When nothing resolves it is simply not connected, so it appears in the add
+dialog's **Cloud** list like anything else that is not connected, with the
+endpoint host as its detail line. One rule, no special case.
+
+Picking it opens a dialog with two ways in, because it has two: a **key**, which
+writes `provider/tinyhumans/key`, and the **account link**, which writes the
+company's TinyHumans identity. The dialog offers the key field and *links* to
+Connections → Account for the other. The account credential already has a home
+there, it has a different lifecycle — it is rotated and it moves every brokered
+surface at once — and a second form for one credential is how two surfaces come
+to disagree about whether a company has it.
+
+### The one place the simple rule does not settle it
+
+At the instance step the chain resolves, so on the plain "only what is not yet
+connected" rule Managed would disappear from the list — and with it the only
+route from *the server pays* to *we pay*. **It stays listed there**, deliberately.
+The cost is that one entry can be in the list while a row for it is on the page;
+the benefit is that a capability does not vanish. The explanation lives on the
+Connected row ("Billed to whoever runs this server"), so the list stays uniform.
 
 ## The dialogs — as shipped
 

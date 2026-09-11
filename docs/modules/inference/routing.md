@@ -15,7 +15,7 @@ tab is not a reason to break a link.
 ```
   ┌────────────────────────────────────────────────────────────────────┐
   │ Routing mode                                                       │
-  │ ⬤ Managed                                       ┃ Always on ┃      │
+  │ ⬤ Managed                                              ┃ On ┃      │
   │ ○ Use Your Own Models                                              │
   │ ○ Advanced                                                         │
   └────────────────────────────────────────────────────────────────────┘
@@ -43,17 +43,48 @@ choice, which are different states), a free-text model id, and **Test** — the
 one control in this surface that sends a real completion, with the cost warning
 on the button rather than above the fold.
 
-The model field is free text rather than a catalog select, because a select
-sourced from the provider's catalog makes the only correct value unreachable at
-an Azure endpoint — the request keys on a deployment name while `/models`
-publishes base model ids — and a typed id is honoured verbatim everywhere.
+The model field is **a catalog select with a free-text escape hatch**, not one or
+the other. The catalog is what makes the screen usable — an operator who has to
+know a vendor's id scheme by heart is being asked the wrong question — and the
+escape hatch is what keeps it correct.
+
+It is sourced **per provider** (`GET …/inference/providers/{slug}/models`), not
+from one global list: two providers are two catalogs, and the stored key is
+presented host-side so the console never sees it.
+
+Four states, each said out loud:
+
+| Catalog | Field | What the line under it says |
+|---|---|---|
+| loads | select | *Enter a model id instead* |
+| still loading | text | *Reading this provider's models…* |
+| empty, 404, or not OpenAI-shaped | text | why, naming the endpoint |
+| Azure host | text | it routes on a deployment name |
+
+Azure is the reason the escape hatch exists rather than the reason the select
+does not: the request keys on a **deployment name** while `/models` publishes
+**base model ids**, so there the only correct value is one the catalog can never
+contain. That is one endpoint family, not an argument against catalogs — and a
+catalog can be stale or incomplete anywhere, so the toggle is always one click
+away.
+
+**Blank stays meaningful.** Empty means *send the tier and let the endpoint
+resolve it*, which is how `TierVocabulary` passthrough works and is the right
+answer at a tier-native endpoint. It is an item in the list with its own label,
+never an absence to be guessed at.
+
+And nothing typed is ever discarded: the field starts as text and upgrades to a
+select when the list lands **only if nothing has been typed**. Changing a field's
+shape under a value someone is mid-way through entering is the same class of bug
+as stripping one mid-keystroke, which this feature's proxy rule has nine recorded
+instances of.
 
 ## Three modes
 
 ```
 ┌─ Routing ───────────────────────────────────────────────────────────────────┐
 │                                                                             │
-│  ⬤ Managed                                              ┃ Always on ┃       │
+│  ⬤ Managed                                                     ┃ On ┃       │
 │    OpenHuman will run all inference in the cloud, choose the best model      │
 │    for the task, optimize for cost, and keep the safest routing defaults.    │
 │                                                                             │
@@ -183,6 +214,12 @@ With no providers connected it says so rather than showing empty selects:
 It renders a **badge**, not a disabled toggle. openhuman's note on why, which is
 worth keeping: a locked switch reads as switchable-but-broken and invites a fight
 the user cannot win.
+
+What the badge **says** is not ported. openhuman's reads `Always on`, which is
+true there — they run the managed backend. Ours needs a credential and can
+resolve to nothing, so the row reports which step of the credential chain
+answered, and shows no badge at all when none did. See
+[`connect-flow.md`](connect-flow.md).
 
 ## The per-workload dialog
 

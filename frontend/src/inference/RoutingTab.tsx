@@ -1,10 +1,10 @@
 import { useState } from "react";
 
+import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -16,10 +16,10 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
+import { ModelField } from "./ModelField";
 import { WorkloadModelDialog } from "./WorkloadModelDialog";
 import {
   ADVANCED_INTRO,
-  MANAGED_ALWAYS_ON,
   MODE_COPY,
   OWN_MODE_EMPTY,
   OWN_MODE_SCOPE,
@@ -27,6 +27,7 @@ import {
   WORKLOAD_COPY,
   WORKLOAD_TIER,
   applyToEveryWorkload,
+  managedModeBadge,
   formatRef,
   parseRef,
   routingTargets,
@@ -52,10 +53,14 @@ import type { ProviderRef, RoutingMap, RoutingMode, Workload } from "./types";
  * more honest than either omitting it or making it editable.
  */
 export function RoutingTab({
+  client,
+  company,
   state,
   actions,
   canManage,
 }: {
+  client: OpenCompanyClient;
+  company: string | null;
   state: InferenceState;
   actions: InferenceActions;
   canManage: boolean;
@@ -108,6 +113,7 @@ export function RoutingTab({
               key={option}
               option={option}
               selected={mode === option}
+              managedConfigured={state.status?.managed?.configured}
               disabled={!canManage}
               onSelect={() => {
                 setChosenMode(option);
@@ -154,19 +160,15 @@ export function RoutingTab({
                       </SelectContent>
                     </Select>
                   </div>
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="inference-own-model">Model id</Label>
-                    <Input
-                      id="inference-own-model"
-                      value={ownModel}
-                      disabled={!canManage}
-                      placeholder="Leave blank to send the tier"
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="font-mono text-xs"
-                      onChange={(e) => setOwnModel(e.target.value)}
-                    />
-                  </div>
+                  <ModelField
+                    client={client}
+                    company={company}
+                    slug={ownSlug || null}
+                    id="inference-own-model"
+                    value={ownModel}
+                    disabled={!canManage}
+                    onChange={setOwnModel}
+                  />
                 </div>
                 <p className="text-xs text-muted-foreground">{OWN_MODE_SCOPE}</p>
                 <Button
@@ -234,6 +236,8 @@ export function RoutingTab({
       {state.note && <p className="text-xs text-muted-foreground">{state.note}</p>}
 
       <WorkloadModelDialog
+        client={client}
+        company={company}
         workload={editing}
         providers={state.providers}
         current={editing ? (routing[editing] ?? { kind: "default" }) : { kind: "default" }}
@@ -271,11 +275,14 @@ export function RoutingTab({
 function ModeRow({
   option,
   selected,
+  managedConfigured,
   disabled,
   onSelect,
 }: {
   option: RoutingMode;
   selected: boolean;
+  /** Whether the managed chain resolves — only the managed row reads it. */
+  managedConfigured: boolean | undefined;
   disabled: boolean;
   onSelect: () => void;
 }) {
@@ -298,8 +305,12 @@ function ModeRow({
         <span className="text-xs text-muted-foreground">{copy.description}</span>
       </span>
       {option === "managed" && (
-        <Badge variant="outline" className="border-status-done text-status-done-text">
-          {MANAGED_ALWAYS_ON}
+        <Badge
+          variant="outline"
+          className={cn(managedConfigured && "border-status-done text-status-done-text")}
+          data-testid="inference-mode-managed-state"
+        >
+          {managedModeBadge(managedConfigured)}
         </Badge>
       )}
     </button>

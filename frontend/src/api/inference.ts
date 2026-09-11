@@ -174,6 +174,38 @@ export interface InferenceStatus {
    * already more than the single form ever said.
    */
   providers?: Provider[];
+  /**
+   * What the **managed** brain would resolve to, and who pays for it.
+   *
+   * Optional because an older host does not send it. `undefined` is read as
+   * "this host did not say" — the row then falls back to the boolean facts
+   * above rather than claiming a state nobody established.
+   */
+  managed?: ManagedState;
+}
+
+/**
+ * The managed tier's honest state.
+ *
+ * The row for it used to carry a permanent "Always on" badge, inherited from a
+ * design where the same company runs the managed backend. Here it needs a
+ * credential and can resolve to nothing, and a row claiming availability while
+ * agents cannot think is exactly the dishonesty the five-state cognition model
+ * exists to prevent.
+ */
+export interface ManagedState {
+  /**
+   * Which step of the chain answers.
+   *
+   * `instance` and `companyAccount` are separate on purpose: one bills the
+   * company's own TinyHumans account and the other bills whoever runs the
+   * server, and that is the decision an operator is here to make.
+   */
+  source: "provider_key" | "company_account" | "instance" | "none";
+  /** Whether it can be reached at all. */
+  configured: boolean;
+  /** The endpoint managed requests travel to. */
+  baseUrl: string;
 }
 
 /** The set-provider body. `key` is write-only (never returned). */
@@ -462,6 +494,66 @@ export function probeDraft(
   body: { baseUrl: string; key?: string; kind?: string },
 ): Promise<ProbeResult> {
   return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/probe`, body);
+}
+
+/** One provider's own model catalog. */
+export interface ProviderCatalog {
+  /** The endpoint the catalog was read from. */
+  baseUrl: string;
+  /** Every model that endpoint publishes, sorted. Empty when `error` is set. */
+  models: string[];
+  /**
+   * Whether this endpoint's `model` field keys on a **deployment name** rather
+   * than a published model id.
+   *
+   * Azure separates the base model a deployment was made from
+   * (`gpt-5.6-terra-2026-07-09`) from the deployment name (`gpt-5.6-terra`) that
+   * actually routes the request, and `/models` publishes the first while the
+   * request body wants the second. A closed dropdown there makes the only
+   * correct value unreachable, so the field defaults to free text.
+   */
+  freeTextOnly: boolean;
+  /** Why the list is empty, naming the endpoint. */
+  error?: string;
+}
+
+/**
+ * That provider's own catalog — **per provider, not per company**.
+ *
+ * Two providers are two catalogs. `listInferenceModels` answers for the
+ * *configured* endpoint, which was the only question worth asking when a company
+ * had one provider and is a different question now.
+ *
+ * The stored key is presented host-side; the console never sees it.
+ */
+export function listProviderModels(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+): Promise<ProviderCatalog> {
+  return client.get<ProviderCatalog>(
+    `${client.scopeFor(company)}/inference/providers/${encodeURIComponent(slug)}/models`,
+  );
+}
+
+/**
+ * Paste a key for the managed tier — step 1 of its chain.
+ *
+ * Managed has no provider record, so this is not an ordinary add: it resolves
+ * from a chain rather than from a row, and a record for it would collide with
+ * the company's own entry zero. Send `""` to clear the key and fall back down
+ * the chain to the company's account, then the instance's.
+ *
+ * The other half of setting managed up is the hub link flow, which writes the
+ * company **account** rather than a key. That lives on Connections → Account
+ * and is deliberately not duplicated here.
+ */
+export function setManagedKey(
+  client: OpenCompanyClient,
+  company: string | null,
+  key: string,
+): Promise<ProviderMutation> {
+  return client.put<ProviderMutation>(`${client.scopeFor(company)}/inference/managed/key`, { key });
 }
 
 /**

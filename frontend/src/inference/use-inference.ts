@@ -23,6 +23,7 @@ import {
   putRoutes,
   restartInference,
   setDefaultProvider,
+  setManagedKey,
   setProviderEnabled,
   testProvider,
 } from "@/api/inference";
@@ -62,6 +63,7 @@ export interface InferenceActions {
   remove: (slug: string) => Promise<ProviderMutation>;
   setEnabled: (slug: string, enabled: boolean) => Promise<ProviderMutation>;
   makeDefault: (slug: string) => Promise<ProviderMutation>;
+  saveManagedKey: (key: string) => Promise<ProviderMutation>;
   test: (slug: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
@@ -161,6 +163,7 @@ export function useInference(
     setEnabled: (slug, enabled) =>
       write(slug, () => setProviderEnabled(client, company, slug, enabled)),
     makeDefault: (slug) => write(slug, () => setDefaultProvider(client, company, slug)),
+    saveManagedKey: (key) => write(null, () => setManagedKey(client, company, key)),
     test: async (slug) => {
       setBusySlug(slug);
       try {
