@@ -10,9 +10,16 @@ import {
   applyToEveryWorkload,
   formatRef,
   inferRoutingMode,
+  MANAGED_TARGET_LABEL,
+  UNSET_TARGET,
+  modelTarget,
   orphanedRoutes,
   ownModeDraft,
   parseRef,
+  refForTarget,
+  routingOptions,
+  targetForRef,
+  targetLabel,
   refSignature,
   routingTargets,
   rowValue,
@@ -293,5 +300,79 @@ describe("ownModeDraft", () => {
     ) as RoutingMap;
     expect(ownModeDraft(managed)).toEqual({ slug: "", model: "" });
     expect(ownModeDraft({} as RoutingMap)).toEqual({ slug: "", model: "" });
+  });
+});
+
+describe("the per-workload select", () => {
+  const connected = [provider("openrouter", "openrouter"), provider("anthropic", "anthropic")];
+
+  it("lists providers only — the primary is never a second entry", () => {
+    // Three connected providers, three options. It used to list five: the unset
+    // row's own display (`Primary (OpenRouter)`) and a second Managed sentinel,
+    // both beside the real rows, two of them naming the same account.
+    const options = routingOptions(connected);
+    expect(options.map((o) => o.slug)).toEqual(["tinyhumans", "openrouter", "anthropic"]);
+    expect(options[0].label).toBe(MANAGED_TARGET_LABEL);
+    expect(options.some((o) => o.slug === UNSET_TARGET)).toBe(false);
+  });
+
+  it("lists managed once even when it is also a provider record", () => {
+    // A company whose entry zero is the managed config has a `tinyhumans` row of
+    // its own. One identity, one entry.
+    const options = routingOptions([provider("tinyhumans", "managed"), ...connected]);
+    expect(options.filter((o) => o.slug === "tinyhumans")).toHaveLength(1);
+  });
+
+  it("gives Default and the provider it resolves to the same field shape", () => {
+    // The bug this closes: `Primary (OpenRouter)` showed no Model id field and
+    // `OpenRouter` did, for two names of one provider.
+    expect(modelTarget(UNSET_TARGET, connected)).toBe("openrouter");
+    expect(modelTarget("openrouter", connected)).toBe("openrouter");
+    expect(modelTarget(UNSET_TARGET, connected)).toBe(modelTarget("openrouter", connected));
+  });
+
+  it("follows the marked default, not list order, when resolving unset", () => {
+    const marked = [
+      provider("openrouter", "openrouter"),
+      { ...provider("anthropic", "anthropic"), isDefault: true },
+    ];
+    expect(modelTarget(UNSET_TARGET, marked)).toBe("anthropic");
+  });
+
+  it("offers no model id for managed, under either of its names", () => {
+    // A `managed` ref carries no model in the route grammar, so a field there
+    // could only be discarded on save — and both synonyms have to agree.
+    expect(modelTarget("tinyhumans", connected)).toBeNull();
+    expect(modelTarget(UNSET_TARGET, [])).toBeNull();
+  });
+
+  it("stays unset while the model is blank, and pins when one is chosen", () => {
+    expect(refForTarget(UNSET_TARGET, "", connected)).toEqual({ kind: "default" });
+    expect(refForTarget(UNSET_TARGET, "   ", connected)).toEqual({ kind: "default" });
+    expect(refForTarget(UNSET_TARGET, "gpt-5", connected)).toEqual({
+      kind: "cloud",
+      providerSlug: "openrouter",
+      model: "gpt-5",
+    });
+    expect(refForTarget("anthropic", "claude-sonnet-5", connected)).toEqual({
+      kind: "cloud",
+      providerSlug: "anthropic",
+      model: "claude-sonnet-5",
+    });
+    expect(refForTarget("tinyhumans", "gpt-5", connected)).toEqual({ kind: "managed" });
+  });
+
+  it("round-trips a stored ref back to the value the select shows", () => {
+    expect(targetForRef({ kind: "default" })).toBe(UNSET_TARGET);
+    expect(targetForRef({ kind: "managed" })).toBe("tinyhumans");
+    expect(targetForRef(parseRef("anthropic:claude-sonnet-5"))).toBe("anthropic");
+  });
+
+  it("never shows a sentinel to an operator", () => {
+    // The helper labels a provider by its slug, so these read lowercase — the
+    // point is that neither sentinel reaches the screen.
+    expect(targetLabel(UNSET_TARGET, connected)).toBe("Primary (openrouter)");
+    expect(targetLabel("tinyhumans", connected)).toBe(MANAGED_TARGET_LABEL);
+    expect(targetLabel("anthropic", connected)).toBe("anthropic");
   });
 });

@@ -13,6 +13,8 @@
 // they overlap they are written to agree, and the ones that matter — the mode
 // inference and the three scrub rules — are pinned on both sides.
 
+import { MANAGED_OPTION_SLUG } from "./connect";
+import { overrideIsSendable } from "./proxy-compat";
 import type { Provider, ProviderRef, RoutingMap, RoutingMode, Workload } from "./types";
 
 /**
@@ -342,6 +344,113 @@ export function routingTargets(providers: readonly Provider[]): Provider[] {
   return providers.filter((p) => p.enabled);
 }
 
+/** The managed brain's name wherever a row or a list has to say it. */
+export const MANAGED_TARGET_LABEL = "Managed";
+
+/**
+ * The sentinel a per-workload select uses for the row's **unset** state.
+ *
+ * Unset is a state, not an option — see {@link routingOptions}.
+ */
+export const UNSET_TARGET = "__unset__";
+
+/** One choosable provider in the per-workload select. */
+export interface RoutingOption {
+  /** The slug a chosen row writes. */
+  slug: string;
+  /** The name shown. */
+  label: string;
+}
+
+/**
+ * The providers one workload may be pointed at — **providers only**.
+ *
+ * The dialog used to list the primary twice: once as `Primary (OpenRouter)`,
+ * which is the unset row's own display, and once as `OpenRouter`. Three
+ * connected providers produced five entries, two of which named the same
+ * account and behaved differently. "Follow the default" is not a fourth
+ * provider; it is the absence of a choice, and the Routing tab already renders
+ * it as `Primary (OpenRouter)`. Getting back to it is an **action**, not a list
+ * entry.
+ *
+ * Managed is first and is listed by its own slug rather than a second sentinel,
+ * so it is one identity everywhere — and so a company whose entry zero *is* the
+ * managed config does not get a row for it twice.
+ */
+export function routingOptions(providers: readonly Provider[]): RoutingOption[] {
+  const rest = routingTargets(providers)
+    .filter((p) => p.slug !== MANAGED_OPTION_SLUG)
+    .map((p) => ({ slug: p.slug, label: p.label }));
+  return [{ slug: MANAGED_OPTION_SLUG, label: MANAGED_TARGET_LABEL }, ...rest];
+}
+
+/**
+ * The provider whose model id a chosen target would set, or `null` when it
+ * takes none.
+ *
+ * **The one place that decides whether the Model id field appears**, and it
+ * decides on the *kind of provider* rather than on which synonym was picked.
+ * `Primary (OpenRouter)` and `OpenRouter` are two names for one provider, and a
+ * field that appeared under one and not the other was reporting a difference
+ * that does not exist.
+ *
+ * `null` for managed because the route grammar has no managed-plus-model form:
+ * a `managed` ref carries no model, so a field there could only be discarded on
+ * save. Both of its synonyms resolve through this function, so they agree by
+ * construction rather than by two branches being kept in step.
+ */
+export function modelTarget(target: string, providers: readonly Provider[]): string | null {
+  const slug = target === UNSET_TARGET ? primaryProvider(providers)?.slug : target;
+  if (!slug || slug === MANAGED_OPTION_SLUG) return null;
+  return slug;
+}
+
+/**
+ * The ref a chosen target and model write.
+ *
+ * Unset stays unset while the model is blank. **Choosing a model pins the row**
+ * to the provider the default currently resolves to, because "follow the
+ * default, but with this model" is not expressible in the route grammar — and
+ * silently dropping the model would be the worse of the two answers.
+ *
+ * The override is judged here, at the one point that crosses the boundary,
+ * rather than by clearing the input: the operator can see what they typed and
+ * why it will not be used.
+ */
+export function refForTarget(
+  target: string,
+  model: string,
+  providers: readonly Provider[],
+): ProviderRef {
+  if (target === MANAGED_OPTION_SLUG) return { kind: "managed" };
+  const slug = modelTarget(target, providers);
+  const pinned = slug && overrideIsSendable(slug, model) ? model.trim() : "";
+  if (target === UNSET_TARGET) {
+    return pinned && slug ? parseRef(`${slug}:${pinned}`) : { kind: "default" };
+  }
+  return parseRef(pinned ? `${target}:${pinned}` : target);
+}
+
+/**
+ * What the per-workload trigger reads for a chosen target.
+ *
+ * A function rather than an inline ternary because a select that shows
+ * `__unset__` to an operator is the failure this exists to prevent — the same
+ * trap `TaskEditDialog` documents for a column id versus its label.
+ */
+export function targetLabel(target: string, providers: readonly Provider[]): string {
+  if (target === UNSET_TARGET) return primaryLabel(providers);
+  if (target === MANAGED_OPTION_SLUG) return MANAGED_TARGET_LABEL;
+  return providers.find((p) => p.slug === target)?.label ?? target;
+}
+
+/** The select value a stored ref restores to. */
+export function targetForRef(ref: ProviderRef): string {
+  if (ref.kind === "managed") return MANAGED_OPTION_SLUG;
+  if (ref.kind === "cloud") return ref.providerSlug;
+  return UNSET_TARGET;
+}
+
 /**
  * What a row's value column reads, and what its button says.
  *
@@ -359,7 +468,7 @@ export function rowValue(
       // reports routing and one that hides half of it.
       return { value: primaryLabel(providers), action: "Choose Model" };
     case "managed":
-      return { value: "Managed", action: "Change Model" };
+      return { value: MANAGED_TARGET_LABEL, action: "Change Model" };
     case "cloud": {
       const label = providers.find((p) => p.slug === ref.providerSlug)?.label ?? ref.providerSlug;
       return { value: ref.model ? `${label} · ${ref.model}` : label, action: "Change Model" };

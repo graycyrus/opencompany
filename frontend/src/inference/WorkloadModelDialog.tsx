@@ -21,12 +21,18 @@ import {
 } from "@/components/ui/select";
 import { ModelField } from "./ModelField";
 import { overrideIsSendable } from "./proxy-compat";
-import { WORKLOAD_COPY, formatRef, parseRef, primaryLabel, routingTargets } from "./routing";
+import {
+  UNSET_TARGET,
+  WORKLOAD_COPY,
+  formatRef,
+  modelTarget,
+  primaryLabel,
+  refForTarget,
+  routingOptions,
+  targetForRef,
+  targetLabel,
+} from "./routing";
 import type { Provider, ProviderRef, Workload } from "./types";
-
-/** The sentinel values the provider select uses for the two slug-less choices. */
-const UNSET = "__unset__";
-const MANAGED = "__managed__";
 
 /**
  * Choosing what one workload runs on.
@@ -72,32 +78,22 @@ export function WorkloadModelDialog({
   onCancel: () => void;
   onApply: (ref: ProviderRef) => void;
 }) {
-  const [target, setTarget] = useState<string>(UNSET);
+  const [target, setTarget] = useState<string>(UNSET_TARGET);
   const [model, setModel] = useState("");
 
   useEffect(() => {
     if (!workload) return;
-    setTarget(
-      current.kind === "cloud" ? current.providerSlug : current.kind === "managed" ? MANAGED : UNSET,
-    );
+    setTarget(targetForRef(current));
     setModel(current.kind === "cloud" || current.kind === "local" ? (current.model ?? "") : "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workload]);
 
   if (!workload) return null;
   const copy = WORKLOAD_COPY[workload];
-  const targets = routingTargets(providers);
-
-  // The override is dropped here, at the one point that crosses the boundary,
-  // rather than by clearing the input — so the operator can see what they typed
-  // and why it will not be used.
-  const sendableModel = overrideIsSendable(target, model) ? model.trim() : "";
-  const ref: ProviderRef =
-    target === UNSET
-      ? { kind: "default" }
-      : target === MANAGED
-        ? { kind: "managed" }
-        : parseRef(sendableModel ? `${target}:${sendableModel}` : target);
+  const options = routingOptions(providers);
+  /** Whose catalog the model field reads, and `null` when the row takes no id. */
+  const modelSlug = modelTarget(target, providers);
+  const ref: ProviderRef = refForTarget(target, model, providers);
 
   return (
     <Dialog open onOpenChange={(next) => !next && onCancel()}>
@@ -124,36 +120,67 @@ export function WorkloadModelDialog({
                 <SelectValue>{() => targetLabel(target, providers)}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                {/* Unset and Managed are different states on purpose: one is an
-                    absence and one is a choice. Collapsing them loses the
-                    ability to say "this row is deliberately managed". */}
-                <SelectItem value={UNSET}>{primaryLabel(providers)}</SelectItem>
-                <SelectItem value={MANAGED}>Managed</SelectItem>
-                {targets.map((p) => (
-                  <SelectItem key={p.slug} value={p.slug}>
-                    {p.label}
+                {/* Providers only. "Follow the default" is this row's unset
+                    state, not a fourth provider — listing it here named the
+                    primary twice, once under its own label and once as
+                    `Primary (…)`, and the two behaved differently. */}
+                {options.map((option) => (
+                  <SelectItem key={option.slug} value={option.slug}>
+                    {option.label}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            {/* Getting back to unset is an action. It clears the model with it:
+                a model pins the row, so leaving one behind would put it straight
+                back where it was. */}
+            {target !== UNSET_TARGET && (
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto justify-self-start p-0 text-xs"
+                data-testid="inference-workload-follow-default"
+                onClick={() => {
+                  setTarget(UNSET_TARGET);
+                  setModel("");
+                }}
+              >
+                Follow the default — {primaryLabel(providers)}
+              </Button>
+            )}
           </div>
 
-          {target !== UNSET && target !== MANAGED && (
+          {/* Present or absent by the **kind of provider**, never by which
+              synonym was chosen: `modelTarget` resolves an unset row to the
+              provider it actually uses, so `Primary (OpenRouter)` and
+              `OpenRouter` produce the same field. */}
+          {modelSlug && (
             <ModelField
               client={client}
               company={company}
-              slug={target}
+              slug={modelSlug}
               id="inference-workload-model"
               value={model}
               onChange={setModel}
             />
           )}
 
+          {/* Said out loud rather than discovered after saving: the grammar has
+              no "follow the default, but with this model" form, so choosing one
+              is a decision to stop following it. */}
+          {target === UNSET_TARGET && model.trim() && modelSlug && (
+            <p className="text-xs text-muted-foreground" data-testid="inference-workload-pins">
+              Choosing a model pins this workload to {targetLabel(modelSlug, providers)}. It will
+              stay there if the company default moves.
+            </p>
+          )}
+
           {/* Judged on a SETTLED value, never on a keystroke: six of this
               rule's nine recorded regressions are about dropping a value while
               it was still being typed. It applies to the platform proxy alone —
               every other provider takes a typed id verbatim. */}
-          {model.trim() && !overrideIsSendable(target, model) && (
+          {model.trim() && modelSlug && !overrideIsSendable(modelSlug, model) && (
             <p className="text-xs text-status-blocked-text" data-testid="inference-model-incompatible">
               The managed endpoint resolves tier names and its own
               <code className="px-1 font-mono">openrouter/author/model</code> form. This id would
@@ -196,19 +223,6 @@ export function WorkloadModelDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-/**
- * What the provider trigger reads for a chosen value.
- *
- * A function rather than an inline ternary because the two sentinels and the
- * slug lookup are three cases, and a select that shows `__unset__` to an
- * operator is the failure this exists to prevent.
- */
-function targetLabel(target: string, providers: readonly Provider[]): string {
-  if (target === UNSET) return primaryLabel(providers);
-  if (target === MANAGED) return "Managed";
-  return providers.find((p) => p.slug === target)?.label ?? target;
 }
 
 /** The route string a ref writes, exported so the tab can compare drafts. */

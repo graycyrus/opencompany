@@ -232,6 +232,34 @@ This is the only place in openhuman that tests with a real completion rather tha
 a catalog listing — and correctly so: the add flow wants "is this reachable", a
 routing row wants "will this model actually answer".
 
+### The select lists providers, and unset is a state
+
+The select offers **providers only** — Managed, and each connected provider.
+Three connected, three options. It used to list five: the unset row's own
+display (`Primary (OpenRouter)`) sat in the list beside the real `OpenRouter`
+row, so the primary appeared twice under two names that behaved differently, and
+Managed had a second identity of its own beside any `tinyhumans` provider record.
+
+`ProviderRef::Default` is not a list entry, because it is not a provider. It is
+the row's **unset state**, which the Routing tab already renders as
+`Primary (OpenRouter)` — that display is good and stays. Getting back to it is an
+**action** under the select, not an option inside it, and it clears the model
+with it (a model pins the row, so leaving one behind would put it straight back).
+
+### The Model id field depends on the kind of provider
+
+`modelTarget` is the one function that decides whether the field appears, and it
+resolves an unset row to the provider it actually uses first. So
+`Primary (OpenRouter)` and `OpenRouter` produce the same field, by construction
+rather than by two branches being kept in step. It answers `null` for Managed
+under either of its names, because the route grammar has no managed-plus-model
+form and a field there could only be discarded on save.
+
+Choosing a model while the row is unset **pins it** to the provider the default
+currently resolves to, and the dialog says so. "Follow the default, but with this
+model" is not expressible in the grammar, and silently dropping the model is the
+worse of the two answers.
+
 ## Removing a provider scrubs the routes pointing at it
 
 When a provider is removed, every workload pinned to it resets to
