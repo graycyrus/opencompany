@@ -9,10 +9,26 @@ spec for what ships today.
 | `README.md` | The case for the change, the target shape, and what must not regress |
 | [`current-state.md`](current-state.md) | What exists today, honestly — including what is already better than the thing we are copying |
 | [`data-model.md`](data-model.md) | The provider record, credential storage, and the migration constraint that shapes both |
+| [`catalogue.md`](catalogue.md) | **The provider list, verbatim** — 26 cloud, 3 local, 2 CLI, and the copy |
 | [`connect-flow.md`](connect-flow.md) | Adding a provider: the modal, the classified probe, the rollback rules |
-| [`routing.md`](routing.md) | Request → tier → provider → wire model, and what happens when it fails |
+| [`routing.md`](routing.md) | **Manage Routing, verbatim** — three modes, nine workloads, the per-workload dialog |
 | [`known-defects.md`](known-defects.md) | Bugs in the design we are borrowing from, and why we are not inheriting them |
+| [`architecture.md`](architecture.md) | Module seams, and how each one is tested |
 | [`staging.md`](staging.md) | The order the work lands in, and what is shippable at each step |
+
+## The stance
+
+**The catalogue and the two surfaces are a verbatim port.** The provider list,
+its endpoints and auth styles, the three add-categories, the three routing modes,
+the workload rows and the copy all come across as they are — see
+[`catalogue.md`](catalogue.md) and [`routing.md`](routing.md). They are the
+result of several rounds of real bugs, and reinterpreting them re-earns those
+bugs.
+
+What is *not* copied is the parts where our constraints differ — multi-tenant
+scoping, the credential seam, vocabulary discovery — and the parts where
+openhuman is simply wrong, which are enumerated in
+[`known-defects.md`](known-defects.md) with a fix attached to each.
 
 ## Why
 

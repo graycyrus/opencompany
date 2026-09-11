@@ -18,6 +18,11 @@ into a storage shape that later changes is a migration nobody planned.
    change        (today's)     provider      name one     last state
 ```
 
+Every stage is built on the seams in [`architecture.md`](architecture.md):
+`catalogue` (data), `store` (persistence over a port), `resolve` (pure
+decisions), `probe` (IO at the edge, classification pure). A stage that puts a
+decision in a handler or a component has been done wrong, however well it works.
+
 ## Stage 0 — collapse the duplication
 
 Before anything else, because every later stage would otherwise add a seventh
@@ -29,7 +34,12 @@ asserted against it. Fix the two already-drifted copies: the OpenRouter
 attribution headers in `provider.rs` versus `roster_build.rs`, and the stale
 `"managed"` member of the wire union in `api/inference.ts`.
 
-Ships with: a test that fails when the lists diverge. No behaviour change.
+Lands as the `catalogue` module plus its console mirror, with the full list from
+[`catalogue.md`](catalogue.md) — 26 cloud providers, 3 local runtimes, 2 CLI
+logins — replacing the three-provider allowlist.
+
+Ships with: a test that fails when the lists diverge. No behaviour change beyond
+the catalogue growing.
 
 ## Stage 1 — storage takes a list, with the flat slot as entry zero
 

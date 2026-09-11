@@ -1,0 +1,190 @@
+# The provider catalogue
+
+Ported **verbatim** from openhuman at `5e543a76b`. This is the list, the
+endpoints, the auth styles and the copy — not a reinterpretation of them.
+
+Sources, both of which must agree and today are hand-maintained copies of each
+other:
+
+- `vendor/tinymemory/crates/tinymemory-api/src/host/cloud_providers.rs` —
+  `BUILTIN_CLOUD_PROVIDERS`, 27 entries (slug, label, endpoint, auth style)
+- `app/src/components/settings/panels/builtinCloudProviders.ts` — the same list
+  minus the first-party entry, plus `tone` and `keyPlaceholder`
+
+When porting, generate one from the other or assert they match. openhuman does
+neither, and it is listed as a defect for that reason.
+
+## Cloud providers
+
+26 user-addable entries. `auth` is the header style: `bearer` sends
+`Authorization: Bearer <key>`; `anthropic` sends `x-api-key: <key>` plus
+`anthropic-version: 2023-06-01`.
+
+| # | slug | Label | Auth | Key placeholder | Endpoint |
+|---|---|---|---|---|---|
+| 1 | `openai` | OpenAI | bearer | `sk-...` | `https://api.openai.com/v1` |
+| 2 | `anthropic` | Anthropic | **anthropic** | `sk-ant-...` | `https://api.anthropic.com/v1` |
+| 3 | `openrouter` | OpenRouter | bearer | `sk-or-...` | `https://openrouter.ai/api/v1` |
+| 4 | `orcarouter` | OrcaRouter | bearer | `sk-orca-...` | `https://api.orcarouter.ai/v1` |
+| 5 | `gmi` | GMI | bearer | `eyJ....` | `https://api.gmi-serving.com/v1` |
+| 6 | `fireworks` | Fireworks | bearer | `fw-...` | `https://api.fireworks.ai/inference/v1` |
+| 7 | `moonshot` | Kimi (Moonshot) | bearer | `sk-...` | `https://api.moonshot.ai/v1` |
+| 8 | `groq` | Groq | bearer | `gsk_...` | `https://api.groq.com/openai/v1` |
+| 9 | `mistral` | Mistral | bearer | — | `https://api.mistral.ai/v1` |
+| 10 | `deepseek` | DeepSeek | bearer | `sk-...` | `https://api.deepseek.com/v1` |
+| 11 | `together` | Together AI | bearer | — | `https://api.together.xyz/v1` |
+| 12 | `google` | Google Gemini | bearer | — | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| 13 | `cerebras` | Cerebras | bearer | — | `https://api.cerebras.ai/v1` |
+| 14 | `xai` | xAI | bearer | — | `https://api.x.ai/v1` |
+| 15 | `huggingface` | Hugging Face | bearer | `hf_...` | `https://router.huggingface.co/v1` |
+| 16 | `nvidia` | NVIDIA | bearer | — | `https://integrate.api.nvidia.com/v1` |
+| 17 | `zai` | Z.AI | bearer | — | `https://api.z.ai/api/paas/v4` |
+| 18 | `minimax` | MiniMax | bearer | — | `https://api.minimax.io/v1` |
+| 19 | `stepfun` | StepFun | bearer | — | `https://api.stepfun.ai/step_plan/v1` |
+| 20 | `kilocode` | Kilo Code | bearer | — | `https://api.kilo.ai/api/gateway` |
+| 21 | `deepinfra` | DeepInfra | bearer | — | `https://api.deepinfra.com/v1/openai` |
+| 22 | `novita` | Novita | bearer | — | `https://api.novita.ai/v3/openai` |
+| 23 | `venice` | Venice | bearer | — | `https://api.venice.ai/api/v1` |
+| 24 | `vercel-ai-gateway` | Vercel AI Gateway | bearer | — | `https://ai-gateway.vercel.sh/v1` |
+| 25 | `sumopod` | SumoPod | bearer | `sk-...` | `https://ai.sumopod.com/v1` |
+| 26 | `modelscope` | ModelScope | bearer | `ms-...` | `https://api-inference.modelscope.cn/v1` |
+
+The 27th Rust entry is `openhuman` (`https://api.openhuman.ai/v1`, auth style
+`openhuman_jwt`) — their managed first-party backend, always present, never
+removable, not offered in the add list. **Our equivalent is the managed
+TinyHumans brain**, which is already modelled and must keep its own auth path;
+do not port `openhuman` as a row.
+
+### Endpoint paths are not uniform, and that is the point
+
+Note how varied the base URLs are — `/openai/v1`, `/inference/v1`,
+`/v1beta/openai`, `/v1/openai`, `/v3/openai`, `/api/paas/v4`, `/api/gateway`,
+`/step_plan/v1`. This is exactly why the endpoint is a per-provider preset rather
+than `https://{host}/v1`. Any attempt to derive it will be wrong for a third of
+the list.
+
+### Two entries carry a bug fix in their comment — keep it
+
+**MiniMax** was `https://api.minimax.io/anthropic` with Anthropic auth, pointing
+at MiniMax's Messages-protocol API, which openhuman does not speak. Both chat and
+model-listing 404'd; the listing 404 was a Sentry issue. The `/v1` OpenAI surface
+with bearer auth is the fix. Port the fixed value and the comment.
+
+**Anthropic** is the only non-bearer entry in the list. A port that assumes one
+auth style across the catalogue breaks exactly one provider, and it is the one
+people will try first.
+
+### Provider-specific behaviour that travels with the list
+
+| Provider | Behaviour | Why |
+|---|---|---|
+| `openai` | the **only** one where a chat-completions 404 may fall back to `/responses` | every other preset is chat-completions-only; the fallback guarantees a second 404 and floods error reporting |
+| custom / unknown slug | keeps the `/responses` fallback | a user-defined endpoint may be a genuine OpenAI proxy |
+| known chat-only hosts | the fallback is withheld by **host**, not slug | closes the gap where a custom slug points at e.g. `integrate.api.nvidia.com` |
+| `openrouter` | sends `HTTP-Referer` and `X-Title` attribution headers | required by OpenRouter to attribute traffic |
+| Azure hosts | detected by **endpoint host, not slug**, and forced to free-text model entry | Azure routes by *deployment name*, while `/models` lists *base model ids* — a dropdown makes the only correct value unreachable |
+
+The Azure rule deserves porting in full: their host list deliberately **excludes**
+`inference.ai.azure.com` and `models.ai.azure.com`, because those are the Foundry
+serverless endpoints that key `model` on the model name rather than a deployment
+name — classifying them would relabel a correct model id as a "deployment name"
+and mislead the operator in the one place the module exists to clarify.
+
+## Local runtimes
+
+Three, all keyed on an endpoint rather than a credential:
+
+| slug | Label | Needs | Note |
+|---|---|---|---|
+| `ollama` | Ollama | endpoint | default `http://localhost:11434` |
+| `lmstudio` | LM Studio | endpoint | |
+| `omlx` | OMLX | endpoint **and** key | the only local runtime that takes both |
+
+Client-side endpoint validation for this category only: parse as a URL, require
+`http:`/`https:`, and append `/v1` when the path is empty or `/`. Cloud providers
+skip this — their endpoint comes from the preset.
+
+**These are a desktop concern.** OpenCompany is a server-side product, so
+`ollama` reaching `localhost` means the *host's* localhost, not the operator's
+laptop. Port the category and the slugs, but see the SSRF rules in
+[`connect-flow.md`](connect-flow.md): loopback is an explicit allowance made
+*because* this category exists, not a hole.
+
+## CLI logins
+
+Two, both credential-less from the console's point of view:
+
+| Option slug | Stored as | Label source |
+|---|---|---|
+| `claude-code` | `claude-code` | "Claude Code" |
+| `codex` | **`openai`** | "Codex" |
+
+**Codex is the trap, and openhuman documents it:** the Codex CLI login is an
+OpenAI credential, so it is stored under the `openai` slug and shows up as the
+OpenAI row. Keying its "already connected" check on the literal `codex` never
+matches, so the dialog would offer Codex forever. It also deliberately has **no
+row of its own** — a second row would imply a second connection the operator
+could remove separately.
+
+Connecting `claude-code` sends `credentialMode: 'cli_login'` with no key and
+**skips the probe entirely**. Codex uses an OAuth token-set flow and, after
+connecting, **clears the API key** for the `openai` slug.
+
+**On a server-side host, this category is empty.** Render it saying so rather
+than hiding it — the shape is then correct if a delegated credential ever becomes
+available, and an empty labelled group is more honest than a missing one.
+
+## Custom
+
+Not a fourth category. One action, one button, because — openhuman's words — *"a
+select over one option is a button wearing a costume."*
+
+Three fields: name, OpenAI-compatible URL, API key. **The slug is derived from
+the name, never typed**, and validated against three failures before anything is
+written: empty, already in use, or colliding with a reserved builtin slug.
+
+## The copy, verbatim
+
+Port these strings rather than rewriting them. They are the result of several
+passes and they say the distinction the categories exist to make.
+
+| Key | String |
+|---|---|
+| group, cloud | `Cloud` |
+| group, local | `Local runtimes` |
+| group, CLI | `CLI logins` |
+| placeholder, cloud | `Choose a cloud provider…` |
+| placeholder, local | `Choose a local runtime…` |
+| placeholder, CLI | `Choose a CLI login…` |
+| helper, cloud | `Hosted models. You supply an API key.` |
+| helper, local | `Models running on this machine. You supply the endpoint.` |
+| helper, CLI | `Reuses a login another command line tool already holds.` |
+| detail, local row | `Runs on this machine` |
+| detail, CLI row | `Uses a login another CLI already holds` |
+
+Cloud rows use the endpoint's **host** as their detail line, not the full URL.
+
+## Two list rules that are not optional
+
+**Each category lists only what is not yet connected.** The page behind the modal
+shows the rest, and offering to add something twice is how you get two rows for
+one provider.
+
+**The select's value is pinned empty.** Choosing an item starts a connect flow and
+leaves nothing selected — a select that kept the last pick would claim a
+selection it does not own, since the connection state lives in the page, not the
+control.
+
+## Reserved slugs
+
+openhuman keeps two lists under the same name that mean different things — a
+Rust one (what gets re-injected on save) and a TypeScript one (what the add list
+hides). The divergence is deliberate there and documented, but two lists called
+the same thing meaning different things is a trap. **Port one list with one
+meaning**, and if a second is genuinely needed, name it for what it does.
+
+One carve-out worth copying with its reasoning: openhuman deliberately does
+**not** reserve `ollama`, because the settings panel registers an `ollama` entry
+so the model dropdown can resolve the user's chosen base URL — and the factory's
+`ollama:` prefix branch fires before the slug lookup, so a synthetic entry never
+reaches the cloud path. Reserving it would break the model picker.

@@ -14,36 +14,51 @@ configured. openhuman's own note on this is worth keeping:
 
 ## Three categories, because they ask three different questions
 
+Copy is verbatim from openhuman; the full list of options is in
+[`catalogue.md`](catalogue.md).
+
 ```
 ┌─ Add a provider ────────────────────────────────────────────┐
 │                                                             │
-│  Cloud provider                                             │
-│  Sends work to a hosted API. Needs a key.                   │
-│  [ OpenRouter                                           ▾]  │
+│  Cloud                                                      │
+│  Hosted models. You supply an API key.                      │
+│  [ Choose a cloud provider…                             ▾]  │
 │                                                             │
-│  On this machine                                            │
-│  Talks to a runtime you are already running. Needs a URL.   │
-│  [ Ollama                                               ▾]  │
+│  Local runtimes                                             │
+│  Models running on this machine. You supply the endpoint.   │
+│  [ Choose a local runtime…                              ▾]  │
 │                                                             │
-│  Already signed in elsewhere                                │
-│  Uses a credential another tool already holds.              │
-│  [ (none available on this host)                        ▾]  │
+│  CLI logins                                                 │
+│  Reuses a login another command line tool already holds.    │
+│  [ Choose a CLI login…                                  ▾]  │
 │                                                             │
 │  ────────────────────────────────────────────────────────   │
-│  Something else?            [ Add a custom endpoint ]       │
+│                             [ Add Custom Provider ]         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-One flat list would make the operator infer the difference from a group heading.
-A select per category gets a label and a line of helper text to say it outright.
+openhuman's reasoning, which is why this is three selects and not one list:
+
+> The categories are not three slices of one decision, they are three different
+> questions: a cloud provider wants an API key, a local runtime wants an endpoint
+> on this machine, a CLI login wants nothing because another tool already holds
+> the credential. One flat list makes the user infer that from the group heading
+> alone; a select per category has a label and a line of helper text to say it
+> outright.
+
+Row detail lines: cloud shows the endpoint's **host**; local shows `Runs on this
+machine`; CLI shows `Uses a login another CLI already holds`.
 
 Each list shows **only what is not yet connected** — the page behind the modal
 shows the rest, and offering to add something twice is how you get two rows for
-one provider.
+one provider. The select's value stays pinned empty: choosing an item starts a
+connect flow and leaves nothing selected, because the connection state lives in
+the page rather than the control.
 
-The third category is empty on a server-side host and should say so rather than
-be hidden; it exists so the shape is right when a delegated credential is
-available.
+On a server-side host the **CLI logins** category has no options. Render it
+saying so rather than hiding it — the shape is then right if a delegated
+credential ever becomes available, and an empty labelled group is more honest
+than a missing one.
 
 ## The flow
 

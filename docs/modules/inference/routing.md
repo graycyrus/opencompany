@@ -1,159 +1,232 @@
-# Routing
+# Manage Routing
 
-How a request finds a model, once a company can hold more than one provider.
+Ported **verbatim** from openhuman at `5e543a76b` — the three modes, the nine
+workloads, the copy and the mechanics. Source:
+`app/src/components/settings/panels/ai/aiPanelTypes.ts` and the routing tab in
+`AIPanel.tsx`.
 
-## The chain today, and where the new layer goes
-
-```
-  agent.tier              abstract tier            InferenceDecl          wire model
-  (per agent)             (the workload)           (the ONE provider)     (what is sent)
-      │                        │                         │                     │
-      ├── orchestrator ──▶ agentic-v1 ──┐                │                     │
-      ├── reasoning ─────▶ reasoning-v1 ├──▶ resolve_effective ──▶ model_for_tier ──▶ ▶
-      └── (default) ─────▶ chat-v1 ─────┘    runtime>manifest>env    (+ vocabulary)
-```
-
-The new layer is **between the tier and the provider**, not replacing either:
+## Three modes
 
 ```
-  agent.tier ──▶ abstract tier ──▶ ROUTE ──▶ provider (by slug) ──▶ model_for_tier ──▶ ▶
-                                     ▲
-                                     │  new: a per-tier entry naming a provider
-                                     │  unset = the company's primary
+┌─ Routing ───────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  ⬤ Managed                                              ┃ Always on ┃       │
+│    OpenHuman will run all inference in the cloud, choose the best model      │
+│    for the task, optimize for cost, and keep the safest routing defaults.    │
+│                                                                             │
+│  ○ Use Your Own Models                                                      │
+│    Choose one provider + model and route every workload through it. This    │
+│    is simple, but it can be inefficient because lightweight and heavyweight │
+│    inference all share the same route.                                      │
+│                                                                             │
+│  ○ Advanced                                                                 │
+│    Pick different models for different tasks. This is the best option for   │
+│    tight cost optimization and the most control.                            │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-This is one layer deeper than openhuman's `role → provider → model`, because
-OpenCompany's tier is an abstraction over *workloads* and its wire model is
-decided from the endpoint's published vocabulary at request time. Both of those
-are worth keeping, so the route slots above them rather than through them.
-
-## The routing table
-
-One entry per abstract tier. Four tiers, four entries, each independent:
+**The mode is inferred from the data, never stored.** There is no mode field to
+drift out of sync with the routes:
 
 ```
-┌─ Routing ───────────────────────────────────────────────────────────┐
-│                                                                     │
-│   chat-v1        [ Primary (OpenRouter)          ▾]  [ auto      ▾] │
-│   reasoning-v1   [ Acme gateway                  ▾]  [ gpt-5     ▾] │
-│   agentic-v1     [ Primary (OpenRouter)          ▾]  [ auto      ▾] │
-│   vision-v1      [ Primary (OpenRouter)          ▾]  [ auto      ▾] │
-│                                                                     │
-│   "auto" = let the endpoint's vocabulary decide (see current-state)  │
-└─────────────────────────────────────────────────────────────────────┘
+inferRoutingMode(routing):
+    refs = the nine workload refs
+    if every ref is 'openhuman' or 'default'        -> managed
+    if every ref has the same provider+model         -> own
+    otherwise                                        -> custom
 ```
 
-Stored as the existing string grammar, extended with an optional provider prefix:
+Nine fields, one derived mode. A mode field would be a tenth thing that can
+disagree with the other nine.
+
+## The nine workloads
+
+Two groups. Port the labels, the descriptions **and** the recommendation hints —
+the hints are the part that makes the screen usable by someone who does not
+already know which model to pick.
+
+### Chat and Conversations
+
+> Models used during direct user interaction, replies, reasoning, agent loops,
+> and coding help.
+
+| id | Label | Description | Recommendation hint |
+|---|---|---|---|
+| `chat` | Chat | Direct conversational back-and-forth: "Quick" mode in Conversations | a cheap or mid-cost fast chat model with high tokens/sec and low latency. Open-source local models can work well here if they feel responsive. |
+| `reasoning` | Reasoning | Main chat agent, meeting summarizer: "Reasoning" mode in Conversations | a more expensive frontier or strong reasoning model for deep thinking. Used for the main chat agent, meeting summaries, and heavier answer synthesis. |
+| `agentic` | Agentic | Sub-agent runners, tool loops, GIF decisions | a reliable instruction-following model with strong tool use. Mid-cost frontier models are usually safest; capable open-source models can work if tool calling is stable. |
+| `coding` | Coding | Code generation and refactor passes | a coding-tuned model with strong instruction following, edit quality, and long-context performance. Usually worth spending more on. |
+| `vision` | Vision | Image understanding for the vision sub-agent: always multimodal | a multimodal model that accepts image input. The managed default is image-capable; any provider routed here is always treated as vision-enabled. |
+
+### Background Tasks
+
+> Models used outside the main conversation flow for summarization, heartbeat,
+> learning, and subconscious evaluation.
+
+| id | Label | Description | Recommendation hint |
+|---|---|---|---|
+| `memory` | Memory summarization | Tree-extracts and consolidations | a cheaper summarization model. Consistent and compact, but it does not need premium frontier-level reasoning. |
+| `heartbeat` | Heartbeat | Background reasoning between user turns | a cheap, efficient background model. This runs often between turns, so low cost matters more than maximum intelligence. |
+| `learning` | Learning · Reflections | Periodic reflection over recent history | a stronger reflective model. Can be mid-cost or premium because it benefits from better synthesis over recent history. |
+| `subconscious` | Subconscious | Eventfulness scoring + drift checks | a very cheap monitoring model, lightweight and predictable. For eventfulness scoring, drift checks, and quiet background evaluation. |
+
+## What a row can point at
+
+```rust
+enum ProviderRef {
+    Openhuman,                                  // explicitly managed
+    Default,                                    // unset — falls through to managed
+    Cloud { provider_slug, model, temperature },
+    Local { model, temperature },
+    ClaudeCode { model, temperature },
+}
+```
+
+`Openhuman` and `Default` are different states on purpose: one is a choice, the
+other is an absence. Collapsing them loses the ability to say "this row is
+deliberately managed" versus "this row was never set".
+
+## Advanced mode — the row
 
 ```
-  "<model>"                  ← primary provider, explicit model   (today's shape)
-  "<slug>:<model>"           ← named provider, explicit model
-  "<slug>:"                  ← named provider, vocabulary decides the model
-  ""                         ← primary provider, vocabulary decides   (today's default)
+┌─ Advanced ──────────────────────────────────────────────────────────────────┐
+│  Fine-grained routing gives you the best cost optimization and the most      │
+│  control. Use the rows below to decide which workloads stay Managed, which   │
+│  use your shared default, and which pin to a specific model.                 │
+│                                                                             │
+│  Chat and Conversations                                                     │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  Workload                                             Model                 │
+│  Chat                                                                       │
+│    Direct conversational back-and-forth…        [ Managed    ] [Change Model]│
+│  Reasoning                                                                  │
+│    Main chat agent, meeting summarizer…         [ Acme·gpt-5 ] [Change Model]│
+│  …                                                                          │
+│                                                                             │
+│  Background Tasks                                                           │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  Memory summarization                                                       │
+│    Tree-extracts and consolidations             [ No model   ] [Choose Model]│
+│  …                                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-A string, not a foreign key, for the same reasons openhuman gives: it is
-hand-editable, greppable, diffable, and it survives in a TOML manifest where a
-join does not.
+The button reads **Change Model** when one is set and **Choose Model** when none
+is; the value column reads **No model selected** when unset.
 
-## The rule that matters most
+## Use Your Own Models — the shared row
 
-**No tier inherits another tier's route.**
+> Choose one model for everything. This routes all inference through one model.
+> It is simpler, but it can be inefficient for cost and quality because
+> lightweight and heavy tasks will all use the same route.
 
-openhuman shipped the opposite and had to undo it. Their note:
+Two selects — Provider, then Model — and a line stating exactly what it covers:
+
+> Applies the same provider + model to chat, reasoning, coding, memory,
+> heartbeat, learning, and subconscious. Embeddings are configured separately.
+> Changes save when you click save.
+
+With no providers connected it says so rather than showing empty selects:
+
+> Add or connect a provider first. Then you can route every workload through one
+> model here.
+
+## Managed stays a fallback, always
+
+> Managed is always available as a fallback. To use your own model, choose a
+> routing mode below.
+
+It renders a **badge**, not a disabled toggle. openhuman's note on why, which is
+worth keeping: a locked switch reads as switchable-but-broken and invites a fight
+the user cannot win.
+
+## The per-workload dialog
+
+Opened by Change Model / Choose Model. It carries the workload's recommendation
+hint, a provider select, a model select sourced from that provider's `/models`,
+a free-text escape hatch (**Enter model id**), and a **Test** button that sends
+one real one-turn completion for that workload and reports the result inline.
+
+This is the only place in openhuman that tests with a real completion rather than
+a catalog listing — and correctly so: the add flow wants "is this reachable", a
+routing row wants "will this model actually answer".
+
+## Removing a provider scrubs the routes pointing at it
+
+When a provider is removed, every workload pinned to it resets to
+`{ kind: 'default' }`. The matching rule differs by kind and all three cases are
+real bugs openhuman fixed:
+
+- **Cloud / custom** — matched precisely by `providerSlug`.
+- **Claude Code** — its refs carry no `providerSlug`. Without special handling,
+  disconnecting it left workloads pinned to `claude-code:<model>`, which the
+  factory still honours, so chats kept using the CLI after the provider was
+  removed.
+- **Local runtimes** — their refs carry no slug either, so a `local` ref is only
+  definitively orphaned once **no** local runtime remains enabled. Before this
+  helper the local case was silently a no-op.
+
+And a second, independent mechanism at load: a config migration reconciles
+routes naming a provider that no longer exists. Two mechanisms for one invariant,
+because the UI path can be bypassed by a config edit or an older build — and an
+unresolvable route **hard-errors that workload's inference** rather than falling
+back.
+
+## No workload inherits another's route
+
+openhuman shipped the opposite and had to undo it:
 
 > Setting only `coding_provider` used to move `chat` and `reasoning` onto that
 > key too — ordinary conversations silently billed to the user's own account,
 > with no settings field saying so.
 
-An unset tier resolves to the company's **primary provider**, never to a sibling
-tier's configured provider. "Resolves to primary" and "borrows from a sibling"
-are different things, and only the first is predictable from the screen.
+An unset workload resolves through the primary, never through a sibling's
+configured provider. Two deliberate **aliases** survive that change and are not
+the same thing: `burst` reads the agentic route, and `summarization` reads the
+memory route. Those are two names for one configured route, which is different
+from an unset route borrowing a set one.
 
-## Failure
+## Mapping onto OpenCompany
 
-Today: one endpoint, one attempt, one same-endpoint retry for the empty-response
-class. A 401, 429, 500 or timeout ends the turn.
+openhuman's nine workloads do not map one-to-one onto our four abstract tiers
+(`chat-v1`, `reasoning-v1`, `agentic-v1`, `vision-v1`). The port has a real
+decision to make here, and it should be made explicitly rather than by
+coincidence:
 
-The rework **does not add cross-provider failover**, and that is a deliberate
-decision rather than an omission. The reason is a real constraint, not caution:
+| openhuman workload | Nearest OpenCompany tier |
+|---|---|
+| chat | `chat-v1` |
+| reasoning | `reasoning-v1` |
+| agentic | `agentic-v1` |
+| coding | `agentic-v1` (no distinct tier today) |
+| vision | `vision-v1` |
+| memory, heartbeat, learning, subconscious | **no equivalent** — these are background loops OpenCompany does not run |
 
-```
-  turn budget ────────────────────────────────────────▶ 2–3s (triage timeout)
-       │
-       ├─ resolve provider        secret reads
-       ├─ discover vocabulary     budgeted catalog read, cached
-       └─ chat/completions        the actual request
-                                        │
-         a failover here would need ────┴──▶ resolve provider #2
-                                             discover vocabulary #2
-                                             chat/completions #2
-                                             ... inside the SAME budget
-```
+Two honest options:
 
-Either the secondary is resolved eagerly — N× the secret reads and N cache
-entries per company per hour, for a path that is almost never taken — or it is
-resolved lazily and blows a budget the caller already set.
+1. **Ship five rows** — the tiers that exist — keeping openhuman's grouping,
+   labels, hints and dialog exactly. The Background Tasks group is omitted until
+   there are background loops to route.
+2. **Add the tiers first**, then ship all nine.
 
-So failure stays a first-class *reported* state rather than a silently-papered
-one, which is the house position everywhere else in this codebase:
+Option 1 is the one this plan takes: the routing *surface* is ported faithfully,
+and the row count follows what the runtime actually has. Shipping four empty
+background rows would be a screen that lies about what the product does.
 
-- A **401** invalidates the cached credential and surfaces. With per-provider
-  slots, the message can finally name the provider whose key was rejected —
-  today it has to explain in a paragraph that the stored key may belong to a
-  vendor you are no longer using.
-- A **4xx unknown-model** is rewritten into repair advice naming the table to
-  edit. With routes, it can also name the *tier* whose entry is wrong.
-- A **disabled or deleted** provider must not strand a route pointing at it. See
-  below.
+Everything else — the three modes, the inferred mode, the `ProviderRef` union,
+the row layout, Change/Choose Model, the per-workload dialog with its Test, the
+scrub-on-remove with all three matching rules, and the no-inheritance rule —
+ports as-is.
 
-If failover is wanted later, it belongs as an explicit per-tier secondary with
-its provider resolved eagerly at save time — not as an implicit chain.
+## What does not change on our side
 
-## Removing a provider must scrub its routes
-
-Deleting a provider that a tier points at leaves a route naming a slug that no
-longer resolves. openhuman handles this in two independent places, and both are
-worth copying:
-
-1. **At the point of removal**, in the writer — reset any tier pinned to that
-   provider back to primary.
-2. **At load**, as a reconciliation — because the UI path can be bypassed by a
-   manifest edit or an older build, and an unresolvable route hard-errors that
-   tier's inference rather than falling back.
-
-Two mechanisms for one invariant, because the first can be skipped.
-
-The same applies to **disabling**: a disabled provider is not a routing target.
-Today there is no disabled state at all — the only way to stop using a provider
-is to delete it, losing its endpoint and its routes with it.
-
-## Fail closed on ambiguity
-
-When a config expresses an intent the system cannot satisfy, error with
-instructions rather than silently falling back to something that bills
-differently. OpenCompany already does this in one place — a half-migrated BYOK
-config yields a sentinel and an actionable message rather than quietly routing
-through the managed backend.
-
-Extend the same discipline to routes: a tier naming a slug that does not exist is
-an error naming the tier, the slug, and the configured slugs — not a silent
-demotion to primary. A silent demotion is how spend moves without anyone
-deciding it.
-
-## What stays exactly as it is
-
-- **Per-request re-resolution.** `TenantProvider` bakes no config; a console
-  change lands on the next turn with no rebuild. A routing table built at startup
-  would lose this and turn every change into `restartRequired`.
-- **Vocabulary discovery**, per provider. Each entry gets its own
-  `TierVocabulary`, classified from its own catalog. The per-tier substitution
-  bitmask is unchanged.
+- **Per-request re-resolution.** A console change lands on the next turn with no
+  rebuild. A routing table built at startup would turn every change into
+  `restartRequired`.
+- **`TierVocabulary` discovery, per provider.** Each entry classifies its own
+  endpoint. openhuman has no equivalent; a faithful port would drop it.
 - **An operator override wins in every vocabulary.** A typed model id is honoured
   verbatim whatever the endpoint publishes.
-- **`agent.tier` semantics.** A tier names a workload, never a model. That is
-  what lets an agent keep its tier while moving between harnesses.
-- **Internal passes stay on `chat-v1`.** Planning, triage, title, selector,
-  workflow build, profile draft and roster build are hardcoded there today. The
-  route table gives them a provider without giving each one a knob — which is the
-  right amount of new surface.
+- **`agent.tier` stays the per-agent knob.** A tier names a workload, never a
+  model.
