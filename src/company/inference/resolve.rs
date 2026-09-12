@@ -440,6 +440,35 @@ pub enum RoutingMode {
     Unset,
 }
 
+/// Whether any routable workload is **explicitly** pointed at the managed tier.
+///
+/// The one question boot-time brain selection had no way to ask. A company that
+/// routes its tiers to `managed` has configured its inference — but it has
+/// configured it in a place neither half of
+/// [`resolve_effective_scoped`](super::resolve_effective_scoped)'s original two
+/// branches looks: not in the provider list (managed has no record there), and
+/// not in the legacy runtime blob or the manifest. So `RuntimeBuilder::build`
+/// saw "nothing configured", handed the company the offline echo brain, and a
+/// restart changed nothing because a fresh boot ran the identical computation.
+///
+/// **[`ProviderRef::Default`] deliberately does not count.** An unset row means
+/// the operator chose nothing, and [`provider_for_workload`] maps it to
+/// [`Resolution::Primary`] — the provider list, then the legacy chain, both of
+/// which the caller has already tried by the time it asks this. Counting an
+/// absence as a choice here would report every company configured, which is the
+/// mirror image of the bug and strictly worse: it would take companies off the
+/// echo brain that genuinely have nothing to think with.
+///
+/// This is deliberately weaker than [`infer_routing_mode`]'s Managed rule, which
+/// also accepts all-unset. That function answers "which mode is this table
+/// describing"; this one answers "would a turn actually reach managed", and only
+/// an explicit row does that.
+pub fn any_route_is_managed(routes: &Routes) -> bool {
+    ROUTABLE_WORKLOADS
+        .iter()
+        .any(|w| matches!(routes.get(w.tier()), Some(ProviderRef::Managed)))
+}
+
 /// Which mode the current routes describe, given whether managed can answer.
 ///
 /// ## Why this takes a second argument

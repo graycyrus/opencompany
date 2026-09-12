@@ -678,26 +678,6 @@ pub(crate) fn designs_profiles(_runtime: &CompanyRuntime) -> bool {
 /// 1. a tenant config resolves *now* (the same predicate `build` tests),
 /// 2. the company is **not** on the harness path, and
 /// 3. the harness path is reachable here, so a restart would actually change it.
-///
-/// ## `configured` has to mean *either* resolver, not just the legacy one
-///
-/// Condition 1 is the caller's to compute, and for a long time every caller
-/// computed it as `resolve_effective(..).is_some()` — the **legacy single-config
-/// path** (`inference/config` / `inference/key`, now entry zero). That was the
-/// whole story when it was written. It stopped being the whole story when the
-/// provider-list and routing-table system landed: Managed is not a row in
-/// `inference/providers`, it is its own thing with its own credential at
-/// `provider/tinyhumans/key`, so a company that configures **only** Managed
-/// through the console resolves `None` there while [`managed_state`] reports it
-/// available.
-///
-/// The visible failure was a company on the echo brain whose Providers and
-/// Routing tabs both said Managed was configured, whose chat pane still said
-/// "no model configured", and which showed **no restart banner anywhere** — the
-/// one thing that would have told the operator what to do. So callers must OR
-/// the managed resolution into `configured`; passing only the legacy answer
-/// makes this function return `false` by construction for exactly the companies
-/// that need it most.
 fn restart_pending(runtime: &CompanyRuntime, configured: bool) -> bool {
     configured
         && runtime.cognition().path != crate::ports::brain::HARNESS_PATH
@@ -758,23 +738,9 @@ pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
             Ok(None) => (false, true),
             Err(_) => (false, false),
         };
-    // The same widening the status card needs, for the same reason: `decl` above
-    // only answers the entry-zero chain, and a company whose sole inference is
-    // Managed resolves `None` there. Without this the workflow-run route tells an
-    // operator with a working Managed credential that the deployment is "not
-    // wired", when what is actually true is that a restart would wire the runner.
-    //
-    // An `Err` degrades to `false` on the #266 doctrine, matching the resolve
-    // above: a store we cannot read is not evidence a restart would help.
-    let configured = configured || managed_resolves(runtime).await.unwrap_or(false);
     if restart_pending(runtime, configured) {
         return RunnerGap::RestartPending;
     }
-    // `resolved_to_nothing` deliberately still speaks only for `decl`, and needs
-    // no widening: it is consulted under exactly the two conditions
-    // `restart_pending` also requires (harness reachable, company off the harness
-    // path), so a company where managed resolves has already returned above.
-    // Anything reaching here with `resolved_to_nothing` genuinely has nothing.
     if resolved_to_nothing
         && harness_reachable(runtime)
         && runtime.cognition().path != crate::ports::brain::HARNESS_PATH
@@ -881,14 +847,10 @@ async fn effective_status_with(
     };
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
+    let restart_required = restart_pending(runtime, decl.is_some());
     let providers = provider_list(runtime).await?;
     let routes = routing_table(runtime).await?;
     let managed = managed_state(runtime, platform).await?;
-    // Both resolvers, not just the legacy one. `decl` answers only the entry-zero
-    // chain; a company whose sole inference is Managed added through the console
-    // resolves `None` there and `configured` here. Read before `restart_required`
-    // rather than after it, which is the ordering that let the two drift apart.
-    let restart_required = restart_pending(runtime, decl.is_some() || managed.configured);
     // Independent of `decl`: the shipped defaults are the same regardless of
     // what (if anything) this company has configured.
     let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
@@ -924,12 +886,10 @@ async fn effective_status_with(
             key_configured: false,
             cognition: cognition.path.to_string(),
             usage_metering: cognition.metering,
-            // Threaded rather than hardcoded, and this arm is precisely why.
-            // It used to read "`decl` is `None`, so `restart_pending` is
-            // `false` here by construction" — true only while Managed could be
-            // configured through the legacy path alone. A company that adds a
-            // Managed key through the console lands in *this* arm with
-            // `managed.configured` true and a real restart to recommend.
+            // `decl` is `None`, so `restart_pending` is `false` here by
+            // construction — nothing tenant-specific is configured to be
+            // stranded. Threaded rather than hardcoded so the two arms cannot
+            // drift apart.
             restart_required,
             harness_reachable: harness_reachable(runtime),
             designs_profiles: designs_profiles(runtime),
@@ -3682,20 +3642,24 @@ base_url = "https://byo.example/v1"
         assert_eq!(err["code"], "inference_required");
     }
 
-    /// The same #266 strand, reached through the **provider-list** system rather
-    /// than the legacy one — which is the shape that shipped broken.
+    /// The reported company at the HTTP boundary: every tier routed to
+    /// `managed`, a managed key stored, and nothing else configured.
     ///
-    /// Managed has no row in `inference/providers`: its credential lives at
-    /// `provider/tinyhumans/key` and it resolves through a chain rather than
-    /// through a record. So a company that configures nothing but Managed
-    /// resolves `None` from `resolve_effective` — the legacy entry-zero chain —
-    /// while [`managed_state`] correctly reports it available.
+    /// The unit half of this lives in
+    /// [`crate::company::inference`] — this is the same defect seen from the two
+    /// routes an operator actually meets. Managed has no row in
+    /// `inference/providers` and writes neither the legacy runtime blob nor a
+    /// manifest block, so before the third branch landed in
+    /// `resolve_effective_scoped` this company resolved `None`, booted onto the
+    /// offline echo brain, and stayed there across a restart — while the console
+    /// showed Managed available on both tabs and the chat pane said "no model
+    /// configured".
     ///
-    /// Before the fix, `restart_pending` was fed only that `None`, so
-    /// `restartRequired` was `false` **by construction** for exactly this
-    /// company: the Providers and Routing tabs said Managed was configured, the
-    /// chat pane said "no model configured", and no banner anywhere mentioned
-    /// the restart that was the actual remedy.
+    /// `restartRequired` needs no widening of its own: it is `restart_pending`
+    /// over the same resolver, so fixing the resolver fixes the banner, and the
+    /// run route's `RunnerGap` inherits it for free. Both are asserted here,
+    /// because "the resolver is right but nothing downstream moved" is the
+    /// failure this whole family of bugs keeps taking.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
     async fn configuring_only_managed_after_boot_reports_restart_required() {
@@ -3756,12 +3720,8 @@ base_url = "https://byo.example/v1"
         assert_eq!(status, StatusCode::OK, "{raw}");
 
         let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
-        // The precondition the bug hid behind: the legacy resolver still says
-        // nothing is configured, so this is the `None` arm of the status DTO...
-        assert_eq!(dto["source"], "managed");
-        assert_eq!(dto["keyConfigured"], false);
-        // ...while the new system says Managed resolves, and the running brain
-        // is still the one boot chose.
+        // Managed resolves, and the running brain is still the one boot chose —
+        // which together are what `restartRequired` is supposed to mean.
         assert_eq!(dto["managed"]["configured"], true, "{raw}");
         assert_eq!(dto["managed"]["source"], "provider_key", "{raw}");
         assert_eq!(dto["cognition"], "echo", "{raw}");

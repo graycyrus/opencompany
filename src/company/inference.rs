@@ -1066,10 +1066,11 @@ pub async fn key_configured(
 
 /// Resolves a company's *effective* inference configuration.
 ///
-/// Precedence is **runtime > manifest > env-default**. Returns `None` when no
-/// source configures inference at all — the caller then keeps the managed/echo
-/// brain. The single seam the harness builder and the ops route both use so the
-/// agent-facing resolution and the console's status view stay identical.
+/// Precedence is **provider list > runtime > manifest > env-default > a routing
+/// table that names `managed`**. Returns `None` when no source configures
+/// inference at all — the caller then keeps the managed/echo brain. The single
+/// seam the harness builder and the ops route both use so the agent-facing
+/// resolution and the console's status view stay identical.
 ///
 /// This re-reads the secret store on every call, which is what makes a console
 /// switch take effect on the agents' next turn with no rebuild.
@@ -1127,7 +1128,56 @@ pub async fn resolve_effective_scoped(
         return Ok(Some(decl));
     }
 
-    resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await
+    if let Some(decl) = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?
+    {
+        return Ok(Some(decl));
+    }
+
+    // 4. The routing table naming `managed` — after the legacy chain's steps
+    //    1-3, and last of everything.
+    //
+    // **The branch whose absence put a working company on the echo brain.**
+    // Managed is the one inference source with no record in either place the two
+    // branches above read: it is not a row in `inference/providers` (it resolves
+    // through a credential chain rather than from a record), and a company that
+    // configured it through the console's Managed row wrote neither the legacy
+    // runtime blob nor a manifest `[inference]` block. Its credential is at
+    // `provider/tinyhumans/key` and its *choice* is in `inference/routes`.
+    //
+    // So on the reported company — one disabled provider, all four tiers routed
+    // to `managed`, a non-empty managed key — both branches above returned
+    // `None`, `RuntimeBuilder::build` read that as "nothing configured" and
+    // selected the offline echo brain. Restarting the host did not help, because
+    // a fresh boot ran this same computation and got the same answer. Meanwhile
+    // [`resolve_effective_for_tier`] resolved those rows to
+    // [`managed_decl`] perfectly well — the turn-time path knew, and the
+    // boot-time path had no way to ask.
+    //
+    // Tried **last**, so every company that resolves today resolves exactly
+    // where it did: this branch only turns a `None` into a `Some`.
+    let routes = store::load_routes(company, secrets).await?;
+    if resolve::any_route_is_managed(&routes) {
+        // Through `managed_decl` rather than a second opinion about the managed
+        // chain. It is the same function the routed turn path calls, so "does
+        // managed resolve for boot" and "what does a managed route resolve to"
+        // cannot drift — which is the failure mode that produced this bug and
+        // three of its siblings.
+        //
+        // The predicate is the resolved declaration's **own** credential, not a
+        // re-derivation: `managed_decl` always returns a decl (the platform
+        // endpoint exists regardless), and what separates a company that can
+        // think from one that cannot is whether a credential reached it through
+        // `managed_identity` — the pasted key, the company's TinyHumans account,
+        // or the instance identity. `Credential::None` means the operator picked
+        // managed and put nothing behind it, and that company belongs on the
+        // echo brain exactly as before.
+        let decl = managed_decl(company, secrets, env_default, scope).await?;
+        if decl.credential.configured() {
+            return Ok(Some(decl));
+        }
+    }
+
+    Ok(None)
 }
 
 /// The declaration the company's **primary** provider resolves to, if the list
@@ -3287,6 +3337,155 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(decl.base_url, "https://second.example/v1");
+    }
+
+    // ---- a routed-managed company is a configured company ---------------------
+    //
+    // The third instance of tonight's shape, and the one that reached furthest:
+    // `resolve_effective_scoped` is what `RuntimeBuilder::build` asks "is
+    // anything configured at all", and it had exactly two branches — the
+    // provider list, then the legacy chain. Managed lives in neither. It has no
+    // row in `inference/providers` (it resolves through a credential chain, not
+    // a record), and a company configured through the console's Managed row
+    // writes neither the runtime blob nor a manifest block: its credential goes
+    // to `provider/tinyhumans/key` and its choice goes to `inference/routes`.
+    //
+    // So a company routing every tier to `managed`, with a managed key stored,
+    // resolved `None` — and got the offline echo brain. Restarting the host did
+    // not help, because a fresh boot ran the identical computation. The
+    // turn-time resolver knew how to resolve those rows the whole time.
+
+    /// Stores a managed credential at the address the console's managed key
+    /// route writes — the new per-provider slot, not the legacy flat one.
+    async fn managed_key(secrets: &MemSecrets, key: &str) {
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                &store::provider_key_key(MANAGED_SLUG),
+                SecretValue(key.to_string()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_company_routed_to_managed_resolves_rather_than_landing_on_echo() {
+        // The reported company, reproduced exactly: one provider, switched off,
+        // every tier routed to `managed`, and a managed key stored.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "anthropic", "sk-not-a-real-key-anthropic").await;
+        store::set_enabled(&company, &secrets, "anthropic", false)
+            .await
+            .unwrap();
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+
+        // The unrouted resolver — the one `RuntimeBuilder::build` calls, and the
+        // one that used to answer `None` here and strand the company on echo.
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("a company routed to managed with a managed key is configured");
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-managed"),
+            "the credential is the managed key, reached through the managed chain"
+        );
+        assert!(
+            decl.is_proxied(),
+            "managed rides the platform endpoint, which is what entitles it to the chain"
+        );
+
+        // And it agrees with the turn-time path, which knew all along — the two
+        // must not be able to disagree about whether this company can think.
+        let routed = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("the routed path resolves too");
+        assert_eq!(routed.base_url, decl.base_url);
+        assert_eq!(bearer(&routed).await, bearer(&decl).await);
+    }
+
+    #[tokio::test]
+    async fn routing_to_managed_with_nothing_behind_it_still_resolves_to_nothing() {
+        // The other half, and the one that keeps the echo brain meaningful: the
+        // new branch must widen "configured" only where something can actually
+        // answer. A company that picked Managed and put no credential behind it
+        // — no pasted key, no company account, no instance identity, because no
+        // env default is passed — has configured nothing, and reporting it
+        // configured would take it off the echo brain with nothing to think
+        // with. That is the mirror-image bug, and it is worse.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "a managed route with no credential behind it configures nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unset_route_is_not_a_managed_route() {
+        // `ProviderRef::Default` is an absence, not a choice. It maps to
+        // `Resolution::Primary` — the provider list, then the legacy chain, both
+        // of which the new branch runs after. Counting it as managed would
+        // report every company with a managed key configured regardless of what
+        // its routing table says, and would quietly disagree with where the turn
+        // actually goes.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+
+        assert!(
+            !resolve::any_route_is_managed(&store::load_routes(&company, &secrets).await.unwrap()),
+            "an empty routing table names managed nowhere"
+        );
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "a stored managed key with no route pointing at it does not configure the company"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_managed_branch_runs_last_and_changes_no_company_that_already_resolved() {
+        // Precedence, asserted rather than assumed: the new branch is a tail, so
+        // a company whose provider list already answers keeps answering there
+        // even with every tier routed to managed and a managed key stored.
+        // Widening a resolver is only safe if it can turn `None` into `Some` and
+        // nothing else.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("the provider list still answers");
+        assert_eq!(decl.base_url, "https://first.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-1"));
     }
 
     #[tokio::test]
