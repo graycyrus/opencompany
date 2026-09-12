@@ -103,11 +103,11 @@ const CLEAR_NOTE: &str =
 /// visible from the company's own account, so the grid will look empty until
 /// they are connected again there.
 const BYOK_NOTE: &str = "This company now reaches Composio through its own account. Agents pick \
-     that up on their next turn. Providers connected through OpenHuman-managed Composio stay in \
+     that up on their next turn. Providers connected through TinyHumans-managed Composio stay in \
      that account — connect them again here, or clear the key to switch back.";
 
 /// The reminder attached to giving the managed route back.
-const MANAGED_NOTE: &str = "Composio API key cleared. This company is back on OpenHuman-managed \
+const MANAGED_NOTE: &str = "Composio API key cleared. This company is back on TinyHumans-managed \
      Composio from the agents' next turn, with the providers it had connected there.";
 
 /// The toolkits the console should offer for a company, whether that answer
@@ -888,7 +888,7 @@ async fn test_api_key(company: AdminScopedCompany) -> Result<Json<ApiKeyTestDto>
     // distinction.
     let Some(api_key) = api_key else {
         return Err(ApiError(crate::error::OpenCompanyError::NotConfigured(
-            "this company is on OpenHuman-managed Composio, so there is no API key to test — \
+            "this company is on TinyHumans-managed Composio, so there is no API key to test — \
              paste one to bring its own Composio account"
                 .to_string(),
         )));
@@ -1072,7 +1072,7 @@ pub(crate) async fn resolve_tenant(
         return Err(ApiError(crate::error::OpenCompanyError::NotConfigured(
             match access.mode {
                 ComposioMode::Byok => "this company uses its own Composio account but no Composio \
-                     API key is stored — paste one, or clear it to go back to OpenHuman-managed \
+                     API key is stored — paste one, or clear it to go back to TinyHumans-managed \
                      Composio"
                     .to_string(),
                 ComposioMode::Managed => "no Composio credential is available for this company — \
