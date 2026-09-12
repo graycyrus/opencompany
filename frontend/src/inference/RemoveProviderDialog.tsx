@@ -46,6 +46,7 @@ export function RemoveProviderDialog({
   intent,
   label,
   impact,
+  managed,
   busy,
   onCancel,
   onDisable,
@@ -57,12 +58,21 @@ export function RemoveProviderDialog({
   impact: RemovalImpact;
   busy: boolean;
   onCancel: () => void;
+  /**
+   * What managed would do if this removal left nothing else.
+   *
+   * Two of the warnings below promise it as a fallback, and that promise is
+   * false when managed is switched off or its chain resolves to nothing —
+   * exactly when the operator most needs to know. Optional because an older
+   * host does not say; unknown is read as available.
+   */
+  managed?: { configured?: boolean; enabled?: boolean };
   /** Offered only where it is a real alternative — see the component doc. */
   onDisable?: () => void;
   onConfirm: () => void;
 }) {
   if (!intent) return null;
-  const lines = removalWarnings(intent, label, impact);
+  const lines = removalWarnings(intent, label, impact, managed);
 
   return (
     <Dialog open onOpenChange={(next) => !next && onCancel()}>

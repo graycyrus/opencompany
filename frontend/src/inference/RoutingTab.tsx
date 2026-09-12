@@ -304,6 +304,7 @@ export function RoutingTab({
         company={company}
         workload={editing}
         providers={state.providers}
+        managed={state.status?.managed}
         current={editing ? (routing[editing] ?? { kind: "default" }) : { kind: "default" }}
         testing={testing}
         testResult={testResult}

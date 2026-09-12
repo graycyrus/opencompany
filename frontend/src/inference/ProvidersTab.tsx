@@ -347,6 +347,7 @@ export function ProvidersTab({
             ? removalImpact(confirming.provider, state.providers, routingMap, categoryOf)
             : { routed: [], isDefault: false, lastEnabled: false, defaultMovesTo: null }
         }
+        managed={state.status?.managed}
         busy={busy}
         // Offered only where it is genuinely the softer answer: switching a
         // provider off keeps its endpoint, its credential and its routes, which

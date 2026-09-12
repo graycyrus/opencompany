@@ -327,6 +327,47 @@ describe("the per-workload select", () => {
     expect(options.filter((o) => o.slug === "tinyhumans")).toHaveLength(1);
   });
 
+  it("marks Managed unpickable when it cannot serve a turn", () => {
+    // Routing a workload there while it is switched off or unresolved saves
+    // successfully and then fails every turn — a click that reports the
+    // opposite of what it did.
+    const off = routingOptions(connected, { configured: true, enabled: false });
+    expect(off[0].slug).toBe("tinyhumans");
+    expect(off[0].unavailable).toBe(true);
+
+    const unset = routingOptions(connected, { configured: false, enabled: true });
+    expect(unset[0].unavailable).toBe(true);
+
+    // Usable, and unknown — which is what every caller meant before the
+    // argument existed — both stay pickable.
+    expect(routingOptions(connected, { configured: true, enabled: true })[0].unavailable).toBe(
+      false,
+    );
+    expect(routingOptions(connected)[0].unavailable).toBe(false);
+  });
+
+  it("does not promise a fallback Managed cannot provide", () => {
+    const impact: RemovalImpact = {
+      routed: [],
+      isDefault: true,
+      lastEnabled: true,
+      defaultMovesTo: null,
+    };
+    const available = removalWarnings("provider", "Anthropic", impact, {
+      configured: true,
+      enabled: true,
+    }).join(" ");
+    expect(available).toContain("falls back to Managed");
+    expect(available).toContain("only thing that can answer");
+
+    const off = removalWarnings("provider", "Anthropic", impact, {
+      configured: true,
+      enabled: false,
+    }).join(" ");
+    expect(off).not.toContain("falls back to Managed");
+    expect(off).toContain("nothing to think with");
+  });
+
   it("gives Default and the provider it resolves to the same field shape", () => {
     // The bug this closes: `Primary (OpenRouter)` showed no Model id field and
     // `OpenRouter` did, for two names of one provider.
