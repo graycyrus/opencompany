@@ -433,21 +433,42 @@ pub fn remember_omit(endpoint: &str, model: &str, parameter: &str) {
 
 /// The part of a URL that identifies the service, for the learned-omission key.
 ///
-/// Scheme, host and port — the path is dropped so `/v1/chat/completions` and
-/// `/v1/responses` on one gateway are one endpoint, which they are. Anything
-/// that will not parse as a URL is used whole and lowercased: a key that is
-/// merely too specific costs one round-trip, and one that is too broad is the
-/// bug this exists to close.
+/// Scheme, host, port **and base path**, with the operation stripped: two
+/// requests differ in `/chat/completions` vs `/responses`, which is the same
+/// service answering two ways, and they should share what was learnt. What must
+/// not share it is `/vendor-a/v1` and `/vendor-b/v1` on one host — a path-routed
+/// gateway is how a single origin fronts several upstreams, and that is the
+/// arrangement most likely to disagree about a parameter in the first place.
+///
+/// Query and fragment go: `catalogue::catalog_query` appends shape parameters
+/// that say nothing about who is answering.
+///
+/// Anything that will not parse as a URL is used whole and lowercased. A key
+/// that is merely too specific costs one round-trip; one that is too broad is
+/// the bug this exists to close.
 fn endpoint_scope(endpoint: &str) -> String {
+    /// Suffixes that name an *operation* rather than a service.
+    const OPERATIONS: &[&str] = &[
+        "/chat/completions",
+        "/completions",
+        "/responses",
+        "/messages",
+        "/models",
+    ];
     let lowered = endpoint.trim().to_ascii_lowercase();
     let Some((scheme, rest)) = lowered.split_once("://") else {
         return lowered;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    if authority.is_empty() {
+    let path_and_authority = rest.split(['?', '#']).next().unwrap_or(rest);
+    let trimmed = path_and_authority.trim_end_matches('/');
+    if trimmed.is_empty() {
         return lowered;
     }
-    format!("{scheme}://{authority}")
+    let base = OPERATIONS
+        .iter()
+        .find_map(|op| trimmed.strip_suffix(op))
+        .unwrap_or(trimmed);
+    format!("{scheme}://{}", base.trim_end_matches('/'))
 }
 
 /// The one cell the reader and the writer share. A single `OnceLock` rather than
@@ -677,15 +698,32 @@ mod tests {
             "the other gateway never rejected anything"
         );
 
-        // Same service, different path: `/chat/completions` and `/responses`
-        // are one endpoint, so what one learns the other knows.
+        // Same service, different operation: `/chat/completions` and
+        // `/responses` are one endpoint answering two ways, so what one learns
+        // the other knows.
+        for operation in [
+            "https://gateway-one.example/v1/chat/completions",
+            "https://gateway-one.example/v1/responses",
+            "https://gateway-one.example/v1/",
+        ] {
+            assert_eq!(
+                rule_for(operation, model, "max_tokens"),
+                Rule::Omit,
+                "{operation} is the same service"
+            );
+        }
+
+        // But a path-routed gateway is several services behind one origin, and
+        // that is the arrangement most likely to disagree about a parameter at
+        // all — one upstream's 400 says nothing about the next.
         assert_eq!(
             rule_for(
-                "https://gateway-one.example/v1/chat/completions",
+                "https://gateway-one.example/vendor-b/v1",
                 model,
                 "max_tokens"
             ),
-            Rule::Omit
+            Rule::Free,
+            "another upstream behind the same host has not rejected anything"
         );
     }
 }

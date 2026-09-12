@@ -1212,7 +1212,9 @@ async fn refuse_a_managed_fallback_that_is_switched_off(
     };
     if decl.is_proxied() && !store::managed_enabled(company, secrets).await? {
         return Err(OpenCompanyError::Config(
-            "Managed is switched off and nothing else is connected, so there is              nothing to think with. Switch it back on, or connect a provider in              Settings → Inference."
+            "Managed is switched off and nothing else is connected, so there is \
+             nothing to think with. Switch it back on, or connect a provider in \
+             Settings → Inference."
                 .to_string(),
         ));
     }
