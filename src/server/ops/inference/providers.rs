@@ -667,13 +667,29 @@ async fn edit_provider(
     // with the new host live and the *old* host's secret still in the slot — so
     // the next routed turn would present one provider's credential to another.
     // Written first, that failure leaves the row exactly as it was.
+    //
+    // **And the old one is kept, so the ordering is a rollback rather than a
+    // preference.** Either write can fail, and either failure alone leaves one
+    // host holding the other's secret — the endpoint moving without the key is
+    // the old host with the new credential, the key moving without the endpoint
+    // is the reverse. There is no transaction across two store keys, so the
+    // second-best thing is to put the recoverable one first and undo it.
+    let previous_key = if body.key.is_some() {
+        Some(
+            store::load_provider_key(runtime.id(), secrets, &existing)
+                .await
+                .map_err(ApiError)?,
+        )
+    } else {
+        None
+    };
     if let Some(key) = body.key.as_deref() {
         store::store_provider_key(runtime.id(), secrets, &existing, key.trim())
             .await
             .map_err(ApiError)?;
     }
 
-    let provider = store::put_provider(
+    let written = store::put_provider(
         runtime.id(),
         secrets,
         store::ProviderDraft {
@@ -691,8 +707,28 @@ async fn edit_provider(
             enabled: existing.enabled,
         },
     )
-    .await
-    .map_err(ApiError)?;
+    .await;
+    let provider = match written {
+        Ok(provider) => provider,
+        Err(err) => {
+            // The record did not move, so neither may the credential.
+            if let Some(previous) = previous_key
+                && let Err(restore) =
+                    store::store_provider_key(runtime.id(), secrets, &existing, previous.trim())
+                        .await
+            {
+                tracing::error!(
+                    company = %runtime.id(),
+                    provider = %existing.slug,
+                    error = %restore,
+                    "an edit failed to write the provider record and then failed to put the \
+                     previous credential back; this row's stored key is the one that was \
+                     being rotated to, against the endpoint it had before",
+                );
+            }
+            return Err(ApiError(err));
+        }
+    };
 
     if body.key.is_some() {
         crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
