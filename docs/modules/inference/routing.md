@@ -104,15 +104,36 @@ instances of.
 drift out of sync with the routes:
 
 ```
-inferRoutingMode(routing):
-    refs = the nine workload refs
-    if every ref is 'openhuman' or 'default'        -> managed
+infer_routing_mode(routes, managed_resolves):
+    refs = the four workload refs
+    if every ref is 'managed' or 'default':
+        -> managed   when managed_resolves
+        -> unset     when it does not
     if every ref has the same provider+model         -> own
-    otherwise                                        -> custom
+    otherwise                                        -> advanced
 ```
 
-Nine fields, one derived mode. A mode field would be a tenth thing that can
-disagree with the other nine.
+Four fields, one derived mode. A mode field would be a fifth thing that can
+disagree with the other four.
+
+**The second argument is ours, and it is not a refinement — it is a correction.**
+The rule as ported returns `managed` for an empty table, which is true in
+openhuman because they run the managed backend and it is genuinely always on.
+Here managed needs a credential and can resolve to nothing, and an empty table
+does not resolve to managed at all: an unset row is `Resolution::Primary`, the
+first enabled provider. So the screen said Managed while the turn went to the
+operator's own key — and on a company whose only provider had just been added
+with no per-tier model, that turn was `404 model: agentic-v1`.
+
+`unset` is the absence of a usable mode rather than a fourth one. It is never
+offered as a row: the console renders no selection, says where work actually
+goes, and — when nothing is enabled either — says that agents cannot think.
+
+**The rule lives in exactly one place**, `infer_routing_mode` in
+`src/company/inference/resolve.rs`. The console had a faithful copy that was
+never called — the rendered mode has always come from `RoutesDto.mode` — and six
+unit tests pinning it. Copy and tests are both deleted; the same applies to the
+console's `orphanedRoutes`.
 
 ## The nine workloads
 
@@ -206,7 +227,7 @@ With no providers connected it says so rather than showing empty selects:
 > Add or connect a provider first. Then you can route every workload through one
 > model here.
 
-## Managed stays a fallback, always
+## Managed is a fallback only when it resolves
 
 > Managed is always available as a fallback. To use your own model, choose a
 > routing mode below.
@@ -220,6 +241,13 @@ true there — they run the managed backend. Ours needs a credential and can
 resolve to nothing, so the row reports which step of the credential chain
 answered, and shows no badge at all when none did. See
 [`connect-flow.md`](connect-flow.md).
+
+**And the claim that it is always a fallback is not ported either.** Three
+surfaces treated managed as an always-available floor and every one of them was
+untrue on a company where it resolves to nothing. What each of the five
+resolutions renders, what switching a provider off now asks, and the one matcher
+the three route-orphaning callers share:
+[`routing-states.md`](routing-states.md).
 
 ## The per-workload dialog
 
