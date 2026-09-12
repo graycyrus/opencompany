@@ -1368,9 +1368,26 @@ pub async fn resolve_effective_for_tier(
         // what the Managed mode button writes into every row. Read as a slug it
         // names nothing and the workload would fail closed against a provider
         // the operator never had.
-        resolve::Resolution::Managed => Ok(Some(
-            managed_decl(company, secrets, env_default, scope).await?,
-        )),
+        //
+        // Its switch is honoured **here**, on the turn path, and not only in the
+        // status the console renders. A row that is switched off and still
+        // billed is the same defect the routing table itself was added to fix,
+        // one provider along: the operator's statement was "stop spending on
+        // this", the page agreed, and the spend continued. It refuses in the
+        // same words a disabled provider does, because it is the same act.
+        resolve::Resolution::Managed => {
+            if !store::managed_enabled(company, secrets).await? {
+                return Err(OpenCompanyError::Config(format!(
+                    "the {} workload is routed to Managed, which is switched off. \
+                     Switch it back on, or point that workload somewhere else in \
+                     Settings → Inference → Routing.",
+                    workload.as_str()
+                )));
+            }
+            Ok(Some(
+                managed_decl(company, secrets, env_default, scope).await?,
+            ))
+        }
         resolve::Resolution::Missing { workload, slug } => Err(OpenCompanyError::Config(format!(
             "the {} workload is routed to `{slug}`, which this company does not have. \
              Point it somewhere else in Settings → Inference → Routing.",
@@ -3212,6 +3229,57 @@ mod tests {
         assert!(decl.is_proxied(), "the managed route rides the platform");
         assert_eq!(decl.base_url, "https://platform.example/v1");
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_managed_fails_closed_once_managed_is_switched_off() {
+        // The switch is a statement about spend — "stop billing this account" —
+        // and a switch that only moves a badge on the settings page keeps
+        // billing it. That is the defect the routing table itself was added to
+        // fix, one provider along: the page agreed and the spend continued.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        route(&secrets, "agentic-v1", "managed").await;
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .expect_err("a switched-off managed row must not keep serving turns");
+        let message = err.to_string();
+        assert!(message.contains("switched off"), "{message}");
+        assert!(message.contains("agentic"), "{message}");
+
+        // And switching it back on restores it, so the refusal is the switch
+        // rather than a route that has been broken by being touched.
+        store::set_managed_enabled(&company, &secrets, true)
+            .await
+            .unwrap();
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a managed route resolves again once it is switched back on");
+        assert_eq!(decl.base_url, "https://platform.example/v1");
     }
 
     #[tokio::test]
