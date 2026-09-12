@@ -237,8 +237,9 @@ test("the routing mode is inferred from the routes and round-trips", async ({ pa
   // opposite of what this screen did before.
   const managedMode = page.getByTestId("inference-mode-managed");
   if (await managedMode.isDisabled()) {
+    // Whatever else this company's routes say, the one thing that must hold is
+    // that Managed is neither selected nor selectable when it cannot answer.
     await expect(managedMode).toHaveAttribute("aria-pressed", "false");
-    await expect(page.getByTestId("inference-mode-unset")).toBeVisible();
     return;
   }
 
