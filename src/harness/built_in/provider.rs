@@ -1351,6 +1351,48 @@ fn output_cap(requested: Option<u32>) -> Option<u32> {
     }
 }
 
+/// Puts `temperature` on the body **only when the caller asked for one**.
+///
+/// `ModelRequest.temperature` is an `Option<f64>` that defaults to `None`, and
+/// `None` means the caller expressed no opinion — not that it wants `0.0`. Both
+/// request builders used to read it as `unwrap_or(0.0)` and write the result as
+/// a mandatory key, which turned "no opinion" into the most opinionated value in
+/// the range, on every request, to every provider.
+///
+/// It is the one optional-in-the-source field that was promoted to a mandatory
+/// one. [`output_cap`] three lines below each call site is the pattern this now
+/// follows: absent unless there is something to say.
+///
+/// What that cost, all vendor-documented:
+///
+/// * **Anthropic rejects it outright.** *"Models released after Claude Opus 4.6
+///   do not support setting temperature. A value of 1.0 … will be accepted for
+///   backwards compatibility, all other values will be rejected with a 400
+///   error."* Every current model is post-4.6, so `0.0` was a hard 400 on the
+///   entire lineup — every agent turn failing on the first request.
+/// * **OpenAI's current flagships are all reasoning models**, whose migration
+///   guide says *"Remove `temperature`, `top_p`, and `top_logprobs`"*.
+/// * **Groq special-cases exactly this value** — *"If you set a `temperature`
+///   value of 0, it will be converted to `1e-8`."*
+/// * **Ollama** defaults to `1.0` when the field is absent and honours a
+///   Modelfile `PARAMETER temperature` only when absent; sending `0.0`
+///   overrode both.
+///
+/// Omitting is right rather than clamping per provider, because every provider
+/// has a sane default and none of them needs ours. Together, Fireworks and
+/// Cerebras reject `temperature` on no model at all, so a caller that genuinely
+/// wants one still gets it through.
+///
+/// **This does not cover a caller that asks for a temperature explicitly.** Nine
+/// in-repo workloads do, six of them at `Some(0.0)`, and those still 400 against
+/// Anthropic post-4.6 and OpenAI reasoning models. Fixing that needs a
+/// per-provider capability gate; see `docs/modules/inference/provider-contracts.md`.
+fn apply_temperature(body: &mut serde_json::Value, temperature: Option<f64>) {
+    if let Some(temperature) = temperature {
+        body["temperature"] = serde_json::json!(temperature);
+    }
+}
+
 #[async_trait]
 impl ChatModel<()> for MockProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
@@ -1460,13 +1502,13 @@ impl ChatModel<()> for HostedProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         let messages = wire_messages(&request.messages);
         let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
-        let temperature = request.temperature.unwrap_or(0.0);
 
         let mut body = serde_json::json!({
             "model": model,
-            "temperature": temperature,
             "messages": messages,
         });
+        // Only when the caller asked for one — see `apply_temperature`.
+        apply_temperature(&mut body, request.temperature);
         if let Some(cap) = output_cap(request.max_tokens) {
             body["max_tokens"] = serde_json::json!(cap);
         }
@@ -1607,7 +1649,7 @@ pub async fn request_plan(
     decl: &InferenceDecl,
     abstract_model: &str,
     messages: Vec<serde_json::Value>,
-    temperature: f64,
+    temperature: Option<f64>,
     max_tokens: Option<u32>,
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
@@ -1651,9 +1693,10 @@ pub async fn request_plan(
     }
     let mut body = serde_json::json!({
         "model": model,
-        "temperature": temperature,
         "messages": messages,
     });
+    // Only when the caller asked for one — see `apply_temperature`.
+    apply_temperature(&mut body, temperature);
     if let Some(cap) = output_cap(max_tokens) {
         body["max_tokens"] = serde_json::json!(cap);
     }
@@ -2022,12 +2065,13 @@ impl ChatModel<()> for TenantProvider {
             .await
             .map_err(|e| InferenceError::Model(e.to_string()))?;
         let messages = wire_messages(&request.messages);
-        let temperature = request.temperature.unwrap_or(0.0);
         let plan = request_plan(
             &decl,
             model,
             messages,
-            temperature,
+            // Forwarded as the caller expressed it. `unwrap_or(0.0)` here used to
+            // manufacture an opinion — see `apply_temperature`.
+            request.temperature,
             request.max_tokens,
             wire_tools(&request.tools),
             &request.tool_choice,
@@ -2114,7 +2158,10 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
         decl,
         DEFAULT_HOSTED_MODEL,
         messages,
-        0.0,
+        // A reachability check has no opinion about sampling, and the hardcoded
+        // `0.0` here made the probe fail on exactly the providers it is meant to
+        // reassure the operator about: Anthropic 400s on any value but 1.0.
+        None,
         Some(16),
         Vec::new(),
         &ToolChoice::Auto,
@@ -2188,6 +2235,36 @@ mod tests {
 
     /// The output floor only ever raises the harness's cap (issue: reasoning
     /// models exhaust a 16k `max_tokens` on their hidden stream).
+    #[test]
+    /// The defect: `None` meant "no opinion" and we wrote `0.0`, the one value
+    /// Anthropic rejects on its entire current lineup and the one Groq rewrites
+    /// to `1e-8`. The key must be absent, not zero.
+    #[test]
+    fn an_unset_temperature_puts_no_temperature_on_the_wire() {
+        let mut body = serde_json::json!({ "model": "claude-sonnet-5" });
+        apply_temperature(&mut body, None);
+        assert!(
+            body.get("temperature").is_none(),
+            "an unset temperature must not appear at all: {body}"
+        );
+    }
+
+    /// And a caller that does have an opinion still gets it through — Together,
+    /// Fireworks and Cerebras reject `temperature` on no model at all, so
+    /// stripping it everywhere would have been the wrong fix.
+    #[test]
+    fn a_requested_temperature_is_still_sent_including_zero() {
+        let mut body = serde_json::json!({ "model": "llama-3.3-70b" });
+        apply_temperature(&mut body, Some(0.7));
+        assert_eq!(body["temperature"], serde_json::json!(0.7));
+
+        // Explicitly including 0.0: it is a legitimate request, and the bug was
+        // never that 0.0 is invalid — it was that we sent it unasked.
+        let mut body = serde_json::json!({ "model": "llama-3.3-70b" });
+        apply_temperature(&mut body, Some(0.0));
+        assert_eq!(body["temperature"], serde_json::json!(0.0));
+    }
+
     #[test]
     fn output_cap_floor_raises_but_never_lowers() {
         let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
@@ -4170,7 +4247,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            Some(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4194,6 +4271,8 @@ mod tests {
             plan.body.get("parallel_tool_calls").is_none(),
             "no parallel-tool setting without tools"
         );
+        // Asked for, so sent.
+        assert_eq!(plan.body["temperature"], serde_json::json!(0.2));
         assert_eq!(plan.bearer.as_deref(), Some("or-key"));
         assert!(plan.url.ends_with("/chat/completions"), "{}", plan.url);
         assert!(
@@ -4213,7 +4292,7 @@ mod tests {
             &decl,
             "reasoning-v1",
             Vec::new(),
-            0.2,
+            Some(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4228,7 +4307,7 @@ mod tests {
             &decl,
             "anthropic/claude-sonnet-4.5",
             Vec::new(),
-            0.2,
+            Some(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4268,7 +4347,7 @@ mod tests {
             &decl,
             "agentic-v1",
             Vec::new(),
-            0.0,
+            Some(0.0),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4287,7 +4366,7 @@ mod tests {
             &discovered,
             "agentic-v1",
             Vec::new(),
-            0.0,
+            Some(0.0),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4318,7 +4397,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.0,
+            Some(0.0),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4364,7 +4443,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            Some(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4416,7 +4495,7 @@ mod tests {
             &or_decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            Some(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4450,7 +4529,7 @@ mod tests {
             &compat_decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            Some(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
