@@ -39,9 +39,15 @@ cached, so the rows move when the marked default does.
 
 The per-workload dialog carries the workload's recommendation hint, a provider
 select whose first two items are the primary and Managed (an absence and a
-choice, which are different states), a free-text model id, and **Test** — the
-one control in this surface that sends a real completion, with the cost warning
-on the button rather than above the fold.
+choice, which are different states), a free-text model id, and **Test** — a
+catalogue read, the same `GET {base}/models` the add flow uses, described on the
+button as free because it is.
+
+It once promised "one real completion, your provider may charge for it" and sent
+that same catalogue read: it cost nothing, charged nothing, and could not tell a
+bogus model id from a good one. What it settles is reachability plus whether the
+endpoint publishes this id. Whether the model will *answer* needs a completion,
+and nothing on this surface sends one.
 
 The model field is **a catalog select with a free-text escape hatch**, not one or
 the other. The catalog is what makes the screen usable — an operator who has to
