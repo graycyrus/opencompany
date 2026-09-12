@@ -554,42 +554,91 @@ async fn auto_route_sole_provider(
     let existing = store::load_routes(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
-    if existing
-        .values()
-        .any(|route| !matches!(route, resolve::ProviderRef::Default))
-    {
-        return Ok(Vec::new());
-    }
-    if managed_resolves(runtime).await? {
-        return Ok(Vec::new());
-    }
     let providers = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
-    let mut enabled = providers.iter().filter(|p| p.enabled);
-    let (Some(only), None) = (enabled.next(), enabled.next()) else {
-        return Ok(Vec::new());
-    };
-    if only.slug != added.slug {
+    if !is_the_only_thing_that_can_answer(
+        &existing,
+        &providers,
+        managed_resolves(runtime).await?,
+        &added.slug,
+    ) {
         return Ok(Vec::new());
     }
 
-    // Parsed from the slug rather than assembled as a `Cloud` ref, so a CLI
-    // login and a local runtime get the refs their own grammar uses — writing
-    // `claude-code` as a slug-carrying cloud ref would round-trip back through
-    // `ProviderRef::parse` as the CLI ref anyway, and relying on that is how the
-    // two representations drift.
-    let route = resolve::ProviderRef::parse(&added.slug);
+    // The slug-carrying ref, which is what the resolver matches most precisely —
+    // a slug match is decisive whatever the category, so this is right for a
+    // cloud account, a local runtime and a CLI login alike.
+    let route = resolve::ProviderRef::Cloud {
+        provider_slug: added.slug.clone(),
+        model: None,
+    };
     let mut routes = resolve::Routes::new();
     let mut written = Vec::new();
     for workload in resolve::ROUTABLE_WORKLOADS {
         routes.insert(workload.tier().to_string(), route.clone());
         written.push(workload.tier().to_string());
     }
+
+    // **Written only if this company's own resolver reads it back as this
+    // provider.** A route is persisted as the text an operator would type, so a
+    // slug that collides with a word in that grammar — `local`, `managed`,
+    // `default` — round-trips into a different ref entirely, and `is_reserved_slug`
+    // does not cover those three. Writing a row nobody asked for is defensible
+    // only while it is certainly right; a check against the same function the
+    // turn path uses is what makes it certain, rather than an argument about
+    // which slugs are possible.
+    let round_trip: resolve::Routes = routes
+        .iter()
+        .map(|(tier, route)| {
+            (
+                tier.clone(),
+                resolve::ProviderRef::parse(&route.to_route_string()),
+            )
+        })
+        .collect();
+    let resolves_here = resolve::ROUTABLE_WORKLOADS.iter().all(|workload| {
+        matches!(
+            resolve::provider_for_workload(*workload, &round_trip, &providers),
+            resolve::Resolution::Resolved { provider, .. } if provider.slug == added.slug
+        )
+    });
+    if !resolves_here {
+        tracing::warn!(
+            company = %runtime.id(),
+            provider = %added.slug,
+            "not auto-routing: this slug does not read back as itself through the route grammar",
+        );
+        return Ok(Vec::new());
+    }
+
     store::save_routes(runtime.id(), secrets, &routes)
         .await
         .map_err(ApiError)?;
     Ok(written)
+}
+
+/// The §4 condition, as a pure function of the three facts it reads.
+///
+/// Separated from the write so the decision that routes an operator's work for
+/// them can be asserted directly, rather than only through a handler. Every
+/// clause is load-bearing — see [`auto_route_sole_provider`] for why each one is
+/// there and why "the first provider they added" is not among them.
+fn is_the_only_thing_that_can_answer(
+    routes: &resolve::Routes,
+    providers: &[store::Provider],
+    managed_answers: bool,
+    added: &str,
+) -> bool {
+    let table_is_empty = routes
+        .values()
+        .all(|route| matches!(route, resolve::ProviderRef::Default));
+    let mut enabled = providers.iter().filter(|p| p.enabled);
+    let sole = match (enabled.next(), enabled.next()) {
+        (Some(only), None) => only.slug == added,
+        _ => false,
+    };
+    table_is_empty && !managed_answers && sole
 }
 
 /// Whether a catalog leaves every tier unresolvable, so a row over it is
@@ -1954,6 +2003,103 @@ mod tests {
             );
         }
         assert!(tier_overrides(None).is_empty());
+    }
+
+    // ---- the one case where routing a new provider is not a guess ---------
+
+    fn empty() -> resolve::Routes {
+        resolve::Routes::new()
+    }
+
+    fn routed_to(slug: &str) -> resolve::Routes {
+        resolve::ROUTABLE_WORKLOADS
+            .iter()
+            .map(|w| (w.tier().to_string(), resolve::ProviderRef::parse(slug)))
+            .collect()
+    }
+
+    /// The reported company: nothing authored, no managed credential, one
+    /// provider just added. There is precisely one thing that can serve a turn,
+    /// so routing to anything else is not a choice that exists.
+    #[test]
+    fn a_sole_provider_with_no_managed_and_no_routes_is_unambiguous() {
+        let anthropic = provider("anthropic", "anthropic");
+        assert!(is_the_only_thing_that_can_answer(
+            &empty(),
+            std::slice::from_ref(&anthropic),
+            false,
+            "anthropic"
+        ));
+    }
+
+    /// Row B2, and the one the warning is about: Managed resolves, so adding a
+    /// key may be for one workload, for vision only, or to compare. Writing all
+    /// four rows would bill the operator for everything, silently, from a screen
+    /// that still says Managed.
+    #[test]
+    fn managed_being_available_makes_it_a_decision_rather_than_a_certainty() {
+        let anthropic = provider("anthropic", "anthropic");
+        assert!(!is_the_only_thing_that_can_answer(
+            &empty(),
+            std::slice::from_ref(&anthropic),
+            true,
+            "anthropic"
+        ));
+    }
+
+    /// Anything already authored is never overwritten, whatever it says.
+    #[test]
+    fn a_table_that_names_anything_is_left_alone() {
+        let anthropic = provider("anthropic", "anthropic");
+        assert!(!is_the_only_thing_that_can_answer(
+            &routed_to("managed"),
+            std::slice::from_ref(&anthropic),
+            false,
+            "anthropic"
+        ));
+        assert!(!is_the_only_thing_that_can_answer(
+            &routed_to("anthropic"),
+            std::slice::from_ref(&anthropic),
+            false,
+            "anthropic"
+        ));
+    }
+
+    /// **"First provider" is the wrong test, and this is why.** Entry zero is a
+    /// provider the operator never added and which is always enabled, so the
+    /// newly added row can be the second element of the list — and the company
+    /// already has something that answers. Two enabled providers is a choice
+    /// between them, which is the operator's to make.
+    #[test]
+    fn a_second_enabled_provider_makes_it_a_choice() {
+        let anthropic = provider("anthropic", "anthropic");
+        let mut zero = provider("tinyhumans", "openrouter");
+        zero.origin = store::ProviderOrigin::EntryZero;
+        assert!(!is_the_only_thing_that_can_answer(
+            &empty(),
+            &[zero, anthropic],
+            false,
+            "anthropic"
+        ));
+    }
+
+    /// A provider that is switched off is not competition — but the added one
+    /// still has to be the one that is on.
+    #[test]
+    fn only_enabled_providers_count_and_it_must_be_this_one() {
+        let anthropic = provider("anthropic", "anthropic");
+        let mut parked = provider("openrouter", "openrouter");
+        parked.enabled = false;
+        assert!(is_the_only_thing_that_can_answer(
+            &empty(),
+            &[parked.clone(), anthropic.clone()],
+            false,
+            "anthropic"
+        ));
+        assert!(
+            !is_the_only_thing_that_can_answer(&empty(), &[parked, anthropic], false, "openrouter"),
+            "a provider that is not the one enabled is not the thing that answers"
+        );
     }
 
     /// The catalogue that rides back on a probe is sorted, deduplicated and
