@@ -228,7 +228,12 @@ export interface CredentialAsk {
  * that says so: **cloud wants a key** (its endpoint is a preset, and the paths in
  * that table are too varied to be typed), **local wants an endpoint** (that is
  * the thing being chosen), and **a CLI login wants nothing** because another tool
- * already holds the credential. `omlx` is the one row that wants both.
+ * already holds the credential.
+ *
+ * No local runtime demands a key. `omlx` used to, and the host enforces this
+ * value, so it could not be added at all — no build of any of the three projects
+ * called "omlx" requires one. Accepting a key is a separate question from
+ * requiring one, and only the second belongs here.
  */
 export function credentialAsk(optionSlug: string): CredentialAsk {
   const cloud = cloudProvider(optionSlug);
