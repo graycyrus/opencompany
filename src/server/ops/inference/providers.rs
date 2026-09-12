@@ -906,14 +906,37 @@ async fn set_enabled(
         // default the marker exists to replace. Cleared, `primary` falls back to
         // first-enabled — the same answer, but nothing on the page claims the
         // operator decided it.
+        let was_primary = is_primary(runtime, &provider.slug).await?;
         clear_default_if_marked(runtime, &provider.slug).await;
-        parked_tiers(runtime, &provider).await?
+        let mut tiers = parked_tiers(runtime, &provider).await?;
+        // **An unset row is served by this provider too, and it moves.** Only
+        // explicit routes name a slug, so switching off the provider every
+        // unrouted workload was going through reported "nothing was routed
+        // through it" while those workloads quietly moved to the next enabled
+        // account — or to managed. A change of who pays is the one thing this
+        // sentence exists to say out loud.
+        if was_primary {
+            let explicit = store::load_routes(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .map_err(ApiError)?;
+            for workload in resolve::ROUTABLE_WORKLOADS {
+                let tier = workload.tier();
+                let unset = !matches!(
+                    explicit.get(tier),
+                    Some(route) if !matches!(route, resolve::ProviderRef::Default)
+                );
+                if unset && !tiers.iter().any(|t| t == tier) {
+                    tiers.push(tier.to_string());
+                }
+            }
+        }
+        tiers
     };
     let note = match (body.enabled, parked.is_empty()) {
         (true, _) => format!("{} is on.", provider.label),
         (false, true) => format!("{} is off. Nothing was routed through it.", provider.label),
         (false, false) => format!(
-            "{} is off. {} {} parked until it is switched back on.",
+            "{} is off. {} {} no longer served by it.",
             provider.label,
             parked.join(", "),
             if parked.len() == 1 { "is" } else { "are" }
@@ -1045,6 +1068,23 @@ async fn managed_parked_tiers(runtime: &CompanyRuntime) -> Result<Vec<String>, A
         .filter(|(_, route)| matches!(route, resolve::ProviderRef::Managed))
         .map(|(tier, _)| tier.clone())
         .collect())
+}
+
+/// Whether `slug` is the provider an **unset** workload currently goes through.
+///
+/// The resolved answer, like the status DTO's `is_default`: a company that has
+/// never marked one resolves to its first enabled provider, and switching that
+/// one off moves every unset workload just as surely as clearing an explicit
+/// marker would.
+async fn is_primary(runtime: &CompanyRuntime, slug: &str) -> Result<bool, ApiError> {
+    let secrets = runtime.secrets().as_ref();
+    let providers = store::list_providers(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let marked = store::load_default_slug(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    Ok(resolve::primary(&providers, marked.as_deref()).is_some_and(|p| p.slug == slug))
 }
 
 /// The provider, or a 404 naming the slug that resolved to nothing.
