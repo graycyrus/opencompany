@@ -173,7 +173,7 @@ Anthropic now documents Bearer as the **primary** scheme with `x-api-key` as a
 |---|---|---|
 | ollama | no — *"No authentication is required … locally"*; `OLLAMA_API_KEY` is Cloud-only and sending it locally is a documented cause of spurious 401s **V** | no |
 | lmstudio | no **V** | opt-in toggle exists; **we offer no path to it** |
-| omlx | no — see below | yes, if the operator enabled it |
+| omlx | no — see below | yes, if the operator enabled it; **we offer no path to it** |
 
 **"omlx" is ambiguous and our row does not say which project it means.** Three
 candidates, three ports, three auth stories, all **V** by repository:
