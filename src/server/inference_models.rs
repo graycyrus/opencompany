@@ -230,8 +230,12 @@ pub(crate) async fn discover_models(
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
     let policy = probe::default_policy();
-    probe::check_endpoint(base_url, policy)
-        .map_err(|refusal| DiscoveryError::endpoint(refusal.to_string()))?;
+    probe::check_endpoint_with_credential(
+        base_url,
+        policy,
+        bearer.is_some_and(|b| !b.trim().is_empty()),
+    )
+    .map_err(|refusal| DiscoveryError::endpoint(refusal.to_string()))?;
     let base = base_url.trim_end_matches('/');
     // Bounded here, not left to each caller: reqwest's async client has no
     // default timeout, so an endpoint that accepts the connection but never
