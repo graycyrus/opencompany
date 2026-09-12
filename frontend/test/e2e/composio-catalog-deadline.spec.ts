@@ -273,9 +273,17 @@ test.skip("rotating the credential re-reads the catalog instead of warning about
   // "Rotate", not "Save": the row knows a token is already stored, and the
   // button says which of the two things it is doing.
   await page.getByTestId("composio-form-save").click();
-  // The field is cleared only on a write the host accepted, so this separates
+  // The dialog closes only on a write the host accepted — a refusal keeps it
+  // open with the message inside it, next to the field — so this separates
   // "the rotation happened" from "the click did nothing".
-  await expect(field).toHaveValue("", { timeout: 30_000 });
+  //
+  // Asserting the FIELD is empty cannot do that job now. It used to, while the
+  // form was a card on the page that stayed mounted; the credential opens in a
+  // modal instead, so on a successful write the input unmounts with it and an
+  // assertion on an element that is no longer there fails rather than passes.
+  await expect(page.getByTestId("composio-form-dialog")).toHaveCount(0, {
+    timeout: 30_000,
+  });
   await reread;
 
   // The provider this company has not connected, so it can only have reached

@@ -147,17 +147,23 @@ test("a member sees what is connected but is offered nothing that changes it", a
     // coverage while testing nothing. The admin half below asserts the field IS
     // here, which is what keeps this one honest.
     //
-    // `#composio-api-key`, not the legacy `#composio-token`: `COMPOSIO_MANAGED_HIDDEN`
-    // (`src/product-scope.ts`) is `true` on every build, so `ComposioSection`'s
-    // `MODE_ORDER` never offers `managed` and its form never lands on the
-    // `mode === "managed"` token card `#composio-token` lives in — that card is
-    // unreachable UI on the shipped console. The BYOK tile is the only route on
-    // offer, so `#composio-api-key` is the credential field an operator actually
-    // sees, and the one a member must not be handed either.
+    // Two assertions, because the field moved behind a control. The page is
+    // rows now (issue #2259) and the credential opens in a MODAL, so "the
+    // field is not on the page" is true for a member and an admin alike and
+    // proves nothing on its own. What separates them is the row's write
+    // controls: `Add`/`Replace` are rendered only for a viewer who may manage,
+    // and they are the only things that open the form.
+    //
+    // The radio (`composio-row-byok-select`) is deliberately NOT asserted
+    // absent — a member sees which account the company is on, disabled, which
+    // is what tells them why their agents can reach Gmail.
     await openConnectionsPage(memberPage, "composio");
     await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({
       timeout: 30_000,
     });
+    await expect(memberPage.getByTestId("composio-rows")).toBeVisible({ timeout: 30_000 });
+    await expect(memberPage.getByTestId("composio-row-byok-add")).toHaveCount(0);
+    await expect(memberPage.getByTestId("composio-row-byok-replace")).toHaveCount(0);
     await expect(memberPage.locator("#composio-api-key")).toHaveCount(0);
     await expect(button("Save key")).toHaveCount(0);
 
@@ -206,12 +212,26 @@ test("an admin is still offered every control across the four pages", async ({ p
   // is what stops that assertion going vacuous: if the field ever stops
   // rendering here, this fails rather than the member case quietly passing.
   //
-  // `#composio-api-key`, not `#composio-token`: see the matching comment in the
-  // member test above. `COMPOSIO_MANAGED_HIDDEN` keeps `ComposioSection` on the
-  // BYOK route on every build, so the field an admin actually gets here is the
-  // Composio API key input, not the legacy managed-route token card.
+  // It takes a click to get there now: the credential form is a modal opened
+  // from the row that owns the credential, rather than a field standing on the
+  // page. Whichever control the own-account row is offering opens the same
+  // form — "Use this" while the company is on the managed route (the state a
+  // fresh harness company is in), "Add a key" or "Replace key" once it is not
+  // — so the three are taken as one locator instead of pinning this spec to a
+  // route it is not about.
   await openConnectionsPage(page, "composio");
   await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
+  const openCredentialForm = page
+    .locator(
+      [
+        '[data-testid="composio-row-byok-select"]',
+        '[data-testid="composio-row-byok-add"]',
+        '[data-testid="composio-row-byok-replace"]',
+      ].join(", "),
+    )
+    .first();
+  await expect(openCredentialForm).toBeVisible({ timeout: 30_000 });
+  await openCredentialForm.click();
   await expect(page.locator("#composio-api-key")).toBeVisible({ timeout: 30_000 });
 
   await openSettingsPage(page, "mcp");
