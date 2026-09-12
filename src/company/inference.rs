@@ -90,6 +90,14 @@ pub struct HarnessScope {
     pub id: String,
     /// Whether it is the company's default harness.
     pub is_default: bool,
+    /// Whether this harness declared `[harness.inference]` of its own.
+    ///
+    /// **Only the harness knows.** `built_in_lane` hands the resolver its own
+    /// section where it has one and the company's `[inference]` where it does
+    /// not, so by the time the value arrives the two are indistinguishable —
+    /// and the difference decides whether the company's provider list outranks
+    /// it. See [`resolve_effective_scoped`].
+    pub declares_own_inference: bool,
 }
 
 impl HarnessScope {
@@ -99,6 +107,7 @@ impl HarnessScope {
         Self {
             id: id.into(),
             is_default: true,
+            declares_own_inference: false,
         }
     }
 
@@ -107,7 +116,14 @@ impl HarnessScope {
         Self {
             id: id.into(),
             is_default: false,
+            declares_own_inference: false,
         }
+    }
+
+    /// Records that this harness declared `[harness.inference]` of its own.
+    pub fn declaring_own_inference(mut self, declares: bool) -> Self {
+        self.declares_own_inference = declares;
+        self
     }
 
     /// This scope's runtime-config secret key.
@@ -1122,12 +1138,48 @@ pub async fn resolve_effective_scoped(
     // deliberately, so the legacy path keeps every rule it has (the proxy
     // inheritance, the managed chain, `reject_unknown_provider`) rather than a
     // reimplementation of them here.
-    let providers = store::list_providers(company, secrets).await?;
-    if let Some(decl) = decl_for_primary(company, secrets, &providers).await? {
-        return Ok(Some(decl));
+    //
+    // **Skipped for a named harness that configured itself.** The provider list
+    // is a company-level statement, and a `[harness.inference]` section or a
+    // `harness/<id>/inference/config` blob is a narrower one that predates it:
+    // `docs/spec/runtime/providers.md` has said runtime-then-manifest-then-
+    // default *within a harness* all along. Putting the list unconditionally on
+    // top inverted that, so connecting the company's first provider in the
+    // console silently re-pointed a harness that had its own account at the
+    // company's — and charged the wrong one, with nothing on any screen saying
+    // the harness's own section had stopped applying.
+    if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+        let providers = store::list_providers(company, secrets).await?;
+        if let Some(decl) = decl_for_primary(company, secrets, &providers).await? {
+            return Ok(Some(decl));
+        }
     }
 
     resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await
+}
+
+/// Whether a **named** harness holds inference configuration of its own.
+///
+/// Two tiers count, and they are the two `resolve_legacy_scoped` reads first: a
+/// blob in this harness's own `harness/<id>/inference/config` slot, and a
+/// `[harness.inference]` section in the manifest — which only the caller can
+/// report, because the section reaches the resolver already merged with the
+/// company's. Never true for the default harness: its "scoped" keys *are* the
+/// flat ones, and entry zero already carries them into the provider list.
+async fn harness_configures_itself(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<bool> {
+    if scope.is_default {
+        return Ok(false);
+    }
+    if scope.declares_own_inference {
+        return Ok(true);
+    }
+    Ok(load_runtime_config_scoped(company, secrets, scope)
+        .await?
+        .is_some())
 }
 
 /// The declaration the company's **primary** provider resolves to, if the list
@@ -1171,8 +1223,15 @@ async fn decl_for_indexed(
     // account, never the platform proxy, so `proxied` is false — and that is
     // what denies it both the instance identity and the company's, which is the
     // safety property the credential chain is built on.
+    //
+    // **Stated, not derived.** This used to read `is_managed_choice(&kind)`,
+    // which is `false` for every kind an indexed record can hold — the add
+    // route only ever writes a catalogue slug or `custom`, and the edit route
+    // carries the kind across unchanged — so the two lines agreed by accident
+    // rather than by construction. Saying it outright means a future kind
+    // cannot quietly hand an operator-typed endpoint the platform's identity.
     let credential = Credential::from_value(key);
-    let proxied = is_managed_choice(&provider.kind);
+    let proxied = false;
     let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
     Ok(InferenceDecl {
         provider: normalize_provider(&provider.kind).to_string(),
@@ -1358,8 +1417,19 @@ pub async fn resolve_effective_for_tier(
         // Unset. The whole existing chain, unchanged — which is what keeps a
         // company that has never opened the Routing tab resolving exactly where
         // it always did.
+        //
+        // Same carve-out as `resolve_effective_scoped` step 0, for the same
+        // reason: an unset row is not a choice, so it must not outrank a named
+        // harness's own `[harness.inference]` or scoped runtime blob. A row
+        // that *is* set outranks both — that one is a choice, made here.
         resolve::Resolution::Primary => {
-            match decl_for_primary(company, secrets, &providers).await? {
+            let primary =
+                if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+                    decl_for_primary(company, secrets, &providers).await?
+                } else {
+                    None
+                };
+            match primary {
                 Some(decl) => Ok(Some(decl)),
                 None => resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await,
             }
@@ -3229,6 +3299,65 @@ mod tests {
         assert!(decl.is_proxied(), "the managed route rides the platform");
         assert_eq!(decl.base_url, "https://platform.example/v1");
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+    }
+
+    #[tokio::test]
+    async fn a_named_harness_that_configured_itself_outranks_the_company_provider_list() {
+        // `docs/spec/runtime/providers.md` has always said runtime, then
+        // manifest, then default — **within a harness**. Putting the company's
+        // provider list unconditionally above that inverted it, so connecting
+        // the company's first provider in the console silently re-pointed a
+        // harness with an account of its own at the company's, and charged it.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+
+        // The default harness reads the company's list, which is the whole
+        // point of the list existing.
+        let default_scope = HarnessScope::default_harness("embedded");
+        let shared = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            None,
+            &secrets,
+            &default_scope,
+        )
+        .await
+        .unwrap()
+        .expect("the default harness resolves through the connected provider");
+        assert_eq!(shared.base_url, "https://first.example/v1");
+
+        // A named harness that declared `[harness.inference]` of its own does
+        // not. It resolves through what it declared.
+        let own = HarnessScope::named("deep").declaring_own_inference(true);
+        let mine =
+            resolve_effective_scoped(&company, &inference("openrouter"), None, &secrets, &own)
+                .await
+                .unwrap()
+                .expect("a harness with its own section resolves through it");
+        assert_ne!(
+            mine.base_url, "https://first.example/v1",
+            "the company's connected provider must not outrank this harness's own section"
+        );
+        assert_eq!(
+            mine.base_url, PLATFORM_BASE_URL,
+            "with a section of its own and no key in it, this harness rides the subscription"
+        );
+
+        // And a named harness that declared nothing still inherits the
+        // company's list — the carve-out is for a statement, not for a name.
+        let inherits = HarnessScope::named("shallow");
+        let theirs = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            None,
+            &secrets,
+            &inherits,
+        )
+        .await
+        .unwrap()
+        .expect("a harness with nothing of its own inherits");
+        assert_eq!(theirs.base_url, "https://first.example/v1");
     }
 
     #[tokio::test]
