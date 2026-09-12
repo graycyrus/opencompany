@@ -169,13 +169,26 @@ export function ComposioSection({
   const [testingRow, setTestingRow] = useState<ComposioRowId | null>(null);
 
   const requestGeneration = useRef(0);
-  // Focus in and back out of the inline confirmation. It is `role="alertdialog"`
-  // over a plain `<div>`, not a modal primitive with its own focus trap, so
-  // nothing does this for free: opening it unmounts the "Save" button that had
-  // focus, leaving focus on `document.body` — invisible to a mouse user, but a
-  // screen reader or keyboard user loses their place entirely.
-  const confirmOpenerRef = useRef<HTMLElement | null>(null);
+  // Focus in and back out of the switch confirmation. It is a labelled group
+  // inside the credential dialog rather than a popup of its own, so nothing
+  // moves focus for free: showing it unmounts the footer's Save button, which
+  // is where focus was, and the dialog's trap then leaves focus on the popup
+  // itself — invisible to a mouse user, but a screen-reader or keyboard user
+  // loses their place entirely.
+  //
+  // Both directions are by REF to a currently-rendered button, not by recording
+  // the node that had focus. Recording it was the first shape and it cannot
+  // work here: the node focus came from is the footer's Save button, and
+  // showing the confirmation is exactly what unmounts it — so by the time
+  // Cancel puts it back, the recorded node is detached and a restore onto it is
+  // a no-op. The footer's Save button re-registers this ref on the way back,
+  // which is the same button by role even though it is a different node.
   const confirmPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
+  const saveButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Whether the confirmation has been on screen during this dialog. Without it,
+  // the first render of every dialog would count as a close and yank focus onto
+  // Save before the operator has touched the field.
+  const confirmWasOpen = useRef(false);
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -204,21 +217,23 @@ export function ComposioSection({
     void refresh();
   }, [refresh]);
 
-  // Opening moves focus onto the confirmation's primary action; closing returns
-  // it to whatever raised it — but only when focus is still exactly where
-  // opening left it (`document.body`). A save that succeeded and moved focus
-  // somewhere sensible on its own must not be yanked back to a button that may
-  // no longer say what it said.
+  // Opening moves focus onto the confirmation's primary action; cancelling
+  // hands it back to the Save button the confirmation replaced.
+  //
+  // On a save that SUCCEEDED there is nothing to hand back to — the whole
+  // dialog unmounts — and `saveButtonRef` is null by then, so this does
+  // nothing and Base UI returns focus to the row control that opened the
+  // dialog. That is the right destination, and it is why this does not need a
+  // guard for the difference.
   useEffect(() => {
     if (confirmSwitch) {
+      confirmWasOpen.current = true;
       confirmPrimaryActionRef.current?.focus();
       return;
     }
-    const opener = confirmOpenerRef.current;
-    confirmOpenerRef.current = null;
-    if (opener?.isConnected && document.activeElement === document.body) {
-      opener.focus();
-    }
+    if (!confirmWasOpen.current) return;
+    confirmWasOpen.current = false;
+    saveButtonRef.current?.focus();
   }, [confirmSwitch]);
 
   const rows = composioRows(status);
@@ -389,10 +404,6 @@ export function ComposioSection({
       form?.credential === "composio-api-key" &&
       persistedMode === "managed"
     ) {
-      confirmOpenerRef.current =
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : null;
       setConfirmSwitch(true);
       return;
     }
@@ -691,11 +702,23 @@ export function ComposioSection({
                 )}
 
                 {/* Said before the switch, not after: what it costs is not
-                    readable off a row. */}
+                    readable off a row.
+
+                    `role="group"`, NOT `role="alertdialog"`, which is what this
+                    carried while it was a block on the page. It is inside a
+                    `DialogContent` now — an element already announced as
+                    `role="dialog" aria-modal="true"` — and a second dialog role
+                    nested in a modal's own subtree is not a composition ARIA
+                    defines: two elements claim one modal context and the inner
+                    one has no modality, no focus containment and no boundary of
+                    its own. A labelled, described group is the honest shape for
+                    what this actually is — a titled block of the dialog it
+                    lives in, whose text belongs to the button beneath it. */}
                 {confirmSwitch ? (
                   <div
-                    role="alertdialog"
+                    role="group"
                     aria-labelledby="composio-switch-warning"
+                    aria-describedby="composio-switch-consequence"
                     className="space-y-3 rounded-md border border-status-blocked/40 bg-status-blocked-soft p-3"
                   >
                     <p
@@ -705,7 +728,10 @@ export function ComposioSection({
                       <AlertTriangle className="size-3.5 shrink-0" />
                       Providers connected before this stay where they are
                     </p>
-                    <p className="text-xs text-muted-foreground">
+                    <p
+                      id="composio-switch-consequence"
+                      className="text-xs text-muted-foreground"
+                    >
                       They live in the Composio account this company reached
                       before, not in this one, so the grid will look empty until
                       you connect them again here. Choosing TinyHumans-managed
@@ -747,6 +773,7 @@ export function ComposioSection({
                       Cancel
                     </Button>
                     <Button
+                      ref={saveButtonRef}
                       disabled={busy || !secret.trim()}
                       data-testid="composio-form-save"
                       onClick={requestSubmit}
