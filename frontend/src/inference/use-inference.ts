@@ -167,15 +167,31 @@ export function useInference(
         toast.success(result.note);
         // A delete or a disable can move routes, so the table is re-read rather
         // than assumed unchanged. It is the one thing a provider write can
-        // change that the provider write's own response does not carry.
+        // change that the write's own response does not carry *in full* — the
+        // orphan list is only on the routing route.
         try {
           const table = await getRoutes(client, company);
           setRoutes(table.routes);
           setMode(table.mode);
           setOrphaned(table.orphaned);
         } catch {
-          // Already handled by `reload`'s reasoning: a member is refused here
-          // and the providers are still correct.
+          // Refused (a member) or simply failed. Either way the write itself
+          // succeeded, and the status it answered with carries the persisted
+          // table — so the routing state follows the write rather than staying
+          // at its pre-write value. Leaving it alone showed routes to a
+          // provider the Providers tab had just removed, and the next edit
+          // would have been computed from that stale table.
+          const persisted = result.status.routes ?? {};
+          setRoutes(persisted);
+          setMode(
+            inferRoutingMode(
+              Object.fromEntries(
+                WORKLOADS.map((w) => [w, parseRef(persisted[WORKLOAD_TIER[w]] ?? "")]),
+              ) as RoutingMap,
+            ),
+          );
+          // Orphans are only known to the routing route, and we did not get it.
+          setOrphaned([]);
         }
         return result;
       } catch (err) {
