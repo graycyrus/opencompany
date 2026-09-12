@@ -8,8 +8,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MANAGED_OPTION_SLUG, addOptions, offersManaged } from "@/inference/connect";
-import { managedRow } from "@/inference/ProviderList";
+import {
+  MANAGED_OPTION_SLUG,
+  addOptions,
+  offersManaged,
+} from "@/inference/connect";
+import { NO_CREDENTIAL_RESOLVES, managedRow } from "@/inference/ProviderList";
 import {
   MANAGED_NOT_SET_UP,
   MANAGED_NOT_SET_UP_ELSEWHERE,
@@ -29,7 +33,12 @@ describe("what the managed row says", () => {
     // The badge that used to say "Always on" is gone — the row carries a real
     // toggle now, like any other provider — and no sub-line may smuggle the
     // same claim back in as prose.
-    for (const source of ["provider_key", "company_account", "instance", "none"] as const) {
+    for (const source of [
+      "provider_key",
+      "company_account",
+      "instance",
+      "none",
+    ] as const) {
       expect(managedRow(source).toLowerCase(), source).not.toContain("always");
     }
   });
@@ -44,6 +53,15 @@ describe("what the managed row says", () => {
 
   it("says outright that agents cannot think when nothing resolves", () => {
     expect(managedRow("none")).toContain("cannot think");
+  });
+
+  it("keeps that sentence reachable from the states that need it", () => {
+    // It could not render: the managed row is gated on `managed.configured`, the
+    // host derives that as `source.resolves()`, so `source === "none"` implies
+    // no row — and the one state that needed this sentence was the one state
+    // that could never show it. The two dead-end states say it now, through the
+    // same constant, so the row and the banner cannot drift apart.
+    expect(managedRow("none")).toBe(NO_CREDENTIAL_RESOLVES);
   });
 });
 
@@ -106,7 +124,9 @@ describe("the fallback line under the Connected card", () => {
   it("covers the one state the row's badge cannot express", () => {
     // Set up, resolving, and still not a fallback — because it is switched out
     // of routing. The credential is untouched, and the line says so.
-    expect(managedFallbackNote({ configured: true, enabled: false })).toBe(MANAGED_SWITCHED_OFF);
+    expect(managedFallbackNote({ configured: true, enabled: false })).toBe(
+      MANAGED_SWITCHED_OFF,
+    );
     expect(MANAGED_SWITCHED_OFF).toContain("credential is untouched");
   });
 
