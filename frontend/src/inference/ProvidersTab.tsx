@@ -327,6 +327,7 @@ export function ProvidersTab({
       <ProviderConnectDialog
         optionSlug={connecting}
         providers={state.providers}
+        editing={editing}
         busy={busy}
         error={error}
         offerAddAnyway={probeFailure !== null}

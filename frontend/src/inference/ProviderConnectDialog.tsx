@@ -64,6 +64,7 @@ export interface ConnectDraft {
 export function ProviderConnectDialog({
   optionSlug,
   providers,
+  editing,
   busy,
   error,
   offerAddAnyway,
@@ -73,6 +74,14 @@ export function ProviderConnectDialog({
   /** The chosen option, or `null` when the dialog is closed. */
   optionSlug: string | null;
   providers: readonly Provider[];
+  /**
+   * The row this dialog is editing, or `null` when it is adding one.
+   *
+   * Carries the two things an edit must not invent: the stored label and the
+   * stored endpoint. It is also what excludes the row from its own slug
+   * collision check.
+   */
+  editing?: Provider | null;
   busy: boolean;
   /** What went wrong last time, if anything. */
   error: string | null;
@@ -90,24 +99,37 @@ export function ProviderConnectDialog({
   const [baseUrl, setBaseUrl] = useState("");
   const [key, setKey] = useState("");
 
-  // Seed from the chosen option each time the dialog opens on a new one. A
-  // conventional endpoint is a starting point the operator still confirms — it
-  // is the thing being chosen for this category, so it is never assumed.
+  // Seed from the chosen option each time the dialog opens on a new one — or,
+  // in edit mode, from the row being edited.
+  //
+  // **A conventional endpoint is a starting point for an ADD and a wrong answer
+  // for an edit.** Seeding a local runtime's catalogue default over a stored
+  // one turned "Edit endpoint" into one click that relocated an Ollama at
+  // `http://10.0.0.5:11435` back to `localhost` without saying so, and the two
+  // local runtimes that ship no default (LM Studio, OMLX) opened blank with the
+  // button disabled until the operator retyped a URL from memory.
   useEffect(() => {
     if (!open) return;
-    setLabel("");
-    setBaseUrl(ask.defaultEndpoint ?? "");
+    setLabel(editing?.label ?? "");
+    setBaseUrl(editing?.baseUrl ?? ask.defaultEndpoint ?? "");
     setKey("");
     // `optionSlug` is the identity of "which dialog is this"; `ask` is derived
     // from it, so it is not a second dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [optionSlug, open]);
+  }, [optionSlug, open, editing?.slug]);
+
+  // The row being edited is not its own collision. Its slug is already taken —
+  // by it — and `edit` is keyed on the stored slug rather than on this one, so
+  // including it made a custom provider's own name read as "taken" and left
+  // both buttons disabled. Rotating its key meant inventing a name it would
+  // never actually be given.
+  const rivals = editing ? providers.filter((p) => p.slug !== editing.slug) : providers;
 
   const slug = slugify(label);
-  const slugError = custom ? checkSlug(providers, slug) : null;
+  const slugError = custom ? checkSlug(rivals, slug) : null;
   const endpointOk = !ask.needsEndpoint || normalizeEndpoint(baseUrl) !== null;
   const ready = custom
-    ? customProviderReady(providers, { label, baseUrl })
+    ? customProviderReady(rivals, { label, baseUrl })
     : endpointOk && (!ask.needsKey || key.trim().length > 0);
 
   const submit = (addAnyway: boolean) =>
