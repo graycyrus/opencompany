@@ -36,7 +36,6 @@ import { grantStanding } from "@/lib/provider-grid";
 import { classifyLoadFailure } from "@/lib/section-load";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { GrantNamespace } from "@/components/grant-namespace";
-import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -412,27 +411,37 @@ export function ComposioSection({
 
   // The composio-grant tri-state, narrowed the same way `ProvidersSection` does
   // (issue #1478): `undefined` reads as "unknown", never as "not granted", so
-  // this badge and the grid a few inches below it cannot disagree on the same
+  // this section and the grid a few inches below it cannot disagree on the same
   // field.
+  //
+  // It no longer paints a badge — see the heading below — but the narrowing is
+  // load-bearing all the same: the call to action underneath fires on
+  // `not-granted` only, and collapsing "unknown" into it is exactly what #1478
+  // is about.
   const grant = grantStanding(status?.granted);
   const skipOffered = offersSkipVerify(outcome);
 
   return (
     <section className="space-y-3">
+      {/* The heading, and nothing beside it.
+
+          A grant badge sat here reading "granted" / "not granted" / "grant
+          unknown". Two of its three states say nothing an operator can act on
+          — "granted" is the ordinary case, and "grant unknown" reports that a
+          field was not read — so on almost every visit it was a chip of
+          vocabulary ("grant") that belongs to the tool namespace rather than to
+          the question this card answers, which is whose Composio account the
+          company reaches.
+
+          The third state is the one worth surfacing, and it already is, one
+          element below: an explicit not-granted renders `GrantNamespace`, which
+          says what is wrong in a sentence and offers the fix. The badge was the
+          same fact with no verb. */}
       <div className="flex flex-wrap items-center gap-2">
         <Plug className="size-4 text-muted-foreground" />
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Connected
         </h2>
-        {status && (
-          <Badge variant={grant === "granted" ? "secondary" : "outline"}>
-            {grant === "granted"
-              ? "granted"
-              : grant === "not-granted"
-                ? "not granted"
-                : "grant unknown"}
-          </Badge>
-        )}
       </div>
 
       {load === "loading" ? (
