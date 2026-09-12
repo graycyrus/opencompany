@@ -440,13 +440,17 @@ async fn check(
         Ok(()) => None,
         Err(failure) => {
             let class = probe::classify(info.slug, &failure);
-            // The raw failure goes to the log, never to the response: it can
-            // echo request material, including fragments of the credential, and
-            // the response lands in a banner somebody screenshots.
+            // Neither the response NOR the log gets the raw failure. The body
+            // can echo request material including fragments of the credential,
+            // and a log is a second durable copy of it — kept longer and read
+            // by more people than the banner that reasoning was written about.
+            // `log_detail` keeps the part a person acts on and withholds the
+            // body; `class` beside it is what the body was read for.
             tracing::info!(
                 provider = info.slug,
                 class = class.as_str(),
-                "[search] connectivity check failed: {failure:?}"
+                detail = %probe::log_detail(&failure),
+                "[search] connectivity check failed"
             );
             Some((class, probe::describe(class, info.label)))
         }
@@ -794,8 +798,32 @@ async fn put_search(
 
     if provider == MANAGED_PROVIDER {
         // Selecting managed has always meant "stop using my own account", and
-        // the honest expression of that is to unmark the default rather than to
-        // store `managed` as though it were a connection.
+        // the honest expression of that is still NOT to store `managed` as
+        // though it were a connection.
+        //
+        // Unmarking the default is not it either, though, which is what this
+        // branch used to do alone. [`resolve::active`] reads an absent marker as
+        // "the first usable provider", so a company with any usable connection
+        // kept searching through it while this route answered 200 — and worst
+        // for exactly the configurations this route exists to serve, since an
+        // upgraded legacy company has no marker for the clear to remove.
+        //
+        // So the connections are switched off. Managed search is what the
+        // absence of everything else means, and leaving nothing in the way is
+        // the only representation of that this model has. Nothing is destroyed:
+        // every credential and address stays where it is, the rows stay on the
+        // page reading as off, and naming one of them again turns it back on.
+        for connected in store::list_providers(runtime.id(), runtime.secrets().as_ref()).await? {
+            if connected.enabled {
+                store::set_enabled(
+                    runtime.id(),
+                    runtime.secrets().as_ref(),
+                    &connected.slug,
+                    false,
+                )
+                .await?;
+            }
+        }
         store::clear_default_slug(runtime.id(), runtime.secrets().as_ref()).await?;
         return Ok(Json(status_of(runtime).await?));
     }
@@ -821,7 +849,12 @@ async fn put_search(
         runtime.secrets().as_ref(),
         SearchProvider {
             slug: provider.clone(),
-            enabled: connected.as_ref().map(|p| p.enabled).unwrap_or(true),
+            // Naming a provider on this route is selecting it, and a selected
+            // provider that is switched off resolves to something else — which
+            // would make the route answer 200 and change nothing, the same
+            // failure as the managed branch above. It is also what makes the
+            // round trip work: managed, then back to this provider.
+            enabled: true,
             endpoint: endpoint.or_else(|| connected.and_then(|p| p.endpoint)),
         },
     )
@@ -1294,6 +1327,77 @@ mod tests {
             .find(|row| row["slug"] == "querit")
             .expect("querit row");
         assert_eq!(querit["keyConfigured"], false, "{after}");
+    }
+
+    #[tokio::test]
+    async fn selecting_managed_actually_stops_searching_through_the_account() {
+        // The compatibility route answered 200 for `{"provider":"managed"}` and
+        // changed nothing an agent could feel. It cleared the default marker,
+        // and `resolve::active` reads an absent marker as "the first usable
+        // provider" — so a company with a working Exa connection kept searching
+        // through Exa, billed to Exa, after explicitly asking to stop.
+        //
+        // Worse where it matters most: an upgraded legacy company has no marker
+        // at all, so the clear was already a no-op there and the route was pure
+        // theatre.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        let (_, connected) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "exa", "apiKey": "exa-not-a-real-key"})),
+        )
+        .await;
+        assert_eq!(
+            connected["effectiveProvider"], "exa",
+            "the setup has to actually be searching through exa: {connected}"
+        );
+
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "managed"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            after["effectiveProvider"], "managed",
+            "asking for managed and being told 200 has to mean it: {after}"
+        );
+
+        // Switched off, not destroyed. The credential is write-only and is
+        // never shown back, so an operator who lost one here could not retype it
+        // from the screen.
+        let exa = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|row| row["slug"] == "exa")
+            .expect("the exa row survives")
+            .clone();
+        assert_eq!(exa["keyConfigured"], true, "the key is kept: {after}");
+        assert_eq!(exa["enabled"], false, "the connection is off: {after}");
+
+        // And naming it again turns it back on, rather than marking a default
+        // that resolves to nothing.
+        let (_, back) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "exa"})),
+        )
+        .await;
+        assert_eq!(
+            back["effectiveProvider"], "exa",
+            "the round trip has to come back: {back}"
+        );
     }
 
     #[tokio::test]
