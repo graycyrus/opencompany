@@ -182,6 +182,20 @@ export interface InferenceStatus {
    * above rather than claiming a state nobody established.
    */
   managed?: ManagedState;
+  /**
+   * The routing table: tier → the route string an operator types. A tier absent
+   * from the map is unset and resolves through the primary.
+   *
+   * The same table `GET …/inference/routes` answers with, carried here because
+   * **status is readable by a member and that route is not**. Without it a
+   * non-admin's read-only Routing tab has nothing to render and shows every
+   * workload on its default, which is a claim about the company nobody made.
+   *
+   * Optional because an older host does not send it, and because the mode is
+   * *not* here: it is derived from these four values, never stored, and a
+   * second copy of it would be a fifth thing that can disagree with them.
+   */
+  routes?: Record<string, string>;
 }
 
 /**
