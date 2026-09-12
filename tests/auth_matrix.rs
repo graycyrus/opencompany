@@ -553,6 +553,31 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
         "Members may probe inference with the stored credential."
     ),
     r!(Post, "/inference/restart", Admin, Authority, ""),
+    r!(Post, "/inference/providers", Admin, Credential, ""),
+    r!(Put, "/inference/providers/{slug}", Admin, Credential, ""),
+    r!(Delete, "/inference/providers/{slug}", Admin, Destructive, ""),
+    r!(Post, "/inference/providers/{slug}/enabled", Admin, Authority, ""),
+    r!(Post, "/inference/providers/{slug}/default", Admin, Authority, ""),
+    r!(
+        Post,
+        "/inference/providers/{slug}/test",
+        Scoped,
+        Credential,
+        "Members may probe a stored provider with its stored credential."
+    ),
+    r!(Get, "/inference/providers/{slug}/models", Scoped, Ordinary, ""),
+    r!(Post, "/inference/probe", Admin, Credential, ""),
+    r!(Get, "/inference/routes", Admin, Ordinary, ""),
+    r!(Put, "/inference/routes", Admin, Authority, ""),
+    r!(Put, "/inference/managed/key", Admin, Credential, ""),
+    r!(Post, "/inference/managed/enabled", Admin, Authority, ""),
+    r!(
+        Post,
+        "/inference/managed/test",
+        Scoped,
+        Credential,
+        "Members may probe the managed tier with the stored credential."
+    ),
     r!(Get, "/ledgers", Scoped, Ordinary, ""),
     red!(Post, "/ledgers", Authority, LedgerFix),
     r!(Get, "/ledgers/{slug}", Scoped, Ordinary, ""),
