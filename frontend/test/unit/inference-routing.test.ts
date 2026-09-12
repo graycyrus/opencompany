@@ -343,6 +343,47 @@ describe("the per-workload select", () => {
     expect(options.filter((o) => o.slug === "tinyhumans")).toHaveLength(1);
   });
 
+  it("marks Managed unpickable when it cannot serve a turn", () => {
+    // Routing a workload there while it is switched off or unresolved saves
+    // successfully and then fails every turn — a click that reports the
+    // opposite of what it did.
+    const off = routingOptions(connected, { configured: true, enabled: false });
+    expect(off[0].slug).toBe("tinyhumans");
+    expect(off[0].unavailable).toBe(true);
+
+    const unset = routingOptions(connected, { configured: false, enabled: true });
+    expect(unset[0].unavailable).toBe(true);
+
+    // Usable, and unknown — which is what every caller meant before the
+    // argument existed — both stay pickable.
+    expect(routingOptions(connected, { configured: true, enabled: true })[0].unavailable).toBe(
+      false,
+    );
+    expect(routingOptions(connected)[0].unavailable).toBe(false);
+  });
+
+  it("does not promise a fallback Managed cannot provide", () => {
+    const impact: RemovalImpact = {
+      routed: [],
+      isDefault: true,
+      lastEnabled: true,
+      defaultMovesTo: null,
+    };
+    const available = removalWarnings("provider", "Anthropic", impact, {
+      configured: true,
+      enabled: true,
+    }).join(" ");
+    expect(available).toContain("falls back to Managed");
+    expect(available).toContain("only thing that can answer");
+
+    const off = removalWarnings("provider", "Anthropic", impact, {
+      configured: true,
+      enabled: false,
+    }).join(" ");
+    expect(off).not.toContain("falls back to Managed");
+    expect(off).toContain("nothing to think with");
+  });
+
   it("gives Default and the provider it resolves to the same field shape", () => {
     // The bug this closes: `Primary (OpenRouter)` showed no Model id field and
     // `OpenRouter` did, for two names of one provider.
@@ -587,11 +628,19 @@ describe("the false Managed floor", () => {
     const only = provider("anthropic", "anthropic");
     const impact = removalImpact(only, [only], {} as RoutingMap, categoryOf);
     expect(impact.lastEnabled).toBe(true);
-    const lines = removalWarnings("provider", "Anthropic", impact, false);
-    expect(lines.some((l) => l.includes("agents cannot think"))).toBe(true);
+    // Two different ways Managed cannot answer, and the sentence has to be the
+    // same for both: a chain that resolves to nothing, and a switch that is off.
+    for (const managed of [{ configured: false }, { enabled: false }]) {
+      const lines = removalWarnings("provider", "Anthropic", impact, managed);
+      expect(lines.some((l) => l.includes("nothing to think with"))).toBe(true);
+      expect(lines.some((l) => l.includes("leaves Managed as the only thing"))).toBe(false);
+    }
+    // And the reassurance is printed where it is true.
     expect(
-      lines.some((l) => l.includes("leaves Managed as the only thing")),
-    ).toBe(false);
+      removalWarnings("provider", "Anthropic", impact, { configured: true, enabled: true }).some(
+        (l) => l.includes("leaves Managed as the only thing"),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -677,7 +726,7 @@ describe("switching a provider off", () => {
     const anthropic = provider("anthropic", "anthropic");
     const routing = applyToEveryWorkload("anthropic", "claude-sonnet-5");
     const impact = removalImpact(anthropic, [anthropic], routing, categoryOf);
-    const lines = removalWarnings("disable", "Anthropic", impact, true);
+    const lines = removalWarnings("disable", "Anthropic", impact, { configured: true });
     expect(lines[0]).toContain("nothing is deleted");
     expect(
       lines.some((l) =>
@@ -702,7 +751,7 @@ describe("switching a provider off", () => {
         { vision: parseRef("anthropic:x") } as RoutingMap,
         categoryOf,
       ),
-      true,
+      { configured: true },
     );
     expect(one.some((l) => l.includes("Vision routes through Anthropic"))).toBe(
       true,
@@ -720,7 +769,7 @@ describe("switching a provider off", () => {
         } as RoutingMap,
         categoryOf,
       ),
-      true,
+      { configured: true },
     );
     expect(
       two.some((l) => l.includes("Chat and Vision route through Anthropic")),
@@ -735,11 +784,13 @@ describe("switching a provider off", () => {
       {} as RoutingMap,
       categoryOf,
     );
-    expect(
-      removalWarnings("disable", "Anthropic", impact, false).some((l) =>
-        l.includes("agents cannot think"),
-      ),
-    ).toBe(true);
+    for (const managed of [{ configured: false }, { enabled: false }]) {
+      expect(
+        removalWarnings("disable", "Anthropic", impact, managed).some((l) =>
+          l.includes("agents cannot think"),
+        ),
+      ).toBe(true);
+    }
   });
 });
 

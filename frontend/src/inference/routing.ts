@@ -559,9 +559,19 @@ export function removalWarnings(
   intent: ProviderIntent,
   label: string,
   impact: RemovalImpact,
-  managedConfigured?: boolean,
+  managed?: { configured?: boolean; enabled?: boolean },
 ): string[] {
-  if (intent === "disable") return disableWarnings(label, impact, managedConfigured);
+  // **"Managed will answer" is a claim, and it has to be checked.** Two of
+  // these sentences promise a fallback the resolver will refuse if managed is
+  // switched off, or build without a credential if its chain resolves to
+  // nothing — so the operator would be confirming a destructive action under a
+  // reassurance that is false exactly when it matters most. Unknown is treated
+  // as available, which is what every caller meant before this argument.
+  //
+  // Computed here and passed down, so the disable sentences and the remove
+  // sentences cannot come to different conclusions about the same company.
+  const managedCanAnswer = !(managed?.enabled === false || managed?.configured === false);
+  if (intent === "disable") return disableWarnings(label, impact, managedCanAnswer);
   const lines: string[] =
     intent === "key"
       ? [
@@ -584,7 +594,9 @@ export function removalWarnings(
       lines.push(
         impact.defaultMovesTo
           ? `It is this company's default. Removing it moves the default to ${impact.defaultMovesTo}, and adding this provider again will not move it back.`
-          : `It is this company's default, and nothing is left to take that over — unrouted work falls back to Managed.`,
+          : managedCanAnswer
+            ? `It is this company's default, and nothing is left to take that over — unrouted work falls back to Managed.`
+            : `It is this company's default, nothing is left to take that over, and Managed cannot answer either. This company will have nothing to think with.`,
       );
     }
   }
@@ -604,9 +616,9 @@ export function removalWarnings(
     // all. Saying otherwise turned the most consequential line in this dialog
     // into a reassurance that was untrue exactly when it mattered.
     lines.push(
-      managedConfigured === false
-        ? `It is the only provider switched on, and Managed is not set up — removing it leaves nothing that can answer, and agents cannot think.`
-        : `It is the only provider switched on, so removing it leaves Managed as the only thing that can answer.`,
+      managedCanAnswer
+        ? `It is the only provider switched on, so removing it leaves Managed as the only thing that can answer.`
+        : `It is the only provider switched on, and Managed cannot answer — removing it leaves this company with nothing to think with.`,
     );
   }
   return lines;
@@ -628,11 +640,7 @@ export function removalWarnings(
  * discarded that into a toast while the Routing tab went on rendering the parked
  * rows as healthy.
  */
-function disableWarnings(
-  label: string,
-  impact: RemovalImpact,
-  managedConfigured?: boolean,
-): string[] {
+function disableWarnings(label: string, impact: RemovalImpact, managedCanAnswer: boolean): string[] {
   const lines: string[] = [
     `${label} keeps its endpoint, its key and every route that names it. Switching it back on restores all of them — nothing is deleted.`,
   ];
@@ -651,9 +659,9 @@ function disableWarnings(
   }
   if (impact.lastEnabled) {
     lines.push(
-      managedConfigured === false
-        ? `It is the only provider switched on, and Managed is not set up — with it off, nothing can answer and agents cannot think.`
-        : `It is the only provider switched on, so unrouted work falls back to Managed while it is off.`,
+      managedCanAnswer
+        ? `It is the only provider switched on, so unrouted work falls back to Managed while it is off.`
+        : `It is the only provider switched on, and Managed cannot answer — with it off, nothing can answer and agents cannot think.`,
     );
   }
   return lines;
@@ -689,6 +697,16 @@ export interface RoutingOption {
   slug: string;
   /** The name shown. */
   label: string;
+  /**
+   * Whether picking it would save a route that cannot serve a turn.
+   *
+   * Managed only, and for the two reasons the resolver refuses it: switched
+   * off, or a credential chain that resolves to nothing. Listed rather than
+   * dropped, because a workload already pointed there has to keep showing what
+   * it is pointed at — a select whose current value is missing from its own
+   * options is a worse lie than a disabled row.
+   */
+  unavailable?: boolean;
 }
 
 /**
@@ -706,11 +724,21 @@ export interface RoutingOption {
  * so it is one identity everywhere — and so a company whose entry zero *is* the
  * managed config does not get a row for it twice.
  */
-export function routingOptions(providers: readonly Provider[]): RoutingOption[] {
+export function routingOptions(
+  providers: readonly Provider[],
+  managed?: { configured?: boolean; enabled?: boolean },
+): RoutingOption[] {
   const rest = routingTargets(providers)
     .filter((p) => p.slug !== MANAGED_OPTION_SLUG)
     .map((p) => ({ slug: p.slug, label: p.label }));
-  return [{ slug: MANAGED_OPTION_SLUG, label: MANAGED_TARGET_LABEL }, ...rest];
+  // Unknown (no `managed` passed) is treated as available, because that is what
+  // every caller meant before this argument existed and a select that grey-out
+  // a working target is its own defect.
+  const unavailable = managed?.enabled === false || managed?.configured === false;
+  return [
+    { slug: MANAGED_OPTION_SLUG, label: MANAGED_TARGET_LABEL, unavailable },
+    ...rest,
+  ];
 }
 
 /**

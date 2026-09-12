@@ -53,8 +53,8 @@ export function RemoveProviderDialog({
   intent,
   label,
   impact,
+  managed,
   busy,
-  managedConfigured,
   onCancel,
   onDisable,
   onConfirm,
@@ -64,21 +64,22 @@ export function RemoveProviderDialog({
   label: string;
   impact: RemovalImpact;
   busy: boolean;
-  /**
-   * Whether the managed chain resolves.
-   *
-   * The last-provider sentence is wrong without it: "leaves Managed as the only
-   * thing that can answer" is a reassurance, and it was printed on exactly the
-   * companies where it is untrue.
-   */
-  managedConfigured?: boolean;
   onCancel: () => void;
+  /**
+   * What managed would do if this removal left nothing else.
+   *
+   * Two of the warnings below promise it as a fallback, and that promise is
+   * false when managed is switched off or its chain resolves to nothing —
+   * exactly when the operator most needs to know. Optional because an older
+   * host does not say; unknown is read as available.
+   */
+  managed?: { configured?: boolean; enabled?: boolean };
   /** Offered only where it is a real alternative — see the component doc. */
   onDisable?: () => void;
   onConfirm: () => void;
 }) {
   if (!intent) return null;
-  const lines = removalWarnings(intent, label, impact, managedConfigured);
+  const lines = removalWarnings(intent, label, impact, managed);
   // **Reversible, and the buttons say so.** Switching a provider off keeps its
   // endpoint, its key and its routes; the host refuses to scrub them precisely so
   // that switching it back on is a switch rather than a re-configuration.
