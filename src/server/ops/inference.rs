@@ -915,15 +915,10 @@ async fn managed_state(
     let secrets = runtime.secrets().as_ref();
     // Both addresses for the one meaning: the new per-provider slot and the
     // legacy flat slot it converges from.
-    let inference_key = inference::load_inference_key_scoped(
-        runtime.id(),
-        secrets,
-        inference::MANAGED_SLUG,
-        None,
-        &inference::HarnessScope::default(),
-    )
-    .await
-    .map_err(ApiError)?;
+    let inference_key =
+        inference::load_managed_key(runtime.id(), secrets, &inference::HarnessScope::default())
+            .await
+            .map_err(ApiError)?;
     let company_account = crate::company::company_key::load(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;

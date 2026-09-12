@@ -1031,15 +1031,10 @@ async fn test_managed(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let platform = super::platform_default(&crate::app::config::ProcessEnv);
-    let inference_key = inference::load_inference_key_scoped(
-        runtime.id(),
-        secrets,
-        inference::MANAGED_SLUG,
-        None,
-        &inference::HarnessScope::default(),
-    )
-    .await
-    .map_err(ApiError)?;
+    let inference_key =
+        inference::load_managed_key(runtime.id(), secrets, &inference::HarnessScope::default())
+            .await
+            .map_err(ApiError)?;
     let company_account = crate::company::company_key::load(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
@@ -1239,12 +1234,9 @@ async fn set_managed_key(
     // from "•••• configured" to showing a bare host.
     //
     // Found in a browser, not by a test. The test is below it now.
-    let legacy_is_managed = store::list_providers(runtime.id(), secrets)
+    let legacy_is_managed = store::legacy_slot_is_managed(runtime.id(), secrets)
         .await
-        .map_err(ApiError)?
-        .iter()
-        .find(|p| p.origin == store::ProviderOrigin::EntryZero)
-        .is_none_or(|zero| zero.slug == crate::company::inference::MANAGED_SLUG);
+        .map_err(ApiError)?;
     if legacy_is_managed
         && let Err(err) = secrets
             .set(

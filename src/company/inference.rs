@@ -906,6 +906,36 @@ pub async fn load_key_scoped(
     Ok(String::new())
 }
 
+/// Reads **managed's** credential, and only managed's.
+///
+/// Same two addresses as [`load_inference_key_scoped`] — `provider/tinyhumans/key`
+/// then the legacy flat slot — with the gate the flat slot needs and the general
+/// reader cannot have: `inference/key` is one address two different rows read
+/// through, and for an upgraded company whose entry zero is a vendor account it
+/// holds that vendor's key. Without the gate, an explicit Managed route sent a
+/// BYOK credential to the platform URL, and the status and Test Managed made the
+/// same ownership mistake.
+///
+/// The write path has always gated on this; see
+/// [`store::legacy_slot_is_managed`].
+pub async fn load_managed_key(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<String> {
+    if let Some(SecretValue(raw)) = secrets
+        .get(company, &provider_key_key(MANAGED_SLUG))
+        .await?
+        && !raw.trim().is_empty()
+    {
+        return Ok(raw);
+    }
+    if !store::legacy_slot_is_managed(company, secrets).await? {
+        return Ok(String::new());
+    }
+    load_key_scoped(company, secrets, None, scope).await
+}
+
 /// Reads the outbound inference credential for one provider slug.
 ///
 /// ```text
@@ -1546,14 +1576,7 @@ async fn managed_decl(
     env_default: Option<&EnvDefault>,
     scope: &HarnessScope,
 ) -> Result<InferenceDecl> {
-    let key = load_inference_key_scoped(
-        company,
-        secrets,
-        credential_slug(LEGACY_MANAGED),
-        None,
-        scope,
-    )
-    .await?;
+    let key = load_managed_key(company, secrets, scope).await?;
     let had_key = !key.trim().is_empty();
     let (base_url, credential, proxied) = resolve_endpoint(LEGACY_MANAGED, None, key, env_default);
     let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
@@ -3394,6 +3417,53 @@ mod tests {
         .unwrap()
         .expect("a harness with nothing of its own inherits");
         assert_eq!(theirs.base_url, "https://first.example/v1");
+    }
+
+    #[tokio::test]
+    async fn managed_never_reads_a_legacy_slot_that_belongs_to_a_vendor_account() {
+        // `inference/key` is one address with two possible owners. For a company
+        // upgraded from a BYOK config it holds that vendor's key, and reading it
+        // as managed's sent an OpenRouter credential to the platform URL — a
+        // credential presented to an account that does not own it.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        // Entry zero is a vendor account, with its key still in the flat slot.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(&company, KEY_KEY, SecretValue("sk-or-byok".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            load_managed_key(&company, &secrets, &HarnessScope::default())
+                .await
+                .unwrap(),
+            "",
+            "the vendor's key is not managed's to present"
+        );
+        // And the general reader still finds it for the row it belongs to.
+        assert_eq!(
+            load_inference_key_scoped(
+                &company,
+                &secrets,
+                "openrouter",
+                None,
+                &HarnessScope::default()
+            )
+            .await
+            .unwrap(),
+            "sk-or-byok"
+        );
     }
 
     #[tokio::test]
