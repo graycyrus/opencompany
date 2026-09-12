@@ -58,6 +58,19 @@ async function choose(page: Page, category: "cloud" | "local" | "cli", label: st
   await page.getByRole("option", { name: new RegExp(label) }).click();
 }
 
+/**
+ * Open the add dialog, then take the custom-provider route out of it.
+ *
+ * `inference-add-custom` is rendered inside the dialog's content, so reaching
+ * for it straight off the page waits out the timeout on an element that has
+ * not been mounted yet.
+ */
+async function addCustom(page: Page) {
+  await page.getByTestId("inference-add-open").click();
+  await expect(page.getByTestId("inference-add-provider")).toBeVisible();
+  await page.getByTestId("inference-add-custom").click();
+}
+
 /** The discard port: refused immediately, no DNS, no wait. */
 const UNREACHABLE = "http://127.0.0.1:9/v1";
 
@@ -80,7 +93,7 @@ test("a provider behind an unreachable endpoint is saved, amber, and keeps its k
   // the key is perfectly good.
   await openInference(page);
 
-  await page.getByTestId("inference-add-custom").click();
+  await addCustom(page);
   await page.locator("#inference-connect-name").fill("E2E Gateway");
   await expect(page.getByTestId("inference-slug-preview")).toHaveText("Slug: e2e-gateway");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
@@ -111,7 +124,7 @@ test("a second provider holds a credential of its own", async ({ page }) => {
   await openInference(page);
 
   for (const name of ["E2E One", "E2E Two"]) {
-    await page.getByTestId("inference-add-custom").click();
+    await addCustom(page);
     await page.locator("#inference-connect-name").fill(name);
     await page.locator("#inference-connect-url").fill(UNREACHABLE);
     await page.locator("#inference-connect-key").fill(`pw-e2e-${name}-${Date.now()}`);
@@ -144,7 +157,7 @@ test("a custom provider may not take a name the catalogue ships", async ({ page 
   // refusal happens before anything is written.
   await openInference(page);
 
-  await page.getByTestId("inference-add-custom").click();
+  await addCustom(page);
   await page.locator("#inference-connect-name").fill("Groq");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await expect(page.getByTestId("inference-slug-error")).toContainText("built-in");
@@ -157,7 +170,7 @@ test("disabling a provider keeps its credential and its routes", async ({ page }
   // re-configuration.
   await openInference(page);
 
-  await page.getByTestId("inference-add-custom").click();
+  await addCustom(page);
   await page.locator("#inference-connect-name").fill("E2E Parked");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
@@ -176,7 +189,7 @@ test("disabling a provider keeps its credential and its routes", async ({ page }
 test("deleting a provider clears its key and resets the routes that named it", async ({ page }) => {
   await openInference(page);
 
-  await page.getByTestId("inference-add-custom").click();
+  await addCustom(page);
   await page.locator("#inference-connect-name").fill("E2E Doomed");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
