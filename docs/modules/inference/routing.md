@@ -212,31 +212,41 @@ With no providers connected it says so rather than showing empty selects:
 > Add or connect a provider first. Then you can route every workload through one
 > model here.
 
-## Managed stays a fallback, always
+## Managed is a fallback until it is switched off
+
+The design this ports puts a standing line above the modes:
 
 > Managed is always available as a fallback. To use your own model, choose a
 > routing mode below.
 
-It renders a **badge**, not a disabled toggle. openhuman's note on why, which is
-worth keeping: a locked switch reads as switchable-but-broken and invites a fight
-the user cannot win.
+**Neither half of that sentence is true here**, and both were corrected for the
+same reason: ours needs a credential and can resolve to nothing, and it has an
+operator behind it who may want to stop paying for it.
 
-What the badge **says** is not ported. openhuman's reads `Always on`, which is
-true there — they run the managed backend. Ours needs a credential and can
-resolve to nothing, so the row reports which step of the credential chain
-answered, and shows no badge at all when none did. See
-[`connect-flow.md`](connect-flow.md).
+* **Availability.** The *mode* still renders a badge rather than a locked
+  toggle — openhuman's note on why is worth keeping, a locked switch reads as
+  switchable-but-broken and invites a fight the user cannot win — but what the
+  badge says is not ported. `Always on` is true where the same company runs the
+  managed backend. Ours reports which step of the credential chain answered, and
+  shows no badge at all when none did.
+* **"Always".** The Providers row *does* carry a real switch, and switching it
+  off is honoured on the turn path: an explicit `managed` route fails closed, an
+  unset workload stops falling back, and this tab's Managed mode and the
+  per-workload picker both stop offering it. It is not the credential — every
+  step of the chain stays where it was. See
+  [`connect-flow.md`](connect-flow.md).
 
 ## The per-workload dialog
 
 Opened by Change Model / Choose Model. It carries the workload's recommendation
 hint, a provider select, a model select sourced from that provider's `/models`,
-a free-text escape hatch (**Enter model id**), and a **Test** button that sends
-one real one-turn completion for that workload and reports the result inline.
+a free-text escape hatch (**Enter model id**), and a **Test** button.
 
-openhuman tests here with a real completion rather than a catalog listing,
-because the add flow wants "is this reachable" and a routing row wants "will this
-model actually answer".
+openhuman's Test sends one real one-turn completion, because the add flow wants
+"is this reachable" and a routing row wants "will this model actually answer".
+**Ours does not.** It sends the same `GET {base}/models` the add flow does, and
+says so on the button — so it settles reachability plus whether the endpoint
+publishes this id, costs nothing, and cannot answer the second question at all.
 
 **What shipped does not send a completion, and no longer claims to.** The button
 called the per-provider check, which is `GET /models` — so it cost nothing,
@@ -320,7 +330,8 @@ operation that could be forgotten.
 primary(providers, marked):
     the marked provider, if it exists and is enabled
     else the first enabled provider          ← every company that has not said
-    else None                                ← the managed brain, always available
+    else None                                ← the managed brain, if it is on
+                                               and its chain resolves
 ```
 
 No migration and no backfill: an unmarked company behaves exactly as it did.

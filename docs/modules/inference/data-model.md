@@ -168,7 +168,9 @@ A slot cannot, so there is no rule to write down and no state to reconcile.
 `resolve::primary(providers, marked)` returns the marked provider when it exists
 and is enabled, and otherwise the first enabled one — which is what it returned
 unconditionally before, so an unmarked company is unchanged and nothing is
-backfilled. `None` means the managed brain, which is always available.
+backfilled. `None` means the managed brain — which answers only while it is
+switched on and its credential chain resolves; a company with neither has
+nothing to think with, and the resolver says so rather than inventing one.
 
 Both write paths keep the marker honest: disabling the marked provider clears
 the marker (rather than moving it to something the operator never chose), and
