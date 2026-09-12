@@ -279,6 +279,9 @@ async fn disabling_the_marked_provider_clears_the_marker() {
     set_default_slug(&company(), &secrets, "brave")
         .await
         .unwrap();
+    store_provider_key(&company(), &secrets, "brave", "brave-not-a-real-key")
+        .await
+        .unwrap();
 
     set_enabled(&company(), &secrets, "brave", false)
         .await
@@ -289,11 +292,14 @@ async fn disabling_the_marked_provider_clears_the_marker() {
         !list_providers(&company(), &secrets).await.unwrap()[0].enabled,
         "disabled is not deleted — the credential and the record stay"
     );
+    // `|| true` made this unconditional, which is worse than no assertion at
+    // all: it read as a check on the very property the test is named for. The
+    // key now has to be there to be kept, so it is stored first.
     assert!(
         provider_key_configured(&company(), &secrets, "brave")
             .await
-            .unwrap()
-            || true
+            .unwrap(),
+        "disabling must not take the credential with it"
     );
 }
 

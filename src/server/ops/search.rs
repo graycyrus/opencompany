@@ -413,6 +413,24 @@ fn validate_draft(
     }
     let endpoint =
         endpoint.ok_or_else(|| invalid(format!("{} needs an instance address", info.label)))?;
+    validate_endpoint(endpoint)?;
+    Ok(Some(endpoint.to_string()))
+}
+
+/// Every check an operator-supplied instance address must pass before it is
+/// stored or fetched.
+///
+/// **One function, because there are four write paths and they disagreed.**
+/// `POST …/search/providers` ran all four of these; the two halves of the
+/// legacy `PUT …/search` ran the last two, and `POST …/search/test` ran only
+/// the last. So the compatibility route stored an address the modern route
+/// refuses — including one past [`MAX_ENDPOINT_LEN`], which is the case that
+/// comment was written about: an unbounded operator-supplied string reaching
+/// the store is how a row that cannot be deleted gets made.
+///
+/// A validator that is a habit rather than a function is one that gets applied
+/// unevenly, and unevenly is how this one was.
+fn validate_endpoint(endpoint: &str) -> Result<(), ApiError> {
     if endpoint.len() > MAX_ENDPOINT_LEN {
         return Err(invalid("that instance address is too long"));
     }
@@ -426,8 +444,7 @@ fn validate_draft(
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
         return Err(invalid(format!("`{endpoint}` is not an http(s) URL")));
     }
-    probe::guard_instance_url(endpoint).map_err(invalid)?;
-    Ok(Some(endpoint.to_string()))
+    probe::guard_instance_url(endpoint).map_err(invalid)
 }
 
 /// Runs the check and reports what it means, without touching the store.
@@ -725,7 +742,7 @@ async fn test_provider(
             .and_then(|provider| provider.endpoint),
     };
     if let Some(endpoint) = endpoint.as_deref() {
-        probe::guard_instance_url(endpoint).map_err(invalid)?;
+        validate_endpoint(endpoint)?;
     }
 
     let failure = check(info, api_key.as_deref(), endpoint.as_deref()).await;
@@ -838,10 +855,7 @@ async fn put_search(
     if let Some(endpoint) = endpoint.as_deref()
         && info.needs_endpoint()
     {
-        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-            return Err(invalid(format!("`{endpoint}` is not an http(s) URL")));
-        }
-        probe::guard_instance_url(endpoint).map_err(invalid)?;
+        validate_endpoint(endpoint)?;
     }
 
     store::put_provider(
@@ -878,10 +892,7 @@ async fn apply_to(
         store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), slug, &key).await?;
     }
     if let Some(endpoint) = supplied(body.endpoint.as_deref()) {
-        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-            return Err(invalid(format!("`{endpoint}` is not an http(s) URL")));
-        }
-        probe::guard_instance_url(&endpoint).map_err(invalid)?;
+        validate_endpoint(&endpoint)?;
         let enabled = store::list_providers(runtime.id(), runtime.secrets().as_ref())
             .await?
             .into_iter()
@@ -1187,6 +1198,55 @@ mod tests {
         .await;
         assert_eq!(saved["effectiveProvider"], "searxng", "{saved}");
         assert_eq!(saved["endpoint"], "https://searx.example", "{saved}");
+    }
+
+    #[tokio::test]
+    async fn the_legacy_route_refuses_what_the_modern_one_refuses() {
+        // Four checks guard an operator-supplied address, and only one of the
+        // four write paths ran all four. `POST …/search/providers` did;
+        // `PUT …/search` ran the http(s) prefix and the metadata guard and
+        // skipped the length cap and the control-character check, so the
+        // compatibility route stored addresses the modern route refuses.
+        //
+        // The length one is the case `MAX_ENDPOINT_LEN`'s own comment was
+        // written about: an unbounded operator-supplied string reaching the
+        // store is how a row that cannot be deleted gets made.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        let too_long = format!("http://search.acme.internal/{}", "a".repeat(MAX_ENDPOINT_LEN));
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "searxng", "endpoint": too_long})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "the cap applies here too");
+
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "searxng", "endpoint": "http://search.acme.internal/\u{7}"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "so does the control-character check"
+        );
+
+        // Nothing was stored on the way to either refusal.
+        let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        assert_eq!(after["effectiveProvider"], "managed", "{after}");
+        assert!(
+            after["providers"].as_array().expect("providers").is_empty(),
+            "{after}"
+        );
     }
 
     #[tokio::test]

@@ -280,3 +280,27 @@ async fn a_hostile_body_is_abandoned_rather_than_buffered() {
     );
     server.abort();
 }
+
+#[test]
+fn a_longer_code_carrying_the_same_token_is_still_a_rejected_key() {
+    // The match is a substring, and deliberately. It is anchored by the status
+    // first — only a Brave 422 reaches it at all — and the token it looks for
+    // is specific enough that a body containing it is a body about the
+    // subscription token.
+    //
+    // A stricter equality check on a parsed `code` field would have to parse
+    // four providers' envelopes, and a provider that changes its envelope would
+    // then fail to parse and classify as not-auth: the credential stays stored
+    // beside an amber advisory, which is the safe direction but loses the
+    // signal. A longer code carrying the same token is a rejected key either
+    // way, so it is pinned here rather than guarded against.
+    let body = r#"{"error":{"code":"SUBSCRIPTION_TOKEN_INVALID_FORMAT","status":422}}"#;
+    assert_eq!(classify("brave", &status(422, body)), ProbeClass::Auth);
+
+    // And the anchor holds: the same token under a different status is not a
+    // credential rejection, so nothing is rolled back.
+    assert_ne!(classify("brave", &status(500, body)), ProbeClass::Auth);
+    // As does the per-provider split — Brave's token code means nothing coming
+    // from anybody else.
+    assert_ne!(classify("searxng", &status(422, body)), ProbeClass::Auth);
+}
