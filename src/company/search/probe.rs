@@ -365,12 +365,35 @@ fn pick_address(addresses: &[std::net::SocketAddr]) -> Result<std::net::SocketAd
 /// and letting the client handle it keeps this off the path for the three
 /// account providers, whose addresses are constants in the catalogue rather
 /// than anybody's input.
-async fn pin_for(endpoint: &str) -> Result<Option<(String, std::net::SocketAddr)>, ProbeFailure> {
+/// Why a name could not be pinned.
+///
+/// The two are not the same answer and the callers treat them differently: a
+/// name this host **must not** fetch is refused wherever it appears, while a
+/// name that merely did not resolve is a transient fact about DNS. Refusing to
+/// *store* an address because a name server was briefly down would be a bug of
+/// its own, so the distinction lives in the type rather than in a message
+/// somebody has to match on.
+enum PinFailure {
+    /// It resolved, and to something this host must not fetch.
+    Refused(String),
+    /// It could not be resolved at all — no answer, a timeout, or not a URL.
+    Unresolved(String),
+}
+
+impl PinFailure {
+    fn message(self) -> String {
+        match self {
+            PinFailure::Refused(message) | PinFailure::Unresolved(message) => message,
+        }
+    }
+}
+
+async fn pin_for(endpoint: &str) -> Result<Option<(String, std::net::SocketAddr)>, PinFailure> {
     let parsed = endpoint
         .parse::<axum::http::Uri>()
-        .map_err(|_| ProbeFailure::Transport("that instance address is not a URL".to_string()))?;
+        .map_err(|_| PinFailure::Unresolved("that instance address is not a URL".to_string()))?;
     let Some(host) = parsed.host() else {
-        return Err(ProbeFailure::Transport(
+        return Err(PinFailure::Unresolved(
             "that instance address has no host".to_string(),
         ));
     };
@@ -388,12 +411,38 @@ async fn pin_for(endpoint: &str) -> Result<Option<(String, std::net::SocketAddr)
     // answers does.
     let resolved = tokio::time::timeout(TIMEOUT, tokio::net::lookup_host((host, port)))
         .await
-        .map_err(|_| ProbeFailure::Transport("that instance address timed out in DNS".to_string()))?
-        .map_err(|err| ProbeFailure::Transport(format!("dns error: {err}")))?
+        .map_err(|_| PinFailure::Unresolved("that instance address timed out in DNS".to_string()))?
+        .map_err(|err| PinFailure::Unresolved(format!("dns error: {err}")))?
         .collect::<Vec<_>>();
 
-    let address = pick_address(&resolved).map_err(ProbeFailure::Transport)?;
+    let address = pick_address(&resolved).map_err(PinFailure::Refused)?;
     Ok(Some((host.to_string(), address)))
+}
+
+/// The resolve-time half of [`guard_instance_url`], for a caller that is about
+/// to **store** an address rather than fetch it now.
+///
+/// The literal-IP guard is not enough on a storing path, and the storing paths
+/// are where it matters most: `PUT …/search/providers/{slug}` re-addresses a
+/// connection without probing it, so nothing resolved the name before it was
+/// saved — and the search tool resolves it normally at agent-turn time and
+/// fetches whatever it points at.
+///
+/// **A name that does not resolve is not refused.** DNS being down is not
+/// evidence that an address is forbidden, and refusing to save an operator's own
+/// instance because a resolver blinked would be a worse failure than the one
+/// this prevents. Only a name that resolves to something this host must not
+/// fetch is refused.
+///
+/// This is a check at the door, not a guarantee at fetch time: a name can be
+/// re-pointed after it is stored. Closing that needs the pinning to happen where
+/// the agent's search is actually made, inside the search tool's own client,
+/// which is a change to the harness rather than to this module.
+pub async fn guard_resolved_host(endpoint: &str) -> Result<(), String> {
+    match pin_for(endpoint).await {
+        Ok(_) | Err(PinFailure::Unresolved(_)) => Ok(()),
+        Err(refused @ PinFailure::Refused(_)) => Err(refused.message()),
+    }
 }
 
 /// Asks a provider whether it answers for this credential.
@@ -427,7 +476,9 @@ pub async fn probe(
     // answer at constants in the catalogue, so there is nothing about them for
     // a name to point somewhere else.
     if let Some(endpoint) = endpoint
-        && let Some((host, address)) = pin_for(endpoint).await?
+        && let Some((host, address)) = pin_for(endpoint)
+            .await
+            .map_err(|failure| ProbeFailure::Transport(failure.message()))?
     {
         builder = builder.resolve(&host, address);
     }

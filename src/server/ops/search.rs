@@ -400,7 +400,7 @@ fn supplied(value: Option<&str>) -> Option<String> {
 }
 
 /// Validates a draft against what its kind needs, returning the endpoint to use.
-fn validate_draft(
+async fn validate_draft(
     info: &SearchProviderInfo,
     api_key: Option<&str>,
     endpoint: Option<&str>,
@@ -413,7 +413,7 @@ fn validate_draft(
     }
     let endpoint =
         endpoint.ok_or_else(|| invalid(format!("{} needs an instance address", info.label)))?;
-    validate_endpoint(endpoint)?;
+    validate_endpoint(endpoint).await?;
     Ok(Some(endpoint.to_string()))
 }
 
@@ -430,7 +430,7 @@ fn validate_draft(
 ///
 /// A validator that is a habit rather than a function is one that gets applied
 /// unevenly, and unevenly is how this one was.
-fn validate_endpoint(endpoint: &str) -> Result<(), ApiError> {
+async fn validate_endpoint(endpoint: &str) -> Result<(), ApiError> {
     if endpoint.len() > MAX_ENDPOINT_LEN {
         return Err(invalid("that instance address is too long"));
     }
@@ -444,7 +444,14 @@ fn validate_endpoint(endpoint: &str) -> Result<(), ApiError> {
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
         return Err(invalid(format!("`{endpoint}` is not an http(s) URL")));
     }
-    probe::guard_instance_url(endpoint).map_err(invalid)
+    probe::guard_instance_url(endpoint).map_err(invalid)?;
+    // And what the name resolves to, not just how it is spelled. The literal
+    // guard above judges `http://169.254.169.254/`; only this judges
+    // `http://metadata.example/`, and this route may STORE the address without
+    // ever probing it — after which the search tool resolves it at agent-turn
+    // time and fetches whatever it points at. A name that does not resolve is
+    // deliberately not refused; see `guard_resolved_host`.
+    probe::guard_resolved_host(endpoint).await.map_err(invalid)
 }
 
 /// Runs the check and reports what it means, without touching the store.
@@ -497,7 +504,8 @@ async fn connect_provider(
         info,
         api_key.as_deref(),
         supplied(body.endpoint.as_deref()).as_deref(),
-    )?;
+    )
+    .await?;
 
     // Test-and-set under the store's own lock, and **before** the credential.
     //
@@ -600,26 +608,32 @@ async fn update_provider(
     let slug = slug.trim().to_ascii_lowercase();
     let info = catalogue_entry(&slug)?;
 
-    let Some(existing) = store::list_providers(runtime.id(), runtime.secrets().as_ref())
+    if !store::list_providers(runtime.id(), runtime.secrets().as_ref())
         .await?
-        .into_iter()
-        .find(|provider| provider.slug == slug)
-    else {
+        .iter()
+        .any(|provider| provider.slug == slug)
+    {
         return Err(invalid(format!("{} is not connected", info.label)));
-    };
+    }
 
     if let Some(endpoint) = supplied(body.endpoint.as_deref()) {
-        let endpoint = validate_draft(info, Some("unused"), Some(&endpoint))?;
-        store::put_provider(
+        let endpoint = validate_draft(info, Some("unused"), Some(&endpoint)).await?;
+        // The read of the current row and the write back are one critical
+        // section in the store. Split — as they were here, with the `enabled`
+        // flag read above and written below — a removal landing between them
+        // made this **recreate** the row: a provider the operator had just
+        // disconnected came back enabled with a fresh address and started
+        // receiving agent searches again, after the removal had answered 200.
+        if !store::update_endpoint_if_present(
             runtime.id(),
             runtime.secrets().as_ref(),
-            SearchProvider {
-                slug: slug.clone(),
-                enabled: existing.enabled,
-                endpoint,
-            },
+            &slug,
+            endpoint,
         )
-        .await?;
+        .await?
+        {
+            return Err(invalid(format!("{} is not connected", info.label)));
+        }
     }
     if let Some(enabled) = body.enabled {
         store::set_enabled(runtime.id(), runtime.secrets().as_ref(), &slug, enabled).await?;
@@ -678,18 +692,19 @@ async fn replace_key(
     // providers only. An invisible credential the operator cannot see and
     // cannot delete is the orphaned-secret shape this module keeps refusing
     // elsewhere, and it does not get an exception here.
-    if !store::list_providers(runtime.id(), runtime.secrets().as_ref())
-        .await?
-        .iter()
-        .any(|provider| provider.slug == slug)
+    //
+    // Checked and written in one critical section rather than two: a removal
+    // landing between them would leave the credential at an address absent from
+    // the index, which the status route never reports and `DELETE …/search/key`
+    // never clears, because both walk the index.
+    let key = supplied(body.api_key.as_deref()).unwrap_or_default();
+    if !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &slug, &key).await?
     {
         return Err(invalid(format!(
             "{} is not connected — connect it instead",
             info.label
         )));
     }
-    let key = supplied(body.api_key.as_deref()).unwrap_or_default();
-    store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), &slug, &key).await?;
     Ok(Json(status_of(runtime).await?))
 }
 
@@ -771,7 +786,7 @@ async fn test_provider(
             .and_then(|provider| provider.endpoint),
     };
     if let Some(endpoint) = endpoint.as_deref() {
-        validate_endpoint(endpoint)?;
+        validate_endpoint(endpoint).await?;
     }
 
     let failure = check(info, api_key.as_deref(), endpoint.as_deref()).await;
@@ -884,7 +899,7 @@ async fn put_search(
     if let Some(endpoint) = endpoint.as_deref()
         && info.needs_endpoint()
     {
-        validate_endpoint(endpoint)?;
+        validate_endpoint(endpoint).await?;
     }
 
     store::put_provider(
@@ -921,7 +936,7 @@ async fn apply_to(
         store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), slug, &key).await?;
     }
     if let Some(endpoint) = supplied(body.endpoint.as_deref()) {
-        validate_endpoint(&endpoint)?;
+        validate_endpoint(&endpoint).await?;
         let enabled = store::list_providers(runtime.id(), runtime.secrets().as_ref())
             .await?
             .into_iter()

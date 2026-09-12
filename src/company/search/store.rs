@@ -308,6 +308,72 @@ pub async fn claim_provider(
     Ok(true)
 }
 
+/// Re-addresses a connected provider, or says it is not connected.
+///
+/// The read and the write are one critical section. Split, as they were in the
+/// caller, a removal landing between them made the write **recreate** the row:
+/// a provider the operator had just disconnected came back enabled, with its
+/// old `enabled` flag and a fresh address, and started receiving agent searches
+/// again after the removal had answered 200.
+///
+/// `false` means it was not connected — either it never was, or it stopped being
+/// while this call was waiting for the lock. Those are the same answer from the
+/// caller's side and it does not need to tell them apart.
+pub async fn update_endpoint_if_present(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    endpoint: Option<String>,
+) -> Result<bool> {
+    let _guard = index_guard(company).await;
+    let Some(existing) = list_providers(company, secrets)
+        .await?
+        .into_iter()
+        .find(|provider| provider.slug == slug)
+    else {
+        return Ok(false);
+    };
+    put_provider_locked(
+        company,
+        secrets,
+        SearchProvider {
+            slug: slug.to_string(),
+            enabled: existing.enabled,
+            endpoint,
+        },
+    )
+    .await?;
+    Ok(true)
+}
+
+/// Stores a credential **only for a provider that is connected**, atomically.
+///
+/// Same race as [`update_endpoint_if_present`], with a worse residue: a removal
+/// landing between the caller's existence check and the write left a credential
+/// at an address absent from the index, which the status route never reports
+/// and `DELETE …/search/key` never clears, because both walk the index.
+///
+/// `false` means it is not connected, and nothing was written.
+pub async fn store_key_if_connected(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    key: &str,
+) -> Result<bool> {
+    let _guard = index_guard(company).await;
+    if !list_providers(company, secrets)
+        .await?
+        .iter()
+        .any(|provider| provider.slug == slug)
+    {
+        return Ok(false);
+    }
+    // Takes no lock of its own — it writes credential addresses, not the index
+    // — so calling it while the guard is held is safe rather than re-entrant.
+    store_provider_key(company, secrets, slug, key).await?;
+    Ok(true)
+}
+
 /// [`put_provider`]'s body, for a caller that already holds the index lock.
 ///
 /// Separate because the lock is not re-entrant: [`claim_provider`] holds it

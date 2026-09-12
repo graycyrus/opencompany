@@ -112,7 +112,7 @@ is genuinely free.
 ## The flow
 
 ```
-  pick ──▶ type ──▶ write credential ──▶ flush record ──▶ PROBE ──┬─▶ ok ──▶ saved
+  pick ──▶ type ──▶ claim record ──▶ write credential ──▶ PROBE ──┬─▶ ok ──▶ saved
                                                                    │
                                                                    └─▶ classify
                                                                           │
@@ -129,8 +129,23 @@ Ordering, and none of it is arbitrary:
 
 1. **Validate locally what can be validated locally.** For SearXNG, the URL
    scheme and shape, plus the address guard below. Reject before any write.
-2. **Write the credential first, then flush the record.** The probe resolves the
-   key by slug, so the credential has to land first.
+2. **Claim the record first, then write the credential.** The claim is a
+   test-and-set under the store's per-company index lock: it creates the row
+   only if the slug is not already connected, and says which happened.
+
+   This ordering is the fix for a race, and reversing it restores the race. Two
+   admins connecting the same provider at once both used to get past a plain
+   existence check, and the loser did real damage rather than duplicating work —
+   step 4 rolls back by deleting the row **and** the credential, so the request
+   whose key was rejected deleted the row and the working key the other had just
+   stored, while that one answered `saved: true` from its own request-local copy.
+
+   The credential goes second because a loser must have written nothing by the
+   time it is refused; writing it first would overwrite the winner's key at the
+   shared address on the way to a 400.
+
+   It does **not** need to land before the probe: the probe is handed the
+   request's own key rather than reading it back from the store.
 3. **Probe.**
 4. **Roll back both stores on a destructive failure**, and log a rollback failure
    rather than swallowing it. A silently failed clear orphans a secret, and in

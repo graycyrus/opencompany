@@ -555,3 +555,106 @@ async fn a_refused_claim_writes_nothing() {
         "the loser must not have overwritten the winner's address"
     );
 }
+
+#[tokio::test]
+async fn a_re_address_refuses_rather_than_recreating_a_removed_row() {
+    // The handler read the row, then wrote it back three awaits later with the
+    // `enabled` flag it had read. A removal landing between them made the write
+    // RECREATE the provider: disconnected, then back, enabled, with a fresh
+    // address and receiving agent searches again.
+    let secrets = MemSecrets::default();
+    assert!(
+        !update_endpoint_if_present(
+            &company(),
+            &secrets,
+            "searxng",
+            Some("http://search.acme.internal".to_string()),
+        )
+        .await
+        .unwrap(),
+        "nothing to re-address"
+    );
+    assert!(
+        list_providers(&company(), &secrets)
+            .await
+            .unwrap()
+            .is_empty(),
+        "and nothing created on the way to saying so"
+    );
+
+    // Connected, disabled, then re-addressed: the address changes and the
+    // enabled flag is preserved rather than reset.
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "searxng".to_string(),
+            enabled: true,
+            endpoint: Some("http://old.acme.internal".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    set_enabled(&company(), &secrets, "searxng", false)
+        .await
+        .unwrap();
+    assert!(
+        update_endpoint_if_present(
+            &company(),
+            &secrets,
+            "searxng",
+            Some("http://new.acme.internal".to_string()),
+        )
+        .await
+        .unwrap()
+    );
+    let providers = list_providers(&company(), &secrets).await.unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(
+        providers[0].endpoint.as_deref(),
+        Some("http://new.acme.internal")
+    );
+    assert!(!providers[0].enabled, "the switch stays where it was");
+}
+
+#[tokio::test]
+async fn a_key_is_not_stored_for_a_provider_the_index_does_not_hold() {
+    // Otherwise the credential lands at an address the status route never
+    // reports and `DELETE …/search/key` never clears, because both walk the
+    // index. Checked and written in one critical section so a removal cannot
+    // land between them.
+    let secrets = MemSecrets::default();
+    assert!(
+        !store_key_if_connected(&company(), &secrets, "brave", "brave-not-a-real-key")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !provider_key_configured(&company(), &secrets, "brave")
+            .await
+            .unwrap(),
+        "nothing written on the way to the refusal"
+    );
+
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "brave".to_string(),
+            enabled: true,
+            endpoint: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        store_key_if_connected(&company(), &secrets, "brave", "brave-not-a-real-key")
+            .await
+            .unwrap()
+    );
+    assert!(
+        provider_key_configured(&company(), &secrets, "brave")
+            .await
+            .unwrap()
+    );
+}

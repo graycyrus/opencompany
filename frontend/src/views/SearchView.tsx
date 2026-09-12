@@ -152,11 +152,37 @@ export function SearchView({ client, company }: Props) {
    * on a page where one of the actions moves which account gets billed that is
    * not a small doubt.
    */
+  /**
+   * Drops what a probe once said about a row.
+   *
+   * Health is the diagnosis of a *configuration*, so it stops meaning anything
+   * the moment the configuration changes. Left behind, a row that was tested
+   * with a rejected key still read "key rejected" after the key was replaced —
+   * a red mark on a credential nothing had ever checked, and the same stale
+   * state survived remove-and-reconnect. Omit `slug` to forget all of them,
+   * which is what disconnecting everything means.
+   */
+  const forgetHealth = useCallback((slug?: string) => {
+    setHealth((prior) => {
+      if (slug === undefined) return {};
+      const next = { ...prior };
+      delete next[slug];
+      return next;
+    });
+  }, []);
+
   const run = useCallback(
-    async (slug: string, done: string, work: () => Promise<SearchStatus>) => {
+    async (
+      slug: string,
+      done: string,
+      work: () => Promise<SearchStatus>,
+      /** Whether success makes this row's last probe result meaningless. */
+      changesConfiguration = false,
+    ) => {
       setBusySlug(slug);
       try {
         setStatus(await work());
+        if (changesConfiguration) forgetHealth(slug === "__all__" ? undefined : slug);
         toast.success(done);
       } catch (err) {
         toast.error(reason(err));
@@ -164,7 +190,7 @@ export function SearchView({ client, company }: Props) {
         setBusySlug(null);
       }
     },
-    [],
+    [forgetHealth],
   );
 
   /** Records a finished test on the row, and clears it after ten seconds. */
@@ -185,11 +211,7 @@ export function SearchView({ client, company }: Props) {
         });
         setStatus(result.status);
         if (result.ok) {
-          setHealth((prior) => {
-            const next = { ...prior };
-            delete next[provider.slug];
-            return next;
-          });
+          forgetHealth(provider.slug);
           settleTest(provider.slug, { kind: "done", ok: true, message: "ok" });
         } else {
           const probeClass = result.probeClass ?? "unknown";
@@ -208,7 +230,7 @@ export function SearchView({ client, company }: Props) {
         });
       }
     },
-    [client, company, settleTest],
+    [client, company, forgetHealth, settleTest],
   );
 
   /** The add/connect/replace/re-address submit, whichever the dialog is for. */
@@ -228,6 +250,8 @@ export function SearchView({ client, company }: Props) {
               values.apiKey ?? "",
             ),
           );
+          // The old diagnosis was about the old key.
+          forgetHealth(slug);
           toast.success(`${label} key replaced.`);
         } else if (intent.kind === "edit-endpoint") {
           setStatus(
@@ -235,6 +259,8 @@ export function SearchView({ client, company }: Props) {
               endpoint: values.endpoint,
             }),
           );
+          // And this one was about the old address.
+          forgetHealth(slug);
           toast.success(`${label} address saved.`);
         } else {
           const result = await connectSearchProvider(client, company, {
@@ -242,6 +268,10 @@ export function SearchView({ client, company }: Props) {
             ...values,
           });
           setStatus(result.status);
+          // A new connection has no history, and the slug may be one that was
+          // removed and re-added — which used to inherit the removed row's
+          // diagnosis. Cleared before the probe below records its own.
+          forgetHealth(slug);
           const probeClass = result.probeClass;
           if (result.ok) {
             toast.success(`${label} connected.`);
@@ -266,7 +296,7 @@ export function SearchView({ client, company }: Props) {
         setBusySlug(null);
       }
     },
-    [client, company, intent],
+    [client, company, forgetHealth, intent],
   );
 
   const header = (
@@ -491,19 +521,28 @@ export function SearchView({ client, company }: Props) {
                 const pending = confirm;
                 setConfirm(null);
                 if (!pending) return;
+                // All three change the configuration, so all three drop what
+                // a probe last said about it.
                 if (pending.kind === "disconnect-all") {
                   void run(
                     "__all__",
                     "Disconnected. Searches go through the included account.",
                     () => clearSearch(client, company),
+                    true,
                   );
                 } else if (pending.kind === "remove") {
-                  void run(pending.slug, `${pending.label} removed.`, () =>
-                    removeSearchProvider(client, company, pending.slug),
+                  void run(
+                    pending.slug,
+                    `${pending.label} removed.`,
+                    () => removeSearchProvider(client, company, pending.slug),
+                    true,
                   );
                 } else {
-                  void run(pending.slug, `${pending.label} key removed.`, () =>
-                    replaceSearchProviderKey(client, company, pending.slug, ""),
+                  void run(
+                    pending.slug,
+                    `${pending.label} key removed.`,
+                    () => replaceSearchProviderKey(client, company, pending.slug, ""),
+                    true,
                   );
                 }
               }}
