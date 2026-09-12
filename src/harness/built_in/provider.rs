@@ -2338,7 +2338,10 @@ mod tests {
         );
         // A reasoning model takes no temperature and renames the cap.
         assert!(!sent.contains(&"temperature".to_string()), "{sent:?}");
-        assert!(sent.contains(&"max_completion_tokens".to_string()), "{sent:?}");
+        assert!(
+            sent.contains(&"max_completion_tokens".to_string()),
+            "{sent:?}"
+        );
         assert!(body.get("max_tokens").is_none(), "{body}");
         assert_eq!(body["max_completion_tokens"], serde_json::json!(16384));
     }

@@ -443,8 +443,11 @@ mod tests {
     fn the_same_intent_is_spelled_differently_per_model() {
         // One intent, three dialects, no caller aware of any of them.
         let anthropic = translate("anthropic/claude-opus-5", Sampling::Deterministic.knobs());
-        assert!(anthropic.iter().any(|(k, v)| k == "temperature"
-            && *v == serde_json::json!(1.0)));
+        assert!(
+            anthropic
+                .iter()
+                .any(|(k, v)| k == "temperature" && *v == serde_json::json!(1.0))
+        );
 
         let openai = translate("gpt-6-astra", Sampling::Deterministic.knobs());
         assert!(
@@ -453,8 +456,11 @@ mod tests {
         );
 
         let ordinary = translate("llama3:latest", Sampling::Deterministic.knobs());
-        assert!(ordinary.iter().any(|(k, v)| k == "temperature"
-            && *v == serde_json::json!(0.0)));
+        assert!(
+            ordinary
+                .iter()
+                .any(|(k, v)| k == "temperature" && *v == serde_json::json!(0.0))
+        );
     }
 
     #[test]
@@ -473,14 +479,23 @@ mod tests {
         let fields = translate("gpt-5.6-sol", vec![Knob::new("max_tokens", 16384)]);
         assert_eq!(
             fields,
-            vec![("max_completion_tokens".to_string(), serde_json::json!(16384))]
+            vec![(
+                "max_completion_tokens".to_string(),
+                serde_json::json!(16384)
+            )]
         );
     }
 
     #[test]
     fn a_clamp_brings_a_value_inside_the_range_rather_than_failing() {
-        let fields = translate("meta-llama/Llama-3.3-70B", vec![Knob::new("temperature", 1.8)]);
-        assert_eq!(fields, vec![("temperature".to_string(), serde_json::json!(1.0))]);
+        let fields = translate(
+            "meta-llama/Llama-3.3-70B",
+            vec![Knob::new("temperature", 1.8)],
+        );
+        assert_eq!(
+            fields,
+            vec![("temperature".to_string(), serde_json::json!(1.0))]
+        );
     }
 
     /// The nine in-repo workloads asking for determinism reach the providers
@@ -503,8 +518,11 @@ mod tests {
             "claude-opus-5",
             Sampling::from_request(Some(DETERMINISTIC)).knobs(),
         );
-        assert!(fields.iter().any(|(k, v)| k == "temperature"
-            && *v == serde_json::json!(1.0)));
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "temperature" && *v == serde_json::json!(1.0))
+        );
     }
 
     #[test]
@@ -512,7 +530,10 @@ mod tests {
         // The table is an optimisation. A model nobody has written a row for
         // gets exactly what the caller asked for, and the 400-learning layer
         // corrects us if that turns out to be wrong.
-        assert_eq!(rule_for("some-model-nobody-has-seen", "temperature"), Rule::Free);
+        assert_eq!(
+            rule_for("some-model-nobody-has-seen", "temperature"),
+            Rule::Free
+        );
     }
 
     #[test]
@@ -544,7 +565,10 @@ mod tests {
     /// question.
     #[test]
     fn a_rejection_names_one_parameter_and_only_from_what_we_sent() {
-        let sent = vec!["temperature".to_string(), "max_completion_tokens".to_string()];
+        let sent = vec![
+            "temperature".to_string(),
+            "max_completion_tokens".to_string(),
+        ];
         // A rename means the wire name is not the caller's name, so the blame
         // has to be matched against what actually went out.
         assert_eq!(
@@ -557,7 +581,10 @@ mod tests {
         );
         // Nothing we sent is named, so there is nothing to drop and no retry.
         assert_eq!(
-            parameter_blamed_by("400: Extra inputs are not permitted: 'reasoning_effort'", &sent),
+            parameter_blamed_by(
+                "400: Extra inputs are not permitted: 'reasoning_effort'",
+                &sent
+            ),
             None
         );
     }

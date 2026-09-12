@@ -929,7 +929,10 @@ mod tests {
         // And 401 keeps working with an empty body, which is how several
         // providers send it — the status is the whole signal there.
         let text = build_failure_text(reqwest::StatusCode::UNAUTHORIZED, "");
-        assert!(!text.to_ascii_lowercase().contains("unauthorized"), "{text}");
+        assert!(
+            !text.to_ascii_lowercase().contains("unauthorized"),
+            "{text}"
+        );
         assert_eq!(classify(&text), ProbeClass::Auth);
     }
 
