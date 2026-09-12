@@ -439,7 +439,13 @@ export function ComposioSection({
   // `not-granted` only, and collapsing "unknown" into it is exactly what #1478
   // is about.
   const grant = grantStanding(status?.granted);
-  const skipOffered = offersSkipVerify(outcome);
+  // "Add anyway" answers a refused API-KEY write, and only that. `skipVerify`
+  // is a parameter of `setComposioApiKey` alone — `submit(true)` on the managed
+  // row's token drops it and re-sends a byte-identical request, so the button
+  // there could only ever earn the same refusal again. The classifier cannot
+  // see which credential is in the form, so the form says.
+  const skipOffered =
+    offersSkipVerify(outcome) && form?.credential === "composio-api-key";
 
   return (
     <section className="space-y-3">
