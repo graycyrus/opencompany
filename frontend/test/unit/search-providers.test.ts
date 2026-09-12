@@ -319,3 +319,37 @@ describe("destructive confirmations", () => {
     expect(confirmCopy(null).title).toBe("");
   });
 });
+
+describe("a class this console has never heard of", () => {
+  // `ProbeClass` is a compile-time union and the value is a string off the
+  // wire, so a host one version ahead can send a seventh class. Without a
+  // fallback the switches fell out returning `undefined` against signatures
+  // that say they do not — and `SearchView` reads `.tone` off that inside the
+  // `try` wrapping the save, so a save that SUCCEEDED reported an error toast.
+  const future = "rate_shaped" as unknown as ProbeClass;
+
+  it("still describes a save", () => {
+    const advisory = describeProbe(future, "Brave Search");
+    expect(advisory).toBeDefined();
+    expect(advisory.tone).toBe("warning");
+    // Amber, row kept, key kept: a class this build cannot name is a check
+    // whose result it cannot interpret, which is exactly `unknown`.
+    expect(advisory.rowCreated).toBe(true);
+    expect(advisory.keyKept).toBe(true);
+  });
+
+  it("still labels a row and a test", () => {
+    expect(healthLabel(future)).toBe("unchecked");
+    expect(describeTest(future, "Brave Search")).toBe(
+      "The check did not complete.",
+    );
+  });
+
+  it("has not changed what the six named classes say", () => {
+    // The fallback must not have swallowed a case. Auth is the one that
+    // matters most: it is the only class that says the key was not kept.
+    expect(describeProbe("auth", "Brave Search").keyKept).toBe(false);
+    expect(healthLabel("auth")).toBe("key rejected");
+    expect(healthLabel("format")).toBe("JSON output off");
+  });
+});

@@ -222,7 +222,17 @@ describe("Settings → Search, by role", () => {
       "search-provider-brave-menu",
       "search-provider-brave-test",
     ]) {
-      expect(at(control)?.hasAttribute("disabled")).toBe(false);
+      const element = at(control);
+      expect(element).not.toBeNull();
+      // The SAME predicate the member loop uses, negated. Checking only the
+      // `disabled` attribute here would pass for a control that carries
+      // `aria-disabled="true"` and no `disabled` — which is one of the two
+      // shapes the member loop accepts as disabled, so this test would agree
+      // that a control is both disabled for a member and enabled for an admin.
+      expect(
+        element?.hasAttribute("disabled") ||
+          element?.getAttribute("aria-disabled") === "true",
+      ).toBe(false);
     }
   });
 });

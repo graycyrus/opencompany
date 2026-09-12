@@ -89,7 +89,17 @@ export function describeProbe(
         rowCreated: true,
         keyKept: true,
       };
+    // `unknown` and anything this console has never heard of. `ProbeClass` is a
+    // compile-time union and the value is a string off the wire, so a host one
+    // version ahead can send a seventh class — and without this the switch falls
+    // out returning `undefined` against a signature that says it does not.
+    // `SearchView` then reads `.tone` off it and throws inside the `try` that
+    // wraps the save, so a save that SUCCEEDED reports an error toast.
+    //
+    // Falling through to `unknown` is the honest answer anyway: a class this
+    // build cannot name is a check whose result it cannot interpret.
     case "unknown":
+    default:
       return {
         tone: "warning",
         message: "Saved, but the check did not complete.",
@@ -112,7 +122,11 @@ export function healthLabel(state: ProbeClass): string {
       return "unreachable";
     case "timeout":
       return "slow to answer";
+    // See `describeProbe`: the value is a string off the wire, so an unnamed
+    // class must land somewhere rather than returning `undefined` into a
+    // signature that promises a string.
     case "unknown":
+    default:
       return "unchecked";
   }
 }
@@ -161,7 +175,9 @@ export function describeTest(probeClass: ProbeClass, provider: string): string {
       return `Nothing answered at ${provider}.`;
     case "timeout":
       return `${provider} did not answer in time.`;
+    // See `describeProbe`.
     case "unknown":
+    default:
       return "The check did not complete.";
   }
 }
