@@ -53,18 +53,35 @@ describe("accountShape keeps an unreadable store apart from an empty one", () =>
 describe("accountSubline says which tier actually answers", () => {
   it("names the company's own account", () => {
     expect(accountSubline("ready", status({ source: "company" }))).toContain(
-      "this company's TinyHumans account",
+      "this company's own TinyHumans account",
     );
   });
 
   // The hosted case. `configured` is false here and a row built on it would
-  // read "not configured" while the server's account pays for every turn.
+  // read "not configured" while the server's identity is the one answering.
   it("names the server's account for both fallback identities", () => {
     for (const source of ["attested", "static"] as const) {
       expect(accountSubline("ready", status({ configured: false, source }))).toBe(
-        "Billed to whoever runs this server",
+        "Acting as the account of whoever runs this server",
       );
     }
+  });
+
+  // `source` comes from `company_key::resolve` and reports which TinyHumans
+  // identity won — nothing about who pays for thinking, which `inference/config`
+  // and `inference/key` decide independently on the LLM page. A company on
+  // `source: "company"` can be thinking on its own OpenRouter key; one on the
+  // instance's identity can be paying a provider direct. A payer named from
+  // this value would send an operator chasing spend to the wrong account.
+  it("claims no payer, in any state it can reach", () => {
+    for (const source of ["company", "attested", "static", "none"] as const) {
+      const line = accountSubline("ready", status({ source }));
+      expect(line.toLowerCase()).not.toContain("billed");
+      expect(line.toLowerCase()).not.toContain("pays");
+      expect(line.toLowerCase()).not.toContain("paying");
+    }
+    expect(accountSubline("loading", null).toLowerCase()).not.toContain("billed");
+    expect(accountSubline("error", null).toLowerCase()).not.toContain("billed");
   });
 
   // Narrow on purpose. "Agents cannot think" is what this line said first, and

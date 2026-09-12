@@ -106,7 +106,7 @@ describe("ApiKeyView describes a fallback platform identity honestly", () => {
   // and would send an operator to reconnect something that already works. The
   // row is keyed on what `resolve` returned, not on `configured`, which is
   // false in exactly this case.
-  it("says the server's account is paying rather than that nothing is configured", async () => {
+  it("names the server's identity rather than saying nothing is configured", async () => {
     const client = clientFor({
       credential: async () => credential({ configured: false, source: "attested" }),
       billing: async () => ({ configured: false }),
@@ -115,7 +115,7 @@ describe("ApiKeyView describes a fallback platform identity honestly", () => {
     await mount(client);
 
     const subline = container.querySelector('[data-testid="account-row-subline"]');
-    expect(subline?.textContent).toBe("Billed to whoever runs this server");
+    expect(subline?.textContent).toBe("Acting as the account of whoever runs this server");
     expect(container.querySelector('[data-testid="account-empty"]')).toBeNull();
   });
 

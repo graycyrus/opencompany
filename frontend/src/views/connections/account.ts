@@ -55,9 +55,20 @@ export function accountShape(load: AccountLoad, status: CompanyCredentialStatus 
  *
  * One fact, not three stacked — an operator is scanning for the row rather than
  * reading it. The two "working" states are kept apart because that is the
- * decision somebody is on this page to make: connecting the company's own
- * account moves the bill for every turn, and a row that says only "connected"
- * hides that it has not happened.
+ * decision somebody is on this page to make, and a row that says only
+ * "connected" hides which account is standing behind the company.
+ *
+ * **Identity, not a billing verdict.** These lines said "Billed to …", and
+ * `source` cannot carry that: it comes from `company_key::resolve`, which
+ * reports only which TinyHumans identity won. What an agent's *thinking* costs
+ * is decided by `inference/config` and `inference/key`, which are set
+ * independently on the LLM page — so a company with `source: "company"` can
+ * think on its own OpenRouter key and be billed nothing here, and one on the
+ * instance's identity can be paying a provider directly. Naming a payer from
+ * this value would point an operator investigating spend at the wrong account,
+ * which is the same overclaim this page's pass exists to remove, one row down.
+ * The billing move is stated where it is conditional and true: on the header
+ * card beside the Connect button, and in {@link REMOVAL_LEAVES_THINKING}.
  */
 export function accountSubline(load: AccountLoad, status: CompanyCredentialStatus | null): string {
   if (load !== "ready" || status === null) {
@@ -65,10 +76,10 @@ export function accountSubline(load: AccountLoad, status: CompanyCredentialStatu
   }
   switch (status.source) {
     case "company":
-      return "Billed to this company's TinyHumans account";
+      return "Acting as this company's own TinyHumans account";
     case "attested":
     case "static":
-      return "Billed to whoever runs this server";
+      return "Acting as the account of whoever runs this server";
     case "none":
       // Deliberately narrow. "Agents cannot think" is what this page used to
       // say here, and it is **false** on a company whose LLM page holds a

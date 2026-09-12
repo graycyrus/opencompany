@@ -299,8 +299,12 @@ export function ApiKeyView({ client, company }: Props) {
         {/* The state. One row for the account, one for what is left on it. */}
         <Card>
           <CardContent className="px-0">
+            {/* Named for what the card holds, not for one of the three states
+                it can be in: a heading reading "Connected" over "No account
+                connected yet." or over "The host could not say" contradicts the
+                only line under it. */}
             <h3 className="px-4 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              Connected
+              {shape === "connected" ? "Connected" : "Account"}
             </h3>
 
             {load === "loading" ? (
