@@ -597,11 +597,23 @@ export function refForTarget(
   target: string,
   model: string,
   providers: readonly Provider[],
+  current?: ProviderRef,
 ): ProviderRef {
   if (target === MANAGED_OPTION_SLUG) return { kind: "managed" };
   const slug = modelTarget(target, providers);
   const pinned = slug && overrideIsSendable(slug, model) ? model.trim() : "";
   if (target === UNSET_TARGET) {
+    // **A slug-less ref round-trips rather than collapsing.** `local:<model>`
+    // and `claude-code:<model>` are valid persisted forms with no option in
+    // this select to restore to, so `targetForRef` maps them to unset — and
+    // unset plus a model meant "pin it to the primary", which would have sent a
+    // local model id to a cloud account on a Save that changed nothing. Unset
+    // here means *unchanged* for those two; the way out is picking a provider,
+    // which is the only way in as well.
+    if (current && (current.kind === "local" || current.kind === "claudeCode")) {
+      const kept = model.trim();
+      return { ...current, model: kept.length > 0 ? kept : undefined };
+    }
     return pinned && slug ? parseRef(`${slug}:${pinned}`) : { kind: "default" };
   }
   return parseRef(pinned ? `${target}:${pinned}` : target);
