@@ -1674,6 +1674,15 @@ pub async fn request_plan(
 /// varies: the managed backend says `Model '<id>' is not available`, an
 /// OpenAI-compatible BYOK endpoint says `The model '<id>' does not exist`, and
 /// OpenRouter says `<id> is not a valid model ID`.
+///
+/// **Anthropic is the one that matters most and matched none of them.** It
+/// answers `404 {"type":"not_found_error","message":"model: agentic-v1"}` — a
+/// typed code rather than a sentence — so the whole repair path returned `None`
+/// for the provider an operator is most likely to connect first, and the
+/// operator got the raw 404 with no pointer to Settings → Inference and no
+/// `GET {base}/models` suggestion. Matching the type name rather than the
+/// message is what makes it reachable; the message is only ever `model: <id>`,
+/// which no generic substring could safely claim.
 const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
     "is not available",
     "not a valid model",
@@ -1681,6 +1690,7 @@ const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
     "unknown model",
     "invalid model",
     "does not exist",
+    "not_found_error",
 ];
 
 /// Rewrites a provider "unknown/unavailable model" refusal into an
@@ -5211,6 +5221,36 @@ mod tests {
         assert!(
             advice.contains("GET https://api.tinyhumans.ai/openai/v1/models"),
             "the caller-supplied catalog endpoint is used: {advice}"
+        );
+    }
+
+    /// The reported defect, at the last mechanism that could have caught it: a
+    /// fresh company adds Anthropic, every turn goes out as `model: agentic-v1`
+    /// because nothing asked which model the provider should serve, and
+    /// Anthropic answers `not_found_error`. That wording matched none of the
+    /// signatures, so the repair advice returned `None` and the operator got a
+    /// bare 404 naming a string with no pointer to where it is configured.
+    #[test]
+    fn anthropics_not_found_error_becomes_actionable() {
+        let raw = concat!(
+            "inference returned 404 Not Found: ",
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model: agentic-v1"}}"#,
+        );
+        let advice = model_unavailable_advice(
+            reqwest::StatusCode::NOT_FOUND,
+            raw,
+            "https://api.anthropic.com/v1/models",
+            None,
+            None,
+        )
+        .expect("Anthropic's typed 404 is recognised as a missing model");
+        assert!(
+            advice.contains("GET https://api.anthropic.com/v1/models"),
+            "the advice points at the failing endpoint's own catalog: {advice}"
+        );
+        assert!(
+            advice.contains("agentic-v1"),
+            "the id that was actually sent survives for support: {advice}"
         );
     }
 
