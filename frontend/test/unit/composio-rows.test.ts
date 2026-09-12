@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ComposioCredentialSource, ComposioStatus } from "@/api/composio";
 import {
   ACTIVE_BADGE,
+  SELECTED_BADGE,
   BYOK_LABEL,
   MANAGED_LABEL,
   composioForm,
@@ -196,6 +197,58 @@ describe("composioRows — the shape of the card", () => {
     );
     expect(row(rows, "byok").badge).toBe(ACTIVE_BADGE);
     expect(row(rows, "managed").badge).toBeNull();
+  });
+
+  it("does not call a route Active when nothing resolves on it", () => {
+    // The contradiction this exists for, reported off a running build: the
+    // managed row wore a green "Active" tick beside its own amber sub-line
+    // reading "No credential resolves — agents cannot connect apps". `active`
+    // answers "is this the route you picked" and said yes; the badge published
+    // that as availability. The tone on the very next line already knew better.
+    const managed = row(
+      composioRows(
+        status({ mode: "managed", credentialSource: "none", managedCredentialSource: "none" }),
+      ),
+      "managed",
+    );
+    expect(managed.badge).toBe(SELECTED_BADGE);
+    expect(managed.badge).not.toBe(ACTIVE_BADGE);
+    expect(managed.tone).toBe("warning");
+    // And NOT by pretending it is unselected — turns are still routed here, and
+    // a row that reads as unselected hides that. It stays the checked radio.
+    expect(managed.active).toBe(true);
+  });
+
+  it("applies the same rule to the own-account row", () => {
+    const byok = row(
+      composioRows(status({ mode: "byok", credentialSource: "none" })),
+      "byok",
+    );
+    expect(byok.active, "still the route turns go to").toBe(true);
+    expect(byok.badge).toBe(SELECTED_BADGE);
+    expect(byok.tone).toBe("warning");
+  });
+
+  it("gives every active row a badge, on every combination", () => {
+    // `ComposioRowList` renders `row.badge` for an active row. Its fallback
+    // used to be the literal "Active", which restored the exact claim this file
+    // refuses to make — so the invariant that makes the fallback unreachable is
+    // worth pinning here rather than trusting.
+    for (const mode of ["managed", "byok", undefined] as const) {
+      for (const source of SOURCES) {
+        for (const managedCredentialSource of [...SOURCES, undefined]) {
+          for (const r of composioRows(
+            status({ mode, credentialSource: source, managedCredentialSource }),
+          )) {
+            if (!r.active) continue;
+            expect(
+              r.badge,
+              `${r.id} ${mode}/${source}/${managedCredentialSource}`,
+            ).not.toBeNull();
+          }
+        }
+      }
+    }
   });
 });
 

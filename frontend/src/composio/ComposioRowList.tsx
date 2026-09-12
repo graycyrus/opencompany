@@ -3,6 +3,7 @@ import { Check, KeyRound, PlugZap, ShieldCheck, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { SELECTED_BADGE } from "./rows";
 import type { ComposioRow, ComposioRowId } from "./types";
 
 /**
@@ -182,8 +183,20 @@ export function ComposioRowList({
                     : "border border-border hover:bg-muted",
                 )}
               >
-                {row.active && <Check className="size-3" />}
-                {row.active ? (row.badge ?? "Active") : "Use this"}
+                {/* The tick is part of the claim, not decoration, so it is
+                    held to the same standard as the word beside it: a route
+                    that is selected but resolves to nothing gets neither. The
+                    radio is still `aria-checked` — what is withheld is the
+                    assertion that it works, not the fact that it is chosen. */}
+                {row.active && row.tone !== "warning" && (
+                  <Check className="size-3" />
+                )}
+                {/* `row.badge` decides the word; this file does not. The
+                    fallback used to be "Active", which quietly restored the
+                    exact claim `rows.ts` had just refused to make — so if a row
+                    is ever active with no badge, it reads as selected rather
+                    than as working. */}
+                {row.active ? (row.badge ?? SELECTED_BADGE) : "Use this"}
               </button>
             )}
 

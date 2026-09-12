@@ -35,8 +35,29 @@ export const MANAGED_LABEL = "TinyHumans-managed";
 /** The own-account route's name. */
 export const BYOK_LABEL = "This company's own Composio account";
 
-/** The badge the route a company is actually on carries. */
+/** The badge the route a company is on carries **when it also resolves**. */
 export const ACTIVE_BADGE = "Active";
+
+/**
+ * The badge for the route a company is on when **nothing resolves on it**.
+ *
+ * Selection and availability are two different truths and this row used to
+ * render them as one: `active` answers "is this the route you picked", and it
+ * handed out `Active` whenever it was true — beside a sub-line reading "No
+ * credential resolves — agents cannot connect apps", in the amber the row
+ * already chose because it knew. A green tick claiming a working route, three
+ * inches from the sentence saying it does not work.
+ *
+ * Not solved by rendering the row as inactive, which is the opposite error:
+ * turns really are routed here, and a row that looks unselected hides that.
+ * "Selected" says the one thing that is true — you chose this — and leaves the
+ * sub-line to say the rest.
+ *
+ * The inference surface settled the same question the same way: its Managed row
+ * dropped a permanent "Always on" badge because that was a claim of
+ * availability the row could not back.
+ */
+export const SELECTED_BADGE = "Selected";
 
 /**
  * The route to render for whatever the host said.
@@ -172,13 +193,25 @@ export function composioRows(
   // route. `static` is the only tier that means one exists.
   const managedTokenStored = managedSource === "static";
 
+  // Whether anything actually answers on each route. One boolean per row,
+  // because the badge and the tone are two renderings of this same fact and
+  // they drifted apart when each derived it for itself: the tone knew the
+  // managed chain resolved to nothing and went amber, while the badge next to
+  // it still said "Active".
+  //
+  // `undefined` resolves. It is an older host that did not say, and "not said"
+  // is not evidence of `none` — the same rule `managedSubline` follows.
+  const managedResolves = managedSource !== "none";
+  const byokResolves = byokKeyStored;
+
   const managed: ComposioRow = {
     id: "managed",
     label: MANAGED_LABEL,
     active: onManaged,
-    badge: onManaged ? ACTIVE_BADGE : null,
+    // Selected is not working. See `SELECTED_BADGE`.
+    badge: onManaged ? (managedResolves ? ACTIVE_BADGE : SELECTED_BADGE) : null,
     subline: managedSubline(managedSource),
-    tone: managedSource === "none" ? "warning" : "muted",
+    tone: managedResolves ? "muted" : "warning",
     keyNoun: "token",
     controls: {
       // Hidden when the managed chain resolves to nothing: switching to a route
@@ -234,13 +267,15 @@ export function composioRows(
     id: "byok",
     label: BYOK_LABEL,
     active: !onManaged,
-    badge: !onManaged ? ACTIVE_BADGE : null,
+    // Same rule as the managed row above: a company can be on its own account
+    // with no key stored, and that row must not wear a badge saying it works.
+    badge: !onManaged ? (byokResolves ? ACTIVE_BADGE : SELECTED_BADGE) : null,
     subline: !onManaged
       ? byokKeyStored
         ? `•••• configured · ${endpointHost(status?.backendUrl)}`
         : "No API key stored — agents get no Composio tools"
       : "Not connected",
-    tone: !onManaged && !byokKeyStored ? "warning" : "muted",
+    tone: !onManaged && !byokResolves ? "warning" : "muted",
     keyNoun: "key",
     controls: {
       // Always reachable. Unlike managed, this route cannot resolve to nothing
