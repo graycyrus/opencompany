@@ -198,7 +198,10 @@ fn a_hostname_is_judged_by_what_it_resolves_to() {
     // A private address stays ordinary — a self-hosted SearXNG on the company
     // network is the normal deployment, not the attack.
     assert_eq!(pick_address(&[ordinary]).unwrap(), ordinary);
-    assert!(pick_address(&[]).is_err(), "a name that resolves to nothing");
+    assert!(
+        pick_address(&[]).is_err(),
+        "a name that resolves to nothing"
+    );
 }
 
 #[test]

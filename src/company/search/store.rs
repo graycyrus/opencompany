@@ -86,9 +86,7 @@ use super::{API_KEY_SECRET, ENDPOINT_SECRET, PROVIDER_SECRET, provider_is_byo};
 /// The registry is keyed by company id and grows by one entry per company ever
 /// touched, which is bounded by the tenancy.
 static INDEX_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
-    >,
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 > = std::sync::LazyLock::new(std::sync::Mutex::default);
 
 /// Takes this company's index lock, held until the returned guard is dropped.

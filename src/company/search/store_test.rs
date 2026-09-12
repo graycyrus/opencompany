@@ -461,8 +461,13 @@ async fn a_concurrent_remove_does_not_resurrect_the_row_it_removed() {
     removing.await.expect("task").expect("delete");
     toggling.await.expect("task").expect("toggle");
 
-    let stored = list_providers(&company(), secrets.as_ref()).await.expect("list");
+    let stored = list_providers(&company(), secrets.as_ref())
+        .await
+        .expect("list");
     assert_eq!(stored.len(), 1, "brave must stay removed: {stored:?}");
     assert_eq!(stored[0].slug, "exa", "{stored:?}");
-    assert!(!stored[0].enabled, "the toggle must survive too: {stored:?}");
+    assert!(
+        !stored[0].enabled,
+        "the toggle must survive too: {stored:?}"
+    );
 }

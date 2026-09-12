@@ -1215,7 +1215,10 @@ mod tests {
         let state = state_with_company(home.path(), true).await;
         let admin = crate::server::test_support::seed_admin(&state, "acme").await;
 
-        let too_long = format!("http://search.acme.internal/{}", "a".repeat(MAX_ENDPOINT_LEN));
+        let too_long = format!(
+            "http://search.acme.internal/{}",
+            "a".repeat(MAX_ENDPOINT_LEN)
+        );
         let (status, _) = call(
             &state,
             "PUT",
