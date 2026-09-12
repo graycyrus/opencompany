@@ -204,12 +204,20 @@ test("the add dialog stops offering a provider once it is connected", async ({ p
 });
 
 test("a custom provider may not take a name the catalogue ships", async ({ page }) => {
-  // A routing entry saying `groq` would otherwise mean two things — and the
+  // A routing entry saying `cerebras` would otherwise mean two things — and the
   // refusal happens before anything is written.
+  //
+  // **Deliberately a catalogue row nothing else connects.** `checkSlug` reports
+  // `taken` before `reserved`, and every test in this file shares one company:
+  // once "the add dialog stops offering a provider once it is connected" has
+  // added Groq, typing "Groq" here answers "This company already has a provider
+  // with that name" — a true sentence about the wrong rule, and the assertion
+  // below would be pinning test order rather than the reservation. Cerebras is
+  // in the catalogue and is connected by no test.
   await openInference(page);
 
   await addCustom(page);
-  await page.locator("#inference-connect-name").fill("Groq");
+  await page.locator("#inference-connect-name").fill("Cerebras");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await expect(page.getByTestId("inference-slug-error")).toContainText("built-in");
   await expect(page.getByTestId("inference-connect-submit")).toBeDisabled();
