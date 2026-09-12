@@ -1572,8 +1572,17 @@ pub async fn resolve_effective_for_tier(
                 // See [`resolve_legacy_scoped`]: entry zero is the legacy blob,
                 // and resolving it through the synthesized record would drop the
                 // rules only that chain holds.
+                //
+                // **At the company scope, whatever scope asked.** Entry zero
+                // *is* the flat `inference/config` — that is what the row is
+                // synthesised from and what its label names. Resolving it under
+                // a named harness read `harness/<id>/inference/config` instead,
+                // so a route shown as OpenRouter could run against that
+                // harness's Anthropic configuration and its credential: the
+                // explicit choice defeated, and the bill sent elsewhere.
                 store::ProviderOrigin::EntryZero => {
-                    match resolve_legacy_scoped(company, manifest, env_default, secrets, scope)
+                    let flat = HarnessScope::default_harness(&scope.id);
+                    match resolve_legacy_scoped(company, manifest, env_default, secrets, &flat)
                         .await?
                     {
                         Some(decl) => decl,
