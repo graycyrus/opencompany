@@ -954,7 +954,7 @@ mod tests {
         //
         // So the assertion is about shape rather than content: any file that
         // mentions the header must reach this constant for its value.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = repo_root().join("src");
         let mut offenders = Vec::new();
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
@@ -1002,9 +1002,29 @@ mod tests {
     // forgiving parser would let the file drift into a shape the test quietly
     // stops checking, which is worse than no test because it reads as coverage.
 
+    /// The repository root, which is **not** `CARGO_MANIFEST_DIR`.
+    ///
+    /// The package manifest lives in `crates/opencompany-core/` while `src/`,
+    /// `tests/` and `frontend/` stayed at the repository root and are reached
+    /// from it with `../../` paths. So a repo-relative path joined onto
+    /// `CARGO_MANIFEST_DIR` lands in a directory that does not exist, and these
+    /// tests failed with "No such file or directory" rather than on anything
+    /// they meant to check.
+    ///
+    /// Walking up to the first ancestor that actually holds the console mirror
+    /// keeps this correct under both that layout and a single root crate,
+    /// rather than hard-coding a `../..` that one of the two would get wrong.
+    fn repo_root() -> std::path::PathBuf {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .ancestors()
+            .find(|dir| dir.join("frontend/src/inference/catalogue.ts").is_file())
+            .unwrap_or(manifest)
+            .to_path_buf()
+    }
+
     fn mirror_source() -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("frontend/src/inference/catalogue.ts");
+        let path = repo_root().join("frontend/src/inference/catalogue.ts");
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("console mirror at {} is unreadable: {e}", path.display()))
     }
