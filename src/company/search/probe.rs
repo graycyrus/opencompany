@@ -256,6 +256,14 @@ pub fn describe(class: ProbeClass, provider: &str) -> String {
 /// the `ScopedCompany` the read routes use. It is an allowance, not an
 /// oversight.
 ///
+/// # This is half of the rule
+///
+/// It can only read a literal address, so `http://metadata.example/` passes it
+/// and then resolves to `169.254.169.254` anyway. The other half is
+/// [`pick_address`], applied to what the hostname actually resolves to at the
+/// moment of the request — and the result is pinned into the client, so the
+/// name cannot resolve to something else between the check and the connection.
+///
 /// This is the third copy of a URL-shape rule in the tree, and the second one's
 /// own comment already says the lasting fix is to lift it somewhere both can
 /// depend on. Doing that is a separate change: the three want three different
@@ -303,6 +311,76 @@ fn is_metadata_address(address: std::net::IpAddr) -> bool {
     }
 }
 
+/// The address an operator-supplied endpoint will actually be connected to.
+///
+/// [`guard_instance_url`] reads the URL and can only judge a literal IP. A
+/// hostname is judged here instead, against what it resolves to — otherwise
+/// `http://metadata.example/` walks past the guard and the request goes to
+/// whatever the name points at, which is the whole of the protection the guard
+/// was written to provide.
+///
+/// **Any** metadata address among the answers refuses the lot, rather than
+/// picking a different one. A name that resolves to the metadata service is not
+/// a search instance whatever else it also resolves to, and choosing around it
+/// would make the outcome a coin flip on DNS ordering.
+///
+/// The chosen address is then pinned into the client, which is what closes the
+/// rebinding window: checking a name and then letting the client resolve it
+/// again leaves a gap in which the answer can change.
+fn pick_address(addresses: &[std::net::SocketAddr]) -> Result<std::net::SocketAddr, String> {
+    let Some(first) = addresses.first() else {
+        return Err("that instance address does not resolve".to_string());
+    };
+    if let Some(refused) = addresses
+        .iter()
+        .find(|address| is_metadata_address(address.ip()))
+    {
+        return Err(format!(
+            "that address resolves to {}, a cloud metadata service rather than a search instance",
+            refused.ip()
+        ));
+    }
+    Ok(*first)
+}
+
+/// Resolves an operator-supplied endpoint, refusing what must not be fetched.
+///
+/// Returns the host to pin and the address to pin it to. `None` means there is
+/// nothing to pin: a literal IP is already settled by [`guard_instance_url`],
+/// and letting the client handle it keeps this off the path for the three
+/// account providers, whose addresses are constants in the catalogue rather
+/// than anybody's input.
+async fn pin_for(endpoint: &str) -> Result<Option<(String, std::net::SocketAddr)>, ProbeFailure> {
+    let parsed = endpoint
+        .parse::<axum::http::Uri>()
+        .map_err(|_| ProbeFailure::Transport("that instance address is not a URL".to_string()))?;
+    let Some(host) = parsed.host() else {
+        return Err(ProbeFailure::Transport(
+            "that instance address has no host".to_string(),
+        ));
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(None);
+    }
+    let port = parsed.port_u16().unwrap_or(match parsed.scheme_str() {
+        Some("https") => 443,
+        _ => 80,
+    });
+
+    // Bounded by the same clock as the request. A name server that never
+    // answers must not hold this route open longer than a provider that never
+    // answers does.
+    let resolved = tokio::time::timeout(TIMEOUT, tokio::net::lookup_host((host, port)))
+        .await
+        .map_err(|_| ProbeFailure::Transport("that instance address timed out in DNS".to_string()))?
+        .map_err(|err| ProbeFailure::Transport(format!("dns error: {err}")))?
+        .collect::<Vec<_>>();
+
+    let address = pick_address(&resolved).map_err(ProbeFailure::Transport)?;
+    Ok(Some((host.to_string(), address)))
+}
+
 /// Asks a provider whether it answers for this credential.
 ///
 /// One request, chosen per provider because there is no shape they share. For
@@ -325,11 +403,20 @@ pub async fn probe(
         return Err(ProbeFailure::Transport("no endpoint to check".to_string()));
     }
 
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(TIMEOUT)
         // A redirect to somewhere else is not this provider answering, and
         // following one is how a guarded address is reached anyway.
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    // Only for an address the operator supplied. The three account providers
+    // answer at constants in the catalogue, so there is nothing about them for
+    // a name to point somewhere else.
+    if let Some(endpoint) = endpoint
+        && let Some((host, address)) = pin_for(endpoint).await?
+    {
+        builder = builder.resolve(&host, address);
+    }
+    let client = builder
         .build()
         .map_err(|err| ProbeFailure::Transport(err.to_string()))?;
 

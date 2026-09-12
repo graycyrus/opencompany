@@ -179,6 +179,29 @@ fn the_metadata_service_is_refused_and_a_private_instance_is_not() {
 }
 
 #[test]
+fn a_hostname_is_judged_by_what_it_resolves_to() {
+    // `guard_instance_url` can only read a literal address, so a name walks
+    // past it and the request goes wherever the name points. That is the whole
+    // of the protection the guard exists to give, so the same rule is applied
+    // to the resolved answers — and then pinned, so the name cannot mean
+    // something else by the time the connection is made.
+    let metadata: std::net::SocketAddr = "169.254.169.254:80".parse().unwrap();
+    let ordinary: std::net::SocketAddr = "10.0.0.5:8080".parse().unwrap();
+
+    assert!(pick_address(&[metadata]).is_err());
+    // Any of them being the metadata service refuses all of them. A name that
+    // points there is not a search instance whatever else it points at, and
+    // choosing around it would make the outcome depend on DNS ordering.
+    assert!(pick_address(&[ordinary, metadata]).is_err());
+    assert!(pick_address(&[metadata, ordinary]).is_err());
+
+    // A private address stays ordinary — a self-hosted SearXNG on the company
+    // network is the normal deployment, not the attack.
+    assert_eq!(pick_address(&[ordinary]).unwrap(), ordinary);
+    assert!(pick_address(&[]).is_err(), "a name that resolves to nothing");
+}
+
+#[test]
 fn a_non_http_scheme_is_refused_before_anything_is_fetched() {
     assert!(guard_instance_url("file:///etc/passwd").is_err());
     assert!(guard_instance_url("ftp://example.test").is_err());
