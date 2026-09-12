@@ -140,15 +140,23 @@ test("a member sees what Settings holds but is offered nothing that changes it",
     // ---- Search: whose index answers a teammate, under whose retention ------
     await openSettingsPage(memberPage, "search");
     await expect(memberPage.getByTestId("search-read-only")).toBeVisible({ timeout: 30_000 });
-    await expect(memberPage.getByTestId("search-api-key")).toHaveCount(0);
-    await expect(memberPage.getByTestId("search-save")).toHaveCount(0);
-    await expect(memberPage.getByTestId("search-clear")).toHaveCount(0);
+    // The page is a provider list now rather than a single form, so the same
+    // property is asserted against the controls that exist: nothing that
+    // changes where the company searches is offered, and disconnecting
+    // everything is not rendered for a member at all.
+    await expect(memberPage.getByTestId("search-add")).toBeDisabled();
+    await expect(memberPage.getByTestId("search-disconnect-all")).toHaveCount(0);
 
-    // The provider stays visible and inert. This page's own footnote says the
-    // choice is an administrator's; it used to print that under a live picker.
-    const provider = memberPage.getByTestId("search-provider");
-    await expect(provider).toBeVisible();
-    await expect(provider).toBeDisabled();
+    // The page itself stays readable. Which index answers a teammate's search is
+    // worth reading even when it is not yours to change — this page's own notice
+    // says the choice is an administrator's, and it used to print that under a
+    // live picker.
+    //
+    // Asserted on the view rather than on `search-providers`: with no provider
+    // connected and no managed credential on the runner, the list renders its
+    // empty state instead, and pinning either one would make this test about
+    // the fixture rather than about authority.
+    await expect(memberPage.getByTestId("search-view")).toBeVisible();
 
     // ---- Approvals: the policy-generated tier and always-ask list -----------
     await openSettingsPage(memberPage, "approvals");
@@ -187,8 +195,8 @@ test("an admin is still offered every Settings control", async ({ page }) => {
 
   await openSettingsPage(page, "search");
   await expect(page.getByTestId("search-read-only")).toHaveCount(0);
-  await expect(page.getByTestId("search-provider")).toBeEnabled({ timeout: 30_000 });
-  await expect(page.getByTestId("search-save")).toBeVisible();
+  await expect(page.getByTestId("search-add")).toBeEnabled({ timeout: 30_000 });
+  await expect(page.getByTestId("search-view")).toBeVisible();
 
   await openSettingsPage(page, "approvals");
   await expect(page.getByTestId("policy-read-only")).toHaveCount(0);
