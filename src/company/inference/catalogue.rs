@@ -766,7 +766,24 @@ pub fn is_reserved_slug(slug: &str) -> bool {
     cloud_provider(slug).is_some()
         || local_runtime(slug).is_some()
         || CLI_LOGINS.iter().any(|c| c.stored_slug == slug)
+        || INTERNAL_SLUGS.contains(&slug)
 }
+
+/// Slugs this product owns that are **not** catalogue rows.
+///
+/// Managed is deliberately not in the catalogue — it is a chain, not a vendor —
+/// but it does have a slug, and that slug is an address: `provider/tinyhumans/key`
+/// is where its credential lives, and `managed` is the word the route grammar
+/// uses. A custom provider named "TinyHumans" slugified straight into the first
+/// of those, so adding it stored a vendor key where managed reads, a managed
+/// test presented it to the platform endpoint, and removing the custom row took
+/// managed's credential with it.
+///
+/// Kept here rather than beside the catalogue table because the table is a list
+/// of vendors and these are not vendors; kept in the *reserved* check because
+/// that check has exactly one meaning — a custom provider may not take a name
+/// something else already owns.
+const INTERNAL_SLUGS: &[&str] = &[super::MANAGED_SLUG, super::LEGACY_MANAGED];
 
 /// Which of the three questions a provider answers.
 ///
@@ -1021,6 +1038,22 @@ mod tests {
         // Codex stores under `openai`, which is already reserved as a cloud row.
         assert!(is_reserved_slug("openai"));
         assert!(!is_reserved_slug("acme-gateway"));
+    }
+
+    #[test]
+    fn managed_owns_its_slug_even_though_it_is_not_a_catalogue_row() {
+        // `provider/tinyhumans/key` is where the managed credential lives, and
+        // `managed` is the word the route grammar uses. A custom provider named
+        // "TinyHumans" slugified straight into the first: adding it stored a
+        // vendor key where managed reads it, a managed test presented that key
+        // to the platform endpoint, and removing the custom row took managed's
+        // credential with it.
+        assert!(is_reserved_slug(super::super::MANAGED_SLUG));
+        assert!(is_reserved_slug("tinyhumans"));
+        assert!(is_reserved_slug("managed"));
+        // Reserved is about the name, not the shape: a company may still be
+        // *on* managed, and this only stops a second thing taking its address.
+        assert!(cloud_provider("tinyhumans").is_none());
     }
 
     #[test]
