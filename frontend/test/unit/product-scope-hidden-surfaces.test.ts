@@ -272,7 +272,7 @@ describe("Composio offers both routes, and says which one is live", () => {
   it("names the managed route, because it is a route again", async () => {
     await mountComposio(composioStatus({ mode: "managed", credentialSource: "company" }));
 
-    expect(container.textContent).toContain("OpenHuman-managed");
+    expect(container.textContent).toContain("TinyHumans-managed");
     // ...and says which account pays, which is the decision the row exists for.
     expect(find("composio-row-managed-subline")!.textContent).toContain(
       "Billed to this company's TinyHumans account",

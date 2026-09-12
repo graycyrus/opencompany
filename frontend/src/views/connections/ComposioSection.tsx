@@ -261,7 +261,7 @@ export function ComposioSection({
   function useManaged() {
     void run(
       () => setComposioApiKey(client, company, ""),
-      "Could not move this company to the OpenHuman-managed route.",
+      "Could not move this company to the TinyHumans-managed route.",
     );
   }
 
@@ -342,10 +342,10 @@ export function ComposioSection({
    * time.
    *
    * Gated on a confirmation because the consequence — the providers connected
-   * through OpenHuman's Composio account are in *that* account and vanish from
-   * the grid until they are connected again here — is not readable off a row.
-   * Rotating a key already in use, and switching back, are not gated: neither
-   * strands anything the operator cannot immediately undo.
+   * through the TinyHumans-managed Composio account are in *that* account and
+   * vanish from the grid until they are connected again here — is not readable
+   * off a row. Rotating a key already in use, and switching back, are not
+   * gated: neither strands anything the operator cannot immediately undo.
    */
   function requestSubmit() {
     if (
@@ -536,7 +536,7 @@ export function ComposioSection({
                     <p className="text-xs text-muted-foreground">
                       They live in the Composio account this company reached
                       before, not in this one, so the grid will look empty until
-                      you connect them again here. Choosing OpenHuman-managed
+                      you connect them again here. Choosing TinyHumans-managed
                       again puts this company back where it is now.
                     </p>
                     <div className="flex flex-wrap gap-2">

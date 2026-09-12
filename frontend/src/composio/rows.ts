@@ -13,8 +13,23 @@ import type {
   ComposioRow,
 } from "./types";
 
-/** The managed route's name, as the operator reads it. */
-export const MANAGED_LABEL = "OpenHuman-managed";
+/**
+ * The managed route's name, as the operator reads it.
+ *
+ * **TinyHumans, not OpenHuman.** It was the latter first, on the argument that
+ * this row's chain resolves to three different payers — this company's
+ * TinyHumans account, the instance identity, or a pasted token — so naming the
+ * whole row after one of them would be false of the other two.
+ *
+ * That argument is about the *sub-line*, and the sub-line still makes exactly
+ * that distinction: {@link managedSubline} names the payer per resolved tier
+ * and is untouched. What the label answers is the coarser question the row is
+ * there to ask — whose Composio account, ours or yours — and the answer to that
+ * is the company an operator has an account and a balance with. "OpenHuman" is
+ * the runtime; nobody is billed by it and it appears nowhere else an operator
+ * pays.
+ */
+export const MANAGED_LABEL = "TinyHumans-managed";
 
 /** The own-account route's name. */
 export const BYOK_LABEL = "This company's own Composio account";
@@ -86,7 +101,7 @@ export function managedSubline(
     // An older host did not say, and "not said" is not "working". This says what
     // the route is rather than claiming a tier nobody established.
     default:
-      return "Reached through the Composio account OpenHuman holds";
+      return "Reached through the Composio account TinyHumans holds";
   }
 }
 
