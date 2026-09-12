@@ -52,6 +52,19 @@ export interface Provider {
    * Optional because an older host does not send it.
    */
   isDefault?: boolean;
+  /**
+   * Which slot this record lives in.
+   *
+   * `entryZero` is the pre-list company's single `inference/config` blob,
+   * surfaced as element 0 of the list. It refuses edit, remove and disable with
+   * three separate 400s — correct rules, and the console could not tell which
+   * row they applied to, so it rendered all three controls live and every one of
+   * them was a round trip to a refusal.
+   *
+   * Optional because an older host does not send it; absent reads as `indexed`,
+   * which is what every row was treated as before.
+   */
+  origin?: "entryZero" | "indexed";
   /** The last thing the system learnt about reaching it, if anything. */
   health?: ProviderHealth;
 }

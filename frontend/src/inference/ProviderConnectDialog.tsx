@@ -28,7 +28,22 @@ export interface ConnectDraft {
   label?: string;
   baseUrl?: string;
   key?: string;
+  /** The model every workload routes to, once the endpoint has been asked. */
+  model?: string;
   addAnyway?: boolean;
+}
+
+/**
+ * The model step, once the endpoint has said it needs one.
+ *
+ * `models` is that endpoint's own published catalogue, so the operator chooses
+ * from what is actually there rather than typing an id and finding out on the
+ * first turn. It can be empty — plenty of endpoints serve inference and publish
+ * no catalog — and the field stays free text either way, because an Azure
+ * deployment name is never in `/models` by design.
+ */
+export interface ModelAsk {
+  models: string[];
 }
 
 /**
@@ -67,6 +82,7 @@ export function ProviderConnectDialog({
   busy,
   error,
   offerAddAnyway,
+  modelAsk,
   onCancel,
   onSubmit,
 }: {
@@ -78,6 +94,12 @@ export function ProviderConnectDialog({
   error: string | null;
   /** Whether the last failure was a probe failure, which is the only one that unlocks "add anyway". */
   offerAddAnyway: boolean;
+  /**
+   * The endpoint's catalogue, once it has said it cannot resolve a tier name
+   * on its own. `null` until then — the field does not appear at all for a
+   * gateway that resolves `agentic-v1` itself, because there is nothing to ask.
+   */
+  modelAsk: ModelAsk | null;
   onCancel: () => void;
   onSubmit: (draft: ConnectDraft) => void;
 }) {
@@ -89,6 +111,7 @@ export function ProviderConnectDialog({
   const [label, setLabel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [key, setKey] = useState("");
+  const [model, setModel] = useState("");
 
   // Seed from the chosen option each time the dialog opens on a new one. A
   // conventional endpoint is a starting point the operator still confirms — it
@@ -98,6 +121,7 @@ export function ProviderConnectDialog({
     setLabel("");
     setBaseUrl(ask.defaultEndpoint ?? "");
     setKey("");
+    setModel("");
     // `optionSlug` is the identity of "which dialog is this"; `ask` is derived
     // from it, so it is not a second dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -106,22 +130,32 @@ export function ProviderConnectDialog({
   const slug = slugify(label);
   const slugError = custom ? checkSlug(providers, slug) : null;
   const endpointOk = !ask.needsEndpoint || normalizeEndpoint(baseUrl) !== null;
-  const ready = custom
-    ? customProviderReady(providers, { label, baseUrl })
-    : endpointOk && (!ask.needsKey || key.trim().length > 0);
+  // Once the endpoint has said it needs a model, it needs one: adding without it
+  // is the reported dead end, and the host refuses it anyway.
+  const modelOk = !modelAsk || model.trim().length > 0;
+  const ready =
+    (custom
+      ? customProviderReady(providers, { label, baseUrl })
+      : endpointOk && (!ask.needsKey || key.trim().length > 0)) && modelOk;
 
   const submit = (addAnyway: boolean) =>
     onSubmit({
       kind: optionSlug ?? "custom",
       label: custom ? label.trim() : undefined,
-      baseUrl: ask.needsEndpoint ? (normalizeEndpoint(baseUrl) ?? baseUrl.trim()) : undefined,
+      baseUrl: ask.needsEndpoint
+        ? (normalizeEndpoint(baseUrl) ?? baseUrl.trim())
+        : undefined,
       key: ask.needsKey ? key.trim() : undefined,
+      model: model.trim() || undefined,
       addAnyway,
     });
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent className="sm:max-w-md" data-testid="inference-connect-provider">
+      <DialogContent
+        className="sm:max-w-md"
+        data-testid="inference-connect-provider"
+      >
         <DialogHeader>
           <DialogTitle>{ask.title}</DialogTitle>
           {/* Where the key goes, said plainly, or nothing. The reference this
@@ -155,7 +189,10 @@ export function ProviderConnectDialog({
                 Slug: {slug || "None"}
               </p>
               {slugError && (
-                <p className="text-xs text-status-blocked-text" data-testid="inference-slug-error">
+                <p
+                  className="text-xs text-status-blocked-text"
+                  data-testid="inference-slug-error"
+                >
                   {slugErrorCopy(slugError)}
                 </p>
               )}
@@ -202,6 +239,50 @@ export function ProviderConnectDialog({
             </div>
           )}
 
+          {/* **The ask that never happened.** `add_provider` wrote four empty
+              tier mappings and nothing anywhere asked which model this provider
+              should serve, so the abstract tier name went out as the model id
+              and the vendor 404'd it. `TierVocabulary::Unknown` exists precisely
+              to refuse to guess and `tier_defaults()` returns an empty map for
+              it *so the console will ask* — this is the console asking, with
+              that endpoint's own catalogue in hand. */}
+          {modelAsk && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="inference-connect-model">Model</Label>
+              <Input
+                id="inference-connect-model"
+                value={model}
+                list={
+                  modelAsk.models.length > 0
+                    ? "inference-connect-model-options"
+                    : undefined
+                }
+                placeholder="claude-sonnet-5"
+                autoComplete="off"
+                spellCheck={false}
+                className="font-mono text-xs"
+                data-testid="inference-connect-model"
+                onChange={(e) => setModel(e.target.value)}
+              />
+              {/* A datalist rather than a select: a catalogue can be empty, or
+                  can omit an id that still works — an Azure deployment name is
+                  never published by design — so the list suggests and the field
+                  still accepts anything. */}
+              {modelAsk.models.length > 0 && (
+                <datalist id="inference-connect-model-options">
+                  {modelAsk.models.map((id) => (
+                    <option key={id} value={id} />
+                  ))}
+                </datalist>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {modelAsk.models.length > 0
+                  ? `This endpoint does not resolve workload names like agentic-v1, so it needs a model id. It publishes ${modelAsk.models.length} — pick one, or type another. Every workload starts on it; change that under Routing.`
+                  : "This endpoint does not resolve workload names like agentic-v1 and publishes no catalogue, so the model id has to be typed. Every workload starts on it; change that under Routing."}
+              </p>
+            </div>
+          )}
+
           {/* Managed has two ways in, and only one of them is a key. The other
               writes the company's TinyHumans **account**, which is a different
               credential with a different lifecycle — it is rotated, and it moves
@@ -211,10 +292,12 @@ export function ProviderConnectDialog({
               it. So this links there rather than duplicating it. */}
           {managed && (
             <div className="grid gap-1.5 rounded-md border border-border px-3 py-2">
-              <p className="text-sm font-medium">Or connect your TinyHumans account</p>
+              <p className="text-sm font-medium">
+                Or connect your TinyHumans account
+              </p>
               <p className="text-xs text-muted-foreground">
-                One account key pays for thinking and for app connections, and rotating it
-                reaches both. Set it up on Connections → Account.
+                One account key pays for thinking and for app connections, and
+                rotating it reaches both. Set it up on Connections → Account.
               </p>
               <a
                 className="text-xs font-medium underline underline-offset-4"
@@ -229,7 +312,8 @@ export function ProviderConnectDialog({
 
           {!ask.needsKey && !ask.needsEndpoint && (
             <p className="text-sm text-muted-foreground">
-              Nothing to enter — another command line tool already holds this credential.
+              Nothing to enter — another command line tool already holds this
+              credential.
             </p>
           )}
 
@@ -248,7 +332,12 @@ export function ProviderConnectDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onCancel}
+            disabled={busy}
+          >
             Cancel
           </Button>
           {/* Gated on a typed probe failure, never on a boolean: a slug

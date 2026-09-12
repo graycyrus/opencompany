@@ -365,6 +365,12 @@ export function ProviderList({
  * than reading it.
  */
 export function rowSubline(provider: Provider): string {
+  // **The split that is the most confusing thing in this area, named.** Entry
+  // zero is the company's own `inference/config` blob surfaced as a list row: it
+  // serves turns, it cannot be edited or removed from here, and nothing on the
+  // row said so.
+  if (provider.origin === "entryZero")
+    return "This company's original configuration";
   const category = categoryOf(provider.kind);
   if (category === "local") return "Runs on this machine";
   if (category === "cli") return "Uses a login another CLI already holds";
@@ -401,6 +407,12 @@ function ProviderRow({
   testState: (slug: string) => TestState;
 }) {
   const routing = routingBadge(routingState);
+  // **Entry zero has nowhere to store an `enabled` flag**, so it is always on
+  // and the host refuses to switch it off — "cannot be switched off from the
+  // list; reset the inference config instead". The console could not tell which
+  // row that was, so it rendered a live switch whose only outcome was a 400.
+  const entryZero = provider.origin === "entryZero";
+  const menu = providerMenu(provider);
   return (
     <li
       className="flex items-center gap-3 px-4 py-3"
@@ -455,55 +467,65 @@ function ProviderRow({
 
       <Switch
         checked={provider.enabled}
-        disabled={!canManage || busy}
+        disabled={!canManage || busy || entryZero}
+        title={
+          entryZero
+            ? "This company's original provider is changed through its inference config, not from this list."
+            : undefined
+        }
         aria-label={`${provider.label} enabled`}
         data-testid={`inference-provider-${provider.slug}-toggle`}
         onCheckedChange={(next) => onToggle(provider, next)}
       />
 
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              disabled={!canManage || busy}
-              aria-label={`${provider.label} actions`}
-              data-testid={`inference-provider-${provider.slug}-menu`}
-            >
-              <EllipsisVertical className="size-4" />
-            </Button>
-          }
-        />
-        {/* Which items, decided in `providerMenu` — per kind, and derived from
+      {/* No trigger at all when there is nothing behind it. An overflow button
+          that opens an empty menu is a control that reports a capability the row
+          does not have — which is what entry zero had, three times over. */}
+      {menu.length > 0 && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={!canManage || busy}
+                aria-label={`${provider.label} actions`}
+                data-testid={`inference-provider-${provider.slug}-menu`}
+              >
+                <EllipsisVertical className="size-4" />
+              </Button>
+            }
+          />
+          {/* Which items, decided in `providerMenu` — per kind, and derived from
             the same `credentialAsk` the connect dialog uses, so a local runtime
             or a CLI login is never offered a key it does not have. */}
-        <DropdownMenuContent align="end">
-          {providerMenu(provider).map((action) => (
-            <DropdownMenuItem
-              key={action.id}
-              variant={action.destructive ? "destructive" : undefined}
-              data-testid={`inference-provider-${provider.slug}-${action.id}`}
-              onClick={() => {
-                switch (action.id) {
-                  case "edit":
-                    return onEdit(provider);
-                  case "default":
-                    return onMakeDefault(provider);
-                  case "replaceKey":
-                    return onReplaceKey(provider);
-                  case "removeKey":
-                    return onRemoveKey(provider);
-                  case "remove":
-                    return onRemove(provider);
-                }
-              }}
-            >
-              {action.label}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
+          <DropdownMenuContent align="end">
+            {menu.map((action) => (
+              <DropdownMenuItem
+                key={action.id}
+                variant={action.destructive ? "destructive" : undefined}
+                data-testid={`inference-provider-${provider.slug}-${action.id}`}
+                onClick={() => {
+                  switch (action.id) {
+                    case "edit":
+                      return onEdit(provider);
+                    case "default":
+                      return onMakeDefault(provider);
+                    case "replaceKey":
+                      return onReplaceKey(provider);
+                    case "removeKey":
+                      return onRemoveKey(provider);
+                    case "remove":
+                      return onRemove(provider);
+                  }
+                }}
+              >
+                {action.label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </li>
   );
 }

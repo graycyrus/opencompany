@@ -22,6 +22,7 @@ import {
   editProvider,
   getInferenceStatus,
   getRoutes,
+  probeDraft,
   putRoutes,
   restartInference,
   setDefaultProvider,
@@ -68,6 +69,19 @@ export interface InferenceActions {
   saveManagedKey: (key: string) => Promise<ProviderMutation>;
   setManagedOn: (enabled: boolean) => Promise<ProviderMutation>;
   testManagedChain: () => Promise<ProbeResult>;
+  /**
+   * Ask an endpoint what it publishes, **before** anything is written.
+   *
+   * The add dialog needs this to offer a model: an endpoint whose catalog
+   * resolves no tier name cannot serve a workload until one is named, and the
+   * only honest moment to ask is with that endpoint's own list in hand. Nothing
+   * is stored — the draft's key travels one way and is never written by this.
+   */
+  probeDraftEndpoint: (draft: {
+    baseUrl: string;
+    key?: string;
+    kind?: string;
+  }) => Promise<ProbeResult>;
   test: (slug: string, model?: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
@@ -92,7 +106,6 @@ export function useInference(
   const [orphaned, setOrphaned] = useState<[string, string][]>([]);
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
-
   const reload = useCallback(async () => {
     try {
       const next = await getInferenceStatus(client, company);
@@ -112,7 +125,9 @@ export function useInference(
     } catch (err) {
       // A host that does not serve this route at all is not an error worth a
       // banner — the page simply is not available on that build.
-      setLoad(err instanceof ApiError && err.status === 404 ? "unavailable" : "error");
+      setLoad(
+        err instanceof ApiError && err.status === 404 ? "unavailable" : "error",
+      );
     }
   }, [client, company]);
 
@@ -157,7 +172,11 @@ export function useInference(
         }
         return result;
       } catch (err) {
-        toast.error(err instanceof ApiError ? err.message : "That change could not be saved.");
+        toast.error(
+          err instanceof ApiError
+            ? err.message
+            : "That change could not be saved.",
+        );
         throw err;
       } finally {
         setBusySlug(null);
@@ -176,13 +195,18 @@ export function useInference(
     busySlug,
     reload,
     add: (input) => write(null, () => addProvider(client, company, input)),
-    edit: (slug, input) => write(slug, () => editProvider(client, company, slug, input)),
+    edit: (slug, input) =>
+      write(slug, () => editProvider(client, company, slug, input)),
     remove: (slug) => write(slug, () => deleteProvider(client, company, slug)),
     setEnabled: (slug, enabled) =>
       write(slug, () => setProviderEnabled(client, company, slug, enabled)),
-    makeDefault: (slug) => write(slug, () => setDefaultProvider(client, company, slug)),
-    saveManagedKey: (key) => write(null, () => setManagedKey(client, company, key)),
-    setManagedOn: (enabled) => write(null, () => setManagedEnabled(client, company, enabled)),
+    makeDefault: (slug) =>
+      write(slug, () => setDefaultProvider(client, company, slug)),
+    saveManagedKey: (key) =>
+      write(null, () => setManagedKey(client, company, key)),
+    setManagedOn: (enabled) =>
+      write(null, () => setManagedEnabled(client, company, enabled)),
+    probeDraftEndpoint: (draft) => probeDraft(client, company, draft),
     testManagedChain: async () => {
       const result = await testManaged(client, company);
       // The test records health against the managed slug, and the row renders

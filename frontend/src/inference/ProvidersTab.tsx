@@ -12,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { AddProviderDialog } from "./AddProviderDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
-import type { ConnectDraft } from "./ProviderConnectDialog";
+import type { ConnectDraft, ModelAsk } from "./ProviderConnectDialog";
 import {
   MANAGED_SLUG,
   NO_CREDENTIAL_RESOLVES,
@@ -21,7 +21,7 @@ import {
 import { RemoveProviderDialog } from "./RemoveProviderDialog";
 import type { RemovalIntent } from "./RemoveProviderDialog";
 import { categoryOf } from "./catalogue";
-import { MANAGED_OPTION_SLUG } from "./connect";
+import { MANAGED_OPTION_SLUG, probeEndpoint } from "./connect";
 import {
   WORKLOADS,
   WORKLOAD_TIER,
@@ -110,6 +110,14 @@ export function ProvidersTab({
    */
   const [probeFailure, setProbeFailure] = useState<ProbeClass | null>(null);
   /**
+   * The endpoint's catalogue, once it has said it cannot resolve a tier name.
+   *
+   * `null` until the draft has been probed, and cleared whenever the dialog
+   * closes or the operator starts again — an answer about one endpoint is not an
+   * answer about the next.
+   */
+  const [modelAsk, setModelAsk] = useState<ModelAsk | null>(null);
+  /**
    * What each row's Test is doing, keyed by slug.
    *
    * **Per row, not per page.** A single result under the card says nothing about
@@ -192,6 +200,7 @@ export function ProvidersTab({
     setEditing(null);
     setError(null);
     setProbeFailure(null);
+    setModelAsk(null);
   };
 
   async function submitConnect(draft: ConnectDraft) {
@@ -212,6 +221,25 @@ export function ProvidersTab({
         // credential goes to its own route rather than through `add`.
         await actions.saveManagedKey(draft.key ?? "");
       } else {
+        // **Ask before writing, not after refusing.** An endpoint whose catalog
+        // resolves no workload name cannot serve one until a model is named —
+        // that is the reported defect, and the host now refuses such an add.
+        // Refusing is the backstop; this is the ask. The draft is probed first,
+        // and its own published list is what the operator chooses from.
+        if (!draft.model && !modelAsk) {
+          const url = probeEndpoint(draft.kind, draft.baseUrl);
+          if (url) {
+            const probe = await actions.probeDraftEndpoint({
+              baseUrl: url,
+              key: draft.key,
+              kind: draft.kind,
+            });
+            if (probe.ok && probe.needsModel) {
+              setModelAsk({ models: probe.models ?? [] });
+              return;
+            }
+          }
+        }
         const result = await actions.add(draft);
         // A non-destructive probe failure saved the row and kept the key. The
         // dialog closes on it, because the save succeeded — the advisory is the
@@ -392,6 +420,7 @@ export function ProvidersTab({
         busy={busy}
         error={error}
         offerAddAnyway={probeFailure !== null}
+        modelAsk={modelAsk}
         onCancel={closeConnect}
         onSubmit={(draft) => void submitConnect(draft)}
       />
