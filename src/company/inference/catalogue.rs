@@ -651,6 +651,35 @@ pub fn scoped_catalog_path(endpoint: &str, authenticated: bool) -> Option<&'stat
         .then_some("/models/user?limit=1000&output_modalities=all")
 }
 
+/// The query string a catalog read needs at this endpoint, including the leading
+/// `?`, or empty where it needs none.
+///
+/// The two parameters in [`scoped_catalog_path`] are not a property of
+/// `/models/user` — they are a property of **OpenRouter's catalog API**, and
+/// they apply just as much to the public `/models` registry. Both were being
+/// applied on the authenticated path only, so the two reads that do not have a
+/// credential — the connect probe, and the fallback after `/models/user` 404s —
+/// took OpenRouter's documented defaults instead:
+///
+/// * `output_modalities` defaults to **`text`**, so every image, audio and
+///   embedding model was silently absent. A company whose `vision-v1` tier needs
+///   a vision model was offered a picker with none in it, and nothing said why.
+/// * `limit` defaults to **500** against a catalogue of ~450 and a maximum of
+///   1000, so the list is intact today and silently truncates on the day
+///   OpenRouter publishes its 501st model. `links.next` is never followed, so
+///   the tail would simply not exist.
+///
+/// Deriving both from the same host test that already decides the path keeps
+/// them from drifting apart again: there is now one answer to "what does a
+/// catalog read at this endpoint need", not one per caller.
+pub fn catalog_query(endpoint: &str) -> &'static str {
+    if is_openrouter_endpoint(endpoint) {
+        "?limit=1000&output_modalities=all"
+    } else {
+        ""
+    }
+}
+
 /// Whether an endpoint points at an Azure Foundry / Azure OpenAI resource, i.e.
 /// a provider whose `model` field must carry a deployment name.
 pub fn is_azure_endpoint(endpoint: &str) -> bool {
@@ -1414,6 +1443,50 @@ mod tests {
             );
         }
     }
+    /// The defect: `output_modalities` and `limit` were applied on the
+    /// authenticated path only, so the connect probe and the post-404 fallback
+    /// took OpenRouter's defaults — text-only, capped at 500 — and a company
+    /// whose `vision-v1` tier needs a vision model saw a picker with none.
+    #[test]
+    fn every_openrouter_catalogue_read_asks_for_the_whole_catalogue() {
+        for endpoint in [
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/",
+            "https://eu.openrouter.ai/api/v1",
+        ] {
+            let query = catalog_query(endpoint);
+            assert!(
+                query.contains("output_modalities=all"),
+                "{endpoint} would silently drop every non-text model"
+            );
+            assert!(
+                query.contains("limit=1000"),
+                "{endpoint} would truncate at OpenRouter's default of 500"
+            );
+        }
+        // The authenticated path already asked for both; the point is that the
+        // two now agree rather than each carrying its own copy.
+        let scoped = scoped_catalog_path("https://openrouter.ai/api/v1", true).expect("scoped");
+        for parameter in ["output_modalities=all", "limit=1000"] {
+            assert!(scoped.contains(parameter), "{scoped}");
+            assert!(catalog_query("https://openrouter.ai/api/v1").contains(parameter));
+        }
+    }
+
+    #[test]
+    fn a_non_openrouter_endpoint_gets_no_query_string() {
+        // These parameters are OpenRouter's, not the OpenAI dialect's. Fireworks
+        // rejects unknown fields outright and several hosts 400 on an
+        // unrecognised query, so this must not become a blanket addition.
+        for endpoint in [
+            "https://api.anthropic.com/v1",
+            "http://localhost:11434/v1",
+            "https://api.groq.com/openai/v1",
+        ] {
+            assert_eq!(catalog_query(endpoint), "", "{endpoint}");
+        }
+    }
+
     #[test]
     fn only_openrouters_own_host_gets_the_account_scoped_catalogue() {
         assert!(is_openrouter_endpoint("https://openrouter.ai/api/v1"));

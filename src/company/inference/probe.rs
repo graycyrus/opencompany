@@ -677,7 +677,12 @@ pub async fn probe_models(
     policy: ProbePolicy,
 ) -> Result<Vec<String>, ProbeFailure> {
     check_endpoint(base_url, policy).map_err(ProbeFailure::refused)?;
-    let url = format!("{}/models", base_url.trim().trim_end_matches('/'));
+    let base = base_url.trim().trim_end_matches('/');
+    // No credential here to scope a catalogue *by*, but the catalogue's shape
+    // parameters apply regardless: without them OpenRouter answers text-only and
+    // caps at 500, so the picker this probe populates silently has no vision
+    // model in it. See `catalogue::catalog_query`.
+    let url = format!("{base}/models{}", catalogue::catalog_query(base));
 
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
