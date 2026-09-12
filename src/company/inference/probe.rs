@@ -540,6 +540,36 @@ pub fn check_endpoint_with_credential(
     Err(EndpointRefusal::Cleartext)
 }
 
+/// Whether two URLs name the same origin — scheme, host and port.
+///
+/// **A credentialed request must not follow a redirect off its origin.** `reqwest`
+/// strips `Authorization` when the host changes, but it does **not** strip a
+/// custom header, and the one non-bearer entry in the catalogue sends the key as
+/// `x-api-key`. A provider that can answer `302` could therefore hand an
+/// operator's Anthropic key to any host it names. The check is here rather than
+/// in the redirect closure so both clients — the probe and the catalogue reader —
+/// apply the same rule.
+pub fn same_origin(a: &str, b: &str) -> bool {
+    fn origin(url: &str) -> Option<(String, String)> {
+        let (scheme, rest) = url.trim().split_once("://")?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let host_port = authority
+            .rsplit_once('@')
+            .map(|(_, host)| host)
+            .unwrap_or(authority);
+        Some((
+            scheme.to_ascii_lowercase(),
+            host_port.trim().to_ascii_lowercase(),
+        ))
+    }
+    match (origin(a), origin(b)) {
+        (Some(left), Some(right)) => left == right,
+        // Unparseable on either side is not a match. Refusing to follow costs a
+        // catalogue read; following costs the key.
+        _ => false,
+    }
+}
+
 /// The address half of [`check_endpoint`], exposed so a redirect target can be
 /// checked after it has been resolved.
 pub fn check_address(ip: IpAddr, policy: ProbePolicy) -> Result<(), EndpointRefusal> {
@@ -763,8 +793,16 @@ pub async fn probe_models(
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
     // inspected is here, before the next request goes out.
+    let origin = url.clone();
+    let credentialed = credential.is_some_and(|c| !c.trim().is_empty());
     let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= PROBE_MAX_REDIRECTS {
+            return attempt.stop();
+        }
+        // A credentialed request stays on its origin. `reqwest` drops
+        // `Authorization` across hosts but keeps a custom header, and the
+        // catalogue's one non-bearer entry sends the key as `x-api-key`.
+        if credentialed && !same_origin(&origin, attempt.url().as_str()) {
             return attempt.stop();
         }
         match check_endpoint(attempt.url().as_str(), policy) {
@@ -1292,6 +1330,27 @@ mod tests {
             check_endpoint_with_credential("https://169.254.169.254/v1", SERVER_SIDE, true),
             Err(EndpointRefusal::LinkLocal)
         );
+    }
+
+    #[test]
+    fn a_credentialed_request_does_not_follow_a_redirect_off_its_origin() {
+        // `reqwest` strips `Authorization` when the host changes and keeps a
+        // custom header, and the catalogue's one non-bearer entry sends the key
+        // as `x-api-key` — so a provider that can answer `302` could name any
+        // host to hand it to.
+        let origin = "https://api.acme.test/v1/models";
+        assert!(same_origin(origin, "https://api.acme.test/v2/models"));
+        assert!(same_origin(
+            origin,
+            "https://API.ACME.TEST/v1/models?page=2"
+        ));
+        assert!(!same_origin(origin, "https://elsewhere.test/v1/models"));
+        // Scheme and port are part of an origin, both ways.
+        assert!(!same_origin(origin, "http://api.acme.test/v1/models"));
+        assert!(!same_origin(origin, "https://api.acme.test:8443/v1/models"));
+        // Unparseable is not a match: refusing costs a catalogue read, and
+        // following costs the key.
+        assert!(!same_origin(origin, "api.acme.test/v1/models"));
     }
 
     #[test]

@@ -1090,9 +1090,11 @@ mod tests {
                 // divergence mode — a module spells it out with a value of its
                 // own and nothing notices — and checking one of a pair is how
                 // the guard ends up proving less than it appears to.
-                if source.contains("\"HTTP-Referer\"") && !source.contains("OPENROUTER_REFERER") {
-                    offenders.push(path.display().to_string());
-                } else if source.contains("\"X-Title\"") && !source.contains("OPENROUTER_TITLE") {
+                let spells_out_referer =
+                    source.contains("\"HTTP-Referer\"") && !source.contains("OPENROUTER_REFERER");
+                let spells_out_title =
+                    source.contains("\"X-Title\"") && !source.contains("OPENROUTER_TITLE");
+                if spells_out_referer || spells_out_title {
                     offenders.push(path.display().to_string());
                 }
             }

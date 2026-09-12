@@ -230,6 +230,8 @@ pub(crate) async fn discover_models(
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
     let policy = probe::default_policy();
+    let credentialed = bearer.is_some_and(|b| !b.trim().is_empty());
+    let origin = base_url.trim().to_string();
     probe::check_endpoint_with_credential(
         base_url,
         policy,
@@ -252,6 +254,14 @@ pub(crate) async fn discover_models(
         .timeout(MODEL_CATALOG_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= CATALOG_MAX_REDIRECTS {
+                return attempt.stop();
+            }
+            // A credentialed read stays on its origin: `reqwest` drops
+            // `Authorization` across hosts but keeps a custom header, and the
+            // catalogue's one non-bearer entry sends the key as `x-api-key`, so
+            // a provider that can answer `302` could name any host to send it
+            // to. See `probe::same_origin`.
+            if credentialed && !probe::same_origin(&origin, attempt.url().as_str()) {
                 return attempt.stop();
             }
             match probe::check_endpoint(attempt.url().as_str(), policy) {
