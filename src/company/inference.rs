@@ -3814,6 +3814,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routing_to_managed_while_the_switch_is_off_resolves_to_nothing() {
+        // The boot path and the turn path have to give the same answer, which is
+        // the whole reason this branch calls `managed_decl` rather than forming a
+        // second opinion. `resolve_effective_for_tier` *refuses* an explicit
+        // `managed` route while the switch is off, so a boot that reported this
+        // company configured would select the harness brain and then hand every
+        // turn to a resolver that errors — inference that looks live on the
+        // status card and fails on contact.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "a switched-off Managed is not somewhere a workload can be routed, \
+             so it is not what makes this company configured either"
+        );
+
+        // The turn path's refusal is the other half of the same statement.
+        assert!(
+            resolve_effective_for_tier(
+                &company,
+                &Inference::default(),
+                None,
+                &secrets,
+                &HarnessScope::default(),
+                "chat-v1",
+            )
+            .await
+            .is_err(),
+            "and the routed path refuses, which is the answer boot now matches"
+        );
+
+        // Switching it back on restores it, so the gate is the switch and not
+        // the credential — which is untouched throughout.
+        store::set_managed_enabled(&company, &secrets, true)
+            .await
+            .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("switched back on, the same rows resolve");
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-managed")
+        );
+    }
+
+    #[tokio::test]
     async fn routing_to_managed_with_nothing_behind_it_still_resolves_to_nothing() {
         // The other half, and the one that keeps the echo brain meaningful: the
         // new branch must widen "configured" only where something can actually
