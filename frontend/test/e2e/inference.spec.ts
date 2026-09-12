@@ -46,18 +46,12 @@ async function openInference(page: Page) {
   // the second, and waiting only for the first would hang on exactly the
   // company a first run starts from.
   await expect(
-    page
-      .getByTestId("inference-providers")
-      .or(page.getByTestId("inference-providers-empty")),
+    page.getByTestId("inference-providers").or(page.getByTestId("inference-providers-empty")),
   ).toBeVisible({ timeout: 30_000 });
 }
 
 /** Open the add dialog and choose one option out of a category. */
-async function choose(
-  page: Page,
-  category: "cloud" | "local" | "cli",
-  label: string,
-) {
+async function choose(page: Page, category: "cloud" | "local" | "cli", label: string) {
   await page.getByTestId("inference-add-open").click();
   await expect(page.getByTestId("inference-add-provider")).toBeVisible();
   await page.locator(`#inference-add-${category}`).click();
@@ -80,9 +74,7 @@ async function addCustom(page: Page) {
 /** The discard port: refused immediately, no DNS, no wait. */
 const UNREACHABLE = "http://127.0.0.1:9/v1";
 
-test("Managed is always present and is a badge rather than a switch", async ({
-  page,
-}) => {
+test("Managed is always present and is a badge rather than a switch", async ({ page }) => {
   await openInference(page);
 
   const managed = page.getByTestId("inference-provider-managed");
@@ -103,9 +95,7 @@ test("a provider behind an unreachable endpoint is saved, amber, and keeps its k
 
   await addCustom(page);
   await page.locator("#inference-connect-name").fill("E2E Gateway");
-  await expect(page.getByTestId("inference-slug-preview")).toHaveText(
-    "Slug: e2e-gateway",
-  );
+  await expect(page.getByTestId("inference-slug-preview")).toHaveText("Slug: e2e-gateway");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-connect-submit").click();
@@ -115,15 +105,16 @@ test("a provider behind an unreachable endpoint is saved, amber, and keeps its k
   // The row was created and the credential was kept: the save succeeded, and
   // only reachability is in question.
   await expect(row).toContainText("•••• configured");
-  await expect(
-    page.getByTestId("inference-provider-e2e-gateway-health"),
-  ).toContainText("unreachable");
+  await expect(page.getByTestId("inference-provider-e2e-gateway-health")).toContainText(
+    "unreachable",
+  );
+
   // And it survives a reload, which is the half a component test cannot see.
   await page.reload();
   await openInference(page);
-  await expect(
-    page.getByTestId("inference-provider-e2e-gateway"),
-  ).toContainText("•••• configured");
+  await expect(page.getByTestId("inference-provider-e2e-gateway")).toContainText(
+    "•••• configured",
+  );
 });
 
 test("a second provider holds a credential of its own", async ({ page }) => {
@@ -136,46 +127,32 @@ test("a second provider holds a credential of its own", async ({ page }) => {
     await addCustom(page);
     await page.locator("#inference-connect-name").fill(name);
     await page.locator("#inference-connect-url").fill(UNREACHABLE);
-    await page
-      .locator("#inference-connect-key")
-      .fill(`pw-e2e-${name}-${Date.now()}`);
+    await page.locator("#inference-connect-key").fill(`pw-e2e-${name}-${Date.now()}`);
     await page.getByTestId("inference-connect-submit").click();
-    await expect(page.getByTestId("inference-connect-provider")).toHaveCount(
-      0,
-      {
-        timeout: 30_000,
-      },
-    );
+    await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0, {
+      timeout: 30_000,
+    });
   }
-  await expect(page.getByTestId("inference-provider-e2e-one")).toContainText(
-    "•••• configured",
-  );
-  await expect(page.getByTestId("inference-provider-e2e-two")).toContainText(
-    "•••• configured",
-  );
+
+  await expect(page.getByTestId("inference-provider-e2e-one")).toContainText("•••• configured");
+  await expect(page.getByTestId("inference-provider-e2e-two")).toContainText("•••• configured");
 });
 
-test("the add dialog stops offering a provider once it is connected", async ({
-  page,
-}) => {
+test("the add dialog stops offering a provider once it is connected", async ({ page }) => {
   // Offering to add something twice is how you get two rows for one provider.
   await openInference(page);
 
   await choose(page, "cloud", "Groq");
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-connect-submit").click();
-  await expect(page.getByTestId("inference-provider-groq")).toBeVisible({
-    timeout: 30_000,
-  });
+  await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 30_000 });
 
   await page.getByTestId("inference-add-open").click();
   await page.locator("#inference-add-cloud").click();
   await expect(page.getByRole("option", { name: /^Groq/ })).toHaveCount(0);
 });
 
-test("a custom provider may not take a name the catalogue ships", async ({
-  page,
-}) => {
+test("a custom provider may not take a name the catalogue ships", async ({ page }) => {
   // A routing entry saying `groq` would otherwise mean two things — and the
   // refusal happens before anything is written.
   await openInference(page);
@@ -183,15 +160,11 @@ test("a custom provider may not take a name the catalogue ships", async ({
   await addCustom(page);
   await page.locator("#inference-connect-name").fill("Groq");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
-  await expect(page.getByTestId("inference-slug-error")).toContainText(
-    "built-in",
-  );
+  await expect(page.getByTestId("inference-slug-error")).toContainText("built-in");
   await expect(page.getByTestId("inference-connect-submit")).toBeDisabled();
 });
 
-test("disabling a provider keeps its credential and its routes", async ({
-  page,
-}) => {
+test("disabling a provider keeps its credential and its routes", async ({ page }) => {
   // Distinct from deleting it: "stop billing this account this week" has to be
   // expressible, and a disable that scrubbed would make re-enabling a
   // re-configuration.
@@ -202,32 +175,23 @@ test("disabling a provider keeps its credential and its routes", async ({
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-connect-submit").click();
-  await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({
-    timeout: 30_000,
-  });
+  await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({ timeout: 30_000 });
 
   // Switching off is confirmed now, in reversible language: it parks the
   // workloads routed through this provider rather than losing anything.
   await page.getByTestId("inference-provider-e2e-parked-toggle").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toContainText(
-    "Switch off",
-  );
+  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Switch off");
   await page.getByTestId("inference-remove-confirm").click();
   await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
   await page.reload();
   await openInference(page);
 
   const row = page.getByTestId("inference-provider-e2e-parked");
-  await expect(row.locator("[role='switch']")).toHaveAttribute(
-    "aria-checked",
-    "false",
-  );
+  await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "false");
   await expect(row).toContainText("•••• configured");
 });
 
-test("deleting a provider clears its key and resets the routes that named it", async ({
-  page,
-}) => {
+test("deleting a provider clears its key and resets the routes that named it", async ({ page }) => {
   await openInference(page);
 
   await addCustom(page);
@@ -235,9 +199,7 @@ test("deleting a provider clears its key and resets the routes that named it", a
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-connect-submit").click();
-  await expect(page.getByTestId("inference-provider-e2e-doomed")).toBeVisible({
-    timeout: 30_000,
-  });
+  await expect(page.getByTestId("inference-provider-e2e-doomed")).toBeVisible({ timeout: 30_000 });
 
   // Point one workload at it, through the routing tab.
   await page.getByRole("tab", { name: "Routing" }).click();
@@ -249,29 +211,22 @@ test("deleting a provider clears its key and resets the routes that named it", a
   await page.locator("#inference-workload-provider").click();
   await page.getByRole("option", { name: "E2E Doomed", exact: true }).click();
   await page.getByTestId("inference-workload-apply").click();
-  await expect(page.getByTestId("inference-workload-reasoning")).toContainText(
-    "E2E Doomed",
-  );
+  await expect(page.getByTestId("inference-workload-reasoning")).toContainText("E2E Doomed");
+
   // Remove it, and the row that named it moves back to the primary.
   await page.getByRole("tab", { name: "LLM Providers" }).click();
   await page.getByTestId("inference-provider-e2e-doomed-menu").click();
   await page.getByRole("menuitem", { name: "Remove" }).click();
-  await expect(page.getByTestId("inference-provider-e2e-doomed")).toHaveCount(
-    0,
-    {
-      timeout: 30_000,
-    },
-  );
+  await expect(page.getByTestId("inference-provider-e2e-doomed")).toHaveCount(0, {
+    timeout: 30_000,
+  });
+
   await page.getByRole("tab", { name: "Routing" }).click();
   await page.getByTestId("inference-mode-advanced").click();
-  await expect(page.getByTestId("inference-workload-reasoning")).toContainText(
-    "Primary (",
-  );
+  await expect(page.getByTestId("inference-workload-reasoning")).toContainText("Primary (");
 });
 
-test("the routing mode is inferred from the routes and round-trips", async ({
-  page,
-}) => {
+test("the routing mode is inferred from the routes and round-trips", async ({ page }) => {
   // There is no stored mode to drift out of sync with the rows.
   await openInference(page);
   await page.getByRole("tab", { name: "Routing" }).click();
@@ -291,15 +246,10 @@ test("the routing mode is inferred from the routes and round-trips", async ({
   await page.reload();
   await openInference(page);
   await page.getByRole("tab", { name: "Routing" }).click();
-  await expect(page.getByTestId("inference-mode-managed")).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
+  await expect(page.getByTestId("inference-mode-managed")).toHaveAttribute("aria-pressed", "true");
 });
 
-test("coding is shown as an alias and cannot be routed separately", async ({
-  page,
-}) => {
+test("coding is shown as an alias and cannot be routed separately", async ({ page }) => {
   // Four editable rows, not five: coding and agentic are one tier, so an
   // editable coding row would write one tier's route under two names.
   await openInference(page);

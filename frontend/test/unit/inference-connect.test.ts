@@ -57,16 +57,10 @@ describe("what the add dialog offers", () => {
 
   it("gives each category the detail line its question implies", () => {
     const options = addOptions([]);
-    expect(options.cloud.find((o) => o.value === "openai")?.detail).toBe(
-      "api.openai.com",
-    );
-    expect(options.cloud.find((o) => o.value === "anthropic")?.detail).toBe(
-      "api.anthropic.com",
-    );
+    expect(options.cloud.find((o) => o.value === "openai")?.detail).toBe("api.openai.com");
+    expect(options.cloud.find((o) => o.value === "anthropic")?.detail).toBe("api.anthropic.com");
     expect(options.local[0]?.detail).toBe("Runs on this machine");
-    expect(options.cli[0]?.detail).toBe(
-      "Uses a login another CLI already holds",
-    );
+    expect(options.cli[0]?.detail).toBe("Uses a login another CLI already holds");
   });
 });
 
@@ -75,11 +69,7 @@ describe("what each category asks for", () => {
     // The endpoint is a preset. The paths in that table — /openai/v1,
     // /v1beta/openai, /api/paas/v4 — are not something to retype.
     const ask = credentialAsk("openai");
-    expect(ask).toMatchObject({
-      needsKey: true,
-      needsEndpoint: false,
-      keyPlaceholder: "sk-...",
-    });
+    expect(ask).toMatchObject({ needsKey: true, needsEndpoint: false, keyPlaceholder: "sk-..." });
   });
 
   it("asks a local runtime for an endpoint and not a key", () => {
@@ -89,10 +79,7 @@ describe("what each category asks for", () => {
   });
 
   it("asks omlx for both, because it is the one local runtime that wants both", () => {
-    expect(credentialAsk("omlx")).toMatchObject({
-      needsKey: true,
-      needsEndpoint: true,
-    });
+    expect(credentialAsk("omlx")).toMatchObject({ needsKey: true, needsEndpoint: true });
   });
 
   it("asks a CLI login for nothing", () => {
@@ -104,10 +91,7 @@ describe("what each category asks for", () => {
   });
 
   it("asks a custom provider for both", () => {
-    expect(credentialAsk("custom")).toMatchObject({
-      needsKey: true,
-      needsEndpoint: true,
-    });
+    expect(credentialAsk("custom")).toMatchObject({ needsKey: true, needsEndpoint: true });
   });
 });
 
@@ -128,9 +112,7 @@ describe("the slug, which is derived and never typed", () => {
   });
 
   it("says what to do about each", () => {
-    expect(slugErrorCopy("empty")).toBe(
-      "Enter a provider name to generate a slug.",
-    );
+    expect(slugErrorCopy("empty")).toBe("Enter a provider name to generate a slug.");
     expect(slugErrorCopy("taken")).toContain("already has a provider");
     expect(slugErrorCopy("reserved")).toContain("built-in");
   });
@@ -138,12 +120,8 @@ describe("the slug, which is derived and never typed", () => {
 
 describe("the endpoint an operator types", () => {
   it("gains the /v1 an OpenAI surface lives at when a bare origin is given", () => {
-    expect(normalizeEndpoint("http://localhost:11434")).toBe(
-      "http://localhost:11434/v1",
-    );
-    expect(normalizeEndpoint("  http://localhost:11434/ ")).toBe(
-      "http://localhost:11434/v1",
-    );
+    expect(normalizeEndpoint("http://localhost:11434")).toBe("http://localhost:11434/v1");
+    expect(normalizeEndpoint("  http://localhost:11434/ ")).toBe("http://localhost:11434/v1");
   });
 
   it("leaves a path exactly as typed, because appending is not guessing", () => {
@@ -153,13 +131,7 @@ describe("the endpoint an operator types", () => {
   });
 
   it("refuses anything that is not http or https", () => {
-    for (const bad of [
-      "file:///etc/passwd",
-      "ftp://acme.example/v1",
-      "localhost:11434",
-      "",
-      "http://",
-    ]) {
+    for (const bad of ["file:///etc/passwd", "ftp://acme.example/v1", "localhost:11434", "", "http://"]) {
       expect(normalizeEndpoint(bad)).toBeNull();
     }
   });
@@ -167,25 +139,14 @@ describe("the endpoint an operator types", () => {
 
 describe("the custom-provider dialog's Add button", () => {
   it("stays disabled until both the name and the URL are usable", () => {
-    expect(
-      customProviderReady([], {
-        label: "",
-        baseUrl: "https://acme.example/v1",
-      }),
-    ).toBe(false);
+    expect(customProviderReady([], { label: "", baseUrl: "https://acme.example/v1" })).toBe(false);
     expect(customProviderReady([], { label: "Acme", baseUrl: "" })).toBe(false);
-    expect(
-      customProviderReady([], {
-        label: "Groq",
-        baseUrl: "https://acme.example/v1",
-      }),
-    ).toBe(false);
-    expect(
-      customProviderReady([], {
-        label: "Acme",
-        baseUrl: "https://acme.example/v1",
-      }),
-    ).toBe(true);
+    expect(customProviderReady([], { label: "Groq", baseUrl: "https://acme.example/v1" })).toBe(
+      false,
+    );
+    expect(customProviderReady([], { label: "Acme", baseUrl: "https://acme.example/v1" })).toBe(
+      true,
+    );
   });
 });
 
@@ -196,24 +157,20 @@ describe("the message a refusal shows the operator", () => {
     // the field they have to correct. The sentence after it is already written
     // for them.
     expect(
-      stripEnvelopePrefix(
-        "invalid request: Could not reach Groq: the provider rejected the credential.",
-      ),
+      stripEnvelopePrefix("invalid request: Could not reach Groq: the provider rejected the credential."),
     ).toBe("Could not reach Groq: the provider rejected the credential.");
   });
 
   it("leaves a message that has no prefix alone", () => {
-    expect(stripEnvelopePrefix("That did not work.")).toBe(
-      "That did not work.",
-    );
+    expect(stripEnvelopePrefix("That did not work.")).toBe("That did not work.");
   });
 
   it("does not eat a colon that is part of the sentence", () => {
     // "Could not reach Groq: …" has its own colon, and only a known envelope
     // keyword at the very start may be removed.
-    expect(
-      stripEnvelopePrefix("Could not reach Groq: the provider rejected it."),
-    ).toBe("Could not reach Groq: the provider rejected it.");
+    expect(stripEnvelopePrefix("Could not reach Groq: the provider rejected it.")).toBe(
+      "Could not reach Groq: the provider rejected it.",
+    );
   });
 });
 
@@ -227,37 +184,21 @@ describe("providerMenu", () => {
   const ids = (over = {}) => providerMenu(row(over)).map((a) => a.id);
 
   it("offers key actions on a provider that has a key to act on", () => {
-    expect(ids()).toEqual([
-      "edit",
-      "default",
-      "replaceKey",
-      "removeKey",
-      "remove",
-    ]);
+    expect(ids()).toEqual(["edit", "default", "replaceKey", "removeKey", "remove"]);
   });
 
   it("never offers key actions to a local runtime or a CLI login", () => {
     // Derived from `credentialAsk`, not from a list of kinds here — Ollama is
     // asked for an endpoint and Claude Code holds its credential in another
     // tool, so neither has a key this page could replace or remove.
-    expect(ids({ kind: "ollama", keyConfigured: false })).not.toContain(
-      "replaceKey",
-    );
-    expect(ids({ kind: "ollama", keyConfigured: false })).not.toContain(
-      "removeKey",
-    );
-    expect(ids({ kind: "claude-code", keyConfigured: false })).not.toContain(
-      "replaceKey",
-    );
-    expect(ids({ kind: "claude-code", keyConfigured: false })).not.toContain(
-      "removeKey",
-    );
+    expect(ids({ kind: "ollama", keyConfigured: false })).not.toContain("replaceKey");
+    expect(ids({ kind: "ollama", keyConfigured: false })).not.toContain("removeKey");
+    expect(ids({ kind: "claude-code", keyConfigured: false })).not.toContain("replaceKey");
+    expect(ids({ kind: "claude-code", keyConfigured: false })).not.toContain("removeKey");
   });
 
   it("asks a local runtime to edit its endpoint rather than its key", () => {
-    expect(providerMenu(row({ kind: "ollama" }))[0].label).toBe(
-      "Edit endpoint",
-    );
+    expect(providerMenu(row({ kind: "ollama" }))[0].label).toBe("Edit endpoint");
     expect(providerMenu(row())[0].label).toBe("Edit");
   });
 
@@ -266,9 +207,7 @@ describe("providerMenu", () => {
     // string — offering it against nothing is a destructive-looking no-op.
     expect(ids({ keyConfigured: false })).toContain("replaceKey");
     expect(ids({ keyConfigured: false })).not.toContain("removeKey");
-    expect(providerMenu(row({ keyConfigured: false }))[2].label).toBe(
-      "Add a key",
-    );
+    expect(providerMenu(row({ keyConfigured: false }))[2].label).toBe("Add a key");
   });
 
   it("omits Set as default where it would change nothing", () => {
@@ -285,12 +224,11 @@ describe("providerMenu", () => {
   });
 
   it("names the two removals differently, because they are different", () => {
-    const labels = Object.fromEntries(
-      providerMenu(row()).map((a) => [a.id, a.label]),
-    );
+    const labels = Object.fromEntries(providerMenu(row()).map((a) => [a.id, a.label]));
     expect(labels.removeKey).toBe("Remove key");
     expect(labels.remove).toBe("Remove provider");
   });
+
   it("offers entry zero only what it can actually do", () => {
     // Entry zero refuses edit, remove and disable with three separate 400s. The
     // console had no way to tell which row they applied to, so it rendered all
@@ -300,7 +238,8 @@ describe("providerMenu", () => {
     expect(ids({ origin: "entryZero" })).toEqual(["default"]);
     expect(ids({ origin: "entryZero", isDefault: true })).toEqual([]);
     expect(ids({ origin: "entryZero", enabled: false })).toEqual([]);
-});
+  });
+
   it("treats a row from an older host as an ordinary one", () => {
     // Absent `origin` reads as indexed, which is what every row was before.
     expect(ids()).toContain("remove");

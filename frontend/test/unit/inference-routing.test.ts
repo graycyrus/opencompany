@@ -91,14 +91,7 @@ describe("the rows the routing screen ships", () => {
 
 describe("the hand-editable route grammar", () => {
   it("round-trips through a person", () => {
-    const cases = [
-      "",
-      "managed",
-      "acme",
-      "acme:gpt-5",
-      "local:llama3.1",
-      "claude-code:opus",
-    ];
+    const cases = ["", "managed", "acme", "acme:gpt-5", "local:llama3.1", "claude-code:opus"];
     for (const raw of cases) {
       expect(formatRef(parseRef(raw))).toBe(raw === "default" ? "" : raw);
     }
@@ -112,11 +105,7 @@ describe("the hand-editable route grammar", () => {
   });
 
   it("reads a trailing colon as a slug with no model", () => {
-    expect(parseRef("acme:")).toEqual({
-      kind: "cloud",
-      providerSlug: "acme",
-      model: undefined,
-    });
+    expect(parseRef("acme:")).toEqual({ kind: "cloud", providerSlug: "acme", model: undefined });
   });
 
   it("gives two refs that mean the same thing the same signature", () => {
@@ -154,11 +143,7 @@ describe("scrubbing the routes a removal orphans", () => {
     );
     expect(reset).toEqual(["chat"]);
     expect(next.chat).toEqual({ kind: "default" });
-    expect(next.reasoning).toEqual({
-      kind: "cloud",
-      providerSlug: "openrouter",
-      model: "big",
-    });
+    expect(next.reasoning).toEqual({ kind: "cloud", providerSlug: "openrouter", model: "big" });
   });
 
   it("scrubs a CLI login's slug-less routes", () => {
@@ -202,10 +187,7 @@ describe("scrubbing the routes a removal orphans", () => {
   });
 
   it("never touches a managed or unset row", () => {
-    const routing: RoutingMap = {
-      chat: { kind: "managed" },
-      vision: { kind: "default" },
-    };
+    const routing: RoutingMap = { chat: { kind: "managed" }, vision: { kind: "default" } };
     const { reset } = scrubOnRemove(
       routing,
       provider("acme", "openai_compatible"),
@@ -230,57 +212,35 @@ describe("what a row offers and reads", () => {
   });
 
   it("names the primary an unset row resolves through, and follows the marker", () => {
-    const openrouter = {
-      ...provider("openrouter", "openrouter"),
-      label: "OpenRouter",
-    };
-    const acme = {
-      ...provider("acme", "openai_compatible"),
-      label: "Acme gateway",
-    };
-    expect(rowValue({ kind: "default" }, [openrouter, acme]).value).toBe(
-      "Primary (OpenRouter)",
-    );
+    const openrouter = { ...provider("openrouter", "openrouter"), label: "OpenRouter" };
+    const acme = { ...provider("acme", "openai_compatible"), label: "Acme gateway" };
+    expect(rowValue({ kind: "default" }, [openrouter, acme]).value).toBe("Primary (OpenRouter)");
     // Marked, it moves — read on every render rather than cached.
     expect(
-      rowValue({ kind: "default" }, [openrouter, { ...acme, isDefault: true }])
-        .value,
+      rowValue({ kind: "default" }, [openrouter, { ...acme, isDefault: true }]).value,
     ).toBe("Primary (Acme gateway)");
     // A disabled marked provider is not a routing target, so it is not the
     // primary either.
     expect(
-      rowValue({ kind: "default" }, [
-        openrouter,
-        { ...acme, isDefault: true, enabled: false },
-      ]).value,
+      rowValue({ kind: "default" }, [openrouter, { ...acme, isDefault: true, enabled: false }])
+        .value,
     ).toBe("Primary (OpenRouter)");
   });
 
   it("names the provider by its label, not its slug", () => {
-    const acme = {
-      ...provider("acme", "openai_compatible"),
-      label: "Acme gateway",
-    };
-    expect(
-      rowValue({ kind: "cloud", providerSlug: "acme", model: "gpt-5" }, [acme])
-        .value,
-    ).toBe("Acme gateway · gpt-5");
-  });
-
-  it("falls back to the slug for a provider it cannot find", () => {
-    expect(rowValue({ kind: "cloud", providerSlug: "ghost" }, []).value).toBe(
-      "ghost",
+    const acme = { ...provider("acme", "openai_compatible"), label: "Acme gateway" };
+    expect(rowValue({ kind: "cloud", providerSlug: "acme", model: "gpt-5" }, [acme]).value).toBe(
+      "Acme gateway · gpt-5",
     );
   });
 
+  it("falls back to the slug for a provider it cannot find", () => {
+    expect(rowValue({ kind: "cloud", providerSlug: "ghost" }, []).value).toBe("ghost");
+  });
+
   it("does not offer a disabled provider as a routing target", () => {
-    const providers = [
-      provider("openrouter", "openrouter"),
-      provider("acme", "openai_compatible", false),
-    ];
-    expect(routingTargets(providers).map((p) => p.slug)).toEqual([
-      "openrouter",
-    ]);
+    const providers = [provider("openrouter", "openrouter"), provider("acme", "openai_compatible", false)];
+    expect(routingTargets(providers).map((p) => p.slug)).toEqual(["openrouter"]);
   });
 });
 
@@ -290,10 +250,7 @@ describe("ownModeDraft", () => {
     // correctly and then rendered empty, which reads as a lost save and is
     // indistinguishable from the routing table being inert.
     const saved = applyToEveryWorkload("anthropic", "claude-sonnet-5");
-    expect(ownModeDraft(saved)).toEqual({
-      slug: "anthropic",
-      model: "claude-sonnet-5",
-    });
+    expect(ownModeDraft(saved)).toEqual({ slug: "anthropic", model: "claude-sonnet-5" });
   });
 
   it("keeps a blank model blank rather than inventing a placeholder", () => {
@@ -323,20 +280,14 @@ describe("ownModeDraft", () => {
 });
 
 describe("the per-workload select", () => {
-  const connected = [
-    provider("openrouter", "openrouter"),
-    provider("anthropic", "anthropic"),
-  ];
+  const connected = [provider("openrouter", "openrouter"), provider("anthropic", "anthropic")];
+
   it("lists providers only — the primary is never a second entry", () => {
     // Three connected providers, three options. It used to list five: the unset
     // row's own display (`Primary (OpenRouter)`) and a second Managed sentinel,
     // both beside the real rows, two of them naming the same account.
     const options = routingOptions(connected);
-    expect(options.map((o) => o.slug)).toEqual([
-      "tinyhumans",
-      "openrouter",
-      "anthropic",
-    ]);
+    expect(options.map((o) => o.slug)).toEqual(["tinyhumans", "openrouter", "anthropic"]);
     expect(options[0].label).toBe(MANAGED_TARGET_LABEL);
     expect(options.some((o) => o.slug === UNSET_TARGET)).toBe(false);
   });
@@ -344,10 +295,7 @@ describe("the per-workload select", () => {
   it("lists managed once even when it is also a provider record", () => {
     // A company whose entry zero is the managed config has a `tinyhumans` row of
     // its own. One identity, one entry.
-    const options = routingOptions([
-      provider("tinyhumans", "managed"),
-      ...connected,
-    ]);
+    const options = routingOptions([provider("tinyhumans", "managed"), ...connected]);
     expect(options.filter((o) => o.slug === "tinyhumans")).toHaveLength(1);
   });
 
@@ -356,9 +304,7 @@ describe("the per-workload select", () => {
     // `OpenRouter` did, for two names of one provider.
     expect(modelTarget(UNSET_TARGET, connected)).toBe("openrouter");
     expect(modelTarget("openrouter", connected)).toBe("openrouter");
-    expect(modelTarget(UNSET_TARGET, connected)).toBe(
-      modelTarget("openrouter", connected),
-    );
+    expect(modelTarget(UNSET_TARGET, connected)).toBe(modelTarget("openrouter", connected));
   });
 
   it("follows the marked default, not list order, when resolving unset", () => {
@@ -377,12 +323,8 @@ describe("the per-workload select", () => {
   });
 
   it("stays unset while the model is blank, and pins when one is chosen", () => {
-    expect(refForTarget(UNSET_TARGET, "", connected)).toEqual({
-      kind: "default",
-    });
-    expect(refForTarget(UNSET_TARGET, "   ", connected)).toEqual({
-      kind: "default",
-    });
+    expect(refForTarget(UNSET_TARGET, "", connected)).toEqual({ kind: "default" });
+    expect(refForTarget(UNSET_TARGET, "   ", connected)).toEqual({ kind: "default" });
     expect(refForTarget(UNSET_TARGET, "gpt-5", connected)).toEqual({
       kind: "cloud",
       providerSlug: "openrouter",
@@ -393,17 +335,13 @@ describe("the per-workload select", () => {
       providerSlug: "anthropic",
       model: "claude-sonnet-5",
     });
-    expect(refForTarget("tinyhumans", "gpt-5", connected)).toEqual({
-      kind: "managed",
-    });
+    expect(refForTarget("tinyhumans", "gpt-5", connected)).toEqual({ kind: "managed" });
   });
 
   it("round-trips a stored ref back to the value the select shows", () => {
     expect(targetForRef({ kind: "default" })).toBe(UNSET_TARGET);
     expect(targetForRef({ kind: "managed" })).toBe("tinyhumans");
-    expect(targetForRef(parseRef("anthropic:claude-sonnet-5"))).toBe(
-      "anthropic",
-    );
+    expect(targetForRef(parseRef("anthropic:claude-sonnet-5"))).toBe("anthropic");
   });
 
   it("never shows a sentinel to an operator", () => {
@@ -416,10 +354,7 @@ describe("the per-workload select", () => {
 });
 
 describe("what a removal costs", () => {
-  const openrouter = {
-    ...provider("openrouter", "openrouter"),
-    isDefault: true,
-  };
+  const openrouter = { ...provider("openrouter", "openrouter"), isDefault: true };
   const anthropic = provider("anthropic", "anthropic");
   const providers = [openrouter, anthropic];
 
@@ -435,12 +370,7 @@ describe("what a removal costs", () => {
   });
 
   it("notices the default and the last provider switched on", () => {
-    const impact = removalImpact(
-      openrouter,
-      [openrouter],
-      {} as RoutingMap,
-      categoryOf,
-    );
+    const impact = removalImpact(openrouter, [openrouter], {} as RoutingMap, categoryOf);
     expect(impact.isDefault).toBe(true);
     expect(impact.lastEnabled).toBe(true);
   });
@@ -478,9 +408,7 @@ describe("what a removal costs", () => {
       lastEnabled: false,
       defaultMovesTo: null,
     });
-    expect(
-      one.some((l) => l.includes("One workload routes") && l.includes("Chat")),
-    ).toBe(true);
+    expect(one.some((l) => l.includes("One workload routes") && l.includes("Chat"))).toBe(true);
     const many = removalWarnings("provider", "Anthropic", {
       routed: ["chat", "vision"],
       isDefault: false,
@@ -497,18 +425,10 @@ describe("what a removal costs", () => {
       lastEnabled: true,
       defaultMovesTo: null,
     };
-    expect(
-      removalWarnings("provider", "Anthropic", impact).some((l) =>
-        l.includes("only provider"),
-      ),
-    ).toBe(true);
+    expect(removalWarnings("provider", "Anthropic", impact).some((l) => l.includes("only provider"))).toBe(true);
     // Clearing a credential does not remove the row, so it is still the only
     // provider switched on afterwards.
-    expect(
-      removalWarnings("key", "Anthropic", impact).some((l) =>
-        l.includes("only provider"),
-      ),
-    ).toBe(false);
+    expect(removalWarnings("key", "Anthropic", impact).some((l) => l.includes("only provider"))).toBe(false);
   });
 });
 
@@ -517,20 +437,14 @@ describe("modelAfterProviderChange", () => {
     // `claude-haiku-4-5-20251001` is meaningless at OpenRouter, and the field
     // was silently dropping into free-text mode rather than saying so — the
     // "wrong model at the wrong provider" failure, arriving through the form.
-    expect(
-      modelAfterProviderChange(
-        "claude-haiku-4-5-20251001",
-        "anthropic",
-        "openrouter",
-      ),
-    ).toBe("");
+    expect(modelAfterProviderChange("claude-haiku-4-5-20251001", "anthropic", "openrouter")).toBe(
+      "",
+    );
   });
 
   it("keeps it when the provider has not changed", () => {
     // Not the mid-keystroke rule: re-selecting the same provider is not an edit.
-    expect(modelAfterProviderChange("gpt-5", "openrouter", "openrouter")).toBe(
-      "gpt-5",
-    );
+    expect(modelAfterProviderChange("gpt-5", "openrouter", "openrouter")).toBe("gpt-5");
   });
 
   it("leaves blank blank, which is a working route everywhere", () => {
@@ -540,10 +454,7 @@ describe("modelAfterProviderChange", () => {
 
 describe("where the default goes when a provider is removed", () => {
   it("names the provider that will actually hold it", () => {
-    const anthropic = {
-      ...provider("anthropic", "anthropic"),
-      isDefault: true,
-    };
+    const anthropic = { ...provider("anthropic", "anthropic"), isDefault: true };
     const openrouter = provider("openrouter", "openrouter");
     const impact = removalImpact(
       anthropic,
@@ -553,9 +464,7 @@ describe("where the default goes when a provider is removed", () => {
     );
     expect(impact.defaultMovesTo).toBe("openrouter");
     const lines = removalWarnings("provider", "Anthropic", impact);
-    expect(
-      lines.some((l) => l.includes("moves the default to openrouter")),
-    ).toBe(true);
+    expect(lines.some((l) => l.includes("moves the default to openrouter"))).toBe(true);
     // One-way, and said so: re-adding the credential did not bring the marker
     // back, and nothing on screen admitted that.
     expect(lines.some((l) => l.includes("will not move it back"))).toBe(true);
@@ -566,9 +475,7 @@ describe("where the default goes when a provider is removed", () => {
     const impact = removalImpact(only, [only], {} as RoutingMap, categoryOf);
     expect(impact.defaultMovesTo).toBeNull();
     expect(
-      removalWarnings("provider", "Anthropic", impact).some((l) =>
-        l.includes("Managed"),
-      ),
+      removalWarnings("provider", "Anthropic", impact).some((l) => l.includes("Managed")),
     ).toBe(true);
   });
 });
@@ -586,29 +493,23 @@ describe("removing a local runtime", () => {
       chat: parseRef("ollama:llama3"),
       reasoning: parseRef("openrouter:gpt-5"),
     } as RoutingMap;
-    const { routing: next, reset } = scrubOnRemove(
-      routing,
-      ollama,
-      [openrouter],
-      categoryOf,
-    );
+
+    const { routing: next, reset } = scrubOnRemove(routing, ollama, [openrouter], categoryOf);
     expect(reset).toEqual(["chat"]);
     expect(next.chat).toEqual({ kind: "default" });
     expect(next.reasoning).toEqual(parseRef("openrouter:gpt-5"));
+    expect(next.chat).toEqual({ kind: "default" });
   });
 
   it("leaves a slug-less local route alone while another runtime serves it", () => {
     const ollama = provider("ollama", "ollama");
     const lmstudio = provider("lmstudio", "lmstudio");
     const routing = { chat: parseRef("local:llama3") } as RoutingMap;
-    expect(
-      scrubOnRemove(routing, ollama, [lmstudio], categoryOf).reset,
-    ).toEqual([]);
-    expect(scrubOnRemove(routing, ollama, [], categoryOf).reset).toEqual([
-      "chat",
-    ]);
+    expect(scrubOnRemove(routing, ollama, [lmstudio], categoryOf).reset).toEqual([]);
+    expect(scrubOnRemove(routing, ollama, [], categoryOf).reset).toEqual(["chat"]);
   });
 });
+
 describe("the false Managed floor", () => {
   /**
    * `primaryLabel` printed `Primary (Managed)` whenever nothing was enabled —
