@@ -56,7 +56,14 @@ export function rowSubline(provider: SearchProvider): string {
 }
 
 /** A control a row can offer. */
-export type RowControl = "toggle" | "test" | "replace-key" | "remove-key" | "make-default" | "edit-endpoint" | "remove";
+export type RowControl =
+  | "toggle"
+  | "test"
+  | "replace-key"
+  | "remove-key"
+  | "make-default"
+  | "edit-endpoint"
+  | "remove";
 
 /**
  * Which controls a row offers.
@@ -109,8 +116,12 @@ export function addOptions(providers: readonly SearchProvider[]): {
     detail: optionDetail(item),
   });
   return {
-    account: available.filter((item) => item.category === "account").map(toOption),
-    selfHosted: available.filter((item) => item.category === "self-hosted").map(toOption),
+    account: available
+      .filter((item) => item.category === "account")
+      .map(toOption),
+    selfHosted: available
+      .filter((item) => item.category === "self-hosted")
+      .map(toOption),
   };
 }
 
@@ -122,6 +133,9 @@ export function addOptions(providers: readonly SearchProvider[]): {
  * Managed counts: a deployment where it resolves has something to show even with
  * no records.
  */
-export function isEmpty(providers: readonly SearchProvider[], managedOn: boolean): boolean {
+export function isEmpty(
+  providers: readonly SearchProvider[],
+  managedOn: boolean,
+): boolean {
   return providers.length === 0 && !managedOn;
 }

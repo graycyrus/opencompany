@@ -101,7 +101,10 @@ export async function connectSearchProvider(
   company: string | null,
   body: { slug: string; apiKey?: string; endpoint?: string },
 ): Promise<SearchConnectResult> {
-  return client.post<SearchConnectResult>(`${client.scopeFor(company)}/search/providers`, body);
+  return client.post<SearchConnectResult>(
+    `${client.scopeFor(company)}/search/providers`,
+    body,
+  );
 }
 
 /** Turns one provider on or off, or re-addresses a self-hosted one. */
@@ -152,7 +155,10 @@ export async function setSearchDefault(
   company: string | null,
   slug: string | null,
 ): Promise<SearchStatus> {
-  return client.put<SearchStatus>(`${client.scopeFor(company)}/search/default`, { slug });
+  return client.put<SearchStatus>(
+    `${client.scopeFor(company)}/search/default`,
+    { slug },
+  );
 }
 
 /**
@@ -166,7 +172,10 @@ export async function testSearchProvider(
   company: string | null,
   body: { slug: string; apiKey?: string; endpoint?: string },
 ): Promise<SearchConnectResult> {
-  return client.post<SearchConnectResult>(`${client.scopeFor(company)}/search/test`, body);
+  return client.post<SearchConnectResult>(
+    `${client.scopeFor(company)}/search/test`,
+    body,
+  );
 }
 
 /** Clears every connection, falling the company back to managed search. */

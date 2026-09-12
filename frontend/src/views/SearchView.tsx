@@ -32,7 +32,10 @@ import { GrantNamespace } from "@/components/grant-namespace";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { AddProviderDialog } from "@/search-providers/AddProviderDialog";
-import { ProviderConnectDialog, type ConnectIntent } from "@/search-providers/ProviderConnectDialog";
+import {
+  ProviderConnectDialog,
+  type ConnectIntent,
+} from "@/search-providers/ProviderConnectDialog";
 import { ProviderList } from "@/search-providers/ProviderList";
 import { COPY, labelOf } from "@/search-providers/catalogue";
 import {
@@ -42,7 +45,11 @@ import {
   describeTest,
   type TestState,
 } from "@/search-providers/classify";
-import type { ConfirmTarget, ProbeClass, SearchProvider } from "@/search-providers/types";
+import type {
+  ConfirmTarget,
+  ProbeClass,
+  SearchProvider,
+} from "@/search-providers/types";
 
 interface Props {
   client: OpenCompanyClient;
@@ -173,7 +180,9 @@ export function SearchView({ client, company }: Props) {
     async (provider: SearchProvider) => {
       setTests((prior) => ({ ...prior, [provider.slug]: { kind: "testing" } }));
       try {
-        const result = await testSearchProvider(client, company, { slug: provider.slug });
+        const result = await testSearchProvider(client, company, {
+          slug: provider.slug,
+        });
         setStatus(result.status);
         if (result.ok) {
           setHealth((prior) => {
@@ -192,7 +201,11 @@ export function SearchView({ client, company }: Props) {
           });
         }
       } catch (err) {
-        settleTest(provider.slug, { kind: "done", ok: false, message: reason(err) });
+        settleTest(provider.slug, {
+          kind: "done",
+          ok: false,
+          message: reason(err),
+        });
       }
     },
     [client, company, settleTest],
@@ -207,13 +220,27 @@ export function SearchView({ client, company }: Props) {
       setBusySlug(slug);
       try {
         if (intent.kind === "replace-key") {
-          setStatus(await replaceSearchProviderKey(client, company, slug, values.apiKey ?? ""));
+          setStatus(
+            await replaceSearchProviderKey(
+              client,
+              company,
+              slug,
+              values.apiKey ?? "",
+            ),
+          );
           toast.success(`${label} key replaced.`);
         } else if (intent.kind === "edit-endpoint") {
-          setStatus(await updateSearchProvider(client, company, slug, { endpoint: values.endpoint }));
+          setStatus(
+            await updateSearchProvider(client, company, slug, {
+              endpoint: values.endpoint,
+            }),
+          );
           toast.success(`${label} address saved.`);
         } else {
-          const result = await connectSearchProvider(client, company, { slug, ...values });
+          const result = await connectSearchProvider(client, company, {
+            slug,
+            ...values,
+          });
           setStatus(result.status);
           const probeClass = result.probeClass;
           if (result.ok) {
@@ -263,7 +290,9 @@ export function SearchView({ client, company }: Props) {
         <div className="w-full px-4 py-6">
           <Alert variant="destructive" data-testid="search-load-error">
             <TriangleAlert className="size-4" />
-            <AlertDescription>Could not load search settings: {loadError}</AlertDescription>
+            <AlertDescription>
+              Could not load search settings: {loadError}
+            </AlertDescription>
           </Alert>
         </div>
       </div>
@@ -297,10 +326,10 @@ export function SearchView({ client, company }: Props) {
             title="Only an admin can change where this company searches"
           >
             Whatever a teammate types into a search reaches the provider marked
-            here, under that provider&rsquo;s own retention policy &mdash; and the
-            calls are billed to whichever account the key belongs to. Both are the
-            company&rsquo;s to decide, so an admin decides them. You can see which
-            index answers today.
+            here, under that provider&rsquo;s own retention policy &mdash; and
+            the calls are billed to whichever account the key belongs to. Both
+            are the company&rsquo;s to decide, so an admin decides them. You can
+            see which index answers today.
           </AdminOnlyNotice>
         )}
 
@@ -308,9 +337,9 @@ export function SearchView({ client, company }: Props) {
           <Alert variant="warning" data-testid="search-not-in-build">
             <TriangleAlert className="size-4" />
             <AlertDescription>
-              This host was built without the agent tools, so these settings will
-              be stored and have no effect. Rebuild with the <code>openhuman</code>{" "}
-              feature.
+              This host was built without the agent tools, so these settings
+              will be stored and have no effect. Rebuild with the{" "}
+              <code>openhuman</code> feature.
             </AlertDescription>
           </Alert>
         )}
@@ -366,18 +395,29 @@ export function SearchView({ client, company }: Props) {
               onToggle={(provider, enabled) =>
                 void run(
                   provider.slug,
-                  enabled ? `${provider.label} enabled.` : `${provider.label} disabled.`,
-                  () => updateSearchProvider(client, company, provider.slug, { enabled }),
+                  enabled
+                    ? `${provider.label} enabled.`
+                    : `${provider.label} disabled.`,
+                  () =>
+                    updateSearchProvider(client, company, provider.slug, {
+                      enabled,
+                    }),
                 )
               }
               onTest={(provider) => void onTest(provider)}
-              onReplaceKey={(provider) => setIntent({ kind: "replace-key", slug: provider.slug })}
+              onReplaceKey={(provider) =>
+                setIntent({ kind: "replace-key", slug: provider.slug })
+              }
               // Destructive, so it asks first. Both of these are irreversible in
               // the only sense that matters here: the key is write-only and is
               // never shown back, so an operator who clears the wrong one cannot
               // retype it from the screen.
               onRemoveKey={(provider) =>
-                setConfirm({ kind: "remove-key", slug: provider.slug, label: provider.label })
+                setConfirm({
+                  kind: "remove-key",
+                  slug: provider.slug,
+                  label: provider.label,
+                })
               }
               onEditEndpoint={(provider) =>
                 setIntent({
@@ -394,7 +434,11 @@ export function SearchView({ client, company }: Props) {
                 )
               }
               onRemove={(provider) =>
-                setConfirm({ kind: "remove", slug: provider.slug, label: provider.label })
+                setConfirm({
+                  kind: "remove",
+                  slug: provider.slug,
+                  label: provider.label,
+                })
               }
             />
           </CardContent>
@@ -403,7 +447,10 @@ export function SearchView({ client, company }: Props) {
         {/* The only explanatory sentence that survives the deletion pass, and it
             earns its place: it is the one thing on this page that says a
             connected-but-not-default provider is not being used. */}
-        <p className="text-xs text-muted-foreground" data-testid="search-default-note">
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="search-default-note"
+        >
           {COPY.defaultIsTheOnlyOne}
         </p>
 
@@ -413,7 +460,9 @@ export function SearchView({ client, company }: Props) {
             variant="outline"
             size="sm"
             data-testid="search-disconnect-all"
-            onClick={() => setConfirm({ kind: "disconnect-all", label: "every provider" })}
+            onClick={() =>
+              setConfirm({ kind: "disconnect-all", label: "every provider" })
+            }
           >
             Disconnect all providers
           </Button>
@@ -423,11 +472,16 @@ export function SearchView({ client, company }: Props) {
       {/* Every destructive action passes through here. None of the three can be
           undone from this page: a key is write-only and is never shown back, so
           an operator who clears the wrong one has nothing on screen to retype. */}
-      <AlertDialog open={confirm !== null} onOpenChange={(open) => !open && setConfirm(null)}>
+      <AlertDialog
+        open={confirm !== null}
+        onOpenChange={(open) => !open && setConfirm(null)}
+      >
         <AlertDialogContent data-testid="search-confirm">
           <AlertDialogHeader>
             <AlertDialogTitle>{confirmCopy(confirm).title}</AlertDialogTitle>
-            <AlertDialogDescription>{confirmCopy(confirm).body}</AlertDialogDescription>
+            <AlertDialogDescription>
+              {confirmCopy(confirm).body}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
@@ -438,8 +492,10 @@ export function SearchView({ client, company }: Props) {
                 setConfirm(null);
                 if (!pending) return;
                 if (pending.kind === "disconnect-all") {
-                  void run("__all__", "Disconnected. Searches go through the included account.", () =>
-                    clearSearch(client, company),
+                  void run(
+                    "__all__",
+                    "Disconnected. Searches go through the included account.",
+                    () => clearSearch(client, company),
                   );
                 } else if (pending.kind === "remove") {
                   void run(pending.slug, `${pending.label} removed.`, () =>

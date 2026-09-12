@@ -60,14 +60,20 @@ export function ProviderConnectDialog({
   // provider must not carry a key typed for the previous one into this save.
   useEffect(() => {
     setApiKey("");
-    setEndpoint(intent?.kind === "edit-endpoint" ? (intent.endpoint ?? "") : "");
+    setEndpoint(
+      intent?.kind === "edit-endpoint" ? (intent.endpoint ?? "") : "",
+    );
   }, [intent]);
 
   if (!intent || !item) return null;
 
-  const wantsKey = item.category === "account" && intent.kind !== "edit-endpoint";
-  const wantsEndpoint = item.category === "self-hosted" && intent.kind !== "replace-key";
-  const ready = (!wantsKey || apiKey.trim().length > 0) && (!wantsEndpoint || endpoint.trim().length > 0);
+  const wantsKey =
+    item.category === "account" && intent.kind !== "edit-endpoint";
+  const wantsEndpoint =
+    item.category === "self-hosted" && intent.kind !== "replace-key";
+  const ready =
+    (!wantsKey || apiKey.trim().length > 0) &&
+    (!wantsEndpoint || endpoint.trim().length > 0);
 
   const title =
     intent.kind === "connect"
@@ -78,7 +84,10 @@ export function ProviderConnectDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
-      <DialogContent className="sm:max-w-md" data-testid="search-connect-provider">
+      <DialogContent
+        className="sm:max-w-md"
+        data-testid="search-connect-provider"
+      >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
@@ -88,11 +97,11 @@ export function ProviderConnectDialog({
           </DialogDescription>
         </DialogHeader>
 
-      {/* A real form, so Enter in either field submits. A dialog whose only
+        {/* A real form, so Enter in either field submits. A dialog whose only
           route to its primary action is a mouse is one a keyboard user has to
           tab past every field to finish. */}
-      <form
-        onSubmit={(event) => {
+        <form
+          onSubmit={(event) => {
             event.preventDefault();
             if (!busy && ready) {
               onSubmit({
@@ -102,53 +111,70 @@ export function ProviderConnectDialog({
             }
           }}
         >
-        <div className="grid gap-4">
-          {wantsKey && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="search-connect-key">API key</Label>
-              <Input
-                id="search-connect-key"
-                type="password"
-                autoComplete="off"
-                maxLength={512}
-                value={apiKey}
-                data-testid="search-connect-key"
-                onChange={(event) => setApiKey(event.target.value)}
-              />
-              {item.keyHint && <p className="text-xs text-muted-foreground">{item.keyHint}</p>}
-            </div>
-          )}
+          <div className="grid gap-4">
+            {wantsKey && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="search-connect-key">API key</Label>
+                <Input
+                  id="search-connect-key"
+                  type="password"
+                  autoComplete="off"
+                  maxLength={512}
+                  value={apiKey}
+                  data-testid="search-connect-key"
+                  onChange={(event) => setApiKey(event.target.value)}
+                />
+                {item.keyHint && (
+                  <p className="text-xs text-muted-foreground">
+                    {item.keyHint}
+                  </p>
+                )}
+              </div>
+            )}
 
-          {wantsEndpoint && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="search-connect-endpoint">Instance URL</Label>
-              <Input
-                id="search-connect-endpoint"
-                inputMode="url"
-                placeholder="https://search.example.internal"
-                maxLength={2048}
-                value={endpoint}
-                data-testid="search-connect-endpoint"
-                onChange={(event) => setEndpoint(event.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">{COPY.searxngFormats}</p>
-            </div>
-          )}
-        </div>
-
-        <DialogFooter className="gap-2 sm:flex-col sm:items-stretch">
-          {/* On the control it applies to, rather than above the fold. */}
-          {wantsKey && <p className="text-xs text-muted-foreground">{COPY.checkCosts}</p>}
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={busy || !ready} data-testid="search-connect-submit">
-              {intent.kind === "connect" ? "Connect" : "Save"}
-            </Button>
+            {wantsEndpoint && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="search-connect-endpoint">Instance URL</Label>
+                <Input
+                  id="search-connect-endpoint"
+                  inputMode="url"
+                  placeholder="https://search.example.internal"
+                  maxLength={2048}
+                  value={endpoint}
+                  data-testid="search-connect-endpoint"
+                  onChange={(event) => setEndpoint(event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {COPY.searxngFormats}
+                </p>
+              </div>
+            )}
           </div>
-        </DialogFooter>
-      </form>
+
+          <DialogFooter className="gap-2 sm:flex-col sm:items-stretch">
+            {/* On the control it applies to, rather than above the fold. */}
+            {wantsKey && (
+              <p className="text-xs text-muted-foreground">{COPY.checkCosts}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={onCancel}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={busy || !ready}
+                data-testid="search-connect-submit"
+              >
+                {intent.kind === "connect" ? "Connect" : "Save"}
+              </Button>
+            </div>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

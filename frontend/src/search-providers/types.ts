@@ -19,7 +19,8 @@ export type ProviderCategory = "account" | "self-hosted";
  * most likely failure when connecting a perfectly healthy instance — and it
  * involves no credential at all.
  */
-export type ProbeClass = "auth" | "format" | "quota" | "endpoint" | "timeout" | "unknown";
+export type ProbeClass =
+  "auth" | "format" | "quota" | "endpoint" | "timeout" | "unknown";
 
 /**
  * One search account (or instance) this company has connected.

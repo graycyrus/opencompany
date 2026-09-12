@@ -62,12 +62,21 @@ const SEARCH = {
 };
 
 /** A client answering the page's own read, and `/auth/me` as `role`. */
-function clientAs(role: "admin" | "member", answer: unknown): OpenCompanyClient {
+function clientAs(
+  role: "admin" | "member",
+  answer: unknown,
+): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
     get: (path: string) =>
       path.endsWith("/auth/me")
-        ? Promise.resolve({ id: "u1", email: "a@b.c", role, company: "acme", hasPassword: true })
+        ? Promise.resolve({
+            id: "u1",
+            email: "a@b.c",
+            role,
+            company: "acme",
+            hasPassword: true,
+          })
         : Promise.resolve(answer),
   } as unknown as OpenCompanyClient;
 }
@@ -86,7 +95,9 @@ function at(testid: string): HTMLElement | null {
 }
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -163,7 +174,8 @@ describe("Settings → Search, by role", () => {
       const element = at(control);
       expect(element).not.toBeNull();
       expect(
-        element?.hasAttribute("disabled") || element?.getAttribute("aria-disabled") === "true",
+        element?.hasAttribute("disabled") ||
+          element?.getAttribute("aria-disabled") === "true",
       ).toBe(true);
     }
     // Disconnecting everything is not offered to a member at all.
@@ -176,7 +188,9 @@ describe("Settings → Search, by role", () => {
     const client = clientAs("member", SEARCH);
     await show(createElement(SearchView, { client, company: "acme" }));
 
-    expect(at("search-providers")).not.toBeNull();
+    expect(at("search-provider-list")?.getAttribute("data-state")).toBe(
+      "populated",
+    );
     expect(at("search-provider-brave")).not.toBeNull();
     expect(at("search-provider-brave-default")).not.toBeNull();
   });

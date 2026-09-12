@@ -105,7 +105,8 @@ export const COPY = {
    * not enabled, so this is said *before* the operator submits as well as after
    * it fails.
    */
-  searxngFormats: "JSON output must be enabled — add `json` to `search.formats` in settings.yml.",
+  searxngFormats:
+    "JSON output must be enabled — add `json` to `search.formats` in settings.yml.",
 
   /** The only explanatory sentence that survives on the page. */
   defaultIsTheOnlyOne: "Your teammates search through the default provider.",
@@ -113,7 +114,9 @@ export const COPY = {
 
 /** The detail line an add-dialog option shows. */
 export function optionDetail(item: CatalogueEntry): string {
-  return item.category === "self-hosted" ? "Runs on your own network" : item.endpoint;
+  return item.category === "self-hosted"
+    ? "Runs on your own network"
+    : item.endpoint;
 }
 
 /** The host part of an instance URL, for a row's sub-line. */

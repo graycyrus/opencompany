@@ -128,7 +128,9 @@ function Category({
         onValueChange={(value) => value && onChoose(String(value))}
       >
         <SelectTrigger id={`search-add-${id}`} className="w-full">
-          <SelectValue placeholder={placeholder}>{() => placeholder}</SelectValue>
+          <SelectValue placeholder={placeholder}>
+            {() => placeholder}
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           {options.map((option) => (

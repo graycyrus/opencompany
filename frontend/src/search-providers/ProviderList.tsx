@@ -14,7 +14,15 @@ import { Monogram } from "./AddProviderDialog";
 import { COPY } from "./catalogue";
 import { healthLabel, testOutcome } from "./classify";
 import type { TestState } from "./classify";
-import { MANAGED_LABEL, MANAGED_SLUG, controlsFor, isEmpty, managedIsOn, managedSubline, rowSubline } from "./resolve";
+import {
+  MANAGED_LABEL,
+  MANAGED_SLUG,
+  controlsFor,
+  isEmpty,
+  managedIsOn,
+  managedSubline,
+  rowSubline,
+} from "./resolve";
 import type { ProbeClass, SearchProvider } from "./types";
 
 /**
@@ -76,7 +84,9 @@ function TestControl({
         data-testid={`search-provider-${slug}-test`}
         onClick={onTest}
       >
-        <RefreshCw className={cn("size-4", state.kind === "testing" && "animate-spin")} />
+        <RefreshCw
+          className={cn("size-4", state.kind === "testing" && "animate-spin")}
+        />
       </Button>
     </>
   );
@@ -142,12 +152,23 @@ export function ProviderList({
 }) {
   const managedOn = managedIsOn(inBuild, managedConfigured);
 
+  // Both branches carry the SAME `data-testid` and differ by `data-state`.
+  // Two ids meant every caller had to know which branch it was about to get,
+  // and a test that pinned one of them was really asserting something about the
+  // fixture — which is how the authority e2e came to fail on a runner with no
+  // managed credential rather than on anything to do with authority.
+  //
   // Nothing at all: no records, and no managed surface behind them. The card
   // would otherwise be a heading over blank space, which reads as a page that
-  // failed to load rather than a company that has not started.
+  // failed to load rather than a company that has not started. The empty state
+  // is what a new operator sees, so it gets a real sentence and a CTA.
   if (isEmpty(providers, managedOn)) {
     return (
-      <div className="flex flex-col items-start gap-3 px-4 py-6" data-testid="search-providers-empty">
+      <div
+        className="flex flex-col items-start gap-3 px-4 py-6"
+        data-testid="search-provider-list"
+        data-state="empty"
+      >
         <p className="text-sm">
           <span className="font-medium">No search providers connected.</span>{" "}
           <span className="text-muted-foreground">
@@ -163,13 +184,20 @@ export function ProviderList({
   }
 
   return (
-    <ul className="divide-y divide-border" data-testid="search-providers">
+    <ul
+      className="divide-y divide-border"
+      data-testid="search-provider-list"
+      data-state="populated"
+    >
       {/* Always first. It is not in `providers` because it is not a record — it
           is the fallback every company has whether or not it configured
           anything. It is rendered whatever it resolves to, and says which,
           rather than carrying a permanent "Always on" badge: managed search is
           always the FALLBACK, which is a different claim from always WORKING. */}
-      <li className="flex items-center gap-3 px-4 py-3" data-testid="search-provider-managed">
+      <li
+        className="flex items-center gap-3 px-4 py-3"
+        data-testid="search-provider-managed"
+      >
         <Monogram label={MANAGED_LABEL} />
         <span className="grid min-w-0 flex-1 leading-tight">
           <span className="truncate text-sm font-medium">{MANAGED_LABEL}</span>
@@ -236,18 +264,26 @@ function ProviderRow({
   const offers = (control: string) => controls.includes(control as never);
 
   return (
-    <li className="flex items-center gap-3 px-4 py-3" data-testid={`search-provider-${provider.slug}`}>
+    <li
+      className="flex items-center gap-3 px-4 py-3"
+      data-testid={`search-provider-${provider.slug}`}
+    >
       <Monogram label={provider.label} />
       <span className="grid min-w-0 flex-1 leading-tight">
         <span className="truncate text-sm font-medium">{provider.label}</span>
-        <span className="truncate text-xs text-muted-foreground">{rowSubline(provider)}</span>
+        <span className="truncate text-xs text-muted-foreground">
+          {rowSubline(provider)}
+        </span>
       </span>
 
       {/* A word, not a sentence. What it means — that this is the one the
           teammates actually search through — is the card's single sub-line,
           said once rather than on every row. */}
       {provider.isDefault && (
-        <Badge variant="secondary" data-testid={`search-provider-${provider.slug}-default`}>
+        <Badge
+          variant="secondary"
+          data-testid={`search-provider-${provider.slug}-default`}
+        >
           Default
         </Badge>
       )}
@@ -297,7 +333,9 @@ function ProviderRow({
         />
         <DropdownMenuContent align="end">
           {offers("replace-key") && (
-            <DropdownMenuItem onClick={() => onReplaceKey(provider)}>Replace key</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onReplaceKey(provider)}>
+              Replace key
+            </DropdownMenuItem>
           )}
           {offers("edit-endpoint") && (
             <DropdownMenuItem onClick={() => onEditEndpoint(provider)}>
@@ -305,16 +343,24 @@ function ProviderRow({
             </DropdownMenuItem>
           )}
           {offers("make-default") && (
-            <DropdownMenuItem onClick={() => onMakeDefault(provider)}>Set as default</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onMakeDefault(provider)}>
+              Set as default
+            </DropdownMenuItem>
           )}
           {/* Offered only where there is a key to remove. SearXNG has an address
               and no account, so this never appears on its row. */}
           {offers("remove-key") && (
-            <DropdownMenuItem variant="destructive" onClick={() => onRemoveKey(provider)}>
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => onRemoveKey(provider)}
+            >
               Remove key
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem variant="destructive" onClick={() => onRemove(provider)}>
+          <DropdownMenuItem
+            variant="destructive"
+            onClick={() => onRemove(provider)}
+          >
             Remove
           </DropdownMenuItem>
         </DropdownMenuContent>

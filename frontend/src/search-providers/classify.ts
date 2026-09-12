@@ -48,7 +48,10 @@ export function destroysCredential(probeClass: ProbeClass): boolean {
  * dead end and a next step. The others are about the account or the check, so
  * they name neither.
  */
-export function describeProbe(probeClass: ProbeClass, provider: string): ProbeAdvisory {
+export function describeProbe(
+  probeClass: ProbeClass,
+  provider: string,
+): ProbeAdvisory {
   switch (probeClass) {
     case "auth":
       return {
@@ -130,7 +133,9 @@ export type TestState =
  * deliberately — it describes what happened to a *save*, where the only question
  * is how bad the news is. A test can simply be good news.
  */
-export function testOutcome(state: TestState): { tone: "ok" | "error"; message: string } | null {
+export function testOutcome(
+  state: TestState,
+): { tone: "ok" | "error"; message: string } | null {
   if (state.kind !== "done") return null;
   return { tone: state.ok ? "ok" : "error", message: state.message };
 }
