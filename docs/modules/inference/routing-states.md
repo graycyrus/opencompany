@@ -135,3 +135,50 @@ to a refusal.
 
 `ProviderDto.origin` (`entryZero` / `indexed`) closes that. The rules do not
 move; the row stops offering what cannot work, and its sub-line says what it is.
+
+## A company routed to Managed is a configured company
+
+`RuntimeBuilder::build` picks the harness brain over the offline echo brain on
+one predicate: whether `resolve_effective_scoped` (`src/company/inference.rs`)
+answers `Some`. It had two branches, and **Managed was in neither** — it has no
+row in `inference/providers` (it resolves through a credential chain rather than
+from a record), its credential lives at `provider/tinyhumans/key`, and its
+*selection* lives in `inference/routes`.
+
+So a company with its providers switched off and all four workloads routed to
+`managed` resolved `None`, booted onto the echo brain, and stayed there.
+Restarting the host changed nothing, because a fresh boot ran the same
+computation and got the same answer — while `resolve_effective_for_tier`
+resolved those same rows to `managed_decl` perfectly well. The turn path knew;
+the boot path had no way to ask.
+
+A third branch asks, **last of the three**, so it can only turn a `None` into a
+`Some` and no company that resolves today resolves anywhere new:
+
+1. the provider list — an enabled, indexed provider;
+2. the legacy chain — runtime blob, then manifest, then the env default;
+3. the routing table naming `managed`.
+
+Three things decide what branch 3 answers, and each is deliberate:
+
+- **It goes through `managed_decl`**, the same function the routed turn path
+  calls, rather than forming a second opinion about what managed resolution
+  means. Two implementations of that question is the bug class this branch
+  exists to close, not one to add to.
+- **The predicate is the resolved declaration's own credential.** `managed_decl`
+  always returns a decl — the platform endpoint exists regardless — and only
+  `managed_identity` decides whether a credential reaches it. `Credential::None`
+  means the operator picked Managed and put nothing behind it, and that company
+  belongs on the echo brain exactly as before.
+- **`ProviderRef::Default` does not count.** An absent route resolves to
+  `Resolution::Primary`, which branch 1 already tried; counting it would report
+  every company as configured.
+
+And it is gated on the Managed switch. `resolve_effective_for_tier` *refuses* an
+explicit `managed` route while Managed is switched off, so a boot that selected
+the harness brain on the strength of those rows would hand every turn to a
+resolver that errors — inference that looks live on the status card and fails on
+contact. Off means off on both paths.
+
+`restart_pending` needs no change of its own: it runs over this same resolver, so
+the banner and the predicate `build` actually tests cannot disagree.
