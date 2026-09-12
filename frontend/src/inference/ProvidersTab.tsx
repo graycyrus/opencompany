@@ -324,7 +324,12 @@ export function ProvidersTab({
           setConnecting(option);
         }}
       />
+      {/* Keyed so the dialog is a fresh component per open. Its fields seed at
+          mount from this row; without the key React would keep the previous
+          open's state and the seeding would have to be an effect, which runs
+          after paint and races with anything typed before it. */}
       <ProviderConnectDialog
+        key={`${connecting ?? "closed"}:${editing?.slug ?? "new"}`}
         optionSlug={connecting}
         providers={state.providers}
         editing={editing}
