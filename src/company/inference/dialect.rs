@@ -88,23 +88,40 @@ impl Knob {
 /// determinism wants.
 const DETERMINISTIC_SEED: i64 = 0;
 
-/// The sampler setting that means "least random" in the OpenAI dialect. Rules
-/// rewrite it per model; nothing outside this module names it.
-const DETERMINISTIC_TEMPERATURE: f64 = 0.0;
+/// The sampler setting that means "least random" in the OpenAI dialect.
+///
+/// Public because the vendored `ModelRequest` carries a bare float, so an
+/// in-repo caller that wants determinism has to spell it as a number at that
+/// boundary. Naming it lets the call site say what it means —
+/// `temperature: Some(dialect::DETERMINISTIC)` — and lets
+/// [`Sampling::from_request`] read the intent back out, instead of nine call
+/// sites each independently deciding that `0.0` is a sensible thing to send to
+/// an unknown model.
+pub const DETERMINISTIC: f64 = 0.0;
+
+/// The value [`Sampling::Deterministic`] asks for before any rule rewrites it.
+const DETERMINISTIC_TEMPERATURE: f64 = DETERMINISTIC;
 
 impl Sampling {
     /// The intent behind a vendored `ModelRequest.temperature`.
     ///
-    /// The boundary type carries a float, so intent has to be recovered at the
-    /// edge rather than passed through it. `None` is the honest case — no
-    /// opinion — and a value is taken at face value as [`Sampling::Exact`]:
-    /// guessing that `0.0` "really meant" determinism would be inventing intent
-    /// the caller did not express, which is the mistake this type exists to
-    /// stop. In-repo callers state their intent directly and never come through
-    /// here.
+    /// The boundary type carries a float and nothing else, so intent has to be
+    /// recovered at the edge rather than passed through it.
+    ///
+    /// * `None` — no opinion. The honest case, and the one `unwrap_or(0.0)`
+    ///   destroyed by turning it into the most opinionated value in the range.
+    /// * `Some(0.0)` — [`Sampling::Deterministic`]. Nobody wants `0.0` *as a
+    ///   number*; it is the conventional spelling of "least random this model
+    ///   can be", which is an intent and not a value. Reading it as one is what
+    ///   lets us reach for `seed` as well, and lets a model that forbids a
+    ///   temperature degrade instead of returning a 400.
+    /// * anything else — [`Sampling::Exact`], taken at face value. A caller that
+    ///   named `0.4` wants `0.4`, and inventing something else from it would be
+    ///   the mistake this type exists to stop.
     pub fn from_request(temperature: Option<f64>) -> Self {
         match temperature {
             None => Self::Default,
+            Some(value) if value == DETERMINISTIC => Self::Deterministic,
             Some(value) => Self::Exact(value),
         }
     }
@@ -464,6 +481,30 @@ mod tests {
     fn a_clamp_brings_a_value_inside_the_range_rather_than_failing() {
         let fields = translate("meta-llama/Llama-3.3-70B", vec![Knob::new("temperature", 1.8)]);
         assert_eq!(fields, vec![("temperature".to_string(), serde_json::json!(1.0))]);
+    }
+
+    /// The nine in-repo workloads asking for determinism reach the providers
+    /// through a vendored `ModelRequest` that carries a bare float, so the intent
+    /// has to survive that round trip or the call sites are decorative.
+    #[test]
+    fn determinism_survives_the_vendored_float_boundary() {
+        assert_eq!(
+            Sampling::from_request(Some(DETERMINISTIC)),
+            Sampling::Deterministic
+        );
+        assert_eq!(Sampling::from_request(None), Sampling::Default);
+        // A caller that named a real value is not reinterpreted: triage keeps
+        // 0.2 deliberately, "so a genuinely borderline message is not forced".
+        assert_eq!(Sampling::from_request(Some(0.2)), Sampling::Exact(0.2));
+
+        // And the whole point: that intent, through the boundary, onto a model
+        // that rejects every temperature — without a 400.
+        let fields = translate(
+            "claude-opus-5",
+            Sampling::from_request(Some(DETERMINISTIC)).knobs(),
+        );
+        assert!(fields.iter().any(|(k, v)| k == "temperature"
+            && *v == serde_json::json!(1.0)));
     }
 
     #[test]
