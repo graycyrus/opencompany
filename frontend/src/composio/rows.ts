@@ -235,10 +235,11 @@ export function composioRows(
 /**
  * The credential dialog's heading.
  *
- * Four branches, because the dialog is opened from four places and a modal that
- * says only "Add a token" leaves the operator to remember which of two routes
- * they clicked on. It names the route, not the field — the field is labelled
- * underneath it.
+ * Four branches over five entry points — `managed`/`byok` × add/replace, plus
+ * the own-account row's "Use this", which `composioForm` folds into that row's
+ * add. A modal that says only "Add a token" leaves the operator to remember
+ * which of two routes they clicked on, so this names the route rather than the
+ * field; the field is labelled underneath it.
  *
  * Deliberately never the exact phrase "Composio token": the popup's accessible
  * name comes from this string, and a Playwright `getByLabel(/Composio token/)`

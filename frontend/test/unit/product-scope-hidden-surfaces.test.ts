@@ -299,8 +299,10 @@ describe("Composio offers both routes, and says which one is live", () => {
 
   it("hides the way back when the managed chain resolves to nothing", async () => {
     // Offering a switch into an outage is worse than offering no switch. The
-    // row still reports why, which is what points the operator at the
-    // credential card above it.
+    // row still reports why, in its sub-line — which is the whole of what the
+    // operator gets here now that the company-credential card is off this page
+    // (it is on the API Key page), and is why the sub-line has to say which
+    // payer failed to resolve rather than only that one did not.
     await mountComposio(
       composioStatus({
         mode: "byok",
