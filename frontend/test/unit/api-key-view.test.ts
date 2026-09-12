@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyCredentialStatus } from "@/api/credential";
+import { captureKeyLink } from "@/lib/pending-key-link";
 import { ApiKeyView } from "@/views/connections/ApiKeyView";
 
 let container: HTMLDivElement;
@@ -358,5 +359,71 @@ describe("ApiKeyView offers no control that cannot act", () => {
     expect(document.body.textContent ?? "").toContain("Add a key");
     expect(document.querySelector('[data-testid="account-remove-key"]')).toBeNull();
     expect(writes).toHaveLength(0);
+  });
+});
+
+describe("ApiKeyView redeems a returning grant whatever else failed", () => {
+  // The grant comes back as a top-level navigation: `App` takes the code off
+  // the URL before the first render, strips the address bar because it is a
+  // live single-use credential, and hands it to a module-local box that a
+  // reload empties. The effect inside `ConnectTinyHumansButton` is the only
+  // thing that spends it.
+  //
+  // So that component's *mount* must not be gated on the credential read. It
+  // was, briefly: the header offers one action and the connect action is
+  // chosen from `status`, which is null while the read is in flight and stays
+  // null when it fails — and a company whose secret store hiccuped on exactly
+  // that page load would have lost the key it had just minted, with nothing on
+  // screen to try again with. Only what is *shown* may depend on the read.
+  it("finishes the link even when the credential read fails", async () => {
+    const finished: unknown[] = [];
+    captureKeyLink({ state: "st", code: "cd" }, false);
+
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) throw new Error("secret store unavailable");
+        throw new Error(`unexpected GET ${path}`);
+      },
+      post: async (path: string, body: unknown) => {
+        finished.push({ path, body });
+        return { status: credential({ source: "company" }), note: "" };
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+    await act(async () => {});
+
+    expect(finished).toHaveLength(1);
+    expect((finished[0] as { path: string }).path).toContain("/credential/link/finish");
+    expect((finished[0] as { body: unknown }).body).toEqual({ state: "st", code: "cd" });
+  });
+
+  // And the box is emptied by the redemption rather than by the mount, so a
+  // page that never had a grant never calls the route.
+  it("calls nothing when no grant is pending", async () => {
+    const finished: unknown[] = [];
+    captureKeyLink(null, false);
+
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) return credential({ source: "company" });
+        throw new Error(`unexpected GET ${path}`);
+      },
+      post: async () => {
+        finished.push(true);
+        return {};
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+    await act(async () => {});
+
+    expect(finished).toHaveLength(0);
   });
 });

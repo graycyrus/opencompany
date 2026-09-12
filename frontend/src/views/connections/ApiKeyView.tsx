@@ -282,18 +282,27 @@ export function ApiKeyView({ client, company }: Props) {
             </div>
             {/* Whichever action is live, never both and never a dead one. The
                 grant is the short path where the host has a hub; the paste
-                dialog is the only route where it does not. */}
-            {action === "connect" && (
-              <ConnectTinyHumansButton
-                client={client}
-                company={company}
-                available={status?.hubLink ?? false}
-                canManage={canManage}
-                configured={configured}
-                hint={false}
-                onConnected={() => setGeneration((n) => n + 1)}
-              />
-            )}
+                dialog is the only route where it does not.
+
+                The connect button is **mounted unconditionally** and hides
+                itself — `available`/`canManage` already make it render null —
+                rather than being gated by `action` out here. It is not only a
+                button: the effect that redeems a returning grant lives in it,
+                and the grant arrives on a fresh boot with the code already
+                stripped from the address bar and held in a module-local box
+                that a reload empties. Gating the mount on state that is null
+                while the credential read is in flight, or that stays null when
+                it fails, would drop the credential on the floor with no way
+                back to it. Only what is *shown* may depend on `action`. */}
+            <ConnectTinyHumansButton
+              client={client}
+              company={company}
+              available={action === "connect" && (status?.hubLink ?? false)}
+              canManage={canManage}
+              configured={configured}
+              hint={false}
+              onConnected={() => setGeneration((n) => n + 1)}
+            />
             {action === "key" && (
               <Button type="button" onClick={() => setEditing(true)} data-testid="account-add-key">
                 <KeyRound className="size-4" />

@@ -154,18 +154,22 @@ export function CompanyCredentialCard({
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Company credential
         </h2>
-        {/* "for connecting providers — not the model key" overshot. The
-            distinction is real and kept: this is not a model *provider's* key,
-            and pasting an OpenRouter key here is exactly the mistake the
-            `tinyhumans/key`-vs-`inference/key` split exists to prevent. What
-            was false is the compression into "nothing to do with models" —
-            `ops::company_key::finish_link` writes one granted value into
-            **both** slots and declares the managed provider, so this credential
-            is very often what the agents think on. A line denying that sends an
-            admin hunting for a second key they do not need. Both halves, one
-            line. */}
+        {/* "for connecting providers — not the model key" overshot, and
+            "pays for thinking" then overshot the other way. The distinction is
+            real and kept: this is not a model *provider's* key, and pasting an
+            OpenRouter key here is exactly the mistake the
+            `tinyhumans/key`-vs-provider-key split exists to prevent. What was
+            false is the compression into "nothing to do with models" — a
+            managed turn resolves through this very key (#2266), so this
+            credential is very often what the agents think on.
+
+            But only *where the models are TinyHumans'*. On a company pointed at
+            OpenRouter or its own endpoint this key pays for no thinking at all,
+            and an unconditional "pays for thinking" would send someone chasing
+            spend to the wrong account — the same defect as the row on the
+            Account page, one card over. The condition is three words. */}
         <span className="text-xs text-muted-foreground">
-          connects your apps and pays for thinking — not an OpenRouter key
+          connects your apps, and pays for TinyHumans models — not an OpenRouter key
         </span>
       </div>
 
