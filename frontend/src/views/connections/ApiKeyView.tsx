@@ -36,7 +36,7 @@ import { cn } from "@/lib/utils";
 import {
   ACCOUNT_LABEL,
   REMOVAL_CONSEQUENCE,
-  REMOVAL_LEAVES_THINKING,
+  REMOVAL_AND_THINKING,
   accountShape,
   accountSubline,
   balanceLine,
@@ -264,13 +264,20 @@ export function ApiKeyView({ client, company }: Props) {
               <h2 className="text-sm font-medium">{ACCOUNT_LABEL}</h2>
               {/* The billing consequence, on the card carrying the button it is
                   true of, and visible before anything is saved. Connecting
-                  writes `inference/key` and declares the managed provider as
-                  well as the identity, so it moves the thinking bill; the paste
-                  dialog says the narrower thing, because it does the narrower
-                  thing. */}
+                  stores the identity and declares the `managed` provider, and
+                  managed turns resolve through this same key (#2266) — so it
+                  moves the thinking bill as well.
+
+                  Qualified, because the managed chain has two rungs above this
+                  one: a key pasted for TinyHumans on the LLM page
+                  (`provider/tinyhumans/key`), and the legacy `inference/key`.
+                  Where either is set it keeps answering, and connecting moves
+                  the apps without moving the bill. Saying so is cheaper than
+                  being wrong on a company that has one. */}
               <p className="text-xs text-muted-foreground">
                 One key for the apps your agents act through and the models they think with.
-                Connecting moves both onto this company&apos;s account.
+                Connecting points both at this company&apos;s account — unless the LLM page
+                already holds a TinyHumans key of its own, which keeps precedence.
               </p>
             </div>
             {/* Whichever action is live, never both and never a dead one. The
@@ -490,7 +497,7 @@ export function ApiKeyView({ client, company }: Props) {
             <AlertDialogHeader>
               <AlertDialogTitle>Remove this company&apos;s account key?</AlertDialogTitle>
               <AlertDialogDescription>{REMOVAL_CONSEQUENCE}</AlertDialogDescription>
-              <AlertDialogDescription>{REMOVAL_LEAVES_THINKING}</AlertDialogDescription>
+              <AlertDialogDescription>{REMOVAL_AND_THINKING}</AlertDialogDescription>
               <AlertDialogDescription>
                 The key itself cannot be recovered from here — TinyHumans shows a key&apos;s value
                 once, when it is created. You would have to connect again or paste a new one.

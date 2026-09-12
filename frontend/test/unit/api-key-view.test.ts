@@ -219,8 +219,10 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
 
     // The header card says it, beside the button it is true of.
     expect(container.textContent ?? "").toContain(
-      "Connecting moves both onto this company's account",
+      "Connecting points both at this company's account",
     );
+    // …and qualifies it, because the managed chain has rungs above this key.
+    expect(container.textContent ?? "").toContain("which keeps precedence");
   });
 
   // The other half, and it has to open the dialog to be worth anything: with a
@@ -235,11 +237,13 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
     await press('[data-testid="account-add-key"]');
 
     const dialog = document.body.textContent ?? "";
-    expect(dialog).toContain("Pasting one sets the identity only");
-    expect(dialog).toContain("it does not change which model your agents think on");
+    expect(dialog).toContain("Pasting one sets the identity");
+    expect(dialog).toContain("it does not choose a model provider");
     // `PUT …/credential` writes `tinyhumans/key` and stops; only `finish_link`
-    // also writes `inference/key`. Telling someone a paste moved their model
-    // spend is this page's own defect pointing the other way.
+    // also declares the `managed` provider. What the field must not claim any
+    // more is that it leaves the thinking alone — since #2266 a managed turn
+    // resolves through this very key — so the dialog says that instead.
+    expect(dialog).toContain("its turns resolve through this same key");
     expect(dialog).not.toContain("moves every agent turn");
   });
 });

@@ -64,40 +64,45 @@ const SWITCH_NOTE: &str = "Agents present the new credential on their next cycle
 /// The distinction is **kept** — an OpenRouter key pasted here is the mistake
 /// the split exists to prevent — but narrowed to what is true. The wording this
 /// replaces compressed it into "nothing to do with models", and [`finish_link`]
-/// contradicts that directly: it writes one granted value into *both* slots and
-/// declares the managed provider, so for most companies this credential is
-/// exactly what their agents think on. Telling an admin otherwise sends them
-/// hunting for a second key they do not need.
+/// contradicts that directly: a managed turn resolves *through* this key, so
+/// for most companies this credential is exactly what their agents think on.
+/// Telling an admin otherwise sends them hunting for a second key they do not
+/// need.
 ///
 /// It also states the **billing move**, which neither string used to — but
-/// states it conditionally, because it is conditional. This notice is returned
-/// by [`set_key`] *and* [`finish_link`] *and* [`get_status`], and the two write
-/// paths do different amounts: a paste writes `tinyhumans/key` and stops, while
-/// the grant also writes `inference/key` and declares the managed provider. A
-/// flat "setting this moves every agent turn onto this account" would therefore
-/// be false on the paste path — the same shape of overclaim the rest of this
-/// change removes, pointing the other way.
+/// states it conditionally, because it is conditional twice over. This notice
+/// is returned by [`set_key`] *and* [`finish_link`] *and* [`get_status`], and
+/// the two write paths do different amounts: a paste writes `tinyhumans/key`
+/// and stops, while the grant also declares the `managed` provider. And the
+/// managed chain has two rungs above this key — a key pasted for TinyHumans on
+/// the LLM page, and the legacy `inference/key` — either of which goes on
+/// answering after this one is set (#2266). A flat "setting this moves every
+/// agent turn onto this account" would be false on both counts, which is the
+/// same shape of overclaim the rest of this change removes, pointing the other
+/// way.
 const CONSEQUENCE: &str = "This is the company's TinyHumans account key — the identity the platform presents when it \
      connects providers like Gmail or Slack on your behalf. Every member's agents act and spend \
      through it, and a provider connected with it belongs to the company rather than to the \
      person who connected it. Spend arrives as one account, so it cannot be attributed per \
-     member. Where this company's model provider is TinyHumans, its agents' thinking is billed \
-     here too — connecting through TinyHumans sets both at once, while pasting a key here sets \
-     only the identity. It is not a model provider's own key: an OpenRouter key, or your own \
-     endpoint's, belongs on the Inference card and will not serve as an identity here.";
+     member. Where this company's models are set to TinyHumans, its agents' turns resolve through \
+     this same key and are billed here too — unless a TinyHumans key set on the LLM page outranks \
+     it. Connecting points the models here as well as the apps; pasting a key sets the identity \
+     and leaves the choice of provider alone. It is not a model provider's own key: an OpenRouter \
+     key, or your own endpoint's, belongs on the LLM page and will not serve as an identity here.";
 
 /// Said instead when nothing is configured and the instance carries no identity
 /// either — the honest degraded state, rather than a picker that will fail.
 ///
 /// Scoped to what this credential actually governs. "Providers cannot be
-/// connected or used" read as "nothing works", and a company whose Inference
-/// card holds a provider key of its own goes on thinking perfectly well without
-/// this one — `inference/key` resolves without it. Overstating the breakage
-/// sends that operator to fix something that is not broken.
+/// connected or used" read as "nothing works", and a company whose LLM page
+/// holds a key of its own goes on thinking perfectly well without this one —
+/// that key outranks this credential in the managed chain, and a provider of
+/// its own never consults it. Overstating the breakage sends that operator to
+/// fix something that is not broken.
 const DEGRADED: &str = "No credential is set for this company and this instance carries no \
      platform identity, so nothing the platform brokers on its behalf works: no provider can be \
      connected, and there is no TinyHumans account to bill thinking to. Set the company's \
-     TinyHumans account key. A model provider's own key from the Inference card is a different \
+     TinyHumans account key. A model provider's own key from the LLM page is a different \
      credential and will not do for this — though a company that has set one there can still \
      think while this is unset.";
 

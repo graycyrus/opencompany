@@ -8,7 +8,7 @@ import {
   canRemoveKey,
   headerAction,
   REMOVAL_CONSEQUENCE,
-  REMOVAL_LEAVES_THINKING,
+  REMOVAL_AND_THINKING,
 } from "@/views/connections/account";
 
 function status(overrides: Partial<CompanyCredentialStatus> = {}): CompanyCredentialStatus {
@@ -210,9 +210,24 @@ describe("the removal confirmation says only what removal does", () => {
   // this account after the key is removed. The old sentence promised the
   // opposite, on the one screen where being wrong costs a credential.
   it("never claims the billing stops", () => {
-    const all = `${REMOVAL_CONSEQUENCE} ${REMOVAL_LEAVES_THINKING}`;
+    const all = `${REMOVAL_CONSEQUENCE} ${REMOVAL_AND_THINKING}`;
     expect(all).not.toContain("stops being billed");
-    expect(REMOVAL_LEAVES_THINKING).toContain("keep thinking on this account");
+  });
+
+  // The sentence that has now been wrong in both directions. Before #2266 the
+  // grant copied the key into `inference/key`, so removal here left a second
+  // copy thinking on the same account; it copies nothing now, and a managed
+  // turn resolves through `tinyhumans/key` itself. So the honest sentence is
+  // the fallback the resolver actually takes, not a reassurance — and not the
+  // opposite overclaim either, since a TinyHumans key on the LLM page outranks
+  // this one and goes on working.
+  it("describes what the resolver does next, not a reassurance", () => {
+    expect(REMOVAL_AND_THINKING).toContain("resolve through this same key");
+    expect(REMOVAL_AND_THINKING).toContain("whoever runs this server");
+    expect(REMOVAL_AND_THINKING).toContain("nothing at all if this instance carries none");
+    expect(REMOVAL_AND_THINKING).toContain("outranks this one and keeps working");
+    // The claim the old copy made, which the merged inference rework falsified.
+    expect(REMOVAL_AND_THINKING).not.toContain("puts the same key on the LLM page");
   });
 
   // Both fallbacks, because `GET …/credential` reports the tier that won and
@@ -223,9 +238,9 @@ describe("the removal confirmation says only what removal does", () => {
     expect(REMOVAL_CONSEQUENCE).toContain("no account at all");
   });
 
-  // Conditional, because a pasted key only ever set the identity — there is
-  // nothing of it on the LLM page to leave behind.
+  // Conditional at the top, because the outcome is: only a company whose
+  // models are set to TinyHumans is standing on this key at all.
   it("states the thinking half as the conditional it is", () => {
-    expect(REMOVAL_LEAVES_THINKING).toContain("Connecting through TinyHumans");
+    expect(REMOVAL_AND_THINKING).toContain("where this company's models are set to TinyHumans");
   });
 });

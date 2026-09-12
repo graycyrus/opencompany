@@ -29,8 +29,9 @@ import type { OpenCompanyClient } from "./client";
  *   no provider can be connected, and there is no TinyHumans account to bill
  *   thinking to. The honest degraded state, and the one the picker must not
  *   paper over — but it is **not** "nothing works". A company whose LLM page
- *   holds a provider key of its own thinks perfectly well with this unset,
- *   because `inference/key` resolves without it.
+ *   holds a key of its own thinks perfectly well with this unset: that key
+ *   outranks this one in the managed chain, and a provider of its own does not
+ *   consult this one at all.
  */
 export type CompanyCredentialSource = "company" | "attested" | "static" | "none";
 

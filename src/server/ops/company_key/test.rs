@@ -140,10 +140,11 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
         "the degraded state has to say what is unavailable: {dto}"
     );
     // …and must not overstate it. "Providers cannot be connected or used" read
-    // as "nothing works", and a company whose Inference card holds a provider
-    // key of its own goes on thinking perfectly well without this credential —
-    // `inference/key` resolves without it. Overstating the breakage sends that
-    // operator to fix something that is not broken.
+    // as "nothing works", and a company whose LLM page holds a key of its own
+    // goes on thinking perfectly well without this credential — that key
+    // outranks it in the managed chain, and a provider of its own never
+    // consults it. Overstating the breakage sends that operator to fix
+    // something that is not broken.
     assert!(
         degraded.contains("can still think while this is unset"),
         "the degraded state must not claim the whole company has stopped: {dto}"
@@ -173,24 +174,30 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
     // sit next to each other and both read "configured"; the copy is the only
     // thing standing between an admin and pasting an OpenRouter key here.
     assert!(
-        notice.contains("Inference card"),
+        notice.contains("LLM page"),
         "the notice must say which key this is NOT: {notice}"
     );
 
     // The billing consequence, stated before the save rather than discovered on
-    // the next invoice — and stated *conditionally*, because it is conditional.
-    // This same notice comes back from the paste route and the grant route, and
-    // they do different amounts: a paste writes `tinyhumans/key` and stops,
-    // while `finish_link` also writes `inference/key` and declares the managed
-    // provider. A flat "this moves every agent turn onto the account" would be
-    // false on the path that produced *this* response.
+    // the next invoice — and stated *conditionally*, because it is conditional
+    // twice. This same notice comes back from the paste route and the grant
+    // route, and they do different amounts: a paste writes `tinyhumans/key` and
+    // stops, while `finish_link` also declares the `managed` provider. And the
+    // managed chain has two rungs above this key (a key pasted for TinyHumans
+    // on the LLM page, then the legacy `inference/key`), either of which goes
+    // on answering after this one is set — #2266. A flat "this moves every
+    // agent turn onto the account" would be false on both counts.
     assert!(
-        notice.contains("billed here too"),
-        "the notice must say the thinking can be billed here: {notice}"
+        notice.contains("resolve through this same key"),
+        "the notice must say how the thinking reaches this account: {notice}"
     );
     assert!(
-        notice.contains("pasting a key here sets only the identity"),
-        "the notice must not let a paste be read as arming inference: {notice}"
+        notice.contains("outranks it"),
+        "the notice must not promise a move a higher rung would prevent: {notice}"
+    );
+    assert!(
+        notice.contains("leaves the choice of provider alone"),
+        "the notice must not let a paste be read as choosing the provider: {notice}"
     );
 
     // And it must not overshoot the other way. "It is not the model-provider

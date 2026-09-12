@@ -79,17 +79,19 @@ export function AccountKeyDialog({ open, onOpenChange, replacing, busy, onSubmit
             This company&apos;s TinyHumans account key — the identity its agents present when they
             connect Gmail, Slack or anything else.{" "}
             {/* Precisely what a PASTE does, which is not what the grant does.
-                `PUT …/credential` writes `tinyhumans/key` and nothing else;
-                only `finish_link` also writes `inference/key` and declares the
-                managed provider. Saying "this moves every agent turn onto the
-                account" here would be the same shape of overclaim this page's
-                pass exists to remove — true of the button, false of this
-                field. */}
+                `PUT …/credential` writes `tinyhumans/key` and stops; only
+                `finish_link` also declares the `managed` provider. What it no
+                longer says is that a paste leaves the thinking alone: since
+                #2266 a managed turn *resolves* through `tinyhumans/key`, so on
+                a company already set to TinyHumans this field moves that bill
+                too. The difference that survives is the provider choice, which
+                is the button's to make and not this field's. */}
             <strong className="font-medium text-foreground">
-              Pasting one sets the identity only
+              Pasting one sets the identity
             </strong>{" "}
-            — it does not change which model your agents think on. Connect TinyHumans sets both at
-            once, and moves the thinking bill onto this account with it.
+            — it does not choose a model provider. Where this company already thinks on
+            TinyHumans, its turns resolve through this same key; Connect TinyHumans does both at
+            once.
           </DialogDescription>
           <DialogDescription>
             Not a model provider&apos;s own key: an OpenRouter key, or your own endpoint&apos;s,

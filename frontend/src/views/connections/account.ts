@@ -68,7 +68,7 @@ export function accountShape(load: AccountLoad, status: CompanyCredentialStatus 
  * this value would point an operator investigating spend at the wrong account,
  * which is the same overclaim this page's pass exists to remove, one row down.
  * The billing move is stated where it is conditional and true: on the header
- * card beside the Connect button, and in {@link REMOVAL_LEAVES_THINKING}.
+ * card beside the Connect button, and in {@link REMOVAL_AND_THINKING}.
  */
 export function accountSubline(load: AccountLoad, status: CompanyCredentialStatus | null): string {
   if (load !== "ready" || status === null) {
@@ -82,10 +82,11 @@ export function accountSubline(load: AccountLoad, status: CompanyCredentialStatu
       return "Acting as the account of whoever runs this server";
     case "none":
       // Deliberately narrow. "Agents cannot think" is what this page used to
-      // say here, and it is **false** on a company whose LLM page holds a
-      // provider key of its own: `inference/key` resolves without this
-      // credential, so such a company thinks perfectly well while having no
-      // TinyHumans account at all. What is always true is the absence itself.
+      // say here, and it is **false** on a company whose LLM page holds a key
+      // of its own: that one outranks this credential in the managed chain, and
+      // a provider of its own never consults it — so such a company thinks
+      // perfectly well with no TinyHumans account at all. What is always true
+      // is the absence itself.
       return "No TinyHumans account for this company";
     default:
       // An older or newer host naming a tier this build does not know. Saying
@@ -140,13 +141,11 @@ export function headerAction(
  * *won*, and while this company's own key is set that is always `company`,
  * whether or not an instance identity sits behind it.
  *
- * What it no longer claims is that the billing stops. `set_key("")` clears
- * `tinyhumans/key` and nothing else, while `finish_link` writes the granted
- * value into `inference/key` too and declares the `managed` provider
- * (`src/server/ops/company_key.rs`). On a company that connected through
- * TinyHumans, every agent turn goes on being billed to this very account after
- * the removal — so a dialog promising otherwise would be wrong on exactly the
- * path the button beside it recommends.
+ * What it no longer claims is that the billing stops — that half is
+ * {@link REMOVAL_AND_THINKING}'s, and it is not a flat "it stops" either.
+ * `set_key("")` clears `tinyhumans/key` and nothing else; what happens to the
+ * turns depends on what the managed chain finds next
+ * (`src/server/ops/company_key.rs`, `src/company/inference.rs`).
  */
 export const REMOVAL_CONSEQUENCE =
   "Apps connected as this company stop being reachable, and the identity the platform presents " +
@@ -154,16 +153,27 @@ export const REMOVAL_CONSEQUENCE =
   "this instance carries one — and to no account at all if it does not.";
 
 /**
- * The half the removal does **not** cover, said before the press rather than
- * found on the next invoice.
+ * What the removal costs the company's *thinking*, said before the press rather
+ * than found when its agents stop answering.
  *
- * Conditional, because it is conditional: a pasted key only ever set the
- * identity, so there is nothing of it on the LLM page to leave behind.
+ * This sentence has been wrong in both directions, and #2266 is why. The grant
+ * used to copy the key into `inference/key` as well, so removal here genuinely
+ * did leave a second copy thinking on the same account. It no longer copies:
+ * the key lands only in `tinyhumans/key`, and a managed turn *resolves* through
+ * it — `provider/tinyhumans/key`, then the legacy `inference/key`, then this,
+ * then the instance identity, then nothing. So removing it takes the rung a
+ * managed company was standing on, and the honest sentence is the fallback,
+ * not a reassurance.
+ *
+ * Still conditional at the top: a TinyHumans key pasted on the LLM page
+ * outranks this one and goes on working, which is the state an operator most
+ * needs to be able to tell from the others.
  */
-export const REMOVAL_LEAVES_THINKING =
-  "Thinking is not included. Connecting through TinyHumans also puts the same key on the LLM " +
-  "page and points this company's model provider at it; removing the identity here leaves that " +
-  "one in place, so agents keep thinking on this account until it is removed there too.";
+export const REMOVAL_AND_THINKING =
+  "Thinking goes with it where this company's models are set to TinyHumans: those turns resolve " +
+  "through this same key, so removing it falls back to the identity of whoever runs this server " +
+  "— and to nothing at all if this instance carries none. A TinyHumans key set on the LLM page " +
+  "outranks this one and keeps working.";
 
 /** The balance row, once there is an account of this company's own to ask about. */
 export interface BalanceLine {
