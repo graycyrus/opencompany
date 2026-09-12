@@ -191,10 +191,28 @@ mod tests {
     /// this holds is that the same four slugs, labels and categories appear on
     /// both sides, and a regex over a `const` array is enough to fail loudly
     /// when one is added to only one of them.
+    /// The console mirror, found by walking up from this crate's manifest.
+    ///
+    /// **Not `CARGO_MANIFEST_DIR/frontend`.** That only resolves when the
+    /// manifest directory *is* the repo root, which it is for a plain `cargo
+    /// test` at the top level and is not in CI, where the crate is built from
+    /// `crates/opencompany-core` — so the test passed locally and panicked on
+    /// the `Rust` lane with "cannot read …".
+    fn console_mirror() -> Option<std::path::PathBuf> {
+        let mut dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let candidate = dir.join("frontend/src/search-providers/catalogue.ts");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            dir = dir.parent()?;
+        }
+    }
+
     #[test]
     fn the_console_mirror_lists_the_same_providers() {
-        let mirror = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("frontend/src/search-providers/catalogue.ts");
+        let mirror = console_mirror()
+            .expect("the console mirror must exist somewhere above this crate's manifest");
         let source = std::fs::read_to_string(&mirror)
             .unwrap_or_else(|err| panic!("cannot read {}: {err}", mirror.display()));
 
