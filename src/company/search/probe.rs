@@ -371,12 +371,73 @@ pub async fn probe(
     if response.status().is_success() {
         return Ok(());
     }
-    // Capped: the body is read for classification and thrown away, and an
-    // endpoint that answers a checked request with a gigabyte is not one this
-    // host should buffer.
-    let body = response.text().await.unwrap_or_default();
-    let body = body.chars().take(4096).collect::<String>();
-    Err(ProbeFailure::Status { status, body })
+    Err(ProbeFailure::Status {
+        status,
+        body: read_capped(response).await,
+    })
+}
+
+/// How much of a failing response is read before the rest is dropped.
+///
+/// Enough to classify by — the longest phrase any of the four providers puts in
+/// a rejection is well inside it — and small enough that a hostile answer costs
+/// nothing.
+const BODY_CAP: usize = 4096;
+
+/// Reads at most [`BODY_CAP`] bytes of a response and abandons the rest.
+///
+/// **The cap is applied to the stream, not to the finished string.** The
+/// previous `response.text().await` followed by `.take(4096)` buffered the
+/// whole body first and then kept 4096 characters of it, which caps what is
+/// *retained* and not what is *accepted*: for SearXNG the address is supplied
+/// by the operator, so a malfunctioning or hostile instance could answer a
+/// connect or test request with a body large enough to exhaust this host — and
+/// the route is reachable by any admin of any company on it.
+///
+/// A read error mid-body is not an error here. Whatever arrived is enough to
+/// classify from, and the status code alone usually is; failing the probe
+/// because the tail of a rejection did not arrive would turn a clear answer
+/// into `Unknown`.
+///
+/// The cap is a byte count, so the last character kept may be split. It is
+/// read back lossily and only ever matched against ASCII phrases, so a
+/// replacement character at the very end changes no classification.
+async fn read_capped(mut response: reqwest::Response) -> String {
+    let mut body: Vec<u8> = Vec::new();
+    while body.len() < BODY_CAP {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = BODY_CAP - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+/// What a failure may be written to the log as.
+///
+/// **Never the body.** [`ProbeFailure::Status`] already documents that its body
+/// can echo request material including fragments of the credential, and that it
+/// is never shown to an operator — but a log is a second durable copy of
+/// exactly the same material, kept for longer and read by more people than the
+/// banner the type was worried about. The credential is write-only everywhere
+/// else on this surface, so it does not get an exemption here.
+///
+/// What is left is what a person reading the log actually acts on: the status,
+/// and how much body came back. The class is logged beside this, and the
+/// classification the body fed is what the operator is shown.
+pub fn log_detail(failure: &ProbeFailure) -> String {
+    match failure {
+        // The operator's own address and the transport error for it. No
+        // credential is ever in one: the key travels in a header, and a request
+        // that failed at this layer never got far enough to be echoed.
+        ProbeFailure::Transport(error) => format!("transport: {error}"),
+        ProbeFailure::Status { status, body } => {
+            format!("status {status}, {} bytes of body withheld", body.len())
+        }
+    }
 }
 
 #[cfg(test)]

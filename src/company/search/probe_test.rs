@@ -184,3 +184,76 @@ fn a_non_http_scheme_is_refused_before_anything_is_fetched() {
     assert!(guard_instance_url("ftp://example.test").is_err());
     assert!(guard_instance_url("not a url at all").is_err());
 }
+
+#[test]
+fn the_log_line_withholds_the_body_it_classified_from() {
+    // The body is allowed to reach `classify`. It is not allowed to reach the
+    // response — the type already says so — and a log is a second durable copy
+    // of the same material, so it does not reach that either.
+    let leaked = "token sk-not-a-real-key was rejected";
+    let detail = log_detail(&status(401, leaked));
+    assert!(!detail.contains("sk-not-a-real-key"), "{detail}");
+    assert!(!detail.contains(leaked), "{detail}");
+    // What is left is what somebody reading the log acts on.
+    assert!(detail.contains("401"), "{detail}");
+    assert!(
+        detail.contains(&leaked.len().to_string()),
+        "the size is worth keeping even when the bytes are not: {detail}"
+    );
+}
+
+#[test]
+fn a_transport_failure_still_says_what_went_wrong() {
+    // No credential can be in one: the key travels in a header, and a request
+    // that failed at this layer never got an answer to echo it.
+    let detail = log_detail(&ProbeFailure::Transport(
+        "error sending request: operation timed out".to_string(),
+    ));
+    assert!(detail.contains("operation timed out"), "{detail}");
+}
+
+#[tokio::test]
+async fn a_hostile_body_is_abandoned_rather_than_buffered() {
+    // The cap has to be on the stream. `text()` then `.take(4096)` buffers the
+    // whole body first, which caps what is kept and not what is accepted — and
+    // for SearXNG the address is the operator's, so the answer is not this
+    // host's to trust.
+    //
+    // Sixteen megabytes against a 4 KiB cap: four thousand times the limit, and
+    // an ordinary rejection is under a kilobyte.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        use tokio::io::AsyncWriteExt;
+        let _ = stream
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n")
+            .await;
+        // Written until the client hangs up, which is the point: the reader
+        // must stop, not the writer.
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..256 {
+            if stream.write_all(&chunk).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    let info = crate::company::search::catalogue::entry("searxng").expect("searxng is catalogued");
+    let endpoint = format!("http://{address}");
+    let failure = probe(info, None, Some(&endpoint))
+        .await
+        .expect_err("a 500 is not a success");
+    let ProbeFailure::Status { status, body } = failure else {
+        panic!("expected a status failure, got {failure:?}");
+    };
+    assert_eq!(status, 500);
+    assert!(
+        body.len() <= BODY_CAP,
+        "read {} bytes against a {BODY_CAP}-byte cap",
+        body.len()
+    );
+    server.abort();
+}
