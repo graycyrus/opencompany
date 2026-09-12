@@ -930,6 +930,17 @@ pub async fn load_managed_key(
     {
         return Ok(raw);
     }
+    // **The fallback is the *flat* slot, and only the default harness reads
+    // that.** For a named scope `load_key_scoped` answers
+    // `harness/<id>/inference/key`, which is that harness's own credential for
+    // whatever *it* declared — presenting it to the platform endpoint is the
+    // same ownership mistake as the BYOK one, a scope along. Managed still
+    // resolves for a named harness; it just resolves through the company
+    // account or the instance identity, which is what `managed_identity` does
+    // with an empty key.
+    if !scope.is_default {
+        return Ok(String::new());
+    }
     if !store::legacy_slot_is_managed(company, secrets).await? {
         return Ok(String::new());
     }
@@ -3465,6 +3476,19 @@ mod tests {
             .await
             .unwrap(),
             "sk-or-byok"
+        );
+
+        // Same rule a scope along: a named harness's own slot holds that
+        // harness's credential for whatever it declared, which managed has no
+        // more claim on than it does on entry zero's.
+        let named = HarnessScope::named("deep");
+        store_key_scoped(&company, &secrets, "sk-deep-byok", &named)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_managed_key(&company, &secrets, &named).await.unwrap(),
+            "",
+            "a named harness's key is not managed's to present either"
         );
     }
 
