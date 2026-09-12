@@ -245,7 +245,12 @@ pub(crate) async fn discover_models(
         }
     }
 
-    fetch_catalog(&client, &format!("{base}/models"), bearer, auth).await
+    // The public registry needs the same shape parameters the scoped path uses:
+    // they are a property of OpenRouter's catalog API rather than of
+    // `/models/user`, and taking the defaults here is why this fallback returned
+    // a text-only, 500-entry view of a catalogue the caller believes is whole.
+    let query = crate::company::inference::catalogue::catalog_query(base);
+    fetch_catalog(&client, &format!("{base}/models{query}"), bearer, auth).await
 }
 
 /// One catalog read against one URL.

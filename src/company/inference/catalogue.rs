@@ -96,10 +96,17 @@ pub struct CloudProvider {
 /// ## The endpoints are presets, not a pattern
 ///
 /// Look at the paths: `/openai/v1`, `/inference/v1`, `/v1beta/openai`,
-/// `/v1/openai`, `/v3/openai`, `/api/paas/v4`, `/api/gateway`, `/step_plan/v1`.
-/// Any attempt to derive an endpoint as `https://{host}/v1` is wrong for
-/// roughly a third of this list. That is why each row carries its own URL and
-/// why the cloud category never asks the operator to type one.
+/// `/v1/openai`, `/v3/openai`, `/api/paas/v4`, `/api/gateway`, and DeepSeek's
+/// bare host with no version segment at all. Any attempt to derive an endpoint
+/// as `https://{host}/v1` is wrong for roughly a third of this list. That is why
+/// each row carries its own URL and why the cloud category never asks the
+/// operator to type one.
+///
+/// **That last part is also a limitation**, and the rows it bites are named in
+/// `docs/modules/inference/provider-contracts.md`: a preset is one value, so a
+/// vendor running two products or two regions behind different paths can be
+/// served for at most one of them. A GLM Coding Plan key and a StepFun Step Plan
+/// key both have nowhere to go today.
 pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
     CloudProvider {
         slug: "openai",
@@ -171,14 +178,29 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
     CloudProvider {
         slug: "deepseek",
         label: "DeepSeek",
-        endpoint: "https://api.deepseek.com/v1",
+        // The bare host, which is the only form DeepSeek documents. Its landing
+        // page names exactly two base URLs — `https://api.deepseek.com` and
+        // `https://api.deepseek.com/anthropic` — and its listing reference shows
+        // `GET /models` with no `/v1`. The old "you may also use /v1" sentence
+        // is gone from the current docs; whether `/v1` still resolves is
+        // undocumented, and shipping the form the vendor does not publish is how
+        // a base-URL defect reads to an operator as a model problem, against a
+        // `const` they cannot edit.
+        endpoint: "https://api.deepseek.com",
         auth: AuthStyle::Bearer,
         key_placeholder: Some("sk-..."),
     },
     CloudProvider {
         slug: "together",
         label: "Together AI",
-        endpoint: "https://api.together.xyz/v1",
+        // `.ai`, not the `.xyz` this shipped. Every current Together page — the
+        // quickstart, the OpenAI-compatibility guide, the chat reference and the
+        // OpenAPI spec — uses `https://api.together.ai/v1`; `.xyz` appears on no
+        // live page, and the search results carrying it resolve to stale index
+        // snapshots. Whether `.xyz` is deprecated is undocumented in both
+        // directions, so this is latent rather than broken — but it is the same
+        // shape as the MiniMax defect already fixed below.
+        endpoint: "https://api.together.ai/v1",
         auth: AuthStyle::Bearer,
         key_placeholder: None,
     },
@@ -243,7 +265,15 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
     CloudProvider {
         slug: "stepfun",
         label: "StepFun",
-        endpoint: "https://api.stepfun.ai/step_plan/v1",
+        // **Contested, and settled on the vendor's own documentation.** StepFun's
+        // platform docs show `https://api.stepfun.ai/v1/chat/completions` with no
+        // `/step_plan` segment; an OpenCode issue reports the opposite, that a
+        // Step Plan key works only at `/step_plan/v1`. Both can be true if they
+        // are two products, and a single `const` can be right for at most one of
+        // them — so it ships the one the vendor publishes rather than the one a
+        // third party reports. A Step Plan subscriber has no way to reach their
+        // own endpoint; see `docs/modules/inference/provider-contracts.md`.
+        endpoint: "https://api.stepfun.ai/v1",
         auth: AuthStyle::Bearer,
         key_placeholder: None,
     },
@@ -308,8 +338,27 @@ pub struct LocalRuntime {
     /// A starting endpoint where one is conventional. The operator still types
     /// or confirms it — a local runtime's endpoint is the thing being chosen.
     pub default_endpoint: Option<&'static str>,
-    /// Whether this runtime also wants a credential.
+    /// Whether this runtime **requires** a credential, and so whether the add
+    /// flow refuses without one.
+    ///
+    /// A floor, not a ceiling: see [`LocalRuntime::auth`]. This being wrongly
+    /// `true` does not degrade the row, it makes it unaddable — the host refuses
+    /// it before any request is made.
     pub needs_key: bool,
+    /// How a credential is presented **if there is one**.
+    ///
+    /// Separate from [`LocalRuntime::needs_key`] because "must have a key" and
+    /// "knows what to do with a key" are different questions, and deriving the
+    /// second from the first gets one of them wrong every time. `omlx` is the
+    /// case: no build of it requires a key, but `jundot/omlx` has an optional
+    /// `--api-key`, so an operator who turned that on must still be able to
+    /// authenticate. Deriving auth from `needs_key` would have silently dropped
+    /// their header the moment the `needs_key` datum was corrected.
+    ///
+    /// [`AuthStyle::None`] for a runtime with no auth mechanism at all: Ollama
+    /// documents sending a key locally as a cause of *spurious* 401s, so this
+    /// is a statement about the endpoint, not about whether we hold one.
+    pub auth: AuthStyle,
 }
 
 /// The three local runtimes.
@@ -328,19 +377,47 @@ pub const LOCAL_RUNTIMES: &[LocalRuntime] = &[
         label: "Ollama",
         default_endpoint: Some("http://localhost:11434"),
         needs_key: false,
+        // "No authentication is required … locally", and `OLLAMA_API_KEY` is a
+        // Cloud-only variable whose presence locally is a documented cause of
+        // spurious 401s.
+        auth: AuthStyle::None,
     },
     LocalRuntime {
         slug: "lmstudio",
         label: "LM Studio",
         default_endpoint: None,
         needs_key: false,
+        // None by default. LM Studio does have an opt-in server toggle that
+        // takes a bearer, which this row has no way to express and which the
+        // add flow offers no path to — recorded in provider-contracts.md.
+        auth: AuthStyle::None,
     },
     LocalRuntime {
         slug: "omlx",
         label: "OMLX",
         default_endpoint: None,
-        // The only local runtime that wants both an endpoint and a key.
-        needs_key: true,
+        // **No omlx build requires a key**, so demanding one made the row
+        // impossible to add at all: the host refuses it outright at
+        // `providers.rs`'s "needs an API key" guard. That guard is correct and
+        // was promoted from the console deliberately — the datum it enforced was
+        // the wrong one, which is why the fix belongs here and not there.
+        //
+        // "omlx" names three different projects and none of them needs this:
+        // `ml-explore/mlx-lm`'s `mlx_lm.server` (port 8080) and
+        // `madroidmaq/mlx-omni-server` (10240) have **no auth mechanism at
+        // all**, and `jundot/omlx` (8000) has an optional `--api-key` that is
+        // off unless passed. An operator who turned that one on can still supply
+        // a key: `needs_key` is a floor, not a ceiling.
+        //
+        // Which of the three this row means is genuinely unsettled, and they
+        // listen on three different ports, which is why `default_endpoint` is
+        // `None` rather than a guess. See
+        // `docs/modules/inference/provider-contracts.md`.
+        needs_key: false,
+        // Bearer when there is a key to send, for the `jundot/omlx --api-key`
+        // operator, and nothing at all when there is not — `apply_auth` adds no
+        // header for an absent credential.
+        auth: AuthStyle::Bearer,
     },
 ];
 
@@ -522,11 +599,9 @@ pub fn auth_style_for(kind: &str) -> AuthStyle {
         return cloud.auth;
     }
     if let Some(local) = local_runtime(kind) {
-        return if local.needs_key {
-            AuthStyle::Bearer
-        } else {
-            AuthStyle::None
-        };
+        // Read off the row rather than derived from `needs_key`: a runtime can
+        // accept a key without requiring one, and deriving it conflated the two.
+        return local.auth;
     }
     AuthStyle::Bearer
 }
@@ -604,6 +679,35 @@ pub fn is_openrouter_endpoint(endpoint: &str) -> bool {
 pub fn scoped_catalog_path(endpoint: &str, authenticated: bool) -> Option<&'static str> {
     (authenticated && is_openrouter_endpoint(endpoint))
         .then_some("/models/user?limit=1000&output_modalities=all")
+}
+
+/// The query string a catalog read needs at this endpoint, including the leading
+/// `?`, or empty where it needs none.
+///
+/// The two parameters in [`scoped_catalog_path`] are not a property of
+/// `/models/user` — they are a property of **OpenRouter's catalog API**, and
+/// they apply just as much to the public `/models` registry. Both were being
+/// applied on the authenticated path only, so the two reads that do not have a
+/// credential — the connect probe, and the fallback after `/models/user` 404s —
+/// took OpenRouter's documented defaults instead:
+///
+/// * `output_modalities` defaults to **`text`**, so every image, audio and
+///   embedding model was silently absent. A company whose `vision-v1` tier needs
+///   a vision model was offered a picker with none in it, and nothing said why.
+/// * `limit` defaults to **500** against a catalogue of ~450 and a maximum of
+///   1000, so the list is intact today and silently truncates on the day
+///   OpenRouter publishes its 501st model. `links.next` is never followed, so
+///   the tail would simply not exist.
+///
+/// Deriving both from the same host test that already decides the path keeps
+/// them from drifting apart again: there is now one answer to "what does a
+/// catalog read at this endpoint need", not one per caller.
+pub fn catalog_query(endpoint: &str) -> &'static str {
+    if is_openrouter_endpoint(endpoint) {
+        "?limit=1000&output_modalities=all"
+    } else {
+        ""
+    }
 }
 
 /// Whether an endpoint points at an Azure Foundry / Azure OpenAI resource, i.e.
@@ -933,14 +1037,21 @@ mod tests {
         assert_eq!(category_of("acme-gateway"), Category::Cloud);
     }
 
+    /// `needs_key` is enforced by the host, so a wrong `true` is not a cosmetic
+    /// defect — it makes the runtime unaddable. None of the three projects called
+    /// "omlx" requires a key, and two have no auth mechanism at all, so no local
+    /// runtime may demand one.
     #[test]
-    fn omlx_is_the_only_local_runtime_that_wants_a_key() {
+    fn no_local_runtime_demands_a_key() {
         let with_keys: Vec<&str> = LOCAL_RUNTIMES
             .iter()
             .filter(|r| r.needs_key)
             .map(|r| r.slug)
             .collect();
-        assert_eq!(with_keys, vec!["omlx"]);
+        assert!(
+            with_keys.is_empty(),
+            "a local runtime that demands a key cannot be added at all: {with_keys:?}"
+        );
     }
 
     #[test]
@@ -1297,8 +1408,15 @@ mod tests {
     fn a_keyless_local_runtime_sends_no_auth_header_and_omlx_does() {
         assert_eq!(auth_style_for("ollama"), AuthStyle::None);
         assert_eq!(auth_style_for("lmstudio"), AuthStyle::None);
-        // The only local runtime that wants both an endpoint and a key.
+        // Still bearer, though omlx no longer *requires* a key: an operator
+        // running `jundot/omlx --api-key` must still be able to authenticate.
+        // This is the assertion that would have caught the auth style silently
+        // becoming `None` as a side effect of correcting `needs_key`.
         assert_eq!(auth_style_for("omlx"), AuthStyle::Bearer);
+        assert!(
+            !local_runtime("omlx").expect("omlx row").needs_key,
+            "accepting a key is not the same as demanding one"
+        );
     }
 
     #[test]
@@ -1355,6 +1473,50 @@ mod tests {
             );
         }
     }
+    /// The defect: `output_modalities` and `limit` were applied on the
+    /// authenticated path only, so the connect probe and the post-404 fallback
+    /// took OpenRouter's defaults — text-only, capped at 500 — and a company
+    /// whose `vision-v1` tier needs a vision model saw a picker with none.
+    #[test]
+    fn every_openrouter_catalogue_read_asks_for_the_whole_catalogue() {
+        for endpoint in [
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/",
+            "https://eu.openrouter.ai/api/v1",
+        ] {
+            let query = catalog_query(endpoint);
+            assert!(
+                query.contains("output_modalities=all"),
+                "{endpoint} would silently drop every non-text model"
+            );
+            assert!(
+                query.contains("limit=1000"),
+                "{endpoint} would truncate at OpenRouter's default of 500"
+            );
+        }
+        // The authenticated path already asked for both; the point is that the
+        // two now agree rather than each carrying its own copy.
+        let scoped = scoped_catalog_path("https://openrouter.ai/api/v1", true).expect("scoped");
+        for parameter in ["output_modalities=all", "limit=1000"] {
+            assert!(scoped.contains(parameter), "{scoped}");
+            assert!(catalog_query("https://openrouter.ai/api/v1").contains(parameter));
+        }
+    }
+
+    #[test]
+    fn a_non_openrouter_endpoint_gets_no_query_string() {
+        // These parameters are OpenRouter's, not the OpenAI dialect's. Fireworks
+        // rejects unknown fields outright and several hosts 400 on an
+        // unrecognised query, so this must not become a blanket addition.
+        for endpoint in [
+            "https://api.anthropic.com/v1",
+            "http://localhost:11434/v1",
+            "https://api.groq.com/openai/v1",
+        ] {
+            assert_eq!(catalog_query(endpoint), "", "{endpoint}");
+        }
+    }
+
     #[test]
     fn only_openrouters_own_host_gets_the_account_scoped_catalogue() {
         assert!(is_openrouter_endpoint("https://openrouter.ai/api/v1"));

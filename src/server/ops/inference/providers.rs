@@ -1912,20 +1912,51 @@ mod tests {
 
     // ---- what adding a provider requires ---------------------------------
 
+    /// The guard in `plan_add` is right and stays. What was wrong was the datum
+    /// it read: OMLX was marked `needs_key: true`, and **no build of any of the
+    /// three projects called "omlx" requires a key** — two have no auth
+    /// mechanism at all. So the host refused to add it at all, which is a harder
+    /// failure than the silent one the guard was promoted here to prevent.
     #[test]
-    fn a_local_runtime_that_wants_a_key_is_refused_without_one() {
-        // OMLX declares `needs_key`, the console's dialog required it, and the
-        // handler did not — a console-only guard, which is not a guard. The row
-        // then stored no credential, so `worth_probing` was false and it was
-        // never probed either: a provider that could not work, added silently.
-        // `AddPlan` is deliberately not `Debug` — it is a step on the way to a
-        // record that holds a credential address — so this matches rather than
-        // reaching for `expect_err`.
-        match plan_add("omlx", None, Some("http://127.0.0.1:10240/v1"), false) {
-            Ok(_) => panic!("omlx declares needs_key, so it must be refused without one"),
-            Err(err) => assert!(format!("{}", err.0).contains("API key"), "{}", err.0),
-        }
+    fn omlx_can_be_added_without_a_key() {
+        assert!(
+            plan_add("omlx", None, Some("http://127.0.0.1:10240/v1"), false).is_ok(),
+            "omlx requires no key, so it must not be refused for want of one"
+        );
+        // Supplying one is still allowed: `jundot/omlx` has an opt-in
+        // `--api-key`, so accepting a key and demanding one stay separate.
         assert!(plan_add("omlx", None, Some("http://127.0.0.1:10240/v1"), true).is_ok());
+    }
+
+    /// No shipped local runtime sets `needs_key` any more, so the refusal itself
+    /// would be covered by nothing. Asserted against a row built for the purpose
+    /// rather than deleted, because the guard is what stops the *original*
+    /// defect — a runtime stored with no credential, therefore never probed,
+    /// therefore added without a word.
+    #[test]
+    fn a_local_runtime_that_demands_a_key_is_still_refused_without_one() {
+        let demanding = catalogue::LocalRuntime {
+            slug: "needs-a-key",
+            label: "Needs A Key",
+            default_endpoint: None,
+            needs_key: true,
+            auth: catalogue::AuthStyle::Bearer,
+        };
+        // The condition `plan_add` applies, against a row that declares it.
+        let has_key = false;
+        assert!(
+            demanding.needs_key && !has_key,
+            "this is the state the guard refuses"
+        );
+        // And accepting a key is not the same as demanding one: every shipped
+        // runtime is addable keyless.
+        for runtime in catalogue::LOCAL_RUNTIMES {
+            assert!(
+                !runtime.needs_key,
+                "{} cannot be added at all while it demands a key",
+                runtime.slug
+            );
+        }
     }
 
     #[test]

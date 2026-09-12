@@ -1351,6 +1351,39 @@ fn output_cap(requested: Option<u32>) -> Option<u32> {
     }
 }
 
+/// Writes the caller's **intent** onto the body in the dialect `model` speaks,
+/// and reports which field names went out.
+///
+/// The names are returned rather than recomputed because the retry needs to know
+/// exactly what was sent: `inference::dialect::parameter_blamed_by` only accepts
+/// a rejection that names a parameter **we actually sent**, and after renaming
+/// (`max_tokens` → `max_completion_tokens`) the sent name is not the name the
+/// caller asked with.
+///
+/// Every vendor-specific decision lives in `inference::dialect::RULES`. Nothing
+/// here knows what a temperature is, which is the property that stops this
+/// function growing a vendor name the next time a model behaves differently.
+fn apply_sampling(
+    body: &mut serde_json::Value,
+    model: &str,
+    sampling: inference::dialect::Sampling,
+    max_tokens: Option<u32>,
+) -> Vec<String> {
+    let mut knobs = sampling.knobs();
+    if let Some(cap) = output_cap(max_tokens) {
+        knobs.push(inference::dialect::Knob {
+            name: "max_tokens",
+            value: serde_json::json!(cap),
+        });
+    }
+    let mut sent = Vec::new();
+    for (name, value) in inference::dialect::translate(model, knobs) {
+        body[&name] = value;
+        sent.push(name);
+    }
+    sent
+}
+
 #[async_trait]
 impl ChatModel<()> for MockProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
@@ -1460,16 +1493,18 @@ impl ChatModel<()> for HostedProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         let messages = wire_messages(&request.messages);
         let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
-        let temperature = request.temperature.unwrap_or(0.0);
 
         let mut body = serde_json::json!({
             "model": model,
-            "temperature": temperature,
             "messages": messages,
         });
-        if let Some(cap) = output_cap(request.max_tokens) {
-            body["max_tokens"] = serde_json::json!(cap);
-        }
+        // Intent in, this model's dialect out — see `apply_sampling`.
+        let _sent = apply_sampling(
+            &mut body,
+            model,
+            inference::dialect::Sampling::from_request(request.temperature),
+            request.max_tokens,
+        );
         // Native tool calling: expose the turn's tools so the model emits
         // structured `tool_calls` instead of hand-written `<tool_call>` XML.
         attach_tools(
@@ -1589,6 +1624,15 @@ pub struct RequestPlan {
     pub headers: Vec<(&'static str, String)>,
     /// The JSON request body.
     pub body: serde_json::Value,
+    /// The sampling/limit field names this body actually carries, **after**
+    /// per-model translation.
+    ///
+    /// Carried rather than recomputed because a rule may rename a field, so the
+    /// name the caller asked with is not always the name on the wire. The retry
+    /// will only drop a parameter the model names *and* that appears here, which
+    /// is what stops a rejection mentioning some field we never sent from
+    /// talking us into removing one.
+    pub tunable_fields: Vec<String>,
 }
 
 /// Builds the [`RequestPlan`] for one turn against a tenant provider.
@@ -1607,7 +1651,7 @@ pub async fn request_plan(
     decl: &InferenceDecl,
     abstract_model: &str,
     messages: Vec<serde_json::Value>,
-    temperature: f64,
+    sampling: inference::dialect::Sampling,
     max_tokens: Option<u32>,
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
@@ -1651,12 +1695,12 @@ pub async fn request_plan(
     }
     let mut body = serde_json::json!({
         "model": model,
-        "temperature": temperature,
         "messages": messages,
     });
-    if let Some(cap) = output_cap(max_tokens) {
-        body["max_tokens"] = serde_json::json!(cap);
-    }
+    // Intent in, this model's dialect out. `sent` is the field names that
+    // actually went, which the retry needs — a rename means the caller's name
+    // and the wire name differ. See `apply_sampling`.
+    let sent = apply_sampling(&mut body, &model, sampling, max_tokens);
     let supports_parallel_control =
         decl.is_proxied() || inference::normalize_provider(&decl.provider) == "openrouter";
     attach_tools(&mut body, tools, tool_choice, supports_parallel_control);
@@ -1666,6 +1710,7 @@ pub async fn request_plan(
         bearer,
         headers,
         body,
+        tunable_fields: sent,
     })
 }
 
@@ -1815,7 +1860,66 @@ async fn send_plan(
     // test and compare model capabilities, and is not considered a long-term or
     // production-ready solution for most use cases" — it ignores `strict` and
     // `response_format`, supports no prompt caching, and hoists system messages.
-    let mut request = client.post(&plan.url).json(&plan.body);
+    match send_body(client, plan, &plan.body, credential, harness, source).await {
+        Ok(payload) => Ok(payload),
+        Err(SendFailure::Rejected {
+            parameter,
+            error: _,
+        }) => {
+            // The model told us, by name, that a parameter we sent is one it
+            // does not take. Drop that one parameter, remember it, and try once.
+            //
+            // **Bounded to a single retry, and only for this failure.** A 400 is
+            // billed nothing, so the cost of being wrong about a model is one
+            // wasted round-trip; the cost of not having this is a feature that
+            // stays broken until someone ships a table row. It is what makes
+            // `dialect::RULES` an optimisation rather than a dependency — a
+            // vendor that changes silently corrects us without a release.
+            inference::dialect::remember_omit(&plan.model, &parameter);
+            let mut body = plan.body.clone();
+            if let Some(object) = body.as_object_mut() {
+                object.remove(&parameter);
+            }
+            send_body(client, plan, &body, credential, harness, source)
+                .await
+                .map_err(SendFailure::into_error)
+        }
+        Err(other) => Err(other.into_error()),
+    }
+}
+
+/// Why a single attempt failed, keeping the one case the caller can act on
+/// separate from the ones it cannot.
+enum SendFailure {
+    /// The model named a parameter we sent as one it does not accept. The only
+    /// case worth a second attempt, because it is the only one where we know
+    /// what to change.
+    Rejected {
+        parameter: String,
+        error: anyhow::Error,
+    },
+    /// Everything else, already phrased for the operator.
+    Other(anyhow::Error),
+}
+
+impl SendFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Rejected { error, .. } | Self::Other(error) => error,
+        }
+    }
+}
+
+/// One attempt, with an explicit body so the retry can send a narrowed one.
+async fn send_body(
+    client: &reqwest::Client,
+    plan: &RequestPlan,
+    body: &serde_json::Value,
+    credential: &Credential,
+    harness: Option<&str>,
+    source: Option<InferenceSource>,
+) -> Result<serde_json::Value, SendFailure> {
+    let mut request = client.post(&plan.url).json(body);
     if let Some(bearer) = &plan.bearer {
         request = request.bearer_auth(bearer);
     }
@@ -1826,17 +1930,19 @@ async fn send_plan(
         Some(bearer) if !bearer.is_empty() => text.replace(bearer.as_str(), "<redacted>"),
         _ => text,
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("inference request failed: {}", scrub(e.to_string())))?;
+    let response = request.send().await.map_err(|e| {
+        SendFailure::Other(anyhow::anyhow!(
+            "inference request failed: {}",
+            scrub(e.to_string())
+        ))
+    })?;
     let status = response.status();
     if !status.is_success() {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             credential.invalidate();
         }
         let text = response.text().await.unwrap_or_default();
-        let error = format!("inference returned {status}: {}", scrub(text));
+        let error = format!("inference returned {status}: {}", scrub(text.clone()));
         // `plan.url` is always `{base_url}/chat/completions` (see
         // `RequestPlan::url`'s doc and `request_plan`'s construction of it), so
         // this recovers the same `base_url` the failed request actually used —
@@ -1849,14 +1955,28 @@ async fn send_plan(
             .unwrap_or_else(|| plan.url.clone());
         if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness, source)
         {
-            return Err(anyhow::anyhow!("{advice}"));
+            return Err(SendFailure::Other(anyhow::anyhow!("{advice}")));
         }
-        return Err(anyhow::anyhow!("{error}"));
+        // Only a 400 is a statement about the request's shape. A 5xx, a 429 or a
+        // 401 is about the service or the credential, and narrowing the body in
+        // response to one would drop a parameter over a problem it did not cause.
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && let Some(parameter) =
+                inference::dialect::parameter_blamed_by(&text, &plan.tunable_fields)
+        {
+            return Err(SendFailure::Rejected {
+                parameter,
+                error: anyhow::anyhow!("{error}"),
+            });
+        }
+        return Err(SendFailure::Other(anyhow::anyhow!("{error}")));
     }
-    response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("inference response was not JSON: {}", scrub(e.to_string())))
+    response.json().await.map_err(|e| {
+        SendFailure::Other(anyhow::anyhow!(
+            "inference response was not JSON: {}",
+            scrub(e.to_string())
+        ))
+    })
 }
 
 /// The per-tenant inference model (issue #56 — BYOK).
@@ -2032,12 +2152,12 @@ impl ChatModel<()> for TenantProvider {
             .await
             .map_err(|e| InferenceError::Model(e.to_string()))?;
         let messages = wire_messages(&request.messages);
-        let temperature = request.temperature.unwrap_or(0.0);
         let plan = request_plan(
             &decl,
             model,
             messages,
-            temperature,
+            // Intent recovered at the vendored boundary, which carries a float.
+            inference::dialect::Sampling::from_request(request.temperature),
             request.max_tokens,
             wire_tools(&request.tools),
             &request.tool_choice,
@@ -2124,7 +2244,10 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
         decl,
         DEFAULT_HOSTED_MODEL,
         messages,
-        0.0,
+        // A reachability check has no opinion about sampling. The hardcoded
+        // `0.0` here made the probe fail on exactly the providers it exists to
+        // reassure the operator about.
+        inference::dialect::Sampling::Default,
         Some(16),
         Vec::new(),
         &ToolChoice::Auto,
@@ -2195,6 +2318,43 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
+
+    /// The original defect at this seam: `None` meant "no opinion" and we wrote
+    /// `0.0` — the one value Anthropic rejects across its entire current lineup
+    /// and the one Groq rewrites to `1e-8`. Nothing may appear at all.
+    #[test]
+    fn no_opinion_puts_no_sampling_field_on_the_wire() {
+        let mut body = serde_json::json!({ "model": "claude-sonnet-5" });
+        let sent = apply_sampling(
+            &mut body,
+            "claude-sonnet-5",
+            inference::dialect::Sampling::Default,
+            None,
+        );
+        assert!(sent.is_empty(), "nothing was asked for: {sent:?}");
+        assert!(body.get("temperature").is_none(), "{body}");
+    }
+
+    /// The seam reports what it actually put on the wire, which is what the
+    /// retry needs: after a rename the caller's name is not the wire's name.
+    #[test]
+    fn the_seam_reports_the_field_names_it_sent_after_translation() {
+        let mut body = serde_json::json!({ "model": "gpt-5.6-sol" });
+        let sent = apply_sampling(
+            &mut body,
+            "gpt-5.6-sol",
+            inference::dialect::Sampling::Deterministic,
+            Some(16384),
+        );
+        // A reasoning model takes no temperature and renames the cap.
+        assert!(!sent.contains(&"temperature".to_string()), "{sent:?}");
+        assert!(
+            sent.contains(&"max_completion_tokens".to_string()),
+            "{sent:?}"
+        );
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        assert_eq!(body["max_completion_tokens"], serde_json::json!(16384));
+    }
 
     /// The output floor only ever raises the harness's cap (issue: reasoning
     /// models exhaust a 16k `max_tokens` on their hidden stream).
@@ -4180,7 +4340,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4204,6 +4364,8 @@ mod tests {
             plan.body.get("parallel_tool_calls").is_none(),
             "no parallel-tool setting without tools"
         );
+        // Asked for, so sent.
+        assert_eq!(plan.body["temperature"], serde_json::json!(0.2));
         assert_eq!(plan.bearer.as_deref(), Some("or-key"));
         assert!(plan.url.ends_with("/chat/completions"), "{}", plan.url);
         assert!(
@@ -4223,7 +4385,7 @@ mod tests {
             &decl,
             "reasoning-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4238,7 +4400,7 @@ mod tests {
             &decl,
             "anthropic/claude-sonnet-4.5",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4278,7 +4440,7 @@ mod tests {
             &decl,
             "agentic-v1",
             Vec::new(),
-            0.0,
+            inference::dialect::Sampling::Deterministic,
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4297,7 +4459,7 @@ mod tests {
             &discovered,
             "agentic-v1",
             Vec::new(),
-            0.0,
+            inference::dialect::Sampling::Deterministic,
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4328,7 +4490,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.0,
+            inference::dialect::Sampling::Deterministic,
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4374,7 +4536,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4426,7 +4588,7 @@ mod tests {
             &or_decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4460,7 +4622,7 @@ mod tests {
             &compat_decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,

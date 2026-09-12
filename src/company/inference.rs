@@ -26,6 +26,7 @@
 //! and its `Debug` redacts the credential.
 
 pub mod catalogue;
+pub mod dialect;
 pub mod probe;
 pub mod resolve;
 pub mod store;
@@ -726,15 +727,35 @@ pub fn decl_for_probe(
 /// come through here — it inherits the platform endpoint in
 /// [`resolve_endpoint`], which is the only place that distinction is made.
 ///
-/// `ollama` backstops to a local default; `openai_compatible` has no default
-/// (validation requires an explicit URL).
+/// `ollama` backstops to a local default; every other local runtime, and
+/// `openai_compatible`, has no default (validation requires an explicit URL).
+///
+/// ## Why the fallback is empty rather than OpenRouter
+///
+/// This used to end `_ => override_url.unwrap_or(OPENROUTER_BASE_URL)`, and
+/// `lmstudio` and `omlx` have no arm — so a decl for either that resolved
+/// without a base URL was handed **openrouter.ai**, carrying whatever key the
+/// operator typed for the machine on their desk. A local runtime's turns would
+/// have gone to a third party along with its credential.
+///
+/// The console's add path always writes a URL, so no traced path reached it. But
+/// a `_ =>` arm that defaults to a third-party endpoint is the wrong shape
+/// whatever today's callers happen to do: the blast radius is a credential
+/// leaving the host, and the next caller is one refactor away. An empty string
+/// fails loudly and locally instead — the same answer `openai_compatible`
+/// already gave, for the same reason.
+///
+/// `openrouter` keeps its default by naming itself, which is also what stops an
+/// unknown kind inheriting it by accident.
 pub fn effective_base_url(provider: &str, override_url: Option<&str>) -> String {
     let override_url = override_url.map(str::trim).filter(|s| !s.is_empty());
     match normalize_provider(provider) {
         "ollama" => override_url.unwrap_or(OLLAMA_DEFAULT_BASE_URL).to_string(),
-        "openai_compatible" => override_url.unwrap_or_default().to_string(),
-        // openrouter, and any unknown kind (which `resolve_effective` rejects).
-        _ => override_url.unwrap_or(OPENROUTER_BASE_URL).to_string(),
+        "openrouter" => override_url.unwrap_or(OPENROUTER_BASE_URL).to_string(),
+        // `openai_compatible`, `lmstudio`, `omlx`, and any unknown kind. None of
+        // them has a guessable endpoint, and guessing is how a local runtime's
+        // credential reached OpenRouter.
+        _ => override_url.unwrap_or_default().to_string(),
     }
 }
 
@@ -2464,6 +2485,31 @@ mod tests {
         assert_eq!(
             effective_base_url("openrouter", Some("https://proxy/v1")),
             "https://proxy/v1"
+        );
+    }
+
+    /// The defect: `lmstudio` and `omlx` had no arm, so the `_ =>` fallback
+    /// handed a **local** runtime OpenRouter's URL — and the decl carries the
+    /// credential the operator typed for the machine on their desk. A local
+    /// runtime's turns, and its key, would have left the host.
+    #[test]
+    fn a_local_runtime_never_falls_back_to_a_third_party_endpoint() {
+        for kind in ["lmstudio", "omlx", "openai_compatible", "some-unknown-kind"] {
+            let resolved = effective_base_url(kind, None);
+            assert_ne!(
+                resolved, OPENROUTER_BASE_URL,
+                "{kind} must not inherit a third-party endpoint"
+            );
+            assert!(
+                resolved.is_empty(),
+                "{kind} has no guessable endpoint, so it must fail loudly: {resolved}"
+            );
+        }
+        // An override is still honoured, which is the whole of how these kinds
+        // are meant to be addressed.
+        assert_eq!(
+            effective_base_url("lmstudio", Some("http://localhost:1234/v1")),
+            "http://localhost:1234/v1"
         );
     }
 
