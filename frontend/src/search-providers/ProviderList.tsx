@@ -18,7 +18,7 @@ import {
   MANAGED_LABEL,
   MANAGED_SLUG,
   controlsFor,
-  isEmpty,
+  hasNoProviders,
   managedIsOn,
   managedSubline,
   rowSubline,
@@ -101,11 +101,19 @@ function TestControl({
  * did — every one of them describing a control that was visible while it was
  * being read.
  *
- * ## Managed is a badge, not a disabled toggle
+ * ## Managed is always a row, and a badge rather than a disabled toggle
  *
  * A locked switch reads as switchable-but-broken and invites a fight the
  * operator cannot win. Managed search is what the absence of everything else
  * means, so there is nothing to switch.
+ *
+ * And because it is what that absence means, it is rendered unconditionally —
+ * including, above all, on the deployment with no managed credential, where the
+ * row is the only thing that says so. It used to be the one deployment where
+ * the row was unreachable: the list short-circuited to an empty state whenever
+ * nothing else resolved, printing the row's own sentence as that state's
+ * sub-line. The notice for a company with no records is now the list's last
+ * row instead of a replacement for the list.
  *
  * ## No decisions live here
  *
@@ -151,49 +159,32 @@ export function ProviderList({
   testState: (slug: string) => TestState;
 }) {
   const managedOn = managedIsOn(inBuild, managedConfigured);
+  const noProviders = hasNoProviders(providers);
 
-  // Both branches carry the SAME `data-testid` and differ by `data-state`.
-  // Two ids meant every caller had to know which branch it was about to get,
-  // and a test that pinned one of them was really asserting something about the
-  // fixture — which is how the authority e2e came to fail on a runner with no
-  // managed credential rather than on anything to do with authority.
+  // There is no empty *branch* — the list always renders, because the Managed
+  // row always renders. What used to be a second top-level return is now the
+  // last row of the one list: the card is never a heading over blank space, and
+  // the operator with nothing connected still sees a real sentence and a CTA,
+  // but they see it *beside* Managed rather than instead of it.
   //
-  // Nothing at all: no records, and no managed surface behind them. The card
-  // would otherwise be a heading over blank space, which reads as a page that
-  // failed to load rather than a company that has not started. The empty state
-  // is what a new operator sees, so it gets a real sentence and a CTA.
-  if (isEmpty(providers, managedOn)) {
-    return (
-      <div
-        className="flex flex-col items-start gap-3 px-4 py-6"
-        data-testid="search-provider-list"
-        data-state="empty"
-      >
-        <p className="text-sm">
-          <span className="font-medium">No search providers connected.</span>{" "}
-          <span className="text-muted-foreground">
-            {managedSubline(inBuild, managedConfigured, managedDailyCallCap)}.
-          </span>
-        </p>
-        <Button type="button" disabled={!canManage} onClick={onAdd}>
-          <Plus className="size-4" />
-          Add a provider
-        </Button>
-      </div>
-    );
-  }
-
+  // `data-state` therefore now says whether this company has connected anything
+  // of its own, and nothing about the deployment's managed credential. That is
+  // what makes it safe to pin: it used to flip with the runner's fixture, which
+  // is how the authority e2e came to fail on a runner with no managed
+  // credential rather than on anything to do with authority.
   return (
     <ul
       className="divide-y divide-border"
       data-testid="search-provider-list"
-      data-state="populated"
+      data-state={noProviders ? "empty" : "populated"}
     >
-      {/* Always first. It is not in `providers` because it is not a record — it
-          is the fallback every company has whether or not it configured
-          anything. It is rendered whatever it resolves to, and says which,
-          rather than carrying a permanent "Always on" badge: managed search is
-          always the FALLBACK, which is a different claim from always WORKING. */}
+      {/* Always first and always present. It is not in `providers` because it
+          is not a record — it is the fallback every company has whether or not
+          it configured anything. It is rendered whatever it resolves to, and
+          says which, rather than carrying a permanent "Always on" badge:
+          managed search is always the FALLBACK, which is a different claim from
+          always WORKING. The `On` badge is the one that makes the stronger
+          claim, so that is the one keyed on whether a credential resolves. */}
       <li
         className="flex items-center gap-3 px-4 py-3"
         data-testid="search-provider-managed"
@@ -229,6 +220,38 @@ export function ProviderList({
           testState={testState}
         />
       ))}
+
+      {/* The one a new operator sees, under the row that tells them what they
+          have in the meantime. */}
+      {noProviders && (
+        <li
+          className="flex flex-col items-start gap-3 px-4 py-6"
+          data-testid="search-provider-empty"
+        >
+          <p className="text-sm">
+            <span className="font-medium">No search providers connected.</span>{" "}
+            <span className="text-muted-foreground">
+              Connect one to choose where your teammates search.
+            </span>
+          </p>
+          {/* Only where it is true: with a managed credential behind the row
+              above, teammates can already search, and telling them nothing
+              answers would be the one claim on this page most worth getting
+              right. */}
+          {!managedOn && (
+            <p
+              className="text-xs text-status-blocked-text"
+              data-testid="search-provider-dead-end"
+            >
+              {COPY.noSearchAnswers}
+            </p>
+          )}
+          <Button type="button" disabled={!canManage} onClick={onAdd}>
+            <Plus className="size-4" />
+            Add a provider
+          </Button>
+        </li>
+      )}
     </ul>
   );
 }

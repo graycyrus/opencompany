@@ -166,12 +166,16 @@ test("a member sees what Settings holds but is offered nothing that changes it",
     // says the choice is an administrator's, and it used to print that under a
     // live picker.
     //
-    // `search-provider-list` is present in both the empty and populated
-    // branches, which is the point: with no provider connected and no managed
-    // credential on the runner the list renders its empty state, and pinning
-    // either branch would make this test about the fixture rather than about
-    // authority.
+    // `search-provider-list` renders whatever the runner has: there is no empty
+    // branch to miss any more, because the Managed row is unconditional and the
+    // notice for a company with no records of its own is the list's last row
+    // rather than a replacement for it. Neither assertion below depends on the
+    // runner having a managed credential — pinning `data-state` here would make
+    // this test about the fixture rather than about authority.
     await expect(memberPage.getByTestId("search-provider-list")).toBeVisible();
+    await expect(
+      memberPage.getByTestId("search-provider-managed"),
+    ).toBeVisible();
 
     // ---- Approvals: the policy-generated tier and always-ask list -----------
     await openSettingsPage(memberPage, "approvals");
@@ -220,6 +224,7 @@ test("an admin is still offered every Settings control", async ({ page }) => {
   await expect(page.getByTestId("search-read-only")).toHaveCount(0);
   await expect(page.getByTestId("search-add")).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByTestId("search-provider-list")).toBeVisible();
+  await expect(page.getByTestId("search-provider-managed")).toBeVisible();
 
   await openSettingsPage(page, "approvals");
   await expect(page.getByTestId("policy-read-only")).toHaveCount(0);

@@ -34,7 +34,7 @@ import {
 import {
   addOptions,
   controlsFor,
-  isEmpty,
+  hasNoProviders,
   managedIsOn,
   managedSubline,
   rowSubline,
@@ -155,10 +155,14 @@ describe("the managed row", () => {
     );
   });
 
-  it("counts as something to show, so the empty state is about records", () => {
-    expect(isEmpty([], true)).toBe(false);
-    expect(isEmpty([], false)).toBe(true);
-    expect(isEmpty([account()], false)).toBe(false);
+  it("is a row whatever it resolves to, so the notice is only about records", () => {
+    // The row renders either way — that is the component's job and it takes no
+    // condition — so the only question left is whether this company has
+    // connected anything of its own. A deployment with no managed credential
+    // must not change the answer: when it did, an e2e that pinned the branch
+    // was really pinning the runner's fixture.
+    expect(hasNoProviders([])).toBe(true);
+    expect(hasNoProviders([account()])).toBe(false);
   });
 });
 

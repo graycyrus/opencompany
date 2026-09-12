@@ -126,16 +126,19 @@ export function addOptions(providers: readonly SearchProvider[]): {
 }
 
 /**
- * Whether the page has nothing at all to show.
+ * Whether this company has connected nothing of its own.
  *
- * A card with a heading over blank space reads as a page that failed to load
- * rather than a company that has not started, so the empty state is explicit.
- * Managed counts: a deployment where it resolves has something to show even with
- * no records.
+ * **Not whether the list is empty** — it never is. The Managed row is rendered
+ * whatever managed search resolves to, so there is always a row, and the
+ * question left is the one the operator can act on: has anything been connected
+ * beside it? When the answer is no, the list carries a notice and the CTA to
+ * add the first provider.
+ *
+ * Managed deliberately does not count either way. It used to, and that made the
+ * branch a statement about the *deployment's* credential rather than about this
+ * company's records — which is how an e2e that pinned one branch came to fail on
+ * a runner that happened to have no managed credential.
  */
-export function isEmpty(
-  providers: readonly SearchProvider[],
-  managedOn: boolean,
-): boolean {
-  return providers.length === 0 && !managedOn;
+export function hasNoProviders(providers: readonly SearchProvider[]): boolean {
+  return providers.length === 0;
 }

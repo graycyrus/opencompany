@@ -110,6 +110,17 @@ export const COPY = {
 
   /** The only explanatory sentence that survives on the page. */
   defaultIsTheOnlyOne: "Your teammates search through the default provider.",
+
+  /**
+   * The dead end, said rather than implied.
+   *
+   * Reachable only with no provider connected *and* nothing behind the Managed
+   * row — at which point no teammate can search at all, which is a stronger
+   * statement than "not connected yet" and is the one that makes Add the
+   * obvious next step. The Managed row says *why* it does not resolve; this
+   * says what that costs.
+   */
+  noSearchAnswers: "No search answers for this company yet.",
 } as const;
 
 /** The detail line an add-dialog option shows. */
