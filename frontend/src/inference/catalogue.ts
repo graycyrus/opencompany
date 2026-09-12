@@ -241,7 +241,15 @@ export interface LocalRuntime {
   label: string;
   /** A starting endpoint where one is conventional; the operator still confirms it. */
   defaultEndpoint?: string;
-  /** Whether this runtime also wants a credential. */
+  /**
+   * Whether this runtime **requires** a credential, and so whether the add
+   * dialog refuses without one.
+   *
+   * A floor, not a ceiling — a runtime with `false` may still accept a key an
+   * operator chooses to supply. The host mirrors this value and enforces it, so
+   * a wrongly-`true` here does not merely mis-style the form: it makes the
+   * runtime unaddable.
+   */
   needsKey: boolean;
 }
 
@@ -253,7 +261,10 @@ export interface LocalRuntime {
  * machine. The category still ports, and it is the reason loopback is an
  * explicit allowance in the connect flow's SSRF guard rather than an oversight.
  *
- * `omlx` is the only one that wants a key as well as an endpoint.
+ * **None of them requires a key.** `omlx` used to be marked as doing so, which
+ * made it impossible to add at all — the host refuses a local runtime whose
+ * `needsKey` is unmet. No build of any of the three projects called "omlx"
+ * requires one: two have no auth mechanism at all and the third's is opt-in.
  */
 export const LOCAL_RUNTIMES: readonly LocalRuntime[] = [
   {
@@ -270,7 +281,7 @@ export const LOCAL_RUNTIMES: readonly LocalRuntime[] = [
   {
     slug: "omlx",
     label: "OMLX",
-    needsKey: true,
+    needsKey: false,
   },
 ];
 

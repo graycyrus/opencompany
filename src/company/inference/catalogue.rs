@@ -308,8 +308,27 @@ pub struct LocalRuntime {
     /// A starting endpoint where one is conventional. The operator still types
     /// or confirms it — a local runtime's endpoint is the thing being chosen.
     pub default_endpoint: Option<&'static str>,
-    /// Whether this runtime also wants a credential.
+    /// Whether this runtime **requires** a credential, and so whether the add
+    /// flow refuses without one.
+    ///
+    /// A floor, not a ceiling: see [`LocalRuntime::auth`]. This being wrongly
+    /// `true` does not degrade the row, it makes it unaddable — the host refuses
+    /// it before any request is made.
     pub needs_key: bool,
+    /// How a credential is presented **if there is one**.
+    ///
+    /// Separate from [`LocalRuntime::needs_key`] because "must have a key" and
+    /// "knows what to do with a key" are different questions, and deriving the
+    /// second from the first gets one of them wrong every time. `omlx` is the
+    /// case: no build of it requires a key, but `jundot/omlx` has an optional
+    /// `--api-key`, so an operator who turned that on must still be able to
+    /// authenticate. Deriving auth from `needs_key` would have silently dropped
+    /// their header the moment the `needs_key` datum was corrected.
+    ///
+    /// [`AuthStyle::None`] for a runtime with no auth mechanism at all: Ollama
+    /// documents sending a key locally as a cause of *spurious* 401s, so this
+    /// is a statement about the endpoint, not about whether we hold one.
+    pub auth: AuthStyle,
 }
 
 /// The three local runtimes.
@@ -328,19 +347,47 @@ pub const LOCAL_RUNTIMES: &[LocalRuntime] = &[
         label: "Ollama",
         default_endpoint: Some("http://localhost:11434"),
         needs_key: false,
+        // "No authentication is required … locally", and `OLLAMA_API_KEY` is a
+        // Cloud-only variable whose presence locally is a documented cause of
+        // spurious 401s.
+        auth: AuthStyle::None,
     },
     LocalRuntime {
         slug: "lmstudio",
         label: "LM Studio",
         default_endpoint: None,
         needs_key: false,
+        // None by default. LM Studio does have an opt-in server toggle that
+        // takes a bearer, which this row has no way to express and which the
+        // add flow offers no path to — recorded in provider-contracts.md.
+        auth: AuthStyle::None,
     },
     LocalRuntime {
         slug: "omlx",
         label: "OMLX",
         default_endpoint: None,
-        // The only local runtime that wants both an endpoint and a key.
-        needs_key: true,
+        // **No omlx build requires a key**, so demanding one made the row
+        // impossible to add at all: the host refuses it outright at
+        // `providers.rs`'s "needs an API key" guard. That guard is correct and
+        // was promoted from the console deliberately — the datum it enforced was
+        // the wrong one, which is why the fix belongs here and not there.
+        //
+        // "omlx" names three different projects and none of them needs this:
+        // `ml-explore/mlx-lm`'s `mlx_lm.server` (port 8080) and
+        // `madroidmaq/mlx-omni-server` (10240) have **no auth mechanism at
+        // all**, and `jundot/omlx` (8000) has an optional `--api-key` that is
+        // off unless passed. An operator who turned that one on can still supply
+        // a key: `needs_key` is a floor, not a ceiling.
+        //
+        // Which of the three this row means is genuinely unsettled, and they
+        // listen on three different ports, which is why `default_endpoint` is
+        // `None` rather than a guess. See
+        // `docs/modules/inference/provider-contracts.md`.
+        needs_key: false,
+        // Bearer when there is a key to send, for the `jundot/omlx --api-key`
+        // operator, and nothing at all when there is not — `apply_auth` adds no
+        // header for an absent credential.
+        auth: AuthStyle::Bearer,
     },
 ];
 
@@ -522,11 +569,9 @@ pub fn auth_style_for(kind: &str) -> AuthStyle {
         return cloud.auth;
     }
     if let Some(local) = local_runtime(kind) {
-        return if local.needs_key {
-            AuthStyle::Bearer
-        } else {
-            AuthStyle::None
-        };
+        // Read off the row rather than derived from `needs_key`: a runtime can
+        // accept a key without requiring one, and deriving it conflated the two.
+        return local.auth;
     }
     AuthStyle::Bearer
 }
@@ -933,14 +978,21 @@ mod tests {
         assert_eq!(category_of("acme-gateway"), Category::Cloud);
     }
 
+    /// `needs_key` is enforced by the host, so a wrong `true` is not a cosmetic
+    /// defect — it makes the runtime unaddable. None of the three projects called
+    /// "omlx" requires a key, and two have no auth mechanism at all, so no local
+    /// runtime may demand one.
     #[test]
-    fn omlx_is_the_only_local_runtime_that_wants_a_key() {
+    fn no_local_runtime_demands_a_key() {
         let with_keys: Vec<&str> = LOCAL_RUNTIMES
             .iter()
             .filter(|r| r.needs_key)
             .map(|r| r.slug)
             .collect();
-        assert_eq!(with_keys, vec!["omlx"]);
+        assert!(
+            with_keys.is_empty(),
+            "a local runtime that demands a key cannot be added at all: {with_keys:?}"
+        );
     }
 
     #[test]
@@ -1297,8 +1349,15 @@ mod tests {
     fn a_keyless_local_runtime_sends_no_auth_header_and_omlx_does() {
         assert_eq!(auth_style_for("ollama"), AuthStyle::None);
         assert_eq!(auth_style_for("lmstudio"), AuthStyle::None);
-        // The only local runtime that wants both an endpoint and a key.
+        // Still bearer, though omlx no longer *requires* a key: an operator
+        // running `jundot/omlx --api-key` must still be able to authenticate.
+        // This is the assertion that would have caught the auth style silently
+        // becoming `None` as a side effect of correcting `needs_key`.
         assert_eq!(auth_style_for("omlx"), AuthStyle::Bearer);
+        assert!(
+            !local_runtime("omlx").expect("omlx row").needs_key,
+            "accepting a key is not the same as demanding one"
+        );
     }
 
     #[test]
