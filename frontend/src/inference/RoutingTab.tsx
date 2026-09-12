@@ -155,15 +155,19 @@ export function RoutingTab({
               option={option}
               selected={mode === option}
               managedConfigured={state.status?.managed?.configured}
-              // **Unselectable while Managed is switched off.** Selecting it
-              // writes `managed` into every tier and saves successfully, and the
-              // resolver then refuses every one of those turns — an apparently
-              // successful save that takes the company's inference offline.
-              // Switching Managed back on is a different act, on the other tab,
-              // and this row does not get to make it silently.
+              // **Unselectable unless Managed can actually serve a turn.**
+              // Selecting it writes `managed` into every tier and saves
+              // successfully; if it is switched off the resolver then refuses
+              // every one of those turns, and if the chain resolves to nothing
+              // they fail authentication instead. Either way an apparently
+              // successful click takes the company's inference offline.
+              // Connecting it, or switching it back on, is a different act on
+              // the other tab, and this row does not get to make it silently.
               disabled={
                 !canManage ||
-                (option === "managed" && state.status?.managed?.enabled === false)
+                (option === "managed" &&
+                  (state.status?.managed?.enabled === false ||
+                    state.status?.managed?.configured === false))
               }
               onSelect={() => {
                 setChosenMode(option);
