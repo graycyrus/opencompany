@@ -140,7 +140,7 @@ async fn state_with(
 /// The repo's shared skill library (`<crate root>/skills`), the same directory
 /// the serve path derives `skills_root` from.
 fn repo_skills_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills")
 }
 
 /// Like [`state_with_company`], but with the repo's shared skill library wired

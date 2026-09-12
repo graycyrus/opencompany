@@ -69,7 +69,7 @@ rule held or the component failed to mount.
 ## How the check works
 
 The Tauri updater plugin fetches the JSON manifest named by
-`plugins.updater.endpoints` in `src-tauri/tauri.conf.json`:
+`plugins.updater.endpoints` in `crates/opencompany-app/tauri.conf.json`:
 
 ```
 https://github.com/tinyhumansai/opencompany/releases/latest/download/latest.json
@@ -97,7 +97,7 @@ The plugin compares `version` with the running application's, downloads this
 machine's entry, and verifies the bytes against the minisign public key
 compiled into the application before anything touches the installed bundle.
 
-Three commands sit over it, in `src-tauri/src/commands.rs`:
+Three commands sit over it, in `crates/opencompany-app/src/commands.rs`:
 
 | Command | Does | On failure |
 |---|---|---|
@@ -118,7 +118,7 @@ GitHub's asset CDN on release day is exactly the minute the retry exists for. A
 **signature** failure is never retried: re-fetching the same bytes cannot fix a
 bad signature, and looping on one would turn a tampered bundle into a drain on
 somebody's battery. The policy is a pure function in
-`src-tauri/src/update.rs` and is unit tested there.
+`crates/opencompany-app/src/update.rs` and is unit tested there.
 
 ### The restart stops the local hosts first
 
@@ -133,7 +133,7 @@ same root, and the application would come back with every company down and
 it clears `autostart`, so the instance stays down next launch. Quiescing
 releases the locks and leaves the roster untouched, so the relaunched
 application comes back running exactly what this one was running. There is a
-test for precisely that in `src-tauri/src/local.rs`.
+test for precisely that in `crates/opencompany-app/src/local.rs`.
 
 ## What the release has to produce
 
@@ -243,7 +243,7 @@ somewhere an operator would back up a signing key.
 ### 2. Put the public half in the config
 
 Copy the **public** key the command printed into
-`src-tauri/tauri.conf.json`:
+`crates/opencompany-app/tauri.conf.json`:
 
 ```json
   "plugins": {
@@ -260,7 +260,7 @@ Copy the **public** key the command printed into
 Commit that. It is a public key; it is meant to be in the tree.
 
 The test `the_shipped_placeholder_is_not_configured` in
-`src-tauri/src/update.rs` asserts the committed config does **not** carry a
+`crates/opencompany-app/src/update.rs` asserts the committed config does **not** carry a
 real-looking key. That test is the tripwire for a key pasted in by accident, so
 the commit that legitimately adds one has to delete or invert it — a deliberate
 edit, in the same change, rather than a silent one.
