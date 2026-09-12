@@ -538,6 +538,30 @@ mod tests {
         );
     }
 
+    /// The retry drops one parameter, not the request's meaning. Whatever the
+    /// model rejected, the messages and the model id are still what the caller
+    /// asked for — otherwise "retry once" would silently answer a different
+    /// question.
+    #[test]
+    fn a_rejection_names_one_parameter_and_only_from_what_we_sent() {
+        let sent = vec!["temperature".to_string(), "max_completion_tokens".to_string()];
+        // A rename means the wire name is not the caller's name, so the blame
+        // has to be matched against what actually went out.
+        assert_eq!(
+            parameter_blamed_by(
+                "400: Unsupported parameter: 'max_completion_tokens' is not supported",
+                &sent
+            )
+            .as_deref(),
+            Some("max_completion_tokens")
+        );
+        // Nothing we sent is named, so there is nothing to drop and no retry.
+        assert_eq!(
+            parameter_blamed_by("400: Extra inputs are not permitted: 'reasoning_effort'", &sent),
+            None
+        );
+    }
+
     #[test]
     fn what_is_learned_from_a_rejection_outranks_the_table() {
         // The property that makes the table an optimisation rather than a

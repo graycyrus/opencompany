@@ -1850,7 +1850,66 @@ async fn send_plan(
     // test and compare model capabilities, and is not considered a long-term or
     // production-ready solution for most use cases" — it ignores `strict` and
     // `response_format`, supports no prompt caching, and hoists system messages.
-    let mut request = client.post(&plan.url).json(&plan.body);
+    match send_body(client, plan, &plan.body, credential, harness, source).await {
+        Ok(payload) => Ok(payload),
+        Err(SendFailure::Rejected {
+            parameter,
+            error: _,
+        }) => {
+            // The model told us, by name, that a parameter we sent is one it
+            // does not take. Drop that one parameter, remember it, and try once.
+            //
+            // **Bounded to a single retry, and only for this failure.** A 400 is
+            // billed nothing, so the cost of being wrong about a model is one
+            // wasted round-trip; the cost of not having this is a feature that
+            // stays broken until someone ships a table row. It is what makes
+            // `dialect::RULES` an optimisation rather than a dependency — a
+            // vendor that changes silently corrects us without a release.
+            inference::dialect::remember_omit(&plan.model, &parameter);
+            let mut body = plan.body.clone();
+            if let Some(object) = body.as_object_mut() {
+                object.remove(&parameter);
+            }
+            send_body(client, plan, &body, credential, harness, source)
+                .await
+                .map_err(SendFailure::into_error)
+        }
+        Err(other) => Err(other.into_error()),
+    }
+}
+
+/// Why a single attempt failed, keeping the one case the caller can act on
+/// separate from the ones it cannot.
+enum SendFailure {
+    /// The model named a parameter we sent as one it does not accept. The only
+    /// case worth a second attempt, because it is the only one where we know
+    /// what to change.
+    Rejected {
+        parameter: String,
+        error: anyhow::Error,
+    },
+    /// Everything else, already phrased for the operator.
+    Other(anyhow::Error),
+}
+
+impl SendFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Rejected { error, .. } | Self::Other(error) => error,
+        }
+    }
+}
+
+/// One attempt, with an explicit body so the retry can send a narrowed one.
+async fn send_body(
+    client: &reqwest::Client,
+    plan: &RequestPlan,
+    body: &serde_json::Value,
+    credential: &Credential,
+    harness: Option<&str>,
+    source: Option<InferenceSource>,
+) -> Result<serde_json::Value, SendFailure> {
+    let mut request = client.post(&plan.url).json(body);
     if let Some(bearer) = &plan.bearer {
         request = request.bearer_auth(bearer);
     }
@@ -1861,17 +1920,19 @@ async fn send_plan(
         Some(bearer) if !bearer.is_empty() => text.replace(bearer.as_str(), "<redacted>"),
         _ => text,
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("inference request failed: {}", scrub(e.to_string())))?;
+    let response = request.send().await.map_err(|e| {
+        SendFailure::Other(anyhow::anyhow!(
+            "inference request failed: {}",
+            scrub(e.to_string())
+        ))
+    })?;
     let status = response.status();
     if !status.is_success() {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             credential.invalidate();
         }
         let text = response.text().await.unwrap_or_default();
-        let error = format!("inference returned {status}: {}", scrub(text));
+        let error = format!("inference returned {status}: {}", scrub(text.clone()));
         // `plan.url` is always `{base_url}/chat/completions` (see
         // `RequestPlan::url`'s doc and `request_plan`'s construction of it), so
         // this recovers the same `base_url` the failed request actually used —
@@ -1884,14 +1945,28 @@ async fn send_plan(
             .unwrap_or_else(|| plan.url.clone());
         if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness, source)
         {
-            return Err(anyhow::anyhow!("{advice}"));
+            return Err(SendFailure::Other(anyhow::anyhow!("{advice}")));
         }
-        return Err(anyhow::anyhow!("{error}"));
+        // Only a 400 is a statement about the request's shape. A 5xx, a 429 or a
+        // 401 is about the service or the credential, and narrowing the body in
+        // response to one would drop a parameter over a problem it did not cause.
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && let Some(parameter) =
+                inference::dialect::parameter_blamed_by(&text, &plan.tunable_fields)
+        {
+            return Err(SendFailure::Rejected {
+                parameter,
+                error: anyhow::anyhow!("{error}"),
+            });
+        }
+        return Err(SendFailure::Other(anyhow::anyhow!("{error}")));
     }
-    response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("inference response was not JSON: {}", scrub(e.to_string())))
+    response.json().await.map_err(|e| {
+        SendFailure::Other(anyhow::anyhow!(
+            "inference response was not JSON: {}",
+            scrub(e.to_string())
+        ))
+    })
 }
 
 /// The per-tenant inference model (issue #56 — BYOK).
