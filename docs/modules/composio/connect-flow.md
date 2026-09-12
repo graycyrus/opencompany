@@ -87,12 +87,27 @@ The rule that removed the toggle from the Managed inference row.
 | Own key | `Use this` / `Add key` | managed is active |
 | Own key | `Test` | a key is stored |
 | Own key | `Replace key` | a key is stored |
-| Own key | `Remove key` | a key is stored |
+| Own key | `Remove key` | **never** — see below |
+| Managed | `Add a token` | managed is active, or the managed chain resolves to `none` |
+| Managed | `Replace` / `Remove token` | a managed-route token is stored |
 
-The sharp one is the second row. **When `managedCredentialSource` is `none`, the
-managed row offers no `Use this` at all.** Switching to a route that resolves to
-nothing is an outage, not a choice; the row says why instead and points at the
-credential card that would fix it.
+Two rows in that table are the sharp ones.
+
+**`Remove key` on the own-account row is never offered**, and that is a shape of
+the host rather than a decision anyone is free to reverse. The host derives the
+route from whether a key exists, so `setComposioApiKey("")` writes the mode back
+to `managed` as a side effect — the *same* call the managed row's `Use this`
+makes. Rendering one action twice under two names is how an operator comes to
+believe they are two. `composioRows` therefore sets `removeKey: false`
+unconditionally on that row, and this table said the opposite until it was
+caught in review.
+
+**When `managedCredentialSource` is `none`, the managed row offers no `Use
+this`** — switching to a route that resolves to nothing is an outage, not a
+choice. It offers `Add a token` instead, which is the only order that works:
+storing `composio/token` does not move the company off BYOK, so the credential
+is provisioned first and the switch taken second, once the route resolves. The
+sub-line says which payer failed to resolve while that is still true.
 
 ## The flow
 
