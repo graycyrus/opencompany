@@ -207,10 +207,18 @@ is additive for every running tenant.
 ```
 read providers(company, scope):
     entry0 = read("inference/config")          ← may be absent
-    if entry0:  yield Provider::from_flat(entry0, key="inference/key")
+    if entry0:  yield Provider::from_flat(entry0,
+                     key="provider/<slug>/key", legacy="inference/key")
     for slug in list("provider/*/config"):
         yield Provider::from_scoped(slug)
 ```
+
+Entry zero's credential has **one** address rule and a fallback, not an address
+of its own: a write goes to `provider/<slug>/key` and clears `inference/key`, and
+a read tries the new address and falls back to the old one. Pinning it to
+`inference/key` is the pre-convergence behaviour, and it is what would have lost
+the credential on the first save. The full chain, in order, is in
+[`credentials.md`](credentials.md).
 
 ## Boot-time brain selection
 

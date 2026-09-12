@@ -334,6 +334,8 @@ Carried deliberately, each with what it would take to close.
 | 8 | **`parallel_tool_calls: false` reaches only proxied endpoints and OpenRouter.** The gate is a payer test, not a capability test, so the turn-boundary promise is not enforced on the wire for most BYOK endpoints. Whether each gateway accepts the field is **ND**. | Per-endpoint capability discovery. |
 | 9 | **Which project `omlx` means is unresolved** (see above). | An operator decision. |
 | 10 | **ModelScope's free tier is 2,000 calls/day, ≤200/model/day** **S**, and our own probes spend it. | A rate note in the UI, or fewer probes. |
+| 11 | **The managed brain never learns from a 400.** The retry-and-remember layer is keyed on `RequestPlan::tunable_fields`, and `HostedProvider` sends its body with no plan, so an unknown or changed managed model keeps failing where a BYOK one would correct itself after one round-trip. | Routing the hosted path through the shared send logic, or giving it the same bounded retry. |
+| 12 | **The console offers no way to give a local runtime an optional key.** `credentialAsk` models whether a key is *required*, so an `omlx` started with `--api-key` (and LM Studio with its server toggle on) cannot be authenticated from this surface even though the host would accept it. | Separating "accepts a key" from "requires one", through the dialog, the row menu and the host's own check. |
 
 ## Sources
 

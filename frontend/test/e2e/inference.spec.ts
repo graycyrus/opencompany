@@ -215,7 +215,7 @@ test("a custom provider may not take a name the catalogue ships", async ({ page 
   await expect(page.getByTestId("inference-connect-submit")).toBeDisabled();
 });
 
-test("disabling a provider keeps its credential and its routes", async ({ page }) => {
+test("disabling a provider keeps its credential", async ({ page }) => {
   // Distinct from deleting it: "stop billing this account this week" has to be
   // expressible, and a disable that scrubbed would make re-enabling a
   // re-configuration.
@@ -237,7 +237,9 @@ test("disabling a provider keeps its credential and its routes", async ({ page }
   await expect(row).toContainText("•••• configured");
 });
 
-test("deleting a provider clears its key and resets the routes that named it", async ({ page }) => {
+test("deleting a provider removes its row and resets the routes that named it", async ({
+  page,
+}) => {
   await openInference(page);
 
   await addCustom(page);
