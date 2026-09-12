@@ -28,7 +28,22 @@ export interface ConnectDraft {
   label?: string;
   baseUrl?: string;
   key?: string;
+  /** The model every workload routes to, once the endpoint has been asked. */
+  model?: string;
   addAnyway?: boolean;
+}
+
+/**
+ * The model step, once the endpoint has said it needs one.
+ *
+ * `models` is that endpoint's own published catalogue, so the operator chooses
+ * from what is actually there rather than typing an id and finding out on the
+ * first turn. It can be empty — plenty of endpoints serve inference and publish
+ * no catalog — and the field stays free text either way, because an Azure
+ * deployment name is never in `/models` by design.
+ */
+export interface ModelAsk {
+  models: string[];
 }
 
 /**
@@ -85,6 +100,7 @@ export function ProviderConnectDialog({
   busy,
   error,
   offerAddAnyway,
+  modelAsk,
   onCancel,
   onSubmit,
 }: {
@@ -104,6 +120,12 @@ export function ProviderConnectDialog({
   error: string | null;
   /** Whether the last failure was a probe failure, which is the only one that unlocks "add anyway". */
   offerAddAnyway: boolean;
+  /**
+   * The endpoint's catalogue, once it has said it cannot resolve a tier name on
+   * its own. `null` until then — the field does not appear at all for a gateway
+   * that resolves `agentic-v1` itself, because there is nothing to ask.
+   */
+  modelAsk: ModelAsk | null;
   onCancel: () => void;
   onSubmit: (draft: ConnectDraft) => void;
 }) {
@@ -136,6 +158,7 @@ export function ProviderConnectDialog({
   // it and nothing here could display it — so an empty field in edit mode means
   // "leave it alone", which is what `submit` sends.
   const [key, setKey] = useState("");
+  const [model, setModel] = useState("");
 
   // The row being edited is not its own collision. Its slug is already taken —
   // by it — and `edit` is keyed on the stored slug rather than on this one, so
@@ -147,9 +170,13 @@ export function ProviderConnectDialog({
   const slug = slugify(label);
   const slugError = custom ? checkSlug(rivals, slug) : null;
   const endpointOk = !ask.needsEndpoint || normalizeEndpoint(baseUrl) !== null;
-  const ready = custom
-    ? customProviderReady(rivals, { label, baseUrl })
-    : endpointOk && (!ask.needsKey || key.trim().length > 0);
+  // Once the endpoint has said it needs a model, it needs one: adding without it
+  // is the reported dead end, and the host refuses it anyway.
+  const modelOk = !modelAsk || model.trim().length > 0;
+  const ready =
+    (custom
+      ? customProviderReady(rivals, { label, baseUrl })
+      : endpointOk && (!ask.needsKey || key.trim().length > 0)) && modelOk;
 
   const submit = (addAnyway: boolean) =>
     onSubmit({
@@ -162,6 +189,7 @@ export function ProviderConnectDialog({
       // silently disable every turn routed through it. The field starts empty
       // because a stored key cannot be shown, so empty has to mean "unchanged".
       key: keyToSend(ask.needsKey, editing != null, key),
+      model: model.trim() || undefined,
       addAnyway,
     });
 
@@ -245,6 +273,46 @@ export function ProviderConnectDialog({
                 className="font-mono text-xs"
                 onChange={(e) => setKey(e.target.value)}
               />
+            </div>
+          )}
+
+          {/* **The ask that never happened.** `add_provider` wrote four empty
+              tier mappings and nothing anywhere asked which model this provider
+              should serve, so the abstract tier name went out as the model id
+              and the vendor 404'd it. `TierVocabulary::Unknown` exists precisely
+              to refuse to guess and `tier_defaults()` returns an empty map for
+              it *so the console will ask* — this is the console asking, with
+              that endpoint's own catalogue in hand. */}
+          {modelAsk && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="inference-connect-model">Model</Label>
+              <Input
+                id="inference-connect-model"
+                value={model}
+                list={modelAsk.models.length > 0 ? "inference-connect-model-options" : undefined}
+                placeholder="claude-sonnet-5"
+                autoComplete="off"
+                spellCheck={false}
+                className="font-mono text-xs"
+                data-testid="inference-connect-model"
+                onChange={(e) => setModel(e.target.value)}
+              />
+              {/* A datalist rather than a select: a catalogue can be empty, or
+                  can omit an id that still works — an Azure deployment name is
+                  never published by design — so the list suggests and the field
+                  still accepts anything. */}
+              {modelAsk.models.length > 0 && (
+                <datalist id="inference-connect-model-options">
+                  {modelAsk.models.map((id) => (
+                    <option key={id} value={id} />
+                  ))}
+                </datalist>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {modelAsk.models.length > 0
+                  ? `This endpoint does not resolve workload names like agentic-v1, so it needs a model id. It publishes ${modelAsk.models.length} — pick one, or type another. Every workload starts on it; change that under Routing.`
+                  : "This endpoint does not resolve workload names like agentic-v1 and publishes no catalogue, so the model id has to be typed. Every workload starts on it; change that under Routing."}
+              </p>
             </div>
           )}
 

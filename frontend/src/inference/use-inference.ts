@@ -22,6 +22,7 @@ import {
   editProvider,
   getInferenceStatus,
   getRoutes,
+  probeDraft,
   putRoutes,
   restartInference,
   setDefaultProvider,
@@ -69,6 +70,15 @@ export interface InferenceActions {
   saveManagedKey: (key: string) => Promise<ProviderMutation>;
   setManagedOn: (enabled: boolean) => Promise<ProviderMutation>;
   testManagedChain: () => Promise<ProbeResult>;
+  /**
+   * Ask an endpoint what it publishes, **before** anything is written.
+   *
+   * The add dialog needs this to offer a model: an endpoint whose catalog
+   * resolves no tier name cannot serve a workload until one is named, and the
+   * only honest moment to ask is with that endpoint's own list in hand. Nothing
+   * is stored — the draft's key travels one way and is never written by this.
+   */
+  probeDraftEndpoint: (draft: { baseUrl: string; key?: string; kind?: string }) => Promise<ProbeResult>;
   test: (slug: string, model?: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
@@ -125,6 +135,7 @@ export function useInference(
             Object.fromEntries(
               WORKLOADS.map((w) => [w, parseRef(readable[WORKLOAD_TIER[w]] ?? "")]),
             ) as RoutingMap,
+            next.managed?.configured === true,
           ),
         );
         // Orphans are an admin's to clear, and this reader cannot. Saying
@@ -188,6 +199,7 @@ export function useInference(
               Object.fromEntries(
                 WORKLOADS.map((w) => [w, parseRef(persisted[WORKLOAD_TIER[w]] ?? "")]),
               ) as RoutingMap,
+              result.status.managed?.configured === true,
             ),
           );
           // Orphans are only known to the routing route, and we did not get it.
@@ -221,6 +233,7 @@ export function useInference(
     makeDefault: (slug) => write(slug, () => setDefaultProvider(client, company, slug)),
     saveManagedKey: (key) => write(null, () => setManagedKey(client, company, key)),
     setManagedOn: (enabled) => write(null, () => setManagedEnabled(client, company, enabled)),
+    probeDraftEndpoint: (draft) => probeDraft(client, company, draft),
     testManagedChain: async () => {
       const result = await testManaged(client, company);
       // The test records health against the managed slug, and the row renders

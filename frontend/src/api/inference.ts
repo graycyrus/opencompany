@@ -408,6 +408,24 @@ export interface ProbeResult {
    * deployment name is never published by design.
    */
   modelKnown?: boolean;
+  /**
+   * The ids the endpoint published, so the add dialog can offer one.
+   *
+   * Absent when the endpoint published none, or when the probe failed. Capped
+   * host-side — the field the operator types into accepts anything anyway.
+   */
+  models?: string[];
+  /**
+   * Whether this endpoint cannot serve a workload until a model is named.
+   *
+   * Decided from the published catalog, never from the kind: a self-hosted
+   * gateway publishing `agentic-v1` resolves tiers whoever runs it, and
+   * Anthropic, OpenAI, Groq, Ollama and LM Studio all publish neither the tier
+   * names nor the shipped ids and so all need one.
+   *
+   * Optional because an older host does not send it.
+   */
+  needsModel?: boolean;
 }
 
 /** Every provider write answers with the whole status, so nothing has to be reconciled. */
@@ -430,6 +448,15 @@ export interface AddProviderInput {
   baseUrl?: string;
   /** The outbound credential. */
   key?: string;
+  /**
+   * The model id every workload routes to.
+   *
+   * Required by the host for an endpoint whose catalog resolves no tier name —
+   * otherwise the bare tier goes out as the model id and the vendor 404s it,
+   * which is the reported defect. The dialog asks for it with that endpoint's own
+   * catalogue in hand rather than letting the host refuse after a round trip.
+   */
+  model?: string;
   /**
    * Add despite a probe failure that would otherwise be destructive.
    *

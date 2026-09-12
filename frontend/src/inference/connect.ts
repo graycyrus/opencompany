@@ -86,16 +86,21 @@ export interface ProviderRowAction {
 export function providerMenu(
   provider: Pick<Provider, "kind" | "enabled" | "keyConfigured"> & {
     isDefault?: boolean;
-    legacy?: boolean;
+    origin?: "entryZero" | "indexed";
   },
 ): ProviderRowAction[] {
-  // **The company's pre-list configuration has no actions here.** It lives in
-  // the flat `inference/config` slot, and every write route refuses that
-  // origin — so offering Edit, Replace key and Remove produced three buttons
-  // whose only outcome was an error naming a form this page replaced. An empty
-  // menu plus the row's own explanation is the honest surface until the write
-  // routes can accept it.
-  if (provider.legacy) return [];
+  // **Entry zero is changed through the inference config, not as a list entry.**
+  // The host says so three times, in three separate 400s, and the console had no
+  // way to know which row they applied to — so it rendered Edit, Replace key and
+  // Remove provider live on a row where every one of them is a round trip to a
+  // refusal. The rules do not move; this stops offering what cannot work.
+  //
+  // Setting it as the default is not one of the three: it is a marker on the
+  // company, not a write to the row, and it is the one thing the operator may
+  // genuinely want from this row.
+  if (provider.origin === "entryZero") {
+    return provider.isDefault || !provider.enabled ? [] : [{ id: "default", label: "Set as default" }];
+  }
   const ask = credentialAsk(provider.kind);
   const actions: ProviderRowAction[] = [
     { id: "edit", label: ask.needsEndpoint ? "Edit endpoint" : "Edit" },
@@ -229,6 +234,25 @@ export interface CredentialAsk {
   keyPlaceholder?: string;
   /** A starting endpoint, where one is conventional. */
   defaultEndpoint?: string;
+}
+
+/**
+ * The endpoint a draft of `optionSlug` would be probed at, or `null` when there
+ * is nothing to probe.
+ *
+ * A cloud provider's comes from the preset — the paths in that table are too
+ * varied to derive and the operator never types one. A local runtime's is the
+ * thing being chosen, so it comes from the field. A CLI login has neither and
+ * skips the probe entirely, which is the same call the host makes.
+ *
+ * Used to ask an endpoint what it publishes **before** a record is written, so
+ * the dialog can offer a model rather than the host refusing after a round trip.
+ */
+export function probeEndpoint(optionSlug: string, typed?: string): string | null {
+  const cloud = cloudProvider(optionSlug);
+  if (cloud) return cloud.endpoint;
+  if (optionSlug === MANAGED_OPTION_SLUG) return null;
+  return typed ? normalizeEndpoint(typed) : null;
 }
 
 /**

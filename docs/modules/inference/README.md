@@ -14,6 +14,7 @@ spec for what ships today.
 | [`provider-contracts.md`](provider-contracts.md) | **What each vendor actually accepts** — base URLs, `temperature`, token fields, auth, listing, and what a bad key really returns, each claim marked verified or not |
 | [`connect-flow.md`](connect-flow.md) | Adding a provider: the modal, the classified probe, the rollback rules |
 | [`routing.md`](routing.md) | **Manage Routing, verbatim** — three modes, nine workloads, the per-workload dialog |
+| [`routing-states.md`](routing-states.md) | What each resolution renders, the disable confirmation, the model the add flow asks for |
 | [`known-defects.md`](known-defects.md) | Bugs in the design we are borrowing from, and why we are not inheriting them |
 | [`architecture.md`](architecture.md) | Module seams, and how each one is tested |
 | [`staging.md`](staging.md) | The order the work lands in, and what is shippable at each step |

@@ -241,22 +241,20 @@ describe("providerMenu", () => {
     expect(labels.removeKey).toBe("Remove key");
     expect(labels.remove).toBe("Remove provider");
   });
-  it("offers nothing for the company's pre-list configuration", () => {
-    // Entry zero lives in the flat `inference/config` slot and every write
-    // route refuses that origin, so Edit, Replace key and Remove were three
-    // buttons whose only outcome was an error naming a form this page replaced.
-    expect(
-      providerMenu({
-        kind: "openrouter",
-        enabled: true,
-        keyConfigured: true,
-        legacy: true,
-      }),
-    ).toEqual([]);
-    // And the same row without that origin is a normal one.
-    expect(
-      providerMenu({ kind: "openrouter", enabled: true, keyConfigured: true }).length,
-    ).toBeGreaterThan(0);
+
+  it("offers entry zero only what it can actually do", () => {
+    // Entry zero refuses edit, remove and disable with three separate 400s. The
+    // console had no way to tell which row they applied to, so it rendered all
+    // three live and every one of them was a round trip to a refusal. Setting it
+    // as the default is not one of the three — that is a marker on the company,
+    // not a write to the row.
+    expect(ids({ origin: "entryZero" })).toEqual(["default"]);
+    expect(ids({ origin: "entryZero", isDefault: true })).toEqual([]);
+    expect(ids({ origin: "entryZero", enabled: false })).toEqual([]);
   });
 
+  it("treats a row from an older host as an ordinary one", () => {
+    // Absent `origin` reads as indexed, which is what every row was before.
+    expect(ids()).toContain("remove");
+  });
 });

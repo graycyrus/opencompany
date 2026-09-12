@@ -12,18 +12,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { AddProviderDialog } from "./AddProviderDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
-import type { ConnectDraft } from "./ProviderConnectDialog";
-import { MANAGED_SLUG, ProviderList } from "./ProviderList";
+import type { ConnectDraft, ModelAsk } from "./ProviderConnectDialog";
+import { MANAGED_SLUG, NO_CREDENTIAL_RESOLVES, ProviderList } from "./ProviderList";
 import { RemoveProviderDialog } from "./RemoveProviderDialog";
 import type { RemovalIntent } from "./RemoveProviderDialog";
 import { categoryOf } from "./catalogue";
-import { MANAGED_OPTION_SLUG } from "./connect";
+import { MANAGED_OPTION_SLUG, probeEndpoint } from "./connect";
 import {
   MANAGED_TARGET_LABEL,
   WORKLOADS,
   WORKLOAD_TIER,
   managedFallbackNote,
+  nothingCanAnswer,
   parseRef,
+  providerRoutingState,
   removalImpact,
 } from "./routing";
 import type { RoutingMap } from "./types";
@@ -104,6 +106,14 @@ export function ProvidersTab({
    * because neither is evidence that the endpoint is fine.
    */
   const [probeFailure, setProbeFailure] = useState<ProbeClass | null>(null);
+  /**
+   * The endpoint's catalogue, once it has said it cannot resolve a tier name.
+   *
+   * `null` until the draft has been probed, and cleared whenever the dialog
+   * closes or the operator starts again — an answer about one endpoint is not an
+   * answer about the next.
+   */
+  const [modelAsk, setModelAsk] = useState<ModelAsk | null>(null);
   /**
    * What each row's Test is doing, keyed by slug.
    *
@@ -190,6 +200,7 @@ export function ProvidersTab({
     setEditing(null);
     setError(null);
     setProbeFailure(null);
+    setModelAsk(null);
   };
 
   async function submitConnect(draft: ConnectDraft) {
@@ -210,6 +221,25 @@ export function ProvidersTab({
         // credential goes to its own route rather than through `add`.
         await actions.saveManagedKey(draft.key ?? "");
       } else {
+        // **Ask before writing, not after refusing.** An endpoint whose catalog
+        // resolves no workload name cannot serve one until a model is named —
+        // that is the reported defect, and the host now refuses such an add.
+        // Refusing is the backstop; this is the ask. The draft is probed first,
+        // and its own published list is what the operator chooses from.
+        if (!draft.model && !modelAsk) {
+          const url = probeEndpoint(draft.kind, draft.baseUrl);
+          if (url) {
+            const probe = await actions.probeDraftEndpoint({
+              baseUrl: url,
+              key: draft.key,
+              kind: draft.kind,
+            });
+            if (probe.ok && probe.needsModel) {
+              setModelAsk({ models: probe.models ?? [] });
+              return;
+            }
+          }
+        }
         // A non-destructive probe failure saved the row and kept the key, so
         // nothing is recorded here: the dialog closes on it because the save
         // succeeded, and the advisory is the page's note rather than an error
@@ -273,7 +303,17 @@ export function ProvidersTab({
             managed={state.status?.managed}
             canManage={canManage}
             busySlug={state.busySlug}
-            onToggle={(p, enabled) => fireAndForget(actions.setEnabled(p.slug, enabled))}
+            // **Switching on is a one-step act; switching off is not.** Off
+            // keeps every route pointing here and parks the workloads behind
+            // them — which the host already computes and answers with, and the
+            // console used to discard into a toast while the Routing tab went on
+            // rendering those rows as healthy. So off is confirmed, with what it
+            // parks named, in reversible language.
+            onToggle={(p, enabled) =>
+              enabled
+                ? fireAndForget(actions.setEnabled(p.slug, true))
+                : setConfirming({ intent: "disable", provider: p })
+            }
             onEdit={(p) => {
               setEditing(p);
               setConnecting(p.kind);
@@ -291,6 +331,7 @@ export function ProvidersTab({
               setConnecting(p.kind);
             }}
             onMakeDefault={(p) => fireAndForget(actions.makeDefault(p.slug))}
+            routingState={(p) => providerRoutingState(p, state.providers, routingMap)}
             // The same handler the header's button uses, passed down rather
             // than reimplemented: one way to add a provider, not two.
             onAdd={() => setAdding(true)}
@@ -330,6 +371,17 @@ export function ProvidersTab({
         </p>
       )}
 
+      {/* Row E2: providers are connected and every one of them is switched off,
+          with a managed chain that resolves to nothing. The list above shows
+          rows, so it does not read as an empty company — and nothing anywhere
+          said that this one cannot think. */}
+      {state.providers.length > 0 &&
+        nothingCanAnswer(state.providers, state.status?.managed?.configured) && (
+          <p className="text-xs text-status-blocked-text" data-testid="inference-providers-dead-end">
+            {NO_CREDENTIAL_RESOLVES}. Switch one of these back on, or connect Managed.
+          </p>
+        )}
+
       <AddProviderDialog
         open={adding}
         onOpenChange={setAdding}
@@ -353,6 +405,7 @@ export function ProvidersTab({
         busy={busy}
         error={error}
         offerAddAnyway={probeFailure !== null}
+        modelAsk={modelAsk}
         onCancel={closeConnect}
         onSubmit={(draft) => void submitConnect(draft)}
       />
@@ -387,9 +440,11 @@ export function ProvidersTab({
           setConfirming(null);
           // An empty key is how the store clears a value — it has no delete.
           fireAndForget(
-            intent === "key"
-              ? actions.edit(provider.slug, { key: "" })
-              : actions.remove(provider.slug),
+            intent === "disable"
+              ? actions.setEnabled(provider.slug, false)
+              : intent === "key"
+                ? actions.edit(provider.slug, { key: "" })
+                : actions.remove(provider.slug),
           );
         }}
       />

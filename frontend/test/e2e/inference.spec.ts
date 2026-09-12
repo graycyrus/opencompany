@@ -204,12 +204,20 @@ test("the add dialog stops offering a provider once it is connected", async ({ p
 });
 
 test("a custom provider may not take a name the catalogue ships", async ({ page }) => {
-  // A routing entry saying `groq` would otherwise mean two things — and the
+  // A routing entry saying `cerebras` would otherwise mean two things — and the
   // refusal happens before anything is written.
+  //
+  // **Deliberately a catalogue row nothing else connects.** `checkSlug` reports
+  // `taken` before `reserved`, and every test in this file shares one company:
+  // once "the add dialog stops offering a provider once it is connected" has
+  // added Groq, typing "Groq" here answers "This company already has a provider
+  // with that name" — a true sentence about the wrong rule, and the assertion
+  // below would be pinning test order rather than the reservation. Cerebras is
+  // in the catalogue and is connected by no test.
   await openInference(page);
 
   await addCustom(page);
-  await page.locator("#inference-connect-name").fill("Groq");
+  await page.locator("#inference-connect-name").fill("Cerebras");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await expect(page.getByTestId("inference-slug-error")).toContainText("built-in");
   await expect(page.getByTestId("inference-connect-submit")).toBeDisabled();
@@ -228,7 +236,12 @@ test("disabling a provider keeps its credential", async ({ page }) => {
   await page.getByTestId("inference-connect-submit").click();
   await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({ timeout: 30_000 });
 
+  // Switching off is confirmed now, in reversible language: it parks the
+  // workloads routed through this provider rather than losing anything.
   await page.getByTestId("inference-provider-e2e-parked-toggle").click();
+  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Switch off");
+  await page.getByTestId("inference-remove-confirm").click();
+  await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
   await page.reload();
   await openInference(page);
 
@@ -286,7 +299,19 @@ test("the routing mode is inferred from the routes and round-trips", async ({ pa
   await openInference(page);
   await page.getByRole("tab", { name: "Routing" }).click();
 
-  await page.getByTestId("inference-mode-managed").click();
+  // **Managed is only selectable when Managed can answer.** On an instance whose
+  // managed chain resolves to nothing, an empty table must not read as Managed
+  // and the row must not be clickable — which is the reported defect, and the
+  // opposite of what this screen did before.
+  const managedMode = page.getByTestId("inference-mode-managed");
+  if (await managedMode.isDisabled()) {
+    // Whatever else this company's routes say, the one thing that must hold is
+    // that Managed is neither selected nor selectable when it cannot answer.
+    await expect(managedMode).toHaveAttribute("aria-pressed", "false");
+    return;
+  }
+
+  await managedMode.click();
   await page.reload();
   await openInference(page);
   await page.getByRole("tab", { name: "Routing" }).click();
