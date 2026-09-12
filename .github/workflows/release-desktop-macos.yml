@@ -47,7 +47,7 @@
 # `docs/spec/runtime/desktop-updates.md` has the whole picture, including the
 # one-time keypair setup an operator has to do before any of this works.
 #
-# FEATURES ARE PASSED AT BUILD TIME, not committed to `src-tauri/Cargo.toml`.
+# FEATURES ARE PASSED AT BUILD TIME, not committed to `crates/opencompany-app/Cargo.toml`.
 # See `DESKTOP_RELEASE_FEATURES` on the build job for the whole argument.
 #
 # Issue #590. Every `uses:` below is a full commit SHA with the resolved version
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Only for the updater guard below, which runs a script from the tree and
-      # reads the pubkey out of `src-tauri/tauri.conf.json`. Pinned to `tag` for
+      # reads the pubkey out of `crates/opencompany-app/tauri.conf.json`. Pinned to `tag` for
       # the same reason the build's checkout is: the config it validates has to
       # be the config that is about to be built.
       - name: Checkout
@@ -209,13 +209,13 @@ jobs:
           - x86_64-apple-darwin
     env:
       # The feature set the SHIPPED desktop build carries, over and above the
-      # default set in `src-tauri/Cargo.toml`.
+      # default set in `crates/opencompany-app/Cargo.toml`.
       #
       # Deliberately here and not in that manifest. `acp` and `composio` are
       # both `= ["openhuman"]` in the root `Cargo.toml` — pure `cfg` switches
       # that pull no `dep:` entry, and `openhuman` is already on via `mcp`. So
       # enabling them adds ZERO packages to the graph and leaves
-      # `src-tauri/Cargo.lock` byte-identical, which is what lets the `--locked`
+      # `crates/opencompany-app/Cargo.lock` byte-identical, which is what lets the `--locked`
       # below still hold. A feature that gated an optional dependency could not
       # be passed this way; it would have to move into the manifest.
       #
@@ -226,7 +226,7 @@ jobs:
       #   same gate, so without the feature `builder.rs` forces `acp_agents =
       #   None` and EVERY `transport = "local"` harness resolves `unavailable`.
       #   The desktop is the only host that has an `AcpAgentFactory` to give —
-      #   `src-tauri/src/embedded.rs` hands one over unconditionally, and the
+      #   `crates/opencompany-app/src/embedded.rs` hands one over unconditionally, and the
       #   seam on `AppState` is ungated, so it compiled and was silently
       #   dropped. Shipping without `acp` ships that dead lane (issue #1245).
       # * `composio` — `src/server/ops/composio.rs` reports
@@ -239,7 +239,7 @@ jobs:
       # `ci.yml`'s `Desktop` lane passes this SAME string to clippy and test —
       # otherwise the release would ship a feature combination nothing ever
       # compiled. Keep the two in step.
-      DESKTOP_RELEASE_FEATURES: opencompany/acp,opencompany/composio
+      DESKTOP_RELEASE_FEATURES: opencompany-core/acp,opencompany-core/composio
     steps:
       # Check out the exact `tag` being published, NOT the dispatch ref. If the
       # branch advanced since the tag was cut, an unpinned checkout would build
@@ -294,15 +294,15 @@ jobs:
       # the .app + unsigned .dmg. macOS signing is intentionally skipped here and
       # handled by the dedicated re-sign + notarize step below (hardened runtime
       # + entitlements are required for notarization). Path-qualified CLI so the
-      # project resolves to src-tauri/ (assert-single-tauri-app.sh).
+      # project resolves to crates/opencompany-app/ (assert-single-tauri-app.sh).
       - name: Build and package Tauri app (unsigned)
-        working-directory: src-tauri
+        working-directory: crates/opencompany-app
         env:
           # Keep in sync with bundle.macOS.minimumSystemVersion in
-          # src-tauri/tauri.conf.json — the Wry system-WebView floor.
+          # crates/opencompany-app/tauri.conf.json — the Wry system-WebView floor.
           MACOSX_DEPLOYMENT_TARGET: "12.0"
         run: |
-          ../frontend/node_modules/.bin/tauri build \
+          ../../frontend/node_modules/.bin/tauri build \
             --target ${{ matrix.target }} \
             -- --locked --features "$DESKTOP_RELEASE_FEATURES"
 
@@ -312,7 +312,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          BUNDLE_DIR="src-tauri/target/${TARGET}/release/bundle"
+          BUNDLE_DIR="crates/opencompany-app/target/${TARGET}/release/bundle"
           APP_PATH="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -1 || true)"
           DMG_PATH="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' ! -name 'rw.*.dmg' -type f 2>/dev/null | head -1 || true)"
           if [ -z "$APP_PATH" ]; then
@@ -348,7 +348,7 @@ jobs:
         run: |
           bash scripts/release/sign-and-notarize-macos.sh \
             "${{ steps.locate.outputs.app_path }}" \
-            "src-tauri/entitlements.plist"
+            "crates/opencompany-app/entitlements.plist"
 
       - name: Re-package DMG after notarization
         if: inputs.sign
@@ -477,7 +477,7 @@ jobs:
       contents: write
     steps:
       # `tag` again, not the dispatch ref: the script asserts the manifest's
-      # version against `src-tauri/tauri.conf.json`, and it has to read the
+      # version against `crates/opencompany-app/tauri.conf.json`, and it has to read the
       # config that was built rather than whatever `main` says today.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

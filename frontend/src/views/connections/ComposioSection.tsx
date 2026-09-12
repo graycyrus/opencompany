@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, Loader2, Plug, Save } from "lucide-react";
+import { AlertTriangle, ExternalLink, Loader2, Plug, Save } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -37,7 +37,7 @@ import { classifyLoadFailure } from "@/lib/section-load";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
@@ -50,6 +50,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
+
+/**
+ * Where a BYOK key comes from.
+ *
+ * The bare host the field's own copy names, not a deep link into the settings
+ * page that mints the key: that path is the vendor's to move, and a stale one
+ * strands the operator on a 404 *after* a sign-in that worked — which is worse
+ * than the landing page they can navigate from themselves.
+ */
+const COMPOSIO_DASHBOARD_URL = "https://app.composio.dev";
 
 interface Props {
   client: OpenCompanyClient;
@@ -596,6 +607,32 @@ export function ComposioSection({
                       ? "From your Composio dashboard at app.composio.dev. Stored on this host, never shown again."
                       : "Stored on this host, never shown again."}
                   </p>
+                  {/* The dashboard the line above names, as somewhere to go
+                      rather than an address to retype. Deliberately the bare
+                      host from that copy and not a guessed deep link: a
+                      settings path that moves leaves the operator on a 404
+                      after a sign-in that worked.
+
+                      Only on the own-account row. The managed route's token
+                      does not come from app.composio.dev at all — it is a
+                      bearer the TinyHumans backend issues — so offering the
+                      same errand there would send an operator to the wrong
+                      vendor for the credential they were asked for. */}
+                  {form.row === "byok" && (
+                    <a
+                      href={COMPOSIO_DASHBOARD_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      data-testid="composio-open-dashboard"
+                      className={cn(
+                        buttonVariants({ variant: "outline", size: "sm" }),
+                        "mt-1",
+                      )}
+                    >
+                      Open Composio dashboard
+                      <ExternalLink className="size-3.5" />
+                    </a>
+                  )}
                 </div>
 
                 {/* The refusal, where the operator is looking — and "add

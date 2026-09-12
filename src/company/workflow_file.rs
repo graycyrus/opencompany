@@ -1143,6 +1143,15 @@ pub fn list_workflows_with_globals(
     overlays: &[crate::ports::types::OverlayWorkflow],
     disable: &[String],
 ) -> Vec<WorkflowFile> {
+    list_workflows_with_global_baseline(source_dir, overlays, disable, crate::globals::workflows())
+}
+
+pub(crate) fn list_workflows_with_global_baseline(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    disable: &[String],
+    globals: &[WorkflowFile],
+) -> Vec<WorkflowFile> {
     let mut files = list_company_workflows_union(source_dir, overlays);
     // Reserved by *claim*, not by successful parse: a malformed seed file or
     // overlay still names an id the company owns, and `load_workflow_with_globals`
@@ -1152,7 +1161,7 @@ pub fn list_workflows_with_globals(
     // loader can never actually return it, exposing an entry this list cannot
     // back.
     let reserved = reserved_company_workflow_ids(source_dir, overlays);
-    for workflow in crate::globals::workflows() {
+    for workflow in globals {
         if reserved.contains(&workflow.id)
             || crate::globals::disabled(disable, "workflow", &workflow.id)
         {
@@ -2589,7 +2598,7 @@ mod tests {
 
     const CAMPAIGN: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/companies/marketing_agency/workflows/campaign_pipeline.toml"
+        "/../../companies/marketing_agency/workflows/campaign_pipeline.toml"
     ));
 
     #[test]
@@ -4002,7 +4011,7 @@ mod tests {
     fn the_shipped_guarded_loop_preset_is_valid() {
         const GAME: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/companies/game_studio/workflows/game_build_pipeline.toml"
+            "/../../companies/game_studio/workflows/game_build_pipeline.toml"
         ));
         parse_workflow(GAME).expect("the game-studio guarded loop is valid");
     }
@@ -5076,7 +5085,7 @@ to = "done"
     /// build error naming the path rather than a silently-skipped test.
     const CONSOLE_DIALOG: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/frontend/src/views/WorkflowCreateDialog.tsx"
+        "/../../frontend/src/views/WorkflowCreateDialog.tsx"
     ));
     const CONSOLE_DIALOG_PATH: &str = "frontend/src/views/WorkflowCreateDialog.tsx";
 
@@ -5084,7 +5093,7 @@ to = "done"
     /// destination kinds.
     const CONSOLE_API: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/frontend/src/api/workflows.ts"
+        "/../../frontend/src/api/workflows.ts"
     ));
     const CONSOLE_API_PATH: &str = "frontend/src/api/workflows.ts";
 

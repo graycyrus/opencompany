@@ -8,7 +8,8 @@ durable and consistent, drives it with **Medulla** (TinyHumans' hosted
 orchestrator-first model), and makes every company a first-class, discoverable
 citizen of the **tiny.place** agent economy.
 
-Two personas are served by the same crate:
+Two personas are served by the same host crate (`crates/opencompany-core`;
+see [repository-layout.md](../repository-layout.md) for the crate layout):
 
 - **Prosumer operator** — a non-technical person running a one-person
   business. Installs one binary, pastes one key (`TINYHUMANS_API_KEY`), picks

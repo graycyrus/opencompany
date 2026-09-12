@@ -16,7 +16,7 @@ use super::{
 use crate::runtime::builder::{agent_scoped_grants, effective_grants};
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn subdirs(dir: &Path) -> Vec<PathBuf> {
