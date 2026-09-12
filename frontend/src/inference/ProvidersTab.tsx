@@ -195,13 +195,13 @@ export function ProvidersTab({
         // credential goes to its own route rather than through `add`.
         await actions.saveManagedKey(draft.key ?? "");
       } else {
-        const result = await actions.add(draft);
-        // A non-destructive probe failure saved the row and kept the key. The
-        // dialog closes on it, because the save succeeded — the advisory is the
-        // page's note, not an error in a form that is still open.
-        if (result.probe && !result.probe.ok && result.probe.class) {
-          setProbeFailure(result.probe.class);
-        }
+        // A non-destructive probe failure saved the row and kept the key, so
+        // nothing is recorded here: the dialog closes on it because the save
+        // succeeded, and the advisory is the page's note rather than an error
+        // in a form that is still open. Recording the class here and then
+        // closing — which `closeConnect` clears — is what this used to do, and
+        // the only reader of it is a dialog that is by then gone.
+        await actions.add(draft);
       }
       closeConnect();
     } catch (err) {

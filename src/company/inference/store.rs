@@ -613,16 +613,22 @@ pub async fn load_provider_key(
     secrets: &dyn SecretStore,
     provider: &Provider,
 ) -> Result<String> {
+    // Trimmed on the way out, because it is trimmed on the way in to decide
+    // whether it is set at all: `provider_key_configured` calls `!raw.trim()
+    // .is_empty()` a stored `"sk-…\n"` true, and this returning the newline
+    // meant the value that answered "yes, configured" and the value put in an
+    // `Authorization` header were not the same string. A pasted key keeps its
+    // trailing newline far more often than anyone would like.
     if let Some(SecretValue(raw)) = secrets.get(company, &provider.key_key()).await?
         && !raw.trim().is_empty()
     {
-        return Ok(raw);
+        return Ok(raw.trim().to_string());
     }
     if let Some(legacy) = provider.legacy_key_key()
         && let Some(SecretValue(raw)) = secrets.get(company, legacy).await?
         && !raw.trim().is_empty()
     {
-        return Ok(raw);
+        return Ok(raw.trim().to_string());
     }
     Ok(String::new())
 }
