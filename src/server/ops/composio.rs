@@ -96,6 +96,22 @@ const SWITCH_NOTE: &str =
 const CLEAR_NOTE: &str =
     "Composio token cleared. Agents use whatever credential remains on their next turn.";
 
+/// The reminder attached to storing a managed-route token for a company that is
+/// **on BYOK**.
+///
+/// [`SWITCH_NOTE`] would be a lie here, in the way that matters most: it says
+/// agents pick the token up on their next turn, and they do not. `resolve_access`
+/// reads the BYOK key while the company is on that route, so a token stored for
+/// the managed route sits there doing nothing until somebody chooses that route.
+///
+/// The state is reachable on purpose. A BYOK company whose managed chain
+/// resolves to nothing cannot be offered "Use this" — that would be switching
+/// into an outage — so the console offers the token first and the switch after,
+/// which is the only order that works. Saying "in effect" at the end of the
+/// first step would be reporting the second one as already done.
+const INACTIVE_TOKEN_NOTE: &str = "Composio token saved for the managed route. This company is \
+     still on its own Composio account, so agents keep using that key until you switch routes.";
+
 /// The reminder attached to switching a company onto its own Composio account.
 ///
 /// It names the consequence the radio button cannot: the providers connected
@@ -657,13 +673,22 @@ async fn set_token(
         "credential_set"
     };
     journal(&company, change, None).await?;
+    // Read once and answered from, rather than read twice: the note below is a
+    // statement about the same status this response carries, and deriving the
+    // two from separate reads is how a page comes to show a sentence that
+    // disagrees with the row underneath it.
+    let status = effective_status(runtime).await?;
+    let note = if body.token.trim().is_empty() {
+        CLEAR_NOTE.to_string()
+    } else if matches!(status.mode, ComposioMode::Managed) {
+        SWITCH_NOTE.to_string()
+    } else {
+        // Stored for a route this company is not on. See `INACTIVE_TOKEN_NOTE`.
+        INACTIVE_TOKEN_NOTE.to_string()
+    };
     Ok(Json(MutationResponse {
-        status: effective_status(runtime).await?,
-        note: if body.token.trim().is_empty() {
-            CLEAR_NOTE.to_string()
-        } else {
-            SWITCH_NOTE.to_string()
-        },
+        status,
+        note,
         // Not probed. This route sets a bearer the *TinyHumans backend*
         // recognises, and there is no cheap call here that distinguishes a bad
         // bearer from a backend that is down — which is the distinction the
@@ -2641,6 +2666,51 @@ mod tests {
         assert_eq!(
             dto["mode"], "managed",
             "a refused write stored nothing: {dto}"
+        );
+    }
+
+    /// A managed-route token stored by a company that is **on BYOK** must not
+    /// claim agents have started using it.
+    ///
+    /// The state is newly reachable: a BYOK company whose managed chain resolves
+    /// to nothing cannot be offered "Use this" — that would be switching into an
+    /// outage — so the console offers the token first and the switch second, and
+    /// that is the only order that works. `SWITCH_NOTE` at the end of the first
+    /// step would report the second as already done, while `resolve_access` is
+    /// still reading the BYOK key.
+    #[tokio::test]
+    async fn a_token_for_the_route_a_company_is_not_on_does_not_claim_effect() {
+        use crate::company::composio::store_api_key;
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "inactivetoken", GRANTED).await;
+        let runtime = runtime_of(&state, "inactivetoken");
+        // Straight to the store rather than through the route: the route probes
+        // the draft key, and this test is about the note, not the probe.
+        store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
+
+        let (_, resp, _) = send_for(
+            &state,
+            "inactivetoken",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": TOKEN })),
+        )
+        .await;
+        let note = resp["note"].as_str().expect("a note").to_string();
+        assert!(
+            !note.contains("next turn"),
+            "the company is on BYOK, so agents do not pick this up next turn: {note}"
+        );
+        assert!(
+            note.contains("still on its own Composio account"),
+            "the note says why the token is not in effect: {note}"
         );
     }
 

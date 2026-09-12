@@ -5,16 +5,55 @@ substance of it. The rules here are ported from the inference rework's
 `connect-flow.md`; the two places this surface deliberately differs are called
 out where they occur.
 
-## No modal, and why
+## A modal after all, and why the first answer was wrong
 
-Inference opens a modal because a company picks one or two providers out of a
-couple of dozen, and listing them all inline spends the page on the ones nobody
-chose.
+This section argued the opposite until it was seen running. The original
+argument, kept because half of it is still right:
 
-Composio has **two routes and no catalogue**. There is nothing to pick from, so
-there is nothing for a modal to hold. The key field belongs on the row it
-configures. A dialog over one option is the same mistake as a select over one
-option — a button wearing a costume.
+> Inference opens a modal because a company picks one or two providers out of a
+> couple of dozen, and listing them all inline spends the page on the ones
+> nobody chose. Composio has **two routes and no catalogue**. There is nothing
+> to pick from, so there is nothing for a modal to hold. The key field belongs
+> on the row it configures. A dialog over one option is the same mistake as a
+> select over one option — a button wearing a costume.
+
+What that reasons about is **what a modal holds**, and it is correct about it:
+there is no list here, and nothing to choose. What it never reasons about is
+**where an inline field lands**, and that is what broke.
+
+"On the row it configures" was not what inline produced. A row cannot hold a
+password field, a hint, a Save, a Cancel and an advisory without becoming a
+card, so the field rendered as a card appended after the rows — and after the
+"takes effect next turn" line, and after two advisory slots. An operator
+clicking `Add a token` on a row near the top of a scrolling page got a form
+roughly a screenful below the fold, with nothing scrolling to it. The page did
+not visibly move. It was reported as a dead button, which is the honest reading.
+
+The fix could have been `scrollIntoView`. It is a modal instead, because the
+position was only the symptom: an inline form's distance from its own button is
+a function of how many advisories happen to sit between them, so it is correct
+by luck on the render you tested and wrong on the next one.
+
+And the action fits the shape. Pasting the credential every agent in the company
+presents is not an edit alongside the rows — it is one decision taken to the
+exclusion of the page behind it, which either lands or is refused before
+anything else can be touched. That is what a modal is for, and it is a different
+question from whether there is a catalogue to put in one.
+
+What follows from it, and is load-bearing:
+
+- **One exit.** Cancel, the X, Escape and the backdrop all run through
+  `closeForm`, so no dismissal leaves a pasted secret in state behind a closed
+  modal. A write in flight holds the dialog open.
+- **A refusal renders inside the dialog**, next to the field, with `add anyway`
+  where that applies — behind a modal overlay, a message on the page is a
+  message nobody can read.
+- **An advisory does not.** It means the key landed and only the check failed,
+  so the dialog closes on it; the message is carried by a toast, because closing
+  the dialog remounts the section that would otherwise hold it.
+- **The managed → BYOK confirmation stays inside** that dialog rather than
+  opening a second one, as a labelled group. It is about the key in the field
+  above it, and a second overlay would hide the thing being decided.
 
 ## The sober layout
 
