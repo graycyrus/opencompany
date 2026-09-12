@@ -8,11 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  MANAGED_OPTION_SLUG,
-  addOptions,
-  offersManaged,
-} from "@/inference/connect";
+import { MANAGED_OPTION_SLUG, addOptions, offersManaged } from "@/inference/connect";
 import { NO_CREDENTIAL_RESOLVES, managedRow } from "@/inference/ProviderList";
 import {
   MANAGED_NOT_SET_UP,

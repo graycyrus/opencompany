@@ -13,11 +13,7 @@ import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { AddProviderDialog } from "./AddProviderDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft, ModelAsk } from "./ProviderConnectDialog";
-import {
-  MANAGED_SLUG,
-  NO_CREDENTIAL_RESOLVES,
-  ProviderList,
-} from "./ProviderList";
+import { MANAGED_SLUG, NO_CREDENTIAL_RESOLVES, ProviderList } from "./ProviderList";
 import { RemoveProviderDialog } from "./RemoveProviderDialog";
 import type { RemovalIntent } from "./RemoveProviderDialog";
 import { categoryOf } from "./catalogue";
@@ -172,10 +168,7 @@ export function ProvidersTab({
           [slug]: {
             kind: "done",
             ok: false,
-            message:
-              err instanceof ApiError
-                ? err.message
-                : "The check did not complete.",
+            message: err instanceof ApiError ? err.message : "The check did not complete.",
           },
         })),
       )
@@ -400,8 +393,8 @@ export function ProvidersTab({
           >
             {NO_CREDENTIAL_RESOLVES}. Switch one of these back on, or connect
             Managed.
-          </p>
-        )}
+        </p>
+      )}
 
       <AddProviderDialog
         open={adding}
@@ -517,8 +510,8 @@ function RestartNotice({
               className="text-xs text-muted-foreground"
               data-testid="inference-restart-manual"
             >
-              This host cannot rebuild a company runtime in place: quit and
-              reopen the app, or restart the server process.
+              This host cannot rebuild a company runtime in place: quit and reopen the app, or
+              restart the server process.
             </p>
           )}
         </div>

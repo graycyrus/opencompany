@@ -12,7 +12,6 @@
 // a request is made, and the host needs them to decide where a turn goes. Where
 // they overlap they are written to agree, and the ones that matter — the mode
 // inference and the three scrub rules — are pinned on both sides.
-
 import { categoryOf } from "./catalogue";
 import { MANAGED_OPTION_SLUG } from "./connect";
 import { overrideIsSendable } from "./proxy-compat";
@@ -248,7 +247,6 @@ export function refSignature(ref: ProviderRef): string {
 export function refFor(routing: RoutingMap, workload: Workload): ProviderRef {
   return routing[workload] ?? UNSET;
 }
-
 /*
  * `inferRoutingMode` used to live here, a faithful port of the host's
  * `infer_routing_mode`. **It was never called.** The rendered mode comes from
@@ -335,7 +333,6 @@ export function primaryProvider(
     providers.find((p) => p.enabled)
   );
 }
-
 /**
  * The sentence for a company with nothing behind it — no enabled provider, and a
  * managed chain that resolves to nothing.
@@ -345,7 +342,6 @@ export function primaryProvider(
  * row's work goes: nowhere.
  */
 export const NOTHING_ANSWERS = "Nothing — no provider can answer";
-
 /**
  * What an unset row says it will actually use.
  *
@@ -485,7 +481,6 @@ export function modelAfterProviderChange(
 ): string {
   return from === to ? model : "";
 }
-
 /**
  * The three things that can be done to a provider from its row, in increasing
  * severity: park it, forget its credential, delete it.
@@ -640,7 +635,7 @@ function disableWarnings(
   if (impact.routed.length > 0) {
     const named = impact.routed.map((w) => WORKLOAD_COPY[w].label);
     lines.push(
-      `${describeWorkloads(named)} route through ${label} and will be parked until you switch it back on.`,
+      `${describeWorkloads(named)} through ${label} and will be parked until you switch it back on.`,
     );
   }
   if (impact.isDefault) {
@@ -735,8 +730,7 @@ export function modelTarget(
   target: string,
   providers: readonly Provider[],
 ): string | null {
-  const slug =
-    target === UNSET_TARGET ? primaryProvider(providers)?.slug : target;
+  const slug = target === UNSET_TARGET ? primaryProvider(providers)?.slug : target;
   if (!slug || slug === MANAGED_OPTION_SLUG) return null;
   return slug;
 }

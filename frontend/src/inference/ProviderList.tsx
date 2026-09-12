@@ -48,7 +48,6 @@ export function managedRow(source: ManagedState["source"] | undefined): string {
       return "TinyHumans chooses a model for each task";
   }
 }
-
 /**
  * The sentence for a company nothing can answer for.
  *
@@ -61,7 +60,6 @@ export function managedRow(source: ManagedState["source"] | undefined): string {
  */
 export const NO_CREDENTIAL_RESOLVES =
   "No credential resolves — agents cannot think";
-
 /** The managed row's name. */
 export const MANAGED_LABEL = "Managed";
 
@@ -127,9 +125,7 @@ function TestControl({
         data-testid={`inference-provider-${slug}-test`}
         onClick={onTest}
       >
-        <RefreshCw
-          className={cn("size-4", state.kind === "testing" && "animate-spin")}
-        />
+        <RefreshCw className={cn("size-4", state.kind === "testing" && "animate-spin")} />
       </Button>
     </>
   );
@@ -477,54 +473,53 @@ function ProviderRow({
         data-testid={`inference-provider-${provider.slug}-toggle`}
         onCheckedChange={(next) => onToggle(provider, next)}
       />
-
       {/* No trigger at all when there is nothing behind it. An overflow button
           that opens an empty menu is a control that reports a capability the row
           does not have — which is what entry zero had, three times over. */}
       {menu.length > 0 && (
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                disabled={!canManage || busy}
-                aria-label={`${provider.label} actions`}
-                data-testid={`inference-provider-${provider.slug}-menu`}
-              >
-                <EllipsisVertical className="size-4" />
-              </Button>
-            }
-          />
-          {/* Which items, decided in `providerMenu` — per kind, and derived from
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={!canManage || busy}
+              aria-label={`${provider.label} actions`}
+              data-testid={`inference-provider-${provider.slug}-menu`}
+            >
+              <EllipsisVertical className="size-4" />
+            </Button>
+          }
+        />
+        {/* Which items, decided in `providerMenu` — per kind, and derived from
             the same `credentialAsk` the connect dialog uses, so a local runtime
             or a CLI login is never offered a key it does not have. */}
-          <DropdownMenuContent align="end">
+        <DropdownMenuContent align="end">
             {menu.map((action) => (
-              <DropdownMenuItem
-                key={action.id}
-                variant={action.destructive ? "destructive" : undefined}
-                data-testid={`inference-provider-${provider.slug}-${action.id}`}
-                onClick={() => {
-                  switch (action.id) {
-                    case "edit":
-                      return onEdit(provider);
-                    case "default":
-                      return onMakeDefault(provider);
-                    case "replaceKey":
-                      return onReplaceKey(provider);
-                    case "removeKey":
-                      return onRemoveKey(provider);
-                    case "remove":
-                      return onRemove(provider);
-                  }
-                }}
-              >
-                {action.label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+            <DropdownMenuItem
+              key={action.id}
+              variant={action.destructive ? "destructive" : undefined}
+              data-testid={`inference-provider-${provider.slug}-${action.id}`}
+              onClick={() => {
+                switch (action.id) {
+                  case "edit":
+                    return onEdit(provider);
+                  case "default":
+                    return onMakeDefault(provider);
+                  case "replaceKey":
+                    return onReplaceKey(provider);
+                  case "removeKey":
+                    return onRemoveKey(provider);
+                  case "remove":
+                    return onRemove(provider);
+                }
+              }}
+            >
+              {action.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
       )}
     </li>
   );

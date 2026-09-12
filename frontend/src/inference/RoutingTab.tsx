@@ -479,7 +479,7 @@ function WorkloadRow({
         <span className="truncate text-sm font-medium">{copy.label}</span>
         <span className="truncate text-xs text-muted-foreground">
           {copy.description}
-        </span>
+      </span>
       </span>
       <span className="grid min-w-0 justify-items-end leading-tight">
         <span

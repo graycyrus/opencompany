@@ -11,12 +11,7 @@
 // shared `api/types.ts` is needed.
 
 import type { OpenCompanyClient } from "./client";
-import type {
-  ProbeClass,
-  Provider,
-  ProviderHealth,
-  RoutingMode,
-} from "@/inference/types";
+import type { ProbeClass, Provider, ProviderHealth, RoutingMode } from "@/inference/types";
 
 /**
  * Provider kinds the console offers.

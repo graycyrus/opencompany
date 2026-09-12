@@ -106,6 +106,7 @@ export function useInference(
   const [orphaned, setOrphaned] = useState<[string, string][]>([]);
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
+
   const reload = useCallback(async () => {
     try {
       const next = await getInferenceStatus(client, company);
@@ -195,17 +196,13 @@ export function useInference(
     busySlug,
     reload,
     add: (input) => write(null, () => addProvider(client, company, input)),
-    edit: (slug, input) =>
-      write(slug, () => editProvider(client, company, slug, input)),
+    edit: (slug, input) => write(slug, () => editProvider(client, company, slug, input)),
     remove: (slug) => write(slug, () => deleteProvider(client, company, slug)),
     setEnabled: (slug, enabled) =>
       write(slug, () => setProviderEnabled(client, company, slug, enabled)),
-    makeDefault: (slug) =>
-      write(slug, () => setDefaultProvider(client, company, slug)),
-    saveManagedKey: (key) =>
-      write(null, () => setManagedKey(client, company, key)),
-    setManagedOn: (enabled) =>
-      write(null, () => setManagedEnabled(client, company, enabled)),
+    makeDefault: (slug) => write(slug, () => setDefaultProvider(client, company, slug)),
+    saveManagedKey: (key) => write(null, () => setManagedKey(client, company, key)),
+    setManagedOn: (enabled) => write(null, () => setManagedEnabled(client, company, enabled)),
     probeDraftEndpoint: (draft) => probeDraft(client, company, draft),
     testManagedChain: async () => {
       const result = await testManaged(client, company);

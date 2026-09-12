@@ -19,7 +19,6 @@ import type { ProviderIntent, RemovalImpact } from "./routing";
  * the same machinery and deliberately different language. See `removalWarnings`.
  */
 export type RemovalIntent = ProviderIntent;
-
 /**
  * Confirming a removal, with what it costs said out loud.
  *

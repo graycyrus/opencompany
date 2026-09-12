@@ -112,7 +112,6 @@ export function ProviderConnectDialog({
   const [baseUrl, setBaseUrl] = useState("");
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
-
   // Seed from the chosen option each time the dialog opens on a new one. A
   // conventional endpoint is a starting point the operator still confirms — it
   // is the thing being chosen for this category, so it is never assumed.
@@ -135,16 +134,13 @@ export function ProviderConnectDialog({
   const modelOk = !modelAsk || model.trim().length > 0;
   const ready =
     (custom
-      ? customProviderReady(providers, { label, baseUrl })
+    ? customProviderReady(providers, { label, baseUrl })
       : endpointOk && (!ask.needsKey || key.trim().length > 0)) && modelOk;
-
   const submit = (addAnyway: boolean) =>
     onSubmit({
       kind: optionSlug ?? "custom",
       label: custom ? label.trim() : undefined,
-      baseUrl: ask.needsEndpoint
-        ? (normalizeEndpoint(baseUrl) ?? baseUrl.trim())
-        : undefined,
+      baseUrl: ask.needsEndpoint ? (normalizeEndpoint(baseUrl) ?? baseUrl.trim()) : undefined,
       key: ask.needsKey ? key.trim() : undefined,
       model: model.trim() || undefined,
       addAnyway,

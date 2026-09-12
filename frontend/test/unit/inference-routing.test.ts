@@ -327,7 +327,6 @@ describe("the per-workload select", () => {
     provider("openrouter", "openrouter"),
     provider("anthropic", "anthropic"),
   ];
-
   it("lists providers only — the primary is never a second entry", () => {
     // Three connected providers, three options. It used to list five: the unset
     // row's own display (`Primary (OpenRouter)`) and a second Managed sentinel,
@@ -587,7 +586,6 @@ describe("removing a local runtime", () => {
       chat: parseRef("ollama:llama3"),
       reasoning: parseRef("openrouter:gpt-5"),
     } as RoutingMap;
-
     const { routing: next, reset } = scrubOnRemove(
       routing,
       ollama,
@@ -611,7 +609,6 @@ describe("removing a local runtime", () => {
     ]);
   });
 });
-
 describe("the false Managed floor", () => {
   /**
    * `primaryLabel` printed `Primary (Managed)` whenever nothing was enabled —

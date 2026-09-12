@@ -291,7 +291,6 @@ describe("providerMenu", () => {
     expect(labels.removeKey).toBe("Remove key");
     expect(labels.remove).toBe("Remove provider");
   });
-
   it("offers entry zero only what it can actually do", () => {
     // Entry zero refuses edit, remove and disable with three separate 400s. The
     // console had no way to tell which row they applied to, so it rendered all
@@ -301,8 +300,7 @@ describe("providerMenu", () => {
     expect(ids({ origin: "entryZero" })).toEqual(["default"]);
     expect(ids({ origin: "entryZero", isDefault: true })).toEqual([]);
     expect(ids({ origin: "entryZero", enabled: false })).toEqual([]);
-  });
-
+});
   it("treats a row from an older host as an ordinary one", () => {
     // Absent `origin` reads as indexed, which is what every row was before.
     expect(ids()).toContain("remove");

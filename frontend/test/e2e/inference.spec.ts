@@ -118,7 +118,6 @@ test("a provider behind an unreachable endpoint is saved, amber, and keeps its k
   await expect(
     page.getByTestId("inference-provider-e2e-gateway-health"),
   ).toContainText("unreachable");
-
   // And it survives a reload, which is the half a component test cannot see.
   await page.reload();
   await openInference(page);
@@ -148,7 +147,6 @@ test("a second provider holds a credential of its own", async ({ page }) => {
       },
     );
   }
-
   await expect(page.getByTestId("inference-provider-e2e-one")).toContainText(
     "•••• configured",
   );
@@ -254,7 +252,6 @@ test("deleting a provider clears its key and resets the routes that named it", a
   await expect(page.getByTestId("inference-workload-reasoning")).toContainText(
     "E2E Doomed",
   );
-
   // Remove it, and the row that named it moves back to the primary.
   await page.getByRole("tab", { name: "LLM Providers" }).click();
   await page.getByTestId("inference-provider-e2e-doomed-menu").click();
@@ -265,7 +262,6 @@ test("deleting a provider clears its key and resets the routes that named it", a
       timeout: 30_000,
     },
   );
-
   await page.getByRole("tab", { name: "Routing" }).click();
   await page.getByTestId("inference-mode-advanced").click();
   await expect(page.getByTestId("inference-workload-reasoning")).toContainText(

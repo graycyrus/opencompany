@@ -189,26 +189,26 @@ export function addOptions(
     cloud: managedEntry.concat(
       CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map(
         (p) => ({
-          value: p.slug,
-          label: p.label,
-          // The host, not the whole URL: the path is noise at a glance and the
-          // host is the part an operator recognises.
-          detail: endpointHost(p.endpoint),
+        value: p.slug,
+        label: p.label,
+        // The host, not the whole URL: the path is noise at a glance and the
+        // host is the part an operator recognises.
+        detail: endpointHost(p.endpoint),
         }),
       ),
     ),
     local: LOCAL_RUNTIMES.filter((r) => !isConnected(providers, r.slug)).map(
       (r) => ({
-        value: r.slug,
-        label: r.label,
-        detail: COPY.detailLocal,
+      value: r.slug,
+      label: r.label,
+      detail: COPY.detailLocal,
       }),
     ),
     cli: CLI_LOGINS.filter((c) => !isConnected(providers, c.optionSlug)).map(
       (c) => ({
-        value: c.optionSlug,
-        label: c.label,
-        detail: COPY.detailCli,
+      value: c.optionSlug,
+      label: c.label,
+      detail: COPY.detailCli,
       }),
     ),
   };

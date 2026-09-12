@@ -1017,12 +1017,12 @@ mod tests {
             ("reasoning-v1", "openrouter:gpt-5"),
         ]);
         assert_eq!(
-            routes_served_by(&routes, &ollama, &[openrouter.clone()]),
+            routes_served_by(&routes, &ollama, std::slice::from_ref(&openrouter)),
             vec!["chat-v1".to_string()],
             "the `local` route is served by the only local runtime there is"
         );
         assert!(
-            routes_served_by(&routes, &openrouter, &[ollama.clone()])
+            routes_served_by(&routes, &openrouter, std::slice::from_ref(&ollama))
                 .contains(&"reasoning-v1".to_string())
         );
     }
