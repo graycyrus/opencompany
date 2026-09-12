@@ -151,10 +151,11 @@ export function ComposioSection({
   // a boolean: an advisory KEPT the key and a rejection stored nothing, and the
   // page must not colour a successful save red.
   const [outcome, setOutcome] = useState<ComposioSubmitOutcome | null>(null);
-  // The managed → BYOK confirmation. Not a modal: the warning belongs in the
-  // same scroll context as the control that raised it, and what it warns about
-  // — every provider connected through the managed route becoming invisible —
-  // is not readable off a row.
+  // The managed → BYOK confirmation. It renders inside the credential dialog,
+  // in place of that dialog's footer, rather than as a second modal over it:
+  // what it warns about — every provider connected through the managed route
+  // becoming invisible — is about the key in the field above it, and a second
+  // overlay would hide the thing being decided about.
   const [confirmSwitch, setConfirmSwitch] = useState(false);
   // The check's verdict, kept apart from `outcome` on purpose. A check writes
   // nothing, so it must not reach `offersSkipVerify` — "add anyway" answers a
@@ -229,8 +230,19 @@ export function ComposioSection({
    *
    * A response can carry an advisory even though it succeeded — the key was
    * stored and only the check failed — so "did it throw" is not enough to
-   * decide what the page says next. The form closes either way, because the
-   * credential is written; what stays on screen is the amber advisory.
+   * decide what the page says next. The dialog closes either way, because the
+   * credential is written.
+   *
+   * **The advisory is toasted, not merely set.** `onChanged()` at the bottom of
+   * this function bumps the generation `ComposioView` keys this section on, and
+   * a changed `key` is an unmount — so the `outcome` set three lines earlier is
+   * thrown away before it can paint. That remount is deliberate (issue #586:
+   * the tier this section reports is downstream of the key just written), and
+   * the clean branch survived it only because a toast lives outside the tree
+   * that remounts. The advisory branch had no toast, so the one case an
+   * operator must not be left guessing about — the key IS stored, the check did
+   * not pass — said nothing at all. The inline `outcome` is kept for the paths
+   * that do not remount; the toast is what makes this one reach anybody.
    */
   function settle(res: ComposioMutation) {
     setStatus(res.status);
@@ -238,11 +250,12 @@ export function ComposioSection({
     setPending(null);
     setConfirmSwitch(false);
     if (res.probeClass || res.advisory) {
-      setOutcome({
-        kind: "advisory",
-        probeClass: res.probeClass,
-        message: advisoryMessage(res.probeClass, res.advisory),
-      });
+      const message = advisoryMessage(res.probeClass, res.advisory);
+      setOutcome({ kind: "advisory", probeClass: res.probeClass, message });
+      // Amber, not red: the write landed. `toast.error` here would report a
+      // stored credential as a failure, which is the miscolouring the two
+      // outcome shapes exist to prevent.
+      toast.warning(message);
     } else {
       setOutcome(null);
       toast.success(res.note);
@@ -396,9 +409,16 @@ export function ComposioSection({
   /**
    * Close the credential dialog, discarding what was typed into it.
    *
-   * Every exit runs through here — Cancel, the X, Escape, a click on the
-   * backdrop — so none of them can leave a secret in state behind a closed
-   * modal, and none can leave `confirmSwitch` armed for the next opening.
+   * Every exit the operator can take runs through here — Cancel, the X,
+   * Escape, a click on the backdrop — so none of them leaves a secret in state
+   * behind a closed modal, or `confirmSwitch` armed for the next opening.
+   *
+   * One exit does not, and cannot: the dialog is derived from `composioForm`,
+   * so a status that moves underneath it closes the dialog by making that
+   * function return `null` (which is the point — see its doc). That path leaves
+   * `pending` and `secret` set. It is reachable only from a refresh raised
+   * behind the overlay, and the next `openForm` clears both, but this is a
+   * discipline the shape does not enforce rather than one it guarantees.
    */
   function closeForm() {
     setPending(null);
@@ -501,14 +521,19 @@ export function ComposioSection({
             restart.
           </p>
 
-          {/* An advisory outlives the dialog: the key WAS stored, the dialog
-              closed on it, and this sentence is the only thing left saying the
-              check failed.
+          {/* The outcome of an action taken from a ROW rather than from the
+              dialog — "Use this" on the managed route, "Remove token" — which
+              have no field to sit beside and no dialog to sit in.
 
-              A REJECTION is the other half and does NOT render here — it keeps
-              the dialog open, and a message printed on the page behind a modal
-              overlay is a message nobody can read. It goes inside, next to the
-              field it is about. */}
+              `!form` rather than a check on the kind, because what decides
+              where a message goes is whether a dialog is open, not what the
+              message says: behind a modal overlay, a sentence on the page is a
+              sentence nobody can read, so anything raised while the dialog is
+              up renders inside it instead.
+
+              Note what does NOT arrive here: an advisory from `settle`. That
+              path remounts this section (see `settle`), so its message is
+              carried by a toast. */}
           {outcome && !form && (
             <ProbeAdvisory
               outcome={outcome}
@@ -597,10 +622,12 @@ export function ComposioSection({
                     }
                     value={secret}
                     onChange={(e) => setSecret(e.target.value)}
-                    // Enter submits, the way every other single-field dialog in
-                    // the console does. Never while the confirmation is up:
-                    // there the keyboard belongs to the choice being put, not
-                    // to the field behind it.
+                    // Enter submits, the idiom the console's other credential
+                    // field already uses (`McpServersSection`). Not while the
+                    // confirmation is up: there the keyboard belongs to the
+                    // choice being put. Tab is NOT taken, so the field behind
+                    // the confirmation is still reachable — deliberately, since
+                    // the value it holds is what the confirmation is about.
                     onKeyDown={(e) => {
                       if (e.key !== "Enter") return;
                       if (busy || confirmSwitch || !secret.trim()) return;
