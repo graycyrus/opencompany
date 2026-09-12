@@ -3312,8 +3312,32 @@ base_url = "https://byo.example/v1"
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
+        // **The reported defect, at the HTTP boundary.** An empty table used to
+        // answer `managed` on a company whose managed chain resolves to nothing,
+        // while every unset row resolved to `Resolution::Primary` — the first
+        // enabled provider. The screen named one destination and the turn used
+        // another.
         let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
-        assert_eq!(routes["mode"], "managed", "nothing set is managed");
+        assert_eq!(
+            routes["mode"], "unset",
+            "nothing set is not a mode when Managed cannot answer"
+        );
+
+        // Give the chain something to resolve to, and the same empty table is
+        // genuinely Managed — the inference is about what the company can use,
+        // not about the table alone.
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/managed/key",
+            Some(json!({ "key": "th-not-a-real-key" })),
+        )
+        .await;
+        let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
+        assert_eq!(
+            routes["mode"], "managed",
+            "nothing set is managed once managed answers"
+        );
 
         send(
             &state,
@@ -3347,6 +3371,78 @@ base_url = "https://byo.example/v1"
         )
         .await;
         assert_eq!(routes["mode"], "advanced");
+    }
+
+    #[tokio::test]
+    async fn the_only_provider_a_company_can_use_is_routed_to() {
+        // §4. Nothing authored, no managed credential, one provider added: there
+        // is precisely one thing in this company that can serve a turn, so
+        // routing to anything else is not a choice that exists. Without this the
+        // operator adds a provider, every screen says Managed, and every turn
+        // goes to the provider anyway — with no per-tier model, which is the
+        // reported `404 model: agentic-v1`.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (_, added, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+        )
+        .await;
+        assert_eq!(
+            added["affectedTiers"].as_array().map(Vec::len),
+            Some(4),
+            "the write says which rows it wrote rather than leaving them to be noticed: {added}"
+        );
+
+        let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
+        assert_eq!(
+            routes["mode"], "own",
+            "one provider on every row is own: {routes}"
+        );
+        assert_eq!(routes["routes"]["agentic-v1"], "acme");
+    }
+
+    #[tokio::test]
+    async fn a_provider_added_beside_managed_is_not_routed_to() {
+        // Row B2, and the case the guard exists for: Managed resolves, so adding
+        // a key may be for one workload, for vision only, or to compare. Writing
+        // all four rows would bill the operator for everything, silently, from a
+        // screen that still says Managed. The answer is to ask, which is what
+        // leaving the table empty does.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/managed/key",
+            Some(json!({ "key": "th-not-a-real-key" })),
+        )
+        .await;
+        let (_, added, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+        )
+        .await;
+        assert!(
+            added["affectedTiers"]
+                .as_array()
+                .is_none_or(|tiers| tiers.is_empty()),
+            "nothing was routed on the operator's behalf: {added}"
+        );
+
+        let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
+        assert_eq!(
+            routes["mode"], "managed",
+            "the table is still empty: {routes}"
+        );
     }
 
     #[tokio::test]
