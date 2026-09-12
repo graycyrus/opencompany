@@ -1351,46 +1351,37 @@ fn output_cap(requested: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Puts `temperature` on the body **only when the caller asked for one**.
+/// Writes the caller's **intent** onto the body in the dialect `model` speaks,
+/// and reports which field names went out.
 ///
-/// `ModelRequest.temperature` is an `Option<f64>` that defaults to `None`, and
-/// `None` means the caller expressed no opinion — not that it wants `0.0`. Both
-/// request builders used to read it as `unwrap_or(0.0)` and write the result as
-/// a mandatory key, which turned "no opinion" into the most opinionated value in
-/// the range, on every request, to every provider.
+/// The names are returned rather than recomputed because the retry needs to know
+/// exactly what was sent: `inference::dialect::parameter_blamed_by` only accepts
+/// a rejection that names a parameter **we actually sent**, and after renaming
+/// (`max_tokens` → `max_completion_tokens`) the sent name is not the name the
+/// caller asked with.
 ///
-/// It is the one optional-in-the-source field that was promoted to a mandatory
-/// one. [`output_cap`] three lines below each call site is the pattern this now
-/// follows: absent unless there is something to say.
-///
-/// What that cost, all vendor-documented:
-///
-/// * **Anthropic rejects it outright.** *"Models released after Claude Opus 4.6
-///   do not support setting temperature. A value of 1.0 … will be accepted for
-///   backwards compatibility, all other values will be rejected with a 400
-///   error."* Every current model is post-4.6, so `0.0` was a hard 400 on the
-///   entire lineup — every agent turn failing on the first request.
-/// * **OpenAI's current flagships are all reasoning models**, whose migration
-///   guide says *"Remove `temperature`, `top_p`, and `top_logprobs`"*.
-/// * **Groq special-cases exactly this value** — *"If you set a `temperature`
-///   value of 0, it will be converted to `1e-8`."*
-/// * **Ollama** defaults to `1.0` when the field is absent and honours a
-///   Modelfile `PARAMETER temperature` only when absent; sending `0.0`
-///   overrode both.
-///
-/// Omitting is right rather than clamping per provider, because every provider
-/// has a sane default and none of them needs ours. Together, Fireworks and
-/// Cerebras reject `temperature` on no model at all, so a caller that genuinely
-/// wants one still gets it through.
-///
-/// **This does not cover a caller that asks for a temperature explicitly.** Nine
-/// in-repo workloads do, six of them at `Some(0.0)`, and those still 400 against
-/// Anthropic post-4.6 and OpenAI reasoning models. Fixing that needs a
-/// per-provider capability gate; see `docs/modules/inference/provider-contracts.md`.
-fn apply_temperature(body: &mut serde_json::Value, temperature: Option<f64>) {
-    if let Some(temperature) = temperature {
-        body["temperature"] = serde_json::json!(temperature);
+/// Every vendor-specific decision lives in `inference::dialect::RULES`. Nothing
+/// here knows what a temperature is, which is the property that stops this
+/// function growing a vendor name the next time a model behaves differently.
+fn apply_sampling(
+    body: &mut serde_json::Value,
+    model: &str,
+    sampling: inference::dialect::Sampling,
+    max_tokens: Option<u32>,
+) -> Vec<String> {
+    let mut knobs = sampling.knobs();
+    if let Some(cap) = output_cap(max_tokens) {
+        knobs.push(inference::dialect::Knob {
+            name: "max_tokens",
+            value: serde_json::json!(cap),
+        });
     }
+    let mut sent = Vec::new();
+    for (name, value) in inference::dialect::translate(model, knobs) {
+        body[&name] = value;
+        sent.push(name);
+    }
+    sent
 }
 
 #[async_trait]
@@ -1507,11 +1498,13 @@ impl ChatModel<()> for HostedProvider {
             "model": model,
             "messages": messages,
         });
-        // Only when the caller asked for one — see `apply_temperature`.
-        apply_temperature(&mut body, request.temperature);
-        if let Some(cap) = output_cap(request.max_tokens) {
-            body["max_tokens"] = serde_json::json!(cap);
-        }
+        // Intent in, this model's dialect out — see `apply_sampling`.
+        let _sent = apply_sampling(
+            &mut body,
+            model,
+            inference::dialect::Sampling::from_request(request.temperature),
+            request.max_tokens,
+        );
         // Native tool calling: expose the turn's tools so the model emits
         // structured `tool_calls` instead of hand-written `<tool_call>` XML.
         attach_tools(
@@ -1631,6 +1624,15 @@ pub struct RequestPlan {
     pub headers: Vec<(&'static str, String)>,
     /// The JSON request body.
     pub body: serde_json::Value,
+    /// The sampling/limit field names this body actually carries, **after**
+    /// per-model translation.
+    ///
+    /// Carried rather than recomputed because a rule may rename a field, so the
+    /// name the caller asked with is not always the name on the wire. The retry
+    /// will only drop a parameter the model names *and* that appears here, which
+    /// is what stops a rejection mentioning some field we never sent from
+    /// talking us into removing one.
+    pub tunable_fields: Vec<String>,
 }
 
 /// Builds the [`RequestPlan`] for one turn against a tenant provider.
@@ -1649,7 +1651,7 @@ pub async fn request_plan(
     decl: &InferenceDecl,
     abstract_model: &str,
     messages: Vec<serde_json::Value>,
-    temperature: Option<f64>,
+    sampling: inference::dialect::Sampling,
     max_tokens: Option<u32>,
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
@@ -1695,11 +1697,10 @@ pub async fn request_plan(
         "model": model,
         "messages": messages,
     });
-    // Only when the caller asked for one — see `apply_temperature`.
-    apply_temperature(&mut body, temperature);
-    if let Some(cap) = output_cap(max_tokens) {
-        body["max_tokens"] = serde_json::json!(cap);
-    }
+    // Intent in, this model's dialect out. `sent` is the field names that
+    // actually went, which the retry needs — a rename means the caller's name
+    // and the wire name differ. See `apply_sampling`.
+    let sent = apply_sampling(&mut body, &model, sampling, max_tokens);
     let supports_parallel_control =
         decl.is_proxied() || inference::normalize_provider(&decl.provider) == "openrouter";
     attach_tools(&mut body, tools, tool_choice, supports_parallel_control);
@@ -1709,6 +1710,7 @@ pub async fn request_plan(
         bearer,
         headers,
         body,
+        tunable_fields: sent,
     })
 }
 
@@ -2069,9 +2071,8 @@ impl ChatModel<()> for TenantProvider {
             &decl,
             model,
             messages,
-            // Forwarded as the caller expressed it. `unwrap_or(0.0)` here used to
-            // manufacture an opinion — see `apply_temperature`.
-            request.temperature,
+            // Intent recovered at the vendored boundary, which carries a float.
+            inference::dialect::Sampling::from_request(request.temperature),
             request.max_tokens,
             wire_tools(&request.tools),
             &request.tool_choice,
@@ -2158,10 +2159,10 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
         decl,
         DEFAULT_HOSTED_MODEL,
         messages,
-        // A reachability check has no opinion about sampling, and the hardcoded
-        // `0.0` here made the probe fail on exactly the providers it is meant to
-        // reassure the operator about: Anthropic 400s on any value but 1.0.
-        None,
+        // A reachability check has no opinion about sampling. The hardcoded
+        // `0.0` here made the probe fail on exactly the providers it exists to
+        // reassure the operator about.
+        inference::dialect::Sampling::Default,
         Some(16),
         Vec::new(),
         &ToolChoice::Auto,
@@ -2233,38 +2234,42 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
 
+    /// The original defect at this seam: `None` meant "no opinion" and we wrote
+    /// `0.0` — the one value Anthropic rejects across its entire current lineup
+    /// and the one Groq rewrites to `1e-8`. Nothing may appear at all.
+    #[test]
+    fn no_opinion_puts_no_sampling_field_on_the_wire() {
+        let mut body = serde_json::json!({ "model": "claude-sonnet-5" });
+        let sent = apply_sampling(
+            &mut body,
+            "claude-sonnet-5",
+            inference::dialect::Sampling::Default,
+            None,
+        );
+        assert!(sent.is_empty(), "nothing was asked for: {sent:?}");
+        assert!(body.get("temperature").is_none(), "{body}");
+    }
+
+    /// The seam reports what it actually put on the wire, which is what the
+    /// retry needs: after a rename the caller's name is not the wire's name.
+    #[test]
+    fn the_seam_reports_the_field_names_it_sent_after_translation() {
+        let mut body = serde_json::json!({ "model": "gpt-5.6-sol" });
+        let sent = apply_sampling(
+            &mut body,
+            "gpt-5.6-sol",
+            inference::dialect::Sampling::Deterministic,
+            Some(16384),
+        );
+        // A reasoning model takes no temperature and renames the cap.
+        assert!(!sent.contains(&"temperature".to_string()), "{sent:?}");
+        assert!(sent.contains(&"max_completion_tokens".to_string()), "{sent:?}");
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        assert_eq!(body["max_completion_tokens"], serde_json::json!(16384));
+    }
+
     /// The output floor only ever raises the harness's cap (issue: reasoning
     /// models exhaust a 16k `max_tokens` on their hidden stream).
-    #[test]
-    /// The defect: `None` meant "no opinion" and we wrote `0.0`, the one value
-    /// Anthropic rejects on its entire current lineup and the one Groq rewrites
-    /// to `1e-8`. The key must be absent, not zero.
-    #[test]
-    fn an_unset_temperature_puts_no_temperature_on_the_wire() {
-        let mut body = serde_json::json!({ "model": "claude-sonnet-5" });
-        apply_temperature(&mut body, None);
-        assert!(
-            body.get("temperature").is_none(),
-            "an unset temperature must not appear at all: {body}"
-        );
-    }
-
-    /// And a caller that does have an opinion still gets it through — Together,
-    /// Fireworks and Cerebras reject `temperature` on no model at all, so
-    /// stripping it everywhere would have been the wrong fix.
-    #[test]
-    fn a_requested_temperature_is_still_sent_including_zero() {
-        let mut body = serde_json::json!({ "model": "llama-3.3-70b" });
-        apply_temperature(&mut body, Some(0.7));
-        assert_eq!(body["temperature"], serde_json::json!(0.7));
-
-        // Explicitly including 0.0: it is a legitimate request, and the bug was
-        // never that 0.0 is invalid — it was that we sent it unasked.
-        let mut body = serde_json::json!({ "model": "llama-3.3-70b" });
-        apply_temperature(&mut body, Some(0.0));
-        assert_eq!(body["temperature"], serde_json::json!(0.0));
-    }
-
     #[test]
     fn output_cap_floor_raises_but_never_lowers() {
         let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
@@ -4247,7 +4252,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            Some(0.2),
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4292,7 +4297,7 @@ mod tests {
             &decl,
             "reasoning-v1",
             Vec::new(),
-            Some(0.2),
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4307,7 +4312,7 @@ mod tests {
             &decl,
             "anthropic/claude-sonnet-4.5",
             Vec::new(),
-            Some(0.2),
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4347,7 +4352,7 @@ mod tests {
             &decl,
             "agentic-v1",
             Vec::new(),
-            Some(0.0),
+            inference::dialect::Sampling::Deterministic,
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4366,7 +4371,7 @@ mod tests {
             &discovered,
             "agentic-v1",
             Vec::new(),
-            Some(0.0),
+            inference::dialect::Sampling::Deterministic,
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4397,7 +4402,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            Some(0.0),
+            inference::dialect::Sampling::Deterministic,
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4443,7 +4448,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            Some(0.2),
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4495,7 +4500,7 @@ mod tests {
             &or_decl,
             "chat-v1",
             Vec::new(),
-            Some(0.2),
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4529,7 +4534,7 @@ mod tests {
             &compat_decl,
             "chat-v1",
             Vec::new(),
-            Some(0.2),
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,

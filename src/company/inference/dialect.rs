@@ -93,6 +93,22 @@ const DETERMINISTIC_SEED: i64 = 0;
 const DETERMINISTIC_TEMPERATURE: f64 = 0.0;
 
 impl Sampling {
+    /// The intent behind a vendored `ModelRequest.temperature`.
+    ///
+    /// The boundary type carries a float, so intent has to be recovered at the
+    /// edge rather than passed through it. `None` is the honest case — no
+    /// opinion — and a value is taken at face value as [`Sampling::Exact`]:
+    /// guessing that `0.0` "really meant" determinism would be inventing intent
+    /// the caller did not express, which is the mistake this type exists to
+    /// stop. In-repo callers state their intent directly and never come through
+    /// here.
+    pub fn from_request(temperature: Option<f64>) -> Self {
+        match temperature {
+            None => Self::Default,
+            Some(value) => Self::Exact(value),
+        }
+    }
+
     /// The knobs this intent asks for, before translation.
     ///
     /// `Deterministic` asks for **both** `seed` and a settled sampler, and that
