@@ -978,10 +978,32 @@ pub async fn load_inference_key_scoped(
     override_key: Option<&str>,
     scope: &HarnessScope,
 ) -> Result<String> {
+    load_inference_key_for(company, secrets, slug, override_key, scope, true).await
+}
+
+/// [`load_inference_key_scoped`], with the company-wide step made optional.
+///
+/// **A named harness that names its own endpoint must not borrow the company's
+/// credential.** The company slot holds a key for the company's own gateway;
+/// presenting it to a different one is the same mistake as managed reading a
+/// vendor's. Inheriting is right only where the harness changed something that
+/// is not the destination — a model, say — so the caller that knows which of
+/// those it is holding passes the answer in.
+pub async fn load_inference_key_for(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    override_key: Option<&str>,
+    scope: &HarnessScope,
+    may_inherit_company_key: bool,
+) -> Result<String> {
     if !scope.is_default {
         let own = load_key_scoped(company, secrets, override_key, scope).await?;
         if !own.trim().is_empty() {
             return Ok(own);
+        }
+        if !may_inherit_company_key {
+            return Ok(String::new());
         }
     }
     if let Some(SecretValue(raw)) = secrets.get(company, &provider_key_key(slug)).await?
@@ -1213,11 +1235,13 @@ pub async fn resolve_effective_scoped(
         }
     }
 
-    let fallback = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?;
-    if let Some(decl) =
-        refuse_a_managed_fallback_that_is_switched_off(company, secrets, fallback).await?
-    {
-        return Ok(Some(decl));
+    // The switched-off-Managed refusal used to sit here and now sits on the turn
+    // path alone: a *read* has to be able to describe the state that refuses a
+    // turn, and erroring here left a company with no page and therefore no
+    // switch to turn Managed back on with.
+    let legacy = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?;
+    if legacy.is_some() {
+        return Ok(legacy);
     }
 
     // 4. The routing table naming `managed` — after the legacy chain's steps
@@ -1249,6 +1273,10 @@ pub async fn resolve_effective_scoped(
     // harness brain on the strength of those rows would hand every turn to a
     // resolver that errors. Off means off on both paths, or this branch
     // reintroduces the drift it exists to close.
+    //
+    // A gate and not a refusal: this answers `Ok(None)`, so the status read
+    // still renders and still offers the switch. That distinction is the one
+    // the read-path guard got wrong.
     let routes = store::load_routes(company, secrets).await?;
     if resolve::any_route_is_managed(&routes) && store::managed_enabled(company, secrets).await? {
         // Through `managed_decl` rather than a second opinion about the managed
@@ -1283,6 +1311,13 @@ pub async fn resolve_effective_scoped(
 /// "Managed is switched off, so it is not a fallback. Its credential is
 /// untouched" — a sentence about exactly this path — so the page was making a
 /// promise the resolver did not keep.
+///
+/// **On the turn path only, never on a read.** It lived in
+/// [`resolve_effective_scoped`] for one commit, which every status read also
+/// goes through — so switching Managed off on a company with nothing else made
+/// `GET …/inference` fail, and the console could no longer render the switch
+/// needed to turn it back on. A refusal is a statement about a turn; a status
+/// read has to be able to *describe* the state that refuses one.
 ///
 /// `is_proxied` is the marker because that is what riding the platform's
 /// endpoint on the platform's credential *is*; a company on its own key is not
@@ -1411,12 +1446,15 @@ async fn resolve_legacy_scoped(
     if let Some(runtime) = load_runtime_config_scoped(company, secrets, scope).await? {
         let provider = normalize_provider(&runtime.provider).to_string();
         reject_unknown_provider(&provider, "the stored runtime inference config")?;
-        let key = load_inference_key_scoped(
+        let key = load_inference_key_for(
             company,
             secrets,
             credential_slug(&runtime.provider),
             None,
             scope,
+            // It named its own endpoint, so the company's key is for somewhere
+            // else. See `load_inference_key_for`.
+            runtime.base_url.is_none(),
         )
         .await?;
         let had_key = !key.trim().is_empty();
@@ -1450,12 +1488,13 @@ async fn resolve_legacy_scoped(
             normalize_provider(manifest.provider.as_deref().unwrap_or_default()).to_string();
         reject_unknown_provider(&provider, "`[inference].provider`")?;
         let raw = manifest.provider.as_deref().unwrap_or_default();
-        let key = load_inference_key_scoped(
+        let key = load_inference_key_for(
             company,
             secrets,
             credential_slug(raw),
             manifest.api_key_secret.as_deref(),
             scope,
+            manifest.base_url.is_none(),
         )
         .await?;
         let had_key = !key.trim().is_empty();
@@ -1498,8 +1537,22 @@ async fn resolve_legacy_scoped(
     //    take that key, store it, report it as configured — and then never send
     //    it anywhere.
     if let Some(env) = env_default {
-        let key =
-            load_inference_key_scoped(company, secrets, DEFAULT_PROVIDER, None, scope).await?;
+        // **Managed's own slot first.** This branch *is* the managed path — a
+        // company that configured nothing, landing on the platform endpoint —
+        // and the console's Managed row writes `provider/tinyhumans/key`. Read
+        // only through `DEFAULT_PROVIDER`, that key was stored, reported as the
+        // step that answers, and then never sent anywhere: turns kept riding
+        // the instance identity while the page said they were billed to it.
+        //
+        // The old lookup stays as the fallback, because a company that has a
+        // key at the default provider's slot or the flat one is a company this
+        // already served and must keep serving.
+        let managed_key = load_managed_key(company, secrets, scope).await?;
+        let key = if managed_key.trim().is_empty() {
+            load_inference_key_scoped(company, secrets, DEFAULT_PROVIDER, None, scope).await?
+        } else {
+            managed_key
+        };
         let had_key = !key.trim().is_empty();
         let (base_url, credential, proxied) =
             resolve_endpoint(DEFAULT_PROVIDER, None, key, Some(env));
@@ -1556,7 +1609,10 @@ pub async fn resolve_effective_for_tier(
     tier: &str,
 ) -> Result<Option<InferenceDecl>> {
     let Some(workload) = resolve::Workload::from_tier(tier) else {
-        return resolve_effective_scoped(company, manifest, env_default, secrets, scope).await;
+        // A tier with no row of its own still resolves for a *turn*, so the
+        // switch applies to it as much as to a routable one.
+        let decl = resolve_effective_scoped(company, manifest, env_default, secrets, scope).await?;
+        return refuse_a_managed_fallback_that_is_switched_off(company, secrets, decl).await;
     };
     let providers = store::list_providers(company, secrets).await?;
     let routes = store::load_routes(company, secrets).await?;
@@ -3626,6 +3682,83 @@ mod tests {
             "",
             "a named harness's key is not managed's to present either"
         );
+    }
+
+    #[tokio::test]
+    async fn a_managed_key_on_a_fresh_company_is_what_its_turns_present() {
+        // The console's Managed row writes `provider/tinyhumans/key`, and the
+        // default branch read only `DEFAULT_PROVIDER`'s slot — so the key was
+        // stored, reported as the step that answers, and never sent anywhere.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("instance-identity"),
+        };
+
+        // Nothing configured: the instance identity is what answers.
+        let before = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("the platform default resolves");
+        assert_eq!(bearer(&before).await.as_deref(), Some("instance-identity"));
+
+        secrets
+            .set(
+                &company,
+                &provider_key_key(MANAGED_SLUG),
+                SecretValue("sk-managed".into()),
+            )
+            .await
+            .unwrap();
+        let after = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("the platform default still resolves");
+        assert_eq!(
+            bearer(&after).await.as_deref(),
+            Some("sk-managed"),
+            "the key the operator pasted is the one the turn presents"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_managed_off_never_makes_the_status_unreadable() {
+        // The refusal is a statement about a *turn*. Putting it in the shared
+        // resolver put it in every status read too, so a company with nothing
+        // but managed could switch it off and then get a 500 from
+        // `GET …/inference` — no page, and therefore no switch to turn it back
+        // on with. A read has to be able to describe the state that refuses.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+
+        let described = resolve_effective(&company, &inference("managed"), Some(&env), &secrets)
+            .await
+            .expect("a status read must still resolve");
+        assert!(
+            described.is_some(),
+            "the console has to render the row that switches it back on"
+        );
+
+        // And the turn path still refuses, which is the point of the switch.
+        let err = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a turn must not ride a switched-off managed");
+        assert!(err.to_string().contains("switched off"), "{err}");
     }
 
     #[tokio::test]

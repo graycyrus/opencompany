@@ -930,6 +930,26 @@ async fn edit_provider(
     // with the new host live and the *old* host's secret still in the slot — so
     // the next routed turn would present one provider's credential to another.
     // Written first, that failure leaves the row exactly as it was.
+    // **A credential does not follow an endpoint to a different origin.**
+    // Leaving the write-only key field blank means "unchanged", which is right
+    // for a rename and wrong the moment the destination moves: the next routed
+    // turn would present one host's secret to another. The operator is asked to
+    // re-enter it, or to remove it first — either is a decision, and silently
+    // forwarding it is not.
+    if !probe::same_origin(&existing.base_url, &base_url)
+        && body.key.is_none()
+        && store::provider_key_configured(runtime.id(), secrets, &existing)
+            .await
+            .map_err(ApiError)?
+    {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "{} has a stored credential and this changes its endpoint to a different \
+             host. Enter the key for the new endpoint, or remove the key first — a \
+             credential for one host is not one for another.",
+            existing.label
+        ))));
+    }
+
     //
     // **And the old one is kept, so the ordering is a rollback rather than a
     // preference.** Either write can fail, and either failure alone leaves one
