@@ -1086,7 +1086,13 @@ mod tests {
                 if path.file_name().and_then(|n| n.to_str()) == Some("catalogue.rs") {
                     continue;
                 }
+                // Both headers, not just the first. `X-Title` has the same
+                // divergence mode — a module spells it out with a value of its
+                // own and nothing notices — and checking one of a pair is how
+                // the guard ends up proving less than it appears to.
                 if source.contains("\"HTTP-Referer\"") && !source.contains("OPENROUTER_REFERER") {
+                    offenders.push(path.display().to_string());
+                } else if source.contains("\"X-Title\"") && !source.contains("OPENROUTER_TITLE") {
                     offenders.push(path.display().to_string());
                 }
             }

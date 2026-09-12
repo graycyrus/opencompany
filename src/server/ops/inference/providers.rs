@@ -304,7 +304,13 @@ async fn add_provider(
     }
 
     // Step 4: flush the record.
-    let provider = store::put_provider(
+    //
+    // A failure here has to take the credential back out. The key is already at
+    // `provider/<slug>/key` and there is now no record owning it, which is the
+    // invisible half of the rollback invariant `roll_back_add` exists for: a
+    // record left behind is on screen and removable, an orphaned credential is
+    // neither, and the next add of that slug would silently present it.
+    let provider = match store::put_provider(
         runtime.id(),
         secrets,
         store::ProviderDraft {
@@ -319,7 +325,15 @@ async fn add_provider(
         },
     )
     .await
-    .map_err(ApiError)?;
+    {
+        Ok(provider) => provider,
+        Err(err) => {
+            if !key.is_empty() {
+                clear_orphaned_key(runtime, &plan.slug).await;
+            }
+            return Err(ApiError(err));
+        }
+    };
     // The credential just changed for this company, and the catalog cache key is
     // made of non-secret ids on purpose — so a rotation would otherwise keep
     // answering from the previous credential's read for the rest of its TTL.
@@ -549,6 +563,30 @@ async fn roll_back_add(runtime: &CompanyRuntime, provider: &store::Provider) {
             error = %err,
             "could not roll back a rejected provider; a credential may be orphaned at \
              provider/<slug>/key and re-adding this slug would reuse it",
+        );
+    }
+}
+
+/// Clears a credential whose provider record was never written.
+///
+/// The same loud-failure rule [`roll_back_add`] follows, for the same reason,
+/// and separate from it because there is no `Provider` to delete yet — the
+/// write that would have produced one is what failed.
+async fn clear_orphaned_key(runtime: &CompanyRuntime, slug: &str) {
+    let secrets = runtime.secrets().as_ref();
+    if let Err(err) = secrets
+        .set(
+            runtime.id(),
+            &store::provider_key_key(slug),
+            crate::ports::types::SecretValue(String::new()),
+        )
+        .await
+    {
+        tracing::error!(
+            company = %runtime.id(),
+            provider = %slug,
+            error = %err,
+            "could not clear the credential of a provider whose record failed to write;              it is orphaned at provider/<slug>/key and re-adding this slug would reuse it",
         );
     }
 }
