@@ -1128,9 +1128,9 @@ pub async fn resolve_effective_scoped(
         return Ok(Some(decl));
     }
 
-    if let Some(decl) = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?
-    {
-        return Ok(Some(decl));
+    let legacy = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?;
+    if legacy.is_some() {
+        return Ok(legacy);
     }
 
     // 4. The routing table naming `managed` — after the legacy chain's steps
