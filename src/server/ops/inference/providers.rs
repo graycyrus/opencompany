@@ -57,7 +57,7 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::inference::{catalogue, probe, resolve, store};
+use crate::company::inference::{TierVocabulary, catalogue, probe, resolve, store};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -145,6 +145,20 @@ struct AddProvider {
     /// The outbound credential. Write-only intake: no route returns it.
     #[serde(default)]
     key: Option<String>,
+    /// The model id every tier routes to.
+    ///
+    /// **The field that was missing, and the reason the reported 404 existed.**
+    /// `add_provider` wrote `models: BTreeMap::new()` and there was no way to
+    /// supply one at all, so a provider whose catalog publishes neither the tier
+    /// names nor the shipped ids was connected with four tiers unmapped — and
+    /// `model_for_tier`'s `Unknown` arm then put the bare tier on the wire.
+    ///
+    /// Absent is right for an endpoint that resolves `agentic-v1` itself, and
+    /// for one publishing the shipped ids `DEFAULT_TIER_MODELS` names. Which of
+    /// those a given endpoint is, is decided from its catalog rather than from
+    /// its kind — see [`needs_an_explicit_model`].
+    #[serde(default)]
+    model: Option<String>,
     /// Add despite a probe failure that would otherwise be destructive.
     ///
     /// The "add anyway" escape hatch, and it exists because a provider that does
@@ -225,6 +239,44 @@ struct ProbeResultDto {
     /// so this is reported as a caution beside a successful check, never as one.
     #[serde(skip_serializing_if = "Option::is_none")]
     model_known: Option<bool>,
+    /// The ids the endpoint published, so the add dialog can offer one.
+    ///
+    /// **This is what closes the loop `TierVocabulary::Unknown` was built to
+    /// open.** That variant exists to refuse to guess, and `tier_defaults()`
+    /// returns an empty map for it *so the console will ask* — but nothing on
+    /// the add path ever consulted it, so the empty map shipped straight to a
+    /// turn. The catalog is already in hand at the moment of the probe; sending
+    /// it means the operator is asked with the answers in front of them rather
+    /// than told no after a round trip.
+    ///
+    /// Capped, because a catalog can run to hundreds of ids and this rides on
+    /// every probe response. The console offers free text alongside the list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    models: Vec<String>,
+    /// Whether this endpoint cannot serve a workload until a model is named.
+    ///
+    /// Decided from the published catalog, never from the kind — see
+    /// [`needs_an_explicit_model`].
+    needs_model: bool,
+}
+
+/// How many published model ids ride back on a probe.
+///
+/// A mirror of a large catalog runs to hundreds of entries, and this is a
+/// response body the console holds in memory for one dialog. Enough to choose
+/// from, and the field the operator types into accepts anything anyway.
+const PROBE_CATALOGUE_LIMIT: usize = 500;
+
+/// The published ids to offer, sorted and capped.
+///
+/// Sorted because a catalog's own order is whatever the endpoint felt like, and
+/// a select an operator has to scan is worth putting in one.
+fn catalogue_offer(models: &[String]) -> Vec<String> {
+    let mut ids: Vec<String> = models.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.truncate(PROBE_CATALOGUE_LIMIT);
+    ids
 }
 
 /// What `POST …/providers/{slug}/test` may be asked.
@@ -262,6 +314,12 @@ async fn add_provider(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let kind = body.kind.trim().to_string();
+    let asked_model = body
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
 
     // Step 1 and 2: everything knowable without a network, before any write.
     let plan = plan_add(
@@ -312,7 +370,7 @@ async fn add_provider(
             label: plan.label.clone(),
             kind: plan.kind.clone(),
             base_url: plan.base_url.clone(),
-            models: BTreeMap::new(),
+            models: tier_overrides(asked_model.as_deref()),
             // New providers arrive on. Adding something and then having to
             // switch it on is a second step for a decision already made.
             enabled: true,
@@ -352,6 +410,31 @@ async fn add_provider(
     let (probe_dto, note) = match outcome {
         None => (None, format!("{} is connected.", provider.label)),
         Some(Ok(models)) => {
+            // **Answering is not the same as being usable.** A catalog that
+            // publishes neither the tier names nor the shipped ids resolves
+            // nothing we can map, so with no model pinned every turn sends the
+            // literal `agentic-v1` and the vendor 404s it — which is exactly
+            // what the report was.
+            //
+            // The probe succeeded, so this is not a reachability judgement and
+            // `add_anyway` deliberately does not apply: that hatch is for an
+            // endpoint we could not read, and this is one we read and
+            // understood. Rolling back rather than storing a green-looking row
+            // is the point — the reported defect was a company that looked
+            // healthy on every screen and could not think. The console asks for
+            // a model before it reaches this, with this same catalog in hand
+            // (`ProbeResultDto::models`); this is the backstop for every other
+            // caller, because a console is not a security boundary.
+            if asked_model.is_none() && needs_an_explicit_model(&models) {
+                roll_back_add(runtime, &provider).await;
+                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "{} does not resolve workload names like `agentic-v1`, so it needs a model id \
+                     to route to. It publishes {} model{} — pick one and add it again.",
+                    provider.label,
+                    models.len(),
+                    if models.len() == 1 { "" } else { "s" },
+                ))));
+            }
             record_health(runtime, &provider.slug, "ok").await;
             (
                 Some(ProbeResultDto {
@@ -360,6 +443,8 @@ async fn add_provider(
                     message: None,
                     model_count: models.len(),
                     model_known: None,
+                    models: catalogue_offer(&models),
+                    needs_model: needs_an_explicit_model(&models),
                 }),
                 format!("{} is connected and answering.", provider.label),
             )
@@ -396,18 +481,147 @@ async fn add_provider(
                     message: Some(message.clone()),
                     model_count: 0,
                     model_known: None,
+                    models: Vec::new(),
+                    needs_model: false,
                 }),
                 message,
             )
         }
     };
 
+    // §4: the one case where routing to this provider is not a guess.
+    let (routed, note) = match auto_route_sole_provider(runtime, &provider).await? {
+        tiers if tiers.is_empty() => (tiers, note),
+        tiers => (
+            tiers,
+            format!("{note} Every workload now routes through it — change that under Routing."),
+        ),
+    };
+
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note,
         probe: probe_dto,
-        affected_tiers: Vec::new(),
+        affected_tiers: routed,
     }))
+}
+
+/// Routes every workload to a provider that has just been added, **only when
+/// nothing else in this company can answer**.
+///
+/// ## The condition, and why it is not "the first provider"
+///
+/// The operator's mental model is *I added a provider so it will be used*, and
+/// the reported dead end is what happens when that is false. But writing four
+/// rows the operator did not author is the shape of the positional default the
+/// explicit marker exists to kill, so it is worth doing only where it is not a
+/// decision at all.
+///
+/// "The first provider they added" is the wrong test. Because of entry zero, a
+/// company can have a provider it never added through this route, so the newly
+/// added one can be the *second* element of the list and still be the thing the
+/// operator expects to be used — and equally, a company with entry zero already
+/// has something that answers. The condition that is genuinely unambiguous is:
+///
+/// * the route table is **empty** — nothing was authored, so nothing is
+///   overwritten;
+/// * the managed chain **does not resolve** — there is no fallback behind the
+///   rows; and
+/// * after this add there is **exactly one enabled provider**, and it is this
+///   one.
+///
+/// All three together mean there is precisely one thing in this company that can
+/// serve a turn. Routing to anything else is not a choice that exists, so this
+/// is not a guess.
+///
+/// ## Why it deliberately stops when Managed is available
+///
+/// That is row B2, and it is the case where guessing moves money. A company on
+/// Managed that adds an OpenRouter key may be doing it for one workload, for
+/// vision only, or to compare — and writing all four rows would bill them for
+/// everything, silently, from a screen that still says Managed. The answer there
+/// is to ask, which is what leaving the table empty and reporting `Unset` does.
+///
+/// Returns the tiers it wrote, so the response says what changed rather than
+/// leaving the operator to notice. Never fails the add: a route that did not
+/// land leaves the company exactly where the add found it.
+async fn auto_route_sole_provider(
+    runtime: &CompanyRuntime,
+    added: &store::Provider,
+) -> Result<Vec<String>, ApiError> {
+    let secrets = runtime.secrets().as_ref();
+
+    let existing = store::load_routes(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    if existing
+        .values()
+        .any(|route| !matches!(route, resolve::ProviderRef::Default))
+    {
+        return Ok(Vec::new());
+    }
+    if managed_resolves(runtime).await? {
+        return Ok(Vec::new());
+    }
+    let providers = store::list_providers(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let mut enabled = providers.iter().filter(|p| p.enabled);
+    let (Some(only), None) = (enabled.next(), enabled.next()) else {
+        return Ok(Vec::new());
+    };
+    if only.slug != added.slug {
+        return Ok(Vec::new());
+    }
+
+    // Parsed from the slug rather than assembled as a `Cloud` ref, so a CLI
+    // login and a local runtime get the refs their own grammar uses — writing
+    // `claude-code` as a slug-carrying cloud ref would round-trip back through
+    // `ProviderRef::parse` as the CLI ref anyway, and relying on that is how the
+    // two representations drift.
+    let route = resolve::ProviderRef::parse(&added.slug);
+    let mut routes = resolve::Routes::new();
+    let mut written = Vec::new();
+    for workload in resolve::ROUTABLE_WORKLOADS {
+        routes.insert(workload.tier().to_string(), route.clone());
+        written.push(workload.tier().to_string());
+    }
+    store::save_routes(runtime.id(), secrets, &routes)
+        .await
+        .map_err(ApiError)?;
+    Ok(written)
+}
+
+/// Whether a catalog leaves every tier unresolvable, so a row over it is
+/// unusable until a model is named.
+///
+/// **Keyed on what the endpoint published, never on its kind or its hostname.**
+/// "Direct vendor APIs need a model, gateways do not" is the right intuition and
+/// the wrong rule: a self-hosted LiteLLM that publishes `agentic-v1` resolves
+/// tiers no matter who runs it, and a vendor that starts publishing them would
+/// have to be removed from a hand-kept list nobody would remember to edit.
+/// [`TierVocabulary::from_catalog_ids`] already answers this from evidence, and
+/// one evidence-based rule covers cloud, local and gateway alike.
+fn needs_an_explicit_model(models: &[String]) -> bool {
+    TierVocabulary::from_catalog_ids(models.iter().map(String::as_str)) == TierVocabulary::Unknown
+}
+
+/// One model id, pinned to every tier.
+///
+/// A provider that cannot resolve tier names needs a concrete id for each one,
+/// and the add dialog asks for a single model rather than four: at the moment
+/// something is connected there is no reason to believe its four workloads want
+/// different models, and the Routing tab is where that decision belongs. This
+/// writes the same id to all four so no tier is left to fall through to the
+/// passthrough that produced the 404.
+fn tier_overrides(model: Option<&str>) -> BTreeMap<String, String> {
+    let Some(model) = model else {
+        return BTreeMap::new();
+    };
+    crate::company::INFERENCE_TIERS
+        .iter()
+        .map(|tier| ((*tier).to_string(), model.to_string()))
+        .collect()
 }
 
 /// What a kind implies, decided before anything is written.
@@ -817,10 +1031,17 @@ async fn set_enabled(
     let note = match (body.enabled, parked.is_empty()) {
         (true, _) => format!("{} is on.", provider.label),
         (false, true) => format!("{} is off. Nothing was routed through it.", provider.label),
+        // **Named, not numbered.** This said "agentic-v1, vision-v1 are parked"
+        // — the right sentence in the wrong vocabulary, on the one screen whose
+        // job is to be read by a person.
         (false, false) => format!(
             "{} is off. {} {} parked until it is switched back on.",
             provider.label,
-            parked.join(", "),
+            parked
+                .iter()
+                .map(|tier| resolve::tier_label(tier))
+                .collect::<Vec<_>>()
+                .join(", "),
             if parked.len() == 1 { "is" } else { "are" }
         ),
     };
@@ -895,19 +1116,35 @@ async fn clear_default_if_marked(runtime: &CompanyRuntime, slug: &str) {
     }
 }
 
-/// The tiers whose route names `provider`, so switching it off can name them.
+/// The tiers whose route `provider` serves, so switching it off can name them.
+///
+/// **This used to match on the slug alone**, and `ProviderRef::slug()` is `None`
+/// for a `local` or `claude-code` ref — so disabling the only Ollama runtime
+/// parked every `local:` route while the note said "Nothing was routed through
+/// it." It reads through [`resolve::routes_served_by`] now, which is
+/// `scrub_removed`'s three rules, so all three surfaces answer the same question
+/// the same way.
+///
+/// `alternatives` is the providers that would *still be enabled* once this one
+/// is off: a `local:` route is only parked when no other local runtime is left
+/// to serve it, exactly as it is only orphaned when no other local runtime is
+/// left at all.
 async fn parked_tiers(
     runtime: &CompanyRuntime,
     provider: &store::Provider,
 ) -> Result<Vec<String>, ApiError> {
-    let routes = store::load_routes(runtime.id(), runtime.secrets().as_ref())
+    let secrets = runtime.secrets().as_ref();
+    let routes = store::load_routes(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
-    Ok(routes
-        .iter()
-        .filter(|(_, route)| route.slug() == Some(provider.slug.as_str()))
-        .map(|(tier, _)| tier.clone())
-        .collect())
+    let providers = store::list_providers(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let alternatives: Vec<store::Provider> = providers
+        .into_iter()
+        .filter(|p| p.enabled && p.slug != provider.slug)
+        .collect();
+    Ok(resolve::routes_served_by(&routes, provider, &alternatives))
 }
 
 /// The provider, or a 404 naming the slug that resolved to nothing.
@@ -1028,6 +1265,8 @@ async fn test_managed(
                 message: None,
                 model_count: models.len(),
                 model_known: None,
+                models: catalogue_offer(&models),
+                needs_model: needs_an_explicit_model(&models),
             }))
         }
         Err(failure) => {
@@ -1044,6 +1283,8 @@ async fn test_managed(
                 message: Some(probe::describe(failure.class, &subject)),
                 model_count: 0,
                 model_known: None,
+                models: Vec::new(),
+                needs_model: false,
             }))
         }
     }
@@ -1266,6 +1507,8 @@ async fn test_provider(
                 message: None,
                 model_count: models.len(),
                 model_known,
+                models: catalogue_offer(&models),
+                needs_model: needs_an_explicit_model(&models),
             }))
         }
         Err(failure) => {
@@ -1288,6 +1531,8 @@ async fn test_provider(
                 message: Some(probe::describe(failure.class, &advisory_subject(&provider))),
                 model_count: 0,
                 model_known: None,
+                models: Vec::new(),
+                needs_model: false,
             }))
         }
     }
@@ -1325,6 +1570,8 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
             message: None,
             model_count: models.len(),
             model_known: None,
+            needs_model: needs_an_explicit_model(&models),
+            models: catalogue_offer(&models),
         })
         .into_response(),
         Err(failure) => {
@@ -1344,6 +1591,8 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
                 message: Some(probe::describe(failure.class, &subject)),
                 model_count: 0,
                 model_known: None,
+                models: Vec::new(),
+                needs_model: false,
             })
             .into_response()
         }
@@ -1635,5 +1884,91 @@ mod tests {
         // Ollama wants an endpoint, not a credential. The rule is the
         // catalogue's per-row `needs_key`, never "local runtimes are keyless".
         assert!(plan_add("ollama", None, None, false).is_ok());
+    }
+
+    // ---- a tier-unaware provider must not reach a turn --------------------
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    /// The reported defect: Anthropic connected with no model, the row rendered
+    /// healthy, and every turn came back
+    /// `404 {"message": "model: agentic-v1"}` because the tier name went out as
+    /// the model id. Anthropic's catalog publishes neither the tier names nor
+    /// the ids `DEFAULT_TIER_MODELS` ships, so nothing could have mapped it.
+    #[test]
+    fn a_direct_vendor_catalog_needs_a_model_named() {
+        assert!(needs_an_explicit_model(&ids(&[
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-haiku-4",
+        ])));
+    }
+
+    /// The same is true of a local runtime, which is why this is not a rule
+    /// about cloud vendors: Ollama publishes its own pulled tags and would 404
+    /// `agentic-v1` exactly as Anthropic does.
+    #[test]
+    fn a_local_runtime_catalog_needs_a_model_named() {
+        assert!(needs_an_explicit_model(&ids(&[
+            "llama3:latest",
+            "qwen2.5-coder:7b",
+        ])));
+    }
+
+    /// And an endpoint that resolves tiers itself does not, whoever runs it —
+    /// the managed endpoint and a self-hosted gateway are the same case. A
+    /// static per-kind flag would get this wrong for a self-hosted LiteLLM.
+    #[test]
+    fn a_tier_native_catalog_needs_nothing_named() {
+        assert!(!needs_an_explicit_model(&ids(&[
+            "chat-v1",
+            "reasoning-v1",
+            "agentic-v1",
+            "vision-v1",
+        ])));
+    }
+
+    /// Nor does one publishing the shipped ids, which is what the substitution
+    /// in `model_for_tier` is for.
+    #[test]
+    fn a_catalog_of_shipped_ids_needs_nothing_named() {
+        let shipped: Vec<String> = crate::company::inference::DEFAULT_TIER_MODELS
+            .iter()
+            .map(|(_, model)| (*model).to_string())
+            .collect();
+        assert!(!needs_an_explicit_model(&shipped));
+    }
+
+    /// A named model is written to every tier, so no workload is left to fall
+    /// through to the passthrough that produced the 404.
+    #[test]
+    fn a_named_model_covers_every_tier() {
+        let overrides = tier_overrides(Some("claude-sonnet-5"));
+        assert_eq!(overrides.len(), crate::company::INFERENCE_TIERS.len());
+        for tier in crate::company::INFERENCE_TIERS {
+            assert_eq!(
+                overrides.get(*tier).map(String::as_str),
+                Some("claude-sonnet-5")
+            );
+        }
+        assert!(tier_overrides(None).is_empty());
+    }
+
+    /// The catalogue that rides back on a probe is sorted, deduplicated and
+    /// capped: it is a select an operator scans, on a response that is held in
+    /// memory for one dialog.
+    #[test]
+    fn the_offered_catalogue_is_sorted_and_capped() {
+        assert_eq!(
+            catalogue_offer(&ids(&["b", "a", "b"])),
+            ids(&["a", "b"]),
+            "a catalog's own order is whatever the endpoint felt like"
+        );
+        let many: Vec<String> = (0..PROBE_CATALOGUE_LIMIT + 50)
+            .map(|n| format!("model-{n:04}"))
+            .collect();
+        assert_eq!(catalogue_offer(&many).len(), PROBE_CATALOGUE_LIMIT);
     }
 }

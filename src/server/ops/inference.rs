@@ -417,6 +417,20 @@ struct ProviderDto {
     enabled: bool,
     /// Whether a credential is stored. **Never the credential.**
     key_configured: bool,
+    /// Which slot this record physically lives in: `entryZero` or `indexed`.
+    ///
+    /// **The console could not tell them apart**, and entry zero refuses three
+    /// operations with three separate 400s — disable ("cannot be switched off
+    /// from the list; reset the inference config instead"), edit ("is changed
+    /// through the inference config, not as a list entry") and remove ("is
+    /// cleared by resetting the inference config"). Correct rules, and the wrong
+    /// place to learn them: the only signal was `id == "prv_entry_zero"`, a
+    /// constant nothing outside `store.rs` reads, so the row rendered all three
+    /// controls live and every one of them was a round trip to a refusal.
+    ///
+    /// The rules stay exactly where they are — this is what lets the console
+    /// stop offering the controls that cannot work.
+    origin: &'static str,
     /// Whether this is the provider an **unset** workload goes through.
     ///
     /// The *resolved* answer, not the raw marker: a company that has never said
@@ -494,6 +508,10 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
             models: provider.models,
             enabled: provider.enabled,
             key_configured,
+            origin: match provider.origin {
+                store::ProviderOrigin::EntryZero => "entryZero",
+                store::ProviderOrigin::Indexed => "indexed",
+            },
             health,
         });
     }
