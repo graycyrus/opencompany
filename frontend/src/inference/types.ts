@@ -72,7 +72,8 @@ export interface ProviderHealth {
 }
 
 /** What a failed check means. See `classify.ts` for the copy each one gets. */
-export type ProbeClass = "auth" | "model" | "quota" | "endpoint" | "timeout" | "unknown";
+export type ProbeClass =
+  "auth" | "model" | "quota" | "endpoint" | "timeout" | "unknown";
 
 /** A workload that owns a routing row. */
 export type Workload = "chat" | "reasoning" | "agentic" | "vision";
@@ -94,5 +95,14 @@ export type ProviderRef =
 /** Workload → what it routes through. A workload absent from the map is unset. */
 export type RoutingMap = Partial<Record<Workload, ProviderRef>>;
 
-/** The three routing modes. Inferred from the map, never stored. */
-export type RoutingMode = "managed" | "own" | "advanced";
+/**
+ * The routing modes. **Inferred host-side from the routes, never stored.**
+ *
+ * `unset` is not a mode an operator picks — it is the absence of one. The host
+ * reports it when every row is managed-or-empty *and* the managed chain resolves
+ * to nothing, which used to be reported as `managed`: the screen said Managed
+ * while the turn went to whichever provider happened to be first enabled, and on
+ * a company whose only provider had just been added that turn was the reported
+ * `404 model: agentic-v1`.
+ */
+export type RoutingMode = "managed" | "own" | "advanced" | "unset";

@@ -63,7 +63,7 @@ use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, scoped};
 
-use super::{InferenceStatusDto, effective_status};
+use super::{InferenceStatusDto, effective_status, managed_resolves};
 
 /// The provider write plane.
 pub(super) fn router() -> Router<AppState> {
@@ -1381,8 +1381,9 @@ async fn get_routes(company: AdminScopedCompany) -> Result<Json<RoutesDto>, ApiE
     let providers = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
+    let managed_answers = managed_resolves(runtime).await?;
     Ok(Json(RoutesDto {
-        mode: mode_name(resolve::infer_routing_mode(&routes)),
+        mode: mode_name(resolve::infer_routing_mode(&routes, managed_answers)),
         orphaned: resolve::orphaned_routes(&routes, &providers),
         routes: routes
             .into_iter()
@@ -1441,8 +1442,9 @@ async fn put_routes(
         .await
         .map_err(ApiError)?;
 
+    let managed_answers = managed_resolves(runtime).await?;
     Ok(Json(RoutesDto {
-        mode: mode_name(resolve::infer_routing_mode(&stored)),
+        mode: mode_name(resolve::infer_routing_mode(&stored, managed_answers)),
         orphaned: resolve::orphaned_routes(&stored, &providers),
         routes: stored
             .into_iter()
@@ -1516,6 +1518,11 @@ fn mode_name(mode: resolve::RoutingMode) -> String {
         resolve::RoutingMode::Managed => "managed",
         resolve::RoutingMode::Own => "own",
         resolve::RoutingMode::Advanced => "advanced",
+        // Not a mode the operator can pick — the absence of one. The console
+        // renders it as "no row selected" plus a sentence naming where turns
+        // actually go, which is the state this whole pass exists to make
+        // visible.
+        resolve::RoutingMode::Unset => "unset",
     }
     .to_string()
 }

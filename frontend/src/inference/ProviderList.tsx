@@ -15,6 +15,7 @@ import { categoryOf, endpointHost } from "./catalogue";
 import { providerMenu } from "./connect";
 import { healthLabel, testOutcome } from "./classify";
 import type { TestState } from "./classify";
+import { routingBadge } from "./routing";
 import type { ManagedState } from "@/api/inference";
 import type { Provider, ProviderHealth } from "./types";
 
@@ -40,13 +41,26 @@ export function managedRow(source: ManagedState["source"] | undefined): string {
     case "instance":
       return "Billed to whoever runs this server";
     case "none":
-      return "No credential resolves — agents cannot think";
+      return NO_CREDENTIAL_RESOLVES;
     // An older host did not say, and "unknown" is not "working" — so this says
     // what managed is rather than claiming a state nobody established.
     default:
       return "TinyHumans chooses a model for each task";
   }
 }
+
+/**
+ * The sentence for a company nothing can answer for.
+ *
+ * It is the best sentence on this whole surface and **it could not render**: the
+ * managed row is gated on `managed.configured`, the host derives that as
+ * `source.resolves()`, so `source === "none"` implies no row — and the one state
+ * that needed this sentence was the one state that could never show it. It is a
+ * constant now so the dead-end states that *are* reachable can say it: the empty
+ * list below, and the Routing tab's unset banner.
+ */
+export const NO_CREDENTIAL_RESOLVES =
+  "No credential resolves — agents cannot think";
 
 /** The managed row's name. */
 export const MANAGED_LABEL = "Managed";
@@ -113,7 +127,9 @@ function TestControl({
         data-testid={`inference-provider-${slug}-test`}
         onClick={onTest}
       >
-        <RefreshCw className={cn("size-4", state.kind === "testing" && "animate-spin")} />
+        <RefreshCw
+          className={cn("size-4", state.kind === "testing" && "animate-spin")}
+        />
       </Button>
     </>
   );
@@ -155,6 +171,7 @@ export function ProviderList({
   onManagedTest,
   onManagedReplaceKey,
   onManagedRemoveKey,
+  routingState,
   testState,
 }: {
   providers: readonly Provider[];
@@ -188,6 +205,12 @@ export function ProviderList({
    * rather than going blank or claiming to be off.
    */
   onManagedRemoveKey: () => void;
+  /**
+   * Whether any workload routes through a provider, and whether it can serve
+   * them. Decided by `providerRoutingState` from the same routing table the
+   * Routing tab renders — a second read would be a second chance to disagree.
+   */
+  routingState: (provider: Provider) => "inUse" | "parked" | null;
   /** What each row's Test is doing, keyed by slug. */
   testState: (slug: string) => TestState;
 }) {
@@ -202,7 +225,19 @@ export function ProviderList({
       >
         <p className="text-sm">
           <span className="font-medium">No providers connected yet.</span>{" "}
-          <span className="text-muted-foreground">Connect one to get started.</span>
+          <span className="text-muted-foreground">
+            Connect one to get started.
+          </span>
+        </p>
+        {/* The state A2 is actually in, said rather than implied. Managed does
+            not resolve (that is the condition for this branch), so this company
+            has no way to think at all — which is a stronger statement than "not
+            connected yet" and is the one that makes Add the obvious next step. */}
+        <p
+          className="text-xs text-status-blocked-text"
+          data-testid="inference-providers-dead-end"
+        >
+          {NO_CREDENTIAL_RESOLVES}.
         </p>
         <Button type="button" disabled={!canManage} onClick={onAdd}>
           <Plus className="size-4" />
@@ -224,10 +259,15 @@ export function ProviderList({
           nothing resolves it is not a connected row — it is an entry in the add
           dialog's Cloud list, like anything else that is not connected. */}
       {managed?.configured && (
-        <li className="flex items-center gap-3 px-4 py-3" data-testid="inference-provider-managed">
+        <li
+          className="flex items-center gap-3 px-4 py-3"
+          data-testid="inference-provider-managed"
+        >
           <Monogram label={MANAGED_LABEL} />
           <span className="grid min-w-0 flex-1 leading-tight">
-            <span className="truncate text-sm font-medium">{MANAGED_LABEL}</span>
+            <span className="truncate text-sm font-medium">
+              {MANAGED_LABEL}
+            </span>
             <span className="truncate text-xs text-muted-foreground">
               {managedRow(managed.source)}
             </span>
@@ -273,14 +313,19 @@ export function ProviderList({
               {/* No Test here. One affordance per action — the icon button on
                   the row is discoverable and its answer lands where it belongs. */}
               <DropdownMenuItem onClick={onManagedReplaceKey}>
-                {managed.source === "provider_key" ? "Replace key" : "Add a key"}
+                {managed.source === "provider_key"
+                  ? "Replace key"
+                  : "Add a key"}
               </DropdownMenuItem>
               {/* Offered only when there is a key of this row's own to remove.
                   The company account and the instance identity are not this
                   row's to take away — and the copy says what actually happens,
                   which is a fall back rather than a switch-off. */}
               {managed.source === "provider_key" && (
-                <DropdownMenuItem variant="destructive" onClick={onManagedRemoveKey}>
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={onManagedRemoveKey}
+                >
                   Remove key
                 </DropdownMenuItem>
               )}
@@ -302,6 +347,7 @@ export function ProviderList({
           onRemoveKey={onRemoveKey}
           onReplaceKey={onReplaceKey}
           onMakeDefault={onMakeDefault}
+          routingState={routingState(provider)}
           testState={testState}
         />
       ))}
@@ -337,6 +383,7 @@ function ProviderRow({
   onRemoveKey,
   onReplaceKey,
   onMakeDefault,
+  routingState,
   testState,
 }: {
   provider: Provider;
@@ -349,8 +396,11 @@ function ProviderRow({
   onRemoveKey: (provider: Provider) => void;
   onReplaceKey: (provider: Provider) => void;
   onMakeDefault: (provider: Provider) => void;
+  /** `inUse`, `parked`, or `null` when nothing routes here. */
+  routingState: "inUse" | "parked" | null;
   testState: (slug: string) => TestState;
 }) {
+  const routing = routingBadge(routingState);
   return (
     <li
       className="flex items-center gap-3 px-4 py-3"
@@ -359,15 +409,38 @@ function ProviderRow({
       <Monogram label={provider.label} slug={provider.slug} />
       <span className="grid min-w-0 flex-1 leading-tight">
         <span className="truncate text-sm font-medium">{provider.label}</span>
-        <span className="truncate text-xs text-muted-foreground">{rowSubline(provider)}</span>
+        <span className="truncate text-xs text-muted-foreground">
+          {rowSubline(provider)}
+        </span>
       </span>
 
       {/* A word, not a sentence. What a default is, is not something this page
           has to explain — where unrouted work goes is the only thing an
           operator needs to be able to see, and moving it is a menu item. */}
       {provider.isDefault && (
-        <Badge variant="secondary" data-testid={`inference-provider-${provider.slug}-default`}>
+        <Badge
+          variant="secondary"
+          data-testid={`inference-provider-${provider.slug}-default`}
+        >
           Default
+        </Badge>
+      )}
+
+      {/* **Routing health, which the row carried none of.** A confirmation on
+          the toggle helps whoever clicks it; this helps everyone who looks at
+          the page afterwards, including the person who did not. `Parked` is the
+          one state the switch position alone cannot express: switched off *and*
+          still routed, so four workloads are waiting on it. */}
+      {routing && (
+        <Badge
+          variant="outline"
+          className={cn(
+            routingState === "parked" &&
+              "border-status-blocked text-status-blocked-text",
+          )}
+          data-testid={`inference-provider-${provider.slug}-routing`}
+        >
+          {routing}
         </Badge>
       )}
 

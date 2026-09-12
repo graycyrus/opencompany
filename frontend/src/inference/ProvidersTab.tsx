@@ -13,12 +13,24 @@ import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { AddProviderDialog } from "./AddProviderDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft } from "./ProviderConnectDialog";
-import { MANAGED_SLUG, ProviderList } from "./ProviderList";
+import {
+  MANAGED_SLUG,
+  NO_CREDENTIAL_RESOLVES,
+  ProviderList,
+} from "./ProviderList";
 import { RemoveProviderDialog } from "./RemoveProviderDialog";
 import type { RemovalIntent } from "./RemoveProviderDialog";
 import { categoryOf } from "./catalogue";
 import { MANAGED_OPTION_SLUG } from "./connect";
-import { WORKLOADS, WORKLOAD_TIER, managedFallbackNote, parseRef, removalImpact } from "./routing";
+import {
+  WORKLOADS,
+  WORKLOAD_TIER,
+  managedFallbackNote,
+  nothingCanAnswer,
+  parseRef,
+  providerRoutingState,
+  removalImpact,
+} from "./routing";
 import type { RoutingMap } from "./types";
 import type { InferenceActions, InferenceState } from "./use-inference";
 import type { Provider } from "./types";
@@ -152,7 +164,10 @@ export function ProvidersTab({
           [slug]: {
             kind: "done",
             ok: false,
-            message: err instanceof ApiError ? err.message : "The check did not complete.",
+            message:
+              err instanceof ApiError
+                ? err.message
+                : "The check did not complete.",
           },
         })),
       )
@@ -167,7 +182,9 @@ export function ProvidersTab({
   if (state.load === "unavailable") return null;
   if (state.load === "loading") return <Skeleton className="h-64 rounded-xl" />;
   if (state.load === "error") {
-    return <SectionUnreachable label="Couldn't read this company's model providers" />;
+    return (
+      <SectionUnreachable label="Couldn't read this company's model providers" />
+    );
   }
 
   const closeConnect = () => {
@@ -208,10 +225,17 @@ export function ProvidersTab({
       // The envelope's own `invalid request: ` prefix is machine vocabulary and
       // this sentence is read by a person standing in front of the field they
       // have to correct.
-      setError(err instanceof ApiError ? stripEnvelopePrefix(err.message) : "That did not work.");
+      setError(
+        err instanceof ApiError
+          ? stripEnvelopePrefix(err.message)
+          : "That did not work.",
+      );
       // The host refuses an add on exactly one probe class, and it is the only
       // refusal that unlocks "add anyway".
-      if (err instanceof ApiError && err.message.includes("rejected the credential")) {
+      if (
+        err instanceof ApiError &&
+        err.message.includes("rejected the credential")
+      ) {
         setProbeFailure("auth");
       }
     } finally {
@@ -258,7 +282,17 @@ export function ProvidersTab({
             managed={state.status?.managed}
             canManage={canManage}
             busySlug={state.busySlug}
-            onToggle={(p, enabled) => fireAndForget(actions.setEnabled(p.slug, enabled))}
+            // **Switching on is a one-step act; switching off is not.** Off
+            // keeps every route pointing here and parks the workloads behind
+            // them — which the host already computes and answers with, and the
+            // console used to discard into a toast while the Routing tab went
+            // on rendering those rows as healthy. So off is confirmed, with
+            // what it parks named, in reversible language.
+            onToggle={(p, enabled) =>
+              enabled
+                ? fireAndForget(actions.setEnabled(p.slug, true))
+                : setConfirming({ intent: "disable", provider: p })
+            }
             onEdit={(p) => {
               setEditing(p);
               setConnecting(p.kind);
@@ -276,11 +310,18 @@ export function ProvidersTab({
               setConnecting(p.kind);
             }}
             onMakeDefault={(p) => fireAndForget(actions.makeDefault(p.slug))}
+            routingState={(p) =>
+              providerRoutingState(p, state.providers, routingMap)
+            }
             // The same handler the header's button uses, passed down rather
             // than reimplemented: one way to add a provider, not two.
             onAdd={() => setAdding(true)}
-            onManagedToggle={(enabled) => fireAndForget(actions.setManagedOn(enabled))}
-            onManagedTest={() => runTest(MANAGED_SLUG, actions.testManagedChain)}
+            onManagedToggle={(enabled) =>
+              fireAndForget(actions.setManagedOn(enabled))
+            }
+            onManagedTest={() =>
+              runTest(MANAGED_SLUG, actions.testManagedChain)
+            }
             // The same dialog the add flow opens on the managed option, so
             // adding a key and replacing one are one code path.
             onManagedReplaceKey={() => {
@@ -308,10 +349,31 @@ export function ProvidersTab({
           same page, and telling an operator to go where they already are has
           stopped reading its own surroundings. */}
       {managedFallbackNote(state.status?.managed) && (
-        <p className="text-xs text-muted-foreground" data-testid="inference-managed-fallback">
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="inference-managed-fallback"
+        >
           {managedFallbackNote(state.status?.managed)}
         </p>
       )}
+
+      {/* Row E2: providers are connected and every one of them is switched off,
+          with a managed chain that resolves to nothing. The list above shows
+          rows, so it does not read as an empty company — and nothing anywhere
+          said that this one cannot think. */}
+      {state.providers.length > 0 &&
+        nothingCanAnswer(
+          state.providers,
+          state.status?.managed?.configured,
+        ) && (
+          <p
+            className="text-xs text-status-blocked-text"
+            data-testid="inference-providers-dead-end"
+          >
+            {NO_CREDENTIAL_RESOLVES}. Switch one of these back on, or connect
+            Managed.
+          </p>
+        )}
 
       <AddProviderDialog
         open={adding}
@@ -338,10 +400,21 @@ export function ProvidersTab({
         label={confirming?.provider.label ?? ""}
         impact={
           confirming
-            ? removalImpact(confirming.provider, state.providers, routingMap, categoryOf)
-            : { routed: [], isDefault: false, lastEnabled: false, defaultMovesTo: null }
+            ? removalImpact(
+                confirming.provider,
+                state.providers,
+                routingMap,
+                categoryOf,
+              )
+            : {
+                routed: [],
+                isDefault: false,
+                lastEnabled: false,
+                defaultMovesTo: null,
+              }
         }
         busy={busy}
+        managedConfigured={state.status?.managed?.configured}
         // Offered only where it is genuinely the softer answer: switching a
         // provider off keeps its endpoint, its credential and its routes, which
         // is what somebody removing one usually wants. It is not an alternative
@@ -363,9 +436,11 @@ export function ProvidersTab({
           setConfirming(null);
           // An empty key is how the store clears a value — it has no delete.
           fireAndForget(
-            intent === "key"
-              ? actions.edit(provider.slug, { key: "" })
-              : actions.remove(provider.slug),
+            intent === "disable"
+              ? actions.setEnabled(provider.slug, false)
+              : intent === "key"
+                ? actions.edit(provider.slug, { key: "" })
+                : actions.remove(provider.slug),
           );
         }}
       />
@@ -399,8 +474,9 @@ function RestartNotice({
       <CardContent className="flex flex-wrap items-center justify-between gap-3">
         <div className="grid min-w-0 flex-1 gap-1">
           <p className="text-sm">
-            Restart required. This company booted without a model, so agents are still on the
-            offline brain and the saved configuration is not yet in effect.
+            Restart required. This company booted without a model, so agents are
+            still on the offline brain and the saved configuration is not yet in
+            effect.
           </p>
           {/* The remedy, in both spellings the host could mean. The capability
               comes from the host, which does not know which shell it is
@@ -408,9 +484,12 @@ function RestartNotice({
               the next step from any control on the page, because there is no
               control for it. */}
           {!canRestart && (
-            <p className="text-xs text-muted-foreground" data-testid="inference-restart-manual">
-              This host cannot rebuild a company runtime in place: quit and reopen the app, or
-              restart the server process.
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="inference-restart-manual"
+            >
+              This host cannot rebuild a company runtime in place: quit and
+              reopen the app, or restart the server process.
             </p>
           )}
         </div>

@@ -397,22 +397,51 @@ fn resolve_by_category<'a>(
     }
 }
 
-/// The three routing modes, inferred from the routes.
+/// The routing modes, inferred from the routes.
 ///
 /// **Never stored.** A mode field would be a fifth thing that can disagree with
 /// the four routes, and the routes are the truth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoutingMode {
-    /// Every row is managed or unset.
+    /// Every row is managed or unset, **and managed can answer**.
     Managed,
     /// Every row names the same provider and model.
     Own,
     /// Anything else.
     Advanced,
+    /// Every row is managed or unset and **managed resolves to nothing**.
+    ///
+    /// The company has no mode it can use. This is not a fourth thing the
+    /// operator can pick — it is the absence of a usable choice, and it exists
+    /// so the console can render that absence rather than a selected row the
+    /// same card calls Not set up.
+    Unset,
 }
 
-/// Which mode the current routes describe.
-pub fn infer_routing_mode(routes: &Routes) -> RoutingMode {
+/// Which mode the current routes describe, given whether managed can answer.
+///
+/// ## Why this takes a second argument
+///
+/// The rule this ports — *every row managed or unset → Managed* — is faithful to
+/// openhuman, where it is also true: they run the managed backend, so managed is
+/// genuinely always on. **Here managed needs a credential and can resolve to
+/// nothing**, and a table of unset rows on such a company does not resolve to
+/// managed at all: [`provider_for_workload`] maps an unset row to
+/// [`Resolution::Primary`], which is the first enabled provider. So the screen
+/// said Managed while the turn went to the operator's own key — and on a company
+/// whose only provider had just been added with no per-tier model, that turn was
+/// the reported `404 model: agentic-v1`.
+///
+/// The principle, stated once: **the inferred default must be a mode the company
+/// can actually use.** An inferred Managed on a company where managed does not
+/// resolve is not a mode, it is a contradiction, and every symptom in the report
+/// falls out of it.
+///
+/// Only the *inference* changes. The mode is still a pure function of the table
+/// plus one fact about the company, still never stored, and an operator who has
+/// explicitly chosen managed still sees managed — they just see [`Self::Unset`]
+/// when that choice has nothing behind it, which is what is true.
+pub fn infer_routing_mode(routes: &Routes, managed_resolves: bool) -> RoutingMode {
     let refs: Vec<ProviderRef> = ROUTABLE_WORKLOADS
         .iter()
         .map(|w| {
@@ -426,7 +455,11 @@ pub fn infer_routing_mode(routes: &Routes) -> RoutingMode {
         .iter()
         .all(|r| matches!(r, ProviderRef::Managed | ProviderRef::Default))
     {
-        return RoutingMode::Managed;
+        return if managed_resolves {
+            RoutingMode::Managed
+        } else {
+            RoutingMode::Unset
+        };
     }
     let first = &refs[0];
     if refs.iter().all(|r| r == first) {
@@ -882,12 +915,47 @@ mod tests {
     // ---- the inferred mode --------------------------------------------------
 
     #[test]
-    fn a_company_that_has_chosen_nothing_is_managed() {
-        assert_eq!(infer_routing_mode(&Routes::new()), RoutingMode::Managed);
+    fn a_company_that_has_chosen_nothing_is_managed_when_managed_answers() {
         assert_eq!(
-            infer_routing_mode(&routes(&[("chat-v1", "managed"), ("vision-v1", "")])),
+            infer_routing_mode(&Routes::new(), true),
             RoutingMode::Managed
         );
+        assert_eq!(
+            infer_routing_mode(&routes(&[("chat-v1", "managed"), ("vision-v1", "")]), true),
+            RoutingMode::Managed
+        );
+    }
+
+    /// The reported defect. A fresh company with no managed credential reads
+    /// `Managed` from an empty table while every unset row resolves to
+    /// [`Resolution::Primary`] — the first enabled provider. The screen named
+    /// one destination and the turn used another.
+    #[test]
+    fn nothing_chosen_and_managed_unresolvable_is_not_a_mode() {
+        assert_eq!(
+            infer_routing_mode(&Routes::new(), false),
+            RoutingMode::Unset
+        );
+        assert_eq!(
+            infer_routing_mode(&routes(&[("chat-v1", "managed"), ("vision-v1", "")]), false),
+            RoutingMode::Unset
+        );
+    }
+
+    /// Managed's availability decides **only** the managed-or-unset table. A
+    /// company that has named a provider on every row has a mode it can use
+    /// whatever the managed chain says, and reporting otherwise would hide a
+    /// choice the operator made.
+    #[test]
+    fn managed_availability_does_not_reach_a_table_that_names_a_provider() {
+        let all = routes(&[
+            ("chat-v1", "acme:gpt-5"),
+            ("reasoning-v1", "acme:gpt-5"),
+            ("agentic-v1", "acme:gpt-5"),
+            ("vision-v1", "acme:gpt-5"),
+        ]);
+        assert_eq!(infer_routing_mode(&all, false), RoutingMode::Own);
+        assert_eq!(infer_routing_mode(&all, true), RoutingMode::Own);
     }
 
     #[test]
@@ -898,7 +966,7 @@ mod tests {
             ("agentic-v1", "acme:gpt-5"),
             ("vision-v1", "acme:gpt-5"),
         ]);
-        assert_eq!(infer_routing_mode(&all), RoutingMode::Own);
+        assert_eq!(infer_routing_mode(&all, true), RoutingMode::Own);
     }
 
     #[test]
@@ -909,12 +977,12 @@ mod tests {
             ("agentic-v1", "acme:gpt-5"),
             ("vision-v1", "acme:vision"),
         ]);
-        assert_eq!(infer_routing_mode(&mixed), RoutingMode::Advanced);
+        assert_eq!(infer_routing_mode(&mixed, true), RoutingMode::Advanced);
 
         // Partly set is also advanced: "the same on every row" is not true of a
         // row that is unset.
         let partial = routes(&[("chat-v1", "acme:gpt-5")]);
-        assert_eq!(infer_routing_mode(&partial), RoutingMode::Advanced);
+        assert_eq!(infer_routing_mode(&partial, true), RoutingMode::Advanced);
     }
 
     #[test]
@@ -922,7 +990,10 @@ mod tests {
         // There is no mode field, so there is nothing that can disagree with
         // the four routes. Re-deriving from the same map is stable.
         let map = routes(&[("chat-v1", "acme:gpt-5")]);
-        assert_eq!(infer_routing_mode(&map), infer_routing_mode(&map.clone()));
+        assert_eq!(
+            infer_routing_mode(&map, true),
+            infer_routing_mode(&map.clone(), true)
+        );
     }
 
     #[test]

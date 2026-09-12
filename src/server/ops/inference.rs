@@ -883,6 +883,22 @@ async fn effective_status_with(
     })
 }
 
+/// Whether the managed brain can actually answer for this company.
+///
+/// The one fact [`resolve::infer_routing_mode`](crate::company::inference::resolve::infer_routing_mode)
+/// needs beyond the routes, read through the same [`managed_state`] the status
+/// card renders so the mode and the badge cannot disagree about it. Three store
+/// reads on a route nobody calls in a loop, in exchange for the console never
+/// again being told Managed on a company where managed resolves to nothing.
+async fn managed_resolves(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
+    Ok(managed_state(
+        runtime,
+        platform_default(&crate::app::config::ProcessEnv).as_ref(),
+    )
+    .await?
+    .configured)
+}
+
 /// What the managed brain would resolve to for this company.
 ///
 /// Reads the three facts and hands them to
