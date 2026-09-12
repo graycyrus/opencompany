@@ -661,6 +661,18 @@ async fn edit_provider(
         }
     };
 
+    // **The credential goes first, for the same reason it does on the add path.**
+    // An edit can move the endpoint and rotate the key in one request, and
+    // committing the endpoint first meant a failed key write returned an error
+    // with the new host live and the *old* host's secret still in the slot — so
+    // the next routed turn would present one provider's credential to another.
+    // Written first, that failure leaves the row exactly as it was.
+    if let Some(key) = body.key.as_deref() {
+        store::store_provider_key(runtime.id(), secrets, &existing, key.trim())
+            .await
+            .map_err(ApiError)?;
+    }
+
     let provider = store::put_provider(
         runtime.id(),
         secrets,
@@ -682,10 +694,7 @@ async fn edit_provider(
     .await
     .map_err(ApiError)?;
 
-    if let Some(key) = body.key {
-        store::store_provider_key(runtime.id(), secrets, &provider, key.trim())
-            .await
-            .map_err(ApiError)?;
+    if body.key.is_some() {
         crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
         // A rotation makes whatever was learnt about the old credential
         // meaningless — including a latched `auth` failure, which would
@@ -1236,9 +1245,23 @@ async fn set_managed_key(
         tracing::error!(
             company = %runtime.id(),
             error = %err,
-            "wrote the managed credential to its own address but could not clear the \
-             legacy slot; a secret is now orphaned there",
+            "could not clear managed's legacy credential slot",
         );
+        // **Reported, not just logged, and specifically on a clear.** The read
+        // chain falls back to `inference/key` when the new slot is empty, so a
+        // failure here leaves the old credential live and still billed while
+        // the console says "Cleared the managed key." A save is different: the
+        // new key is already in the slot that outranks this one, so the stale
+        // legacy value is unreachable and the write succeeded in the only sense
+        // the operator asked about.
+        if key.is_empty() {
+            return Err(ApiError(OpenCompanyError::Store(
+                "The managed key could not be fully cleared — the older of its two \
+                 storage slots still holds it, so turns may still be billed to it. \
+                 Try again."
+                    .to_string(),
+            )));
+        }
     }
     crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 
