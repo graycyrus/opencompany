@@ -567,6 +567,13 @@ pub async fn delete_provider(
     if !index.iter().any(|s| s.slug == slug) {
         return Ok(false);
     }
+    // Kept, so the ordering is a rollback rather than a preference. Clearing
+    // first is right — of the two half-states, "visible with its credential" is
+    // the one an operator can see and act on — but it is only right if the
+    // credential comes back when the index write fails. Without that, a DELETE
+    // that reported failure had still thrown the key away irreversibly, and the
+    // row it left behind could no longer answer.
+    let previous = load_key(company, secrets, slug).await?;
     secrets
         .set(company, &provider_key_key(slug), SecretValue(String::new()))
         .await
@@ -578,7 +585,37 @@ pub async fn delete_provider(
             ))
         })?;
     index.retain(|s| s.slug != slug);
-    save_index(company, secrets, &index).await.map(|()| true)
+    match save_index(company, secrets, &index).await {
+        Ok(()) => Ok(true),
+        Err(err) => {
+            if !previous.trim().is_empty()
+                && let Err(restore) = secrets
+                    .set(company, &provider_key_key(slug), SecretValue(previous))
+                    .await
+            {
+                tracing::error!(
+                    company = %company.as_ref(),
+                    provider = %slug,
+                    error = %restore,
+                    "a removal failed to write the provider index and then failed to put \
+                     the credential back; this row is still listed and can no longer answer",
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// This provider's credential at its own address, without the legacy fallback.
+///
+/// [`delete_provider`] needs the value it is about to clear so it can put it
+/// back, and only that address is its to restore: `inference/key` may belong to
+/// something else entirely, and clearing it is not what this function did.
+async fn load_key(company: &CompanyId, secrets: &dyn SecretStore, slug: &str) -> Result<String> {
+    Ok(match secrets.get(company, &provider_key_key(slug)).await? {
+        Some(SecretValue(raw)) => raw,
+        None => String::new(),
+    })
 }
 
 /// Writes a provider's outbound credential, **and converges its address**.

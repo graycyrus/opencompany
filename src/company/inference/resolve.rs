@@ -540,8 +540,15 @@ pub fn scrub_removed(
     remaining: &[Provider],
 ) -> Vec<String> {
     let category = catalogue::category_of(&removed.kind);
+    // **Enabled, not merely present.** A slugless `local:` route survives only
+    // while something in that category can still serve it, and a switched-off
+    // runtime cannot: `provider_for_workload` looks for an *enabled* target and
+    // fails the workload closed when it finds none. Counting a disabled row as
+    // a survivor left the route pinned and the turn hard-failing, instead of
+    // resetting to the primary the way the rule above says it should.
     let category_survives = remaining
         .iter()
+        .filter(|p| p.enabled)
         .any(|p| catalogue::category_of(&p.kind) == category);
 
     let mut reset = Vec::new();
@@ -1267,5 +1274,22 @@ mod tests {
         let reset = scrub_removed(&mut routes, &ollama, std::slice::from_ref(&lmstudio));
         assert!(reset.is_empty(), "lmstudio still serves it");
         assert!(!scrub_removed(&mut routes, &ollama, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_switched_off_runtime_does_not_keep_a_slug_less_local_route_alive() {
+        // "Another runtime remains" has to mean one that can actually serve the
+        // route. `provider_for_workload` looks for an **enabled** target and
+        // fails the workload closed when it finds none, so counting a
+        // switched-off row as a survivor left the route pinned to a hard
+        // failure rather than resetting it to the primary.
+        let ollama = provider("ollama", "ollama", true);
+        let parked = provider("lmstudio", "lmstudio", false);
+        let mut routes = Routes::new();
+        routes.insert("chat-v1".into(), ProviderRef::parse("local:llama3"));
+
+        let reset = scrub_removed(&mut routes, &ollama, std::slice::from_ref(&parked));
+        assert_eq!(reset, vec!["chat-v1".to_string()]);
+        assert_eq!(routes.get("chat-v1"), Some(&ProviderRef::Default));
     }
 }

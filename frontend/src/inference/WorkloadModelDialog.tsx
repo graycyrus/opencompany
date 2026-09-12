@@ -41,10 +41,12 @@ import type { Provider, ProviderRef, Workload } from "./types";
 /**
  * Choosing what one workload runs on.
  *
- * The **only** place in this surface that tests with a real completion rather
- * than a catalog listing, and correctly so: the add flow asks "is this
- * reachable", a routing row asks "will this model actually answer". Those are
- * different questions and a catalog listing cannot answer the second.
+ * Its **Test is a catalogue read**, the same `GET {base}/models` the add flow
+ * uses. It once said it sent a real completion and never did; the copy is
+ * corrected on the button and this paragraph used to contradict it. What the
+ * check settles is reachability plus whether the endpoint publishes this model
+ * id — not whether the model will answer, which only a completion could tell
+ * you and which nothing here charges for.
  *
  * The dialog carries the workload's recommendation hint, because it is the part
  * that makes this screen usable by someone who has never chosen a model before.

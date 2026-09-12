@@ -1291,6 +1291,22 @@ async fn parked_tiers(
     Ok(resolve::routes_served_by(&routes, provider, &alternatives))
 }
 
+/// The tiers explicitly routed to **managed**, so switching it off can name
+/// them.
+///
+/// Its own function because managed has no provider record for [`parked_tiers`]
+/// to take, and `managed` is a word in the route grammar rather than a slug.
+async fn managed_parked_tiers(runtime: &CompanyRuntime) -> Result<Vec<String>, ApiError> {
+    let routes = store::load_routes(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    Ok(routes
+        .iter()
+        .filter(|(_, route)| matches!(route, resolve::ProviderRef::Managed))
+        .map(|(tier, _)| tier.clone())
+        .collect())
+}
+
 /// The provider, or a 404 naming the slug that resolved to nothing.
 async fn require_provider(
     runtime: &CompanyRuntime,
@@ -1322,15 +1338,29 @@ async fn set_managed_enabled(
     store::set_managed_enabled(runtime.id(), runtime.secrets().as_ref(), body.enabled)
         .await
         .map_err(ApiError)?;
+    // Named, the way switching an indexed provider off names them. A workload
+    // routed explicitly to `managed` fails closed on its next turn, and an
+    // empty list said nothing had changed.
+    let parked = if body.enabled {
+        Vec::new()
+    } else {
+        managed_parked_tiers(runtime).await?
+    };
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: if body.enabled {
             "Managed is on.".to_string()
-        } else {
+        } else if parked.is_empty() {
             "Managed is off. Its credential is untouched.".to_string()
+        } else {
+            format!(
+                "Managed is off and its credential is untouched. {} {} routed to it and                  will not run until it is back on or pointed elsewhere.",
+                parked.join(", "),
+                if parked.len() == 1 { "is" } else { "are" },
+            )
         },
         probe: None,
-        affected_tiers: Vec::new(),
+        affected_tiers: parked,
     }))
 }
 

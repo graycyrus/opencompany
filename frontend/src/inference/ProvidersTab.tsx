@@ -19,6 +19,7 @@ import type { RemovalIntent } from "./RemoveProviderDialog";
 import { categoryOf } from "./catalogue";
 import { MANAGED_OPTION_SLUG, probeEndpoint } from "./connect";
 import {
+  MANAGED_TARGET_LABEL,
   WORKLOADS,
   WORKLOAD_TIER,
   managedFallbackNote,
@@ -121,6 +122,14 @@ export function ProvidersTab({
    * be able to show two different answers at once without ambiguity.
    */
   const [tests, setTests] = useState<Record<string, TestState>>({});
+  /**
+   * Whether the managed row's Remove key is awaiting confirmation.
+   *
+   * Its own flag rather than a `confirming` entry, because `confirming` carries
+   * a `Provider` and managed has no record — it is a chain, which is the same
+   * reason its row is rendered outside the list.
+   */
+  const [confirmingManaged, setConfirmingManaged] = useState(false);
   // Cleared on unmount, so a result that resolves after the page is gone does
   // not set state on a component nobody is looking at.
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -334,10 +343,12 @@ export function ProvidersTab({
               setEditing(null);
               setConnecting(MANAGED_OPTION_SLUG);
             }}
-            // An empty key is how the store clears a value — it has no delete —
-            // and it removes step 1 alone. The response re-reads the chain, so
-            // the row immediately says whichever step answers next.
-            onManagedRemoveKey={() => fireAndForget(actions.saveManagedKey(""))}
+            // Confirmed, like every other row's Remove key. It used to fire on
+            // the click: one press cleared the company's managed credential
+            // while explicit `managed` routes stayed pointed at it, and if no
+            // later step of the chain answers those workloads simply stop.
+            // Clearing step 1 is not reversible from anything on this page.
+            onManagedRemoveKey={() => setConfirmingManaged(true)}
             testState={(slug) => tests[slug] ?? { kind: "idle" }}
           />
         </CardContent>
@@ -435,6 +446,30 @@ export function ProvidersTab({
                 ? actions.edit(provider.slug, { key: "" })
                 : actions.remove(provider.slug),
           );
+        }}
+      />
+
+      {/* Managed's own confirmation. The same dialog, because it is the same
+          act — the impact is computed from the routing map rather than from a
+          provider record, since managed has none. */}
+      <RemoveProviderDialog
+        intent={confirmingManaged ? "key" : null}
+        label={MANAGED_TARGET_LABEL}
+        impact={{
+          routed: WORKLOADS.filter((w) => routingMap[w]?.kind === "managed"),
+          isDefault: false,
+          lastEnabled: false,
+          defaultMovesTo: null,
+        }}
+        managed={state.status?.managed}
+        busy={busy}
+        onCancel={() => setConfirmingManaged(false)}
+        onConfirm={() => {
+          setConfirmingManaged(false);
+          // An empty key is how the store clears a value — it has no delete —
+          // and it removes step 1 alone. The response re-reads the chain, so
+          // the row immediately says whichever step answers next.
+          fireAndForget(actions.saveManagedKey(""));
         }}
       />
     </div>

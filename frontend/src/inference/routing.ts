@@ -303,11 +303,22 @@ export function inferRoutingMode(routing: RoutingMap, managedResolves: boolean):
 export function scrubOnRemove(
   routing: RoutingMap,
   removed: Pick<Provider, "slug" | "kind">,
-  remaining: readonly Pick<Provider, "slug" | "kind">[],
+  remaining: readonly (Pick<Provider, "slug" | "kind"> & { enabled?: boolean })[],
   categoryOf: (kind: string) => "cloud" | "local" | "cli",
 ): { routing: RoutingMap; reset: Workload[] } {
   const category = categoryOf(removed.kind);
-  const categorySurvives = remaining.some((p) => categoryOf(p.kind) === category);
+  // **Enabled, not merely present**, mirroring `resolve::scrub_removed`. A
+  // slugless `local:` route survives only while something in that category can
+  // still serve it, and a switched-off runtime cannot — the resolver looks for
+  // an enabled target and fails the workload closed when it finds none, so
+  // counting a disabled row as a survivor leaves the route pinned to a
+  // hard failure instead of resetting it to the primary.
+  //
+  // `enabled` is optional so a caller passing bare `{slug, kind}` — which is
+  // what this signature took before — still means "these are the survivors".
+  const categorySurvives = remaining.some(
+    (p) => p.enabled !== false && categoryOf(p.kind) === category,
+  );
 
   const next: RoutingMap = { ...routing };
   const reset: Workload[] = [];
