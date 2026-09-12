@@ -29,6 +29,7 @@ import {
   WORKLOAD_COPY,
   WORKLOAD_TIER,
   MANAGED_NOT_SET_UP_ELSEWHERE,
+  MANAGED_SWITCHED_OFF_ELSEWHERE,
   applyToEveryWorkload,
   managedModeBadge,
   formatRef,
@@ -136,13 +137,34 @@ export function RoutingTab({
               {MANAGED_NOT_SET_UP_ELSEWHERE}
             </p>
           )}
+          {/* Configured but switched off is a different sentence from not set
+              up, and it is the one that explains why the row below cannot be
+              chosen. Both cannot be true at once. */}
+          {state.status?.managed?.configured !== false &&
+            state.status?.managed?.enabled === false && (
+              <p
+                className="text-xs text-muted-foreground"
+                data-testid="inference-managed-switched-off"
+              >
+                {MANAGED_SWITCHED_OFF_ELSEWHERE}
+              </p>
+            )}
           {(["managed", "own", "advanced"] as const).map((option) => (
             <ModeRow
               key={option}
               option={option}
               selected={mode === option}
               managedConfigured={state.status?.managed?.configured}
-              disabled={!canManage}
+              // **Unselectable while Managed is switched off.** Selecting it
+              // writes `managed` into every tier and saves successfully, and the
+              // resolver then refuses every one of those turns — an apparently
+              // successful save that takes the company's inference offline.
+              // Switching Managed back on is a different act, on the other tab,
+              // and this row does not get to make it silently.
+              disabled={
+                !canManage ||
+                (option === "managed" && state.status?.managed?.enabled === false)
+              }
               onSelect={() => {
                 setChosenMode(option);
                 // Managed is a whole-table statement, so it saves on selection.
