@@ -1149,6 +1149,12 @@ async fn set_enabled(
     let secrets = runtime.secrets().as_ref();
     let provider = require_provider(runtime, &params.slug).await?;
 
+    // **Asked before the switch, not after.** `resolve::primary` skips disabled
+    // providers, so once the write has landed this row can never report itself
+    // as the one unset workloads were going through — and the whole point of
+    // asking is to say that they just moved.
+    let was_primary = !body.enabled && is_primary(runtime, &provider.slug).await?;
+
     if !store::set_enabled(runtime.id(), secrets, &provider.slug, body.enabled)
         .await
         .map_err(ApiError)?
@@ -1170,7 +1176,29 @@ async fn set_enabled(
         // first-enabled — the same answer, but nothing on the page claims the
         // operator decided it.
         clear_default_if_marked(runtime, &provider.slug).await;
-        parked_tiers(runtime, &provider).await?
+        let mut tiers = parked_tiers(runtime, &provider).await?;
+        // **An unset row is served by this provider too, and it moves.** Only
+        // explicit routes name a slug, so switching off the provider every
+        // unrouted workload was going through reported "nothing was routed
+        // through it" while those workloads quietly moved to the next enabled
+        // account — or to managed. A change of who pays is the one thing this
+        // sentence exists to say out loud.
+        if was_primary {
+            let explicit = store::load_routes(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .map_err(ApiError)?;
+            for workload in resolve::ROUTABLE_WORKLOADS {
+                let tier = workload.tier();
+                let unset = !matches!(
+                    explicit.get(tier),
+                    Some(route) if !matches!(route, resolve::ProviderRef::Default)
+                );
+                if unset && !tiers.iter().any(|t| t == tier) {
+                    tiers.push(tier.to_string());
+                }
+            }
+        }
+        tiers
     };
     let note = match (body.enabled, parked.is_empty()) {
         (true, _) => format!("{} is on.", provider.label),
@@ -1179,7 +1207,7 @@ async fn set_enabled(
         // — the right sentence in the wrong vocabulary, on the one screen whose
         // job is to be read by a person.
         (false, false) => format!(
-            "{} is off. {} {} parked until it is switched back on.",
+            "{} is off. {} {} no longer served by it.",
             provider.label,
             parked
                 .iter()
@@ -1296,15 +1324,60 @@ async fn parked_tiers(
 ///
 /// Its own function because managed has no provider record for [`parked_tiers`]
 /// to take, and `managed` is a word in the route grammar rather than a slug.
+///
+/// **Unset rows count when managed is what they were falling back to.** A
+/// company with no enabled provider resolves every unrouted workload through
+/// the managed chain, so switching it off parks all four — and an empty routing
+/// table, which is the commonest state there is, would otherwise report that
+/// nothing changed.
 async fn managed_parked_tiers(runtime: &CompanyRuntime) -> Result<Vec<String>, ApiError> {
-    let routes = store::load_routes(runtime.id(), runtime.secrets().as_ref())
+    let secrets = runtime.secrets().as_ref();
+    let routes = store::load_routes(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
-    Ok(routes
+    let providers = store::list_providers(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let marked = store::load_default_slug(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let unset_falls_back_to_managed = resolve::primary(&providers, marked.as_deref()).is_none();
+
+    let mut tiers: Vec<String> = routes
         .iter()
         .filter(|(_, route)| matches!(route, resolve::ProviderRef::Managed))
         .map(|(tier, _)| tier.clone())
-        .collect())
+        .collect();
+    if unset_falls_back_to_managed {
+        for workload in resolve::ROUTABLE_WORKLOADS {
+            let tier = workload.tier();
+            let unset = !matches!(
+                routes.get(tier),
+                Some(route) if !matches!(route, resolve::ProviderRef::Default)
+            );
+            if unset && !tiers.iter().any(|t| t == tier) {
+                tiers.push(tier.to_string());
+            }
+        }
+    }
+    Ok(tiers)
+}
+
+/// Whether `slug` is the provider an **unset** workload currently goes through.
+///
+/// The resolved answer, like the status DTO's `is_default`: a company that has
+/// never marked one resolves to its first enabled provider, and switching that
+/// one off moves every unset workload just as surely as clearing an explicit
+/// marker would.
+async fn is_primary(runtime: &CompanyRuntime, slug: &str) -> Result<bool, ApiError> {
+    let secrets = runtime.secrets().as_ref();
+    let providers = store::list_providers(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let marked = store::load_default_slug(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    Ok(resolve::primary(&providers, marked.as_deref()).is_some_and(|p| p.slug == slug))
 }
 
 /// The provider, or a 404 naming the slug that resolved to nothing.
@@ -1570,6 +1643,15 @@ async fn set_managed_key(
     let secrets = runtime.secrets().as_ref();
     let key = body.key.trim();
 
+    // **Asked before anything is written.** This read can fail, and asking it
+    // after the new key had landed meant a transient store error returned "that
+    // did not work" over a credential that was already live and already
+    // outranking the old one on the next turn — the console saying the account
+    // had not changed while it had.
+    let legacy_is_managed = store::legacy_slot_is_managed(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+
     secrets
         .set(
             runtime.id(),
@@ -1590,9 +1672,6 @@ async fn set_managed_key(
     // from "•••• configured" to showing a bare host.
     //
     // Found in a browser, not by a test. The test is below it now.
-    let legacy_is_managed = store::legacy_slot_is_managed(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?;
     if legacy_is_managed
         && let Err(err) = secrets
             .set(

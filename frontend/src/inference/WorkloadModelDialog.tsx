@@ -109,7 +109,7 @@ export function WorkloadModelDialog({
   /** Whose catalog the model field reads, and `null` when the row takes no id. */
   const modelSlug = modelTarget(target, providers);
   const outcome = testOutcome(testResult);
-  const ref: ProviderRef = refForTarget(target, model, providers);
+  const ref: ProviderRef = refForTarget(target, model, providers, current);
 
   return (
     <Dialog open onOpenChange={(next) => !next && onCancel()}>

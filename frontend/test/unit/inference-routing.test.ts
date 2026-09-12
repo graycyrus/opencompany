@@ -343,6 +343,27 @@ describe("the per-workload select", () => {
     expect(options.filter((o) => o.slug === "tinyhumans")).toHaveLength(1);
   });
 
+  it("round-trips a slugless local route instead of pinning it to the primary", () => {
+    // `local:<model>` is a valid persisted form with no option in the select to
+    // restore to, so `targetForRef` maps it to unset — and unset plus a model
+    // used to mean "pin it to the primary", which sent a local model id to a
+    // cloud account on a Save that changed nothing.
+    const local: ProviderRef = { kind: "local", model: "llama3" };
+    expect(targetForRef(local)).toBe(UNSET_TARGET);
+    expect(refForTarget(UNSET_TARGET, "llama3", connected, local)).toEqual(local);
+    // An edited model stays on the same runtime rather than moving provider.
+    expect(refForTarget(UNSET_TARGET, "mistral", connected, local)).toEqual({
+      kind: "local",
+      model: "mistral",
+    });
+    // And picking a provider is still how you leave it.
+    expect(refForTarget("openrouter", "", connected, local)).toEqual({
+      kind: "cloud",
+      providerSlug: "openrouter",
+      model: undefined,
+    });
+  });
+
   it("marks Managed unpickable when it cannot serve a turn", () => {
     // Routing a workload there while it is switched off or unresolved saves
     // successfully and then fails every turn — a click that reports the

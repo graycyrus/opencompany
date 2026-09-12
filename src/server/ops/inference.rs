@@ -3018,7 +3018,28 @@ base_url = "https://byo.example/v1"
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
-        assert_eq!(resp["affectedTiers"], json!(["reasoning-v1"]));
+        // The explicitly routed tier **and** the three unset ones. `acme` is
+        // this company's only provider, so it is also what every unrouted
+        // workload was going through — switching it off moves those to managed,
+        // and a response naming only the explicit route would have said nothing
+        // about a change of who pays for the other three.
+        let mut named: Vec<String> = resp["affectedTiers"]
+            .as_array()
+            .expect("affectedTiers is a list")
+            .iter()
+            .map(|t| t.as_str().unwrap_or_default().to_string())
+            .collect();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![
+                "agentic-v1".to_string(),
+                "chat-v1".to_string(),
+                "reasoning-v1".to_string(),
+                "vision-v1".to_string(),
+            ],
+            "{raw}"
+        );
 
         let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
         assert_eq!(
