@@ -290,6 +290,16 @@ pub fn guard_instance_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// AWS's IPv6 instance metadata address.
+///
+/// It is a **unique local** address (`fc00::/7`), not link-local, so the
+/// link-local test below does not see it — and unlike `169.254.169.254` it has
+/// no shape that gives it away. It is named because it is the address, and
+/// because refusing every ULA would refuse an ordinary IPv6 private network,
+/// which is the same mistake as refusing RFC1918.
+const EC2_IPV6_METADATA: std::net::Ipv6Addr =
+    std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254);
+
 /// Link-local and the cloud metadata services that live there.
 ///
 /// Loopback and RFC1918 are deliberately **absent**: both are ordinary places
@@ -299,6 +309,11 @@ fn is_metadata_address(address: std::net::IpAddr) -> bool {
     match address {
         std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast(),
         std::net::IpAddr::V6(v6) => {
+            // The one metadata address that is not link-local, so it has to be
+            // named rather than derived.
+            if v6 == EC2_IPV6_METADATA {
+                return true;
+            }
             if v6.is_unspecified() || v6.segments()[0] & 0xffc0 == 0xfe80 {
                 return true;
             }

@@ -353,3 +353,31 @@ describe("a class this console has never heard of", () => {
     expect(healthLabel("format")).toBe("JSON output off");
   });
 });
+
+describe("Set as default", () => {
+  it("is not offered on a row that cannot become the default", () => {
+    // `resolve::active` requires the marked provider to be COMPLETE and
+    // otherwise falls through to the next usable one, so marking an incomplete
+    // row changes nothing an agent can feel — while the console answers
+    // "Teammates now search through …". Reachable straight after "Remove key",
+    // which leaves the row enabled with no credential.
+    expect(controlsFor(account({ complete: false }))).not.toContain(
+      "make-default",
+    );
+    expect(
+      controlsFor(searxng({ complete: false, endpoint: null })),
+    ).not.toContain("make-default");
+
+    // The two conditions that were already right stay right.
+    expect(controlsFor(account({ enabled: false }))).not.toContain(
+      "make-default",
+    );
+    expect(controlsFor(account({ isDefault: true }))).not.toContain(
+      "make-default",
+    );
+
+    // And a complete, enabled, non-default row still gets it — the refusals
+    // above are only worth having if the ordinary case survives them.
+    expect(controlsFor(account())).toContain("make-default");
+  });
+});

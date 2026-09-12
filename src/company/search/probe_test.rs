@@ -172,7 +172,16 @@ fn the_metadata_service_is_refused_and_a_private_instance_is_not() {
     assert!(guard_instance_url("http://[::169.254.169.254]/").is_err());
     assert!(guard_instance_url("http://0.0.0.0/").is_err());
 
+    // AWS's IPv6 metadata address is a unique-local address rather than a
+    // link-local one, so nothing about its shape gives it away and the
+    // link-local test walks straight past it. It is named explicitly.
+    assert!(guard_instance_url("http://[fd00:ec2::254]/").is_err());
+    assert!(guard_instance_url("http://[fd00:0ec2:0:0:0:0:0:254]/").is_err());
+
     assert!(guard_instance_url("http://10.0.0.5:8080").is_ok());
+    // And an ordinary IPv6 private network is still ordinary — refusing every
+    // ULA would be the same mistake as refusing RFC1918.
+    assert!(guard_instance_url("http://[fd00:1234::5]:8080").is_ok());
     assert!(guard_instance_url("http://192.168.1.20").is_ok());
     assert!(guard_instance_url("http://127.0.0.1:8888").is_ok());
     assert!(guard_instance_url("https://search.acme.internal").is_ok());

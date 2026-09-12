@@ -471,3 +471,87 @@ async fn a_concurrent_remove_does_not_resurrect_the_row_it_removed() {
         "the toggle must survive too: {stored:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exactly_one_of_two_concurrent_claims_on_one_slug_wins() {
+    // The connect flow used to read the index, decide the slug was free, and
+    // write it three awaits later. Both racers got past the read — and the
+    // loser then did real damage, because an `Auth` probe failure rolls back by
+    // deleting the row and the credential, taking the winner's working key with
+    // it while the winner answered `saved: true`.
+    let secrets = std::sync::Arc::new(SlowSecrets::default());
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let secrets = secrets.clone();
+        tasks.push(tokio::spawn(async move {
+            claim_provider(
+                &company(),
+                secrets.as_ref(),
+                SearchProvider {
+                    slug: "brave".to_string(),
+                    enabled: true,
+                    endpoint: None,
+                },
+            )
+            .await
+        }));
+    }
+    let mut won = 0;
+    for task in tasks {
+        if task.await.expect("task").expect("claim") {
+            won += 1;
+        }
+    }
+    assert_eq!(won, 1, "exactly one claim may succeed");
+    assert_eq!(
+        list_providers(&company(), secrets.as_ref())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_refused_claim_writes_nothing() {
+    // What makes it safe to claim BEFORE storing the credential: a loser must
+    // not have touched the store on its way to being refused, or it would
+    // overwrite the winner's key at the shared address.
+    let secrets = MemSecrets::default();
+    assert!(
+        claim_provider(
+            &company(),
+            &secrets,
+            SearchProvider {
+                slug: "searxng".to_string(),
+                enabled: true,
+                endpoint: Some("http://search.acme.internal".to_string()),
+            },
+        )
+        .await
+        .unwrap()
+    );
+
+    assert!(
+        !claim_provider(
+            &company(),
+            &secrets,
+            SearchProvider {
+                slug: "searxng".to_string(),
+                enabled: true,
+                endpoint: Some("http://somewhere.else.internal".to_string()),
+            },
+        )
+        .await
+        .unwrap(),
+        "the second claim must lose"
+    );
+
+    let providers = list_providers(&company(), &secrets).await.unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(
+        providers[0].endpoint.as_deref(),
+        Some("http://search.acme.internal"),
+        "the loser must not have overwritten the winner's address"
+    );
+}

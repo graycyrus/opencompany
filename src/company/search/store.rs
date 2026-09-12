@@ -269,6 +269,55 @@ pub async fn put_provider(
     provider: SearchProvider,
 ) -> Result<()> {
     let _guard = index_guard(company).await;
+    put_provider_locked(company, secrets, provider).await
+}
+
+/// Adds a provider **only if its slug is not already connected**, and says
+/// which happened.
+///
+/// # Why the check cannot live in the caller
+///
+/// The connect flow read the index, decided the slug was free, and wrote it in
+/// three separate awaits. Two admins connecting the same provider at once both
+/// got past the read — and then the loser did real damage rather than merely
+/// duplicating work: the connect flow rolls back on an `Auth` probe failure by
+/// deleting the row **and** the credential, so a request whose key was rejected
+/// deleted the row and the working key the other request had just stored, while
+/// that request still answered `saved: true` from its own request-local copy.
+///
+/// Test-and-set under the one lock is the only version of this check that is
+/// worth having, so the check moved in here rather than the lock moving out.
+///
+/// `false` means somebody else got there first and **nothing was written** —
+/// which is what makes it safe to call before the credential is stored, so a
+/// loser cannot overwrite the winner's key on its way to being refused.
+pub async fn claim_provider(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    provider: SearchProvider,
+) -> Result<bool> {
+    let _guard = index_guard(company).await;
+    if list_providers(company, secrets)
+        .await?
+        .iter()
+        .any(|existing| existing.slug == provider.slug)
+    {
+        return Ok(false);
+    }
+    put_provider_locked(company, secrets, provider).await?;
+    Ok(true)
+}
+
+/// [`put_provider`]'s body, for a caller that already holds the index lock.
+///
+/// Separate because the lock is not re-entrant: [`claim_provider`] holds it
+/// across a read and a write, and calling the public wrapper from inside that
+/// would deadlock rather than recurse.
+async fn put_provider_locked(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    provider: SearchProvider,
+) -> Result<()> {
     let mut providers: Vec<SearchProvider> = list_providers(company, secrets)
         .await?
         .into_iter()

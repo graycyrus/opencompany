@@ -82,9 +82,18 @@ export function controlsFor(provider: SearchProvider): RowControl[] {
   }
   if (provider.takesEndpoint) controls.push("edit-endpoint");
   // Offered only where it would change something: not on the row that is
-  // already the default, and not on one that is switched off and so cannot be
-  // the active provider at all.
-  if (!provider.isDefault && provider.enabled) controls.push("make-default");
+  // already the default, not on one that is switched off and so cannot be the
+  // active provider at all, and not on one with no key or address yet.
+  //
+  // That last condition is the one that was missing. `resolve::active` requires
+  // the marked provider to be complete and otherwise falls through, so marking
+  // an incomplete row changes nothing an agent can feel — while the console
+  // answers with "Teammates now search through …". A control that reports a
+  // routing change that did not happen is worse than one that is not offered.
+  // Reachable straight after "Remove key", which leaves the row enabled.
+  if (!provider.isDefault && provider.enabled && provider.complete) {
+    controls.push("make-default");
+  }
   controls.push("remove");
   return controls;
 }

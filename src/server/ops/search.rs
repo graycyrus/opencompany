@@ -477,9 +477,12 @@ async fn check(
 /// `POST …/search/providers` — connect one provider.
 ///
 /// The ordering is not arbitrary. Local validation first, so nothing is written
-/// for a draft that cannot work. Then the credential, **then** the record,
-/// because the probe resolves the credential by slug and it has to land first.
-/// Then the probe — and only an auth-class failure rolls both back.
+/// for a draft that cannot work. Then the record, claimed test-and-set under
+/// the store's lock so that two admins connecting the same provider at once
+/// cannot both proceed — and before the credential, so the one that is refused
+/// has written nothing to overwrite the winner's key with. Then the credential,
+/// then the probe, which is handed the key rather than reading it back. Only an
+/// auth-class failure rolls both back.
 async fn connect_provider(
     company: AdminScopedCompany,
     State(_state): State<AppState>,
@@ -496,10 +499,29 @@ async fn connect_provider(
         supplied(body.endpoint.as_deref()).as_deref(),
     )?;
 
-    if store::list_providers(runtime.id(), runtime.secrets().as_ref())
-        .await?
-        .iter()
-        .any(|existing| existing.slug == slug)
+    // Test-and-set under the store's own lock, and **before** the credential.
+    //
+    // It used to be a read here and a write three awaits later, so two admins
+    // connecting the same provider at once both got past it. The loser then did
+    // real damage rather than duplicating work: an `Auth` probe failure rolls
+    // back by deleting the row *and* the credential, so a request whose key was
+    // rejected deleted the row and the working key the other request had just
+    // stored — while that request answered `saved: true` from its own
+    // request-local copy.
+    //
+    // Before the credential, because a loser must not have written anything by
+    // the time it is refused. The order the comment above describes is
+    // unaffected: the probe is handed the key rather than reading it back.
+    if !store::claim_provider(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        SearchProvider {
+            slug: slug.clone(),
+            enabled: true,
+            endpoint: endpoint.clone(),
+        },
+    )
+    .await?
     {
         return Err(invalid(format!(
             "{} is already connected — replace its key instead",
@@ -510,16 +532,6 @@ async fn connect_provider(
     if let Some(key) = api_key.as_deref() {
         store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), &slug, key).await?;
     }
-    store::put_provider(
-        runtime.id(),
-        runtime.secrets().as_ref(),
-        SearchProvider {
-            slug: slug.clone(),
-            enabled: true,
-            endpoint: endpoint.clone(),
-        },
-    )
-    .await?;
 
     let failure = check(info, api_key.as_deref(), endpoint.as_deref()).await;
     let (ok, probe_class, message, saved) = match failure {
@@ -658,6 +670,23 @@ async fn replace_key(
     let info = catalogue_entry(&slug)?;
     if !info.needs_key() {
         return Err(invalid(format!("{} does not take an API key", info.label)));
+    }
+    // **Replace**, so there has to be something to replace. Without this a
+    // direct `PUT …/search/providers/exa/key` for a provider with no row wrote
+    // a credential to `search/provider/exa/key` that the status route never
+    // reports and `DELETE …/search/key` never clears — its loop visits indexed
+    // providers only. An invisible credential the operator cannot see and
+    // cannot delete is the orphaned-secret shape this module keeps refusing
+    // elsewhere, and it does not get an exception here.
+    if !store::list_providers(runtime.id(), runtime.secrets().as_ref())
+        .await?
+        .iter()
+        .any(|provider| provider.slug == slug)
+    {
+        return Err(invalid(format!(
+            "{} is not connected — connect it instead",
+            info.label
+        )));
     }
     let key = supplied(body.api_key.as_deref()).unwrap_or_default();
     store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), &slug, &key).await?;
@@ -1517,6 +1546,56 @@ mod tests {
             .map(|row| row["slug"].as_str().unwrap_or_default())
             .collect();
         assert_eq!(keyed, vec!["brave"], "{after}");
+    }
+
+    #[tokio::test]
+    async fn a_key_cannot_be_replaced_on_a_provider_that_is_not_connected() {
+        // `PUT …/search/providers/{slug}/key` is **replace**, so there has to be
+        // something to replace. Without the check it wrote a credential to
+        // `search/provider/exa/key` that the status route never reports and
+        // `DELETE …/search/key` never clears — its loop visits indexed
+        // providers only. An invisible credential the operator can neither see
+        // nor delete is the orphaned-secret shape this module refuses
+        // everywhere else.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa/key",
+            &admin,
+            Some(json!({"apiKey": "exa-not-a-real-key"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        assert!(
+            after["providers"].as_array().expect("providers").is_empty(),
+            "{after}"
+        );
+
+        // And it still works for one that IS connected — the refusal must not
+        // have cost the ordinary path.
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "exa", "apiKey": "exa-not-a-real-key"})),
+        )
+        .await;
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa/key",
+            &admin,
+            Some(json!({"apiKey": "exa-also-not-a-real-key"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
     }
 
     #[tokio::test]
