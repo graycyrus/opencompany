@@ -990,17 +990,59 @@ async fn clear_default_if_marked(runtime: &CompanyRuntime, slug: &str) {
     }
 }
 
-/// The tiers whose route names `provider`, so switching it off can name them.
+/// The tiers whose route `provider` was serving, so switching it off can name
+/// them.
+///
+/// **Two matching rules, for the same reason `scrub_removed` has three.** A
+/// slug match is the easy one. The other is the slug-less `local:` form: it
+/// names a *category*, so switching off the last enabled runtime parks it even
+/// though `route.slug()` is `None` — the resolver then finds no enabled local
+/// target and fails the workload closed, which is exactly the thing the
+/// operator should be told about before it happens.
 async fn parked_tiers(
     runtime: &CompanyRuntime,
     provider: &store::Provider,
 ) -> Result<Vec<String>, ApiError> {
+    let secrets = runtime.secrets().as_ref();
+    let routes = store::load_routes(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
+    let category = catalogue::category_of(&provider.kind);
+    // Whether anything else in this category would still be enabled afterwards.
+    let category_survives = store::list_providers(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?
+        .iter()
+        .any(|p| {
+            p.slug != provider.slug && p.enabled && catalogue::category_of(&p.kind) == category
+        });
+    Ok(routes
+        .iter()
+        .filter(|(_, route)| match route {
+            resolve::ProviderRef::Local { .. } => {
+                category == catalogue::Category::Local && !category_survives
+            }
+            resolve::ProviderRef::ClaudeCode { .. } => {
+                category == catalogue::Category::Cli && !category_survives
+            }
+            other => other.slug() == Some(provider.slug.as_str()),
+        })
+        .map(|(tier, _)| tier.clone())
+        .collect())
+}
+
+/// The tiers explicitly routed to **managed**, so switching it off can name
+/// them.
+///
+/// Its own function because managed has no provider record for [`parked_tiers`]
+/// to take, and `managed` is a word in the route grammar rather than a slug.
+async fn managed_parked_tiers(runtime: &CompanyRuntime) -> Result<Vec<String>, ApiError> {
     let routes = store::load_routes(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
     Ok(routes
         .iter()
-        .filter(|(_, route)| route.slug() == Some(provider.slug.as_str()))
+        .filter(|(_, route)| matches!(route, resolve::ProviderRef::Managed))
         .map(|(tier, _)| tier.clone())
         .collect())
 }
@@ -1036,15 +1078,29 @@ async fn set_managed_enabled(
     store::set_managed_enabled(runtime.id(), runtime.secrets().as_ref(), body.enabled)
         .await
         .map_err(ApiError)?;
+    // Named, the way switching an indexed provider off names them. A workload
+    // routed explicitly to `managed` fails closed on its next turn, and an
+    // empty list said nothing had changed.
+    let parked = if body.enabled {
+        Vec::new()
+    } else {
+        managed_parked_tiers(runtime).await?
+    };
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: if body.enabled {
             "Managed is on.".to_string()
-        } else {
+        } else if parked.is_empty() {
             "Managed is off. Its credential is untouched.".to_string()
+        } else {
+            format!(
+                "Managed is off and its credential is untouched. {} {} routed to it and                  will not run until it is back on or pointed elsewhere.",
+                parked.join(", "),
+                if parked.len() == 1 { "is" } else { "are" },
+            )
         },
         probe: None,
-        affected_tiers: Vec::new(),
+        affected_tiers: parked,
     }))
 }
 
