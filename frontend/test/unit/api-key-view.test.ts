@@ -252,6 +252,41 @@ describe("ApiKeyView never renders an unreadable store as an empty one", () => {
     // account this is.
     expect(container.querySelector('[data-testid="account-balance"]')).toBeNull();
   });
+
+  // The same honesty, applied to the controls rather than the words. An admin
+  // reading "the host could not say" must not be offered a key field beside
+  // it: the write it opens overwrites a write-only credential this console has
+  // just admitted it cannot see, and the value it replaces cannot be read back
+  // from the hub, which shows a key's plaintext once.
+  it("offers no way to overwrite a key it cannot read", async () => {
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) throw new Error("secret store unavailable");
+        throw new Error(`unexpected GET ${path}`);
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    // The row is there, saying it does not know — that part is the point above.
+    expect(container.querySelector('[data-testid="account-row"]')).not.toBeNull();
+    // The header card's action is gone rather than disabled: there is no state
+    // in which it is the right offer, so a greyed one would only invite a
+    // retry.
+    expect(container.querySelector('[data-testid="account-add-key"]')).toBeNull();
+    // And the row menu, which carries the same "Add a key" item, cannot open.
+    const menu = container.querySelector('[data-testid="account-row-menu"]');
+    expect(menu).not.toBeNull();
+    // Either spelling counts — the trigger is a `Button` rendered through the
+    // menu primitive, and which of the two it forwards is the primitive's
+    // business rather than this page's.
+    const shut =
+      menu?.hasAttribute("disabled") === true || menu?.getAttribute("aria-disabled") === "true";
+    expect(shut).toBe(true);
+  });
 });
 
 describe("ApiKeyView offers no control that cannot act", () => {

@@ -7,6 +7,8 @@ import {
   balanceLine,
   canRemoveKey,
   headerAction,
+  REMOVAL_CONSEQUENCE,
+  REMOVAL_LEAVES_THINKING,
 } from "@/views/connections/account";
 
 function status(overrides: Partial<CompanyCredentialStatus> = {}): CompanyCredentialStatus {
@@ -129,7 +131,17 @@ describe("headerAction holds whichever action is live", () => {
   it("falls back to the paste dialog where it does not", () => {
     expect(headerAction(status({ hubLink: false }), true)).toBe("key");
     expect(headerAction(status({ hubLink: undefined }), true)).toBe("key");
-    expect(headerAction(null, true)).toBe("key");
+  });
+
+  // A null status is the read having failed or not yet landed — not "no key".
+  // The row beside this button says so in words, and an enabled "Add a key"
+  // under that sentence opens a blind overwrite of a write-only credential the
+  // console has just admitted it cannot see. The value it would replace cannot
+  // be read back from anywhere, which is what makes this worse than an ordinary
+  // control-that-cannot-act.
+  it("offers nothing at all while the credential state is unknown", () => {
+    expect(headerAction(null, true)).toBeNull();
+    expect(headerAction(null, false)).toBeNull();
   });
 });
 
@@ -170,5 +182,33 @@ describe("balanceLine", () => {
     expect(line?.low).toBe(false);
     expect(line?.detail).toContain("the hub timed out");
     expect(line?.detail).toContain("The key is set");
+  });
+});
+
+describe("the removal confirmation says only what removal does", () => {
+  // `set_key("")` clears `tinyhumans/key` and stops. `finish_link` writes the
+  // granted value into `inference/key` as well and declares the `managed`
+  // provider, so on a company that took the one-click path — the path the
+  // button beside this dialog recommends — every agent turn is still billed to
+  // this account after the key is removed. The old sentence promised the
+  // opposite, on the one screen where being wrong costs a credential.
+  it("never claims the billing stops", () => {
+    const all = `${REMOVAL_CONSEQUENCE} ${REMOVAL_LEAVES_THINKING}`;
+    expect(all).not.toContain("stops being billed");
+    expect(REMOVAL_LEAVES_THINKING).toContain("keep thinking on this account");
+  });
+
+  // Both fallbacks, because `GET …/credential` reports the tier that won and
+  // that is `company` whichever way it went. Naming one would be a guess
+  // dressed as a fact.
+  it("offers both fallbacks rather than guessing which applies", () => {
+    expect(REMOVAL_CONSEQUENCE).toContain("whoever runs this server");
+    expect(REMOVAL_CONSEQUENCE).toContain("no account at all");
+  });
+
+  // Conditional, because a pasted key only ever set the identity — there is
+  // nothing of it on the LLM page to leave behind.
+  it("states the thinking half as the conditional it is", () => {
+    expect(REMOVAL_LEAVES_THINKING).toContain("Connecting through TinyHumans");
   });
 });

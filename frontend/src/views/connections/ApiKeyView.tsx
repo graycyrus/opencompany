@@ -35,6 +35,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
   ACCOUNT_LABEL,
+  REMOVAL_CONSEQUENCE,
+  REMOVAL_LEAVES_THINKING,
   accountShape,
   accountSubline,
   balanceLine,
@@ -372,7 +374,7 @@ export function ApiKeyView({ client, company }: Props) {
                         <Button
                           variant="ghost"
                           size="icon"
-                          disabled={!canManage || busy}
+                          disabled={!canManage || busy || shape === "unknown"}
                           aria-label={`${ACCOUNT_LABEL} actions`}
                           data-testid="account-row-menu"
                         />
@@ -473,24 +475,18 @@ export function ApiKeyView({ client, company }: Props) {
         />
 
         {/* Names what actually depends on the key, and what happens next rather
-            than only what is lost.
-
-            It offers **both** outcomes rather than picking one, because the
-            console genuinely cannot tell which applies: `GET …/credential`
-            reports the tier that *won*, and while this company's own key is set
-            that is always `company` — whether or not an instance identity sits
-            behind it. Naming one confidently would be a guess dressed as a fact,
-            on the screen where being wrong costs a credential. */}
+            than only what is lost. The two sentences live in `account.ts` with
+            a test each: they are the page's one irreversible claim, and the
+            reasoning behind each half — why both fallbacks are offered rather
+            than one guessed at, and why the removal is not allowed to promise
+            that the billing stops — belongs next to the assertion that holds
+            it. */}
         <AlertDialog open={removing} onOpenChange={setRemoving}>
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>Remove this company&apos;s account key?</AlertDialogTitle>
-              <AlertDialogDescription>
-                Apps connected as this company stop being reachable, and anything billed to this
-                account stops being billed to it. The company then falls back to the identity of
-                whoever runs this server, if this instance carries one — and to no account at all if
-                it does not.
-              </AlertDialogDescription>
+              <AlertDialogDescription>{REMOVAL_CONSEQUENCE}</AlertDialogDescription>
+              <AlertDialogDescription>{REMOVAL_LEAVES_THINKING}</AlertDialogDescription>
               <AlertDialogDescription>
                 The key itself cannot be recovered from here — TinyHumans shows a key&apos;s value
                 once, when it is created. You would have to connect again or paste a new one.

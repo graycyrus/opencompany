@@ -108,8 +108,51 @@ export function headerAction(
   canManage: boolean,
 ): "connect" | "key" | null {
   if (!canManage) return null;
-  return status?.hubLink === true ? "connect" : "key";
+  // No status is not "no key". `refresh` drops `status` to `null` both while
+  // the read is in flight and when it fails, and in the failed case the row
+  // beneath this button is already saying the host could not answer. Offering
+  // "Add a key" under that sentence is the control-that-cannot-act rule
+  // pointing the other way: the write it opens is a blind overwrite of a
+  // write-only credential the console has just admitted it cannot see, and the
+  // value it replaces cannot be read back from anywhere. Wait for a known
+  // state — {@link accountShape} spends one on this for the same reason.
+  if (status === null) return null;
+  return status.hubLink === true ? "connect" : "key";
 }
+
+/**
+ * What removing this company's key actually does — first paragraph of the
+ * confirmation.
+ *
+ * It offers **both** fallbacks rather than picking one, because the console
+ * genuinely cannot tell which applies: `GET …/credential` reports the tier that
+ * *won*, and while this company's own key is set that is always `company`,
+ * whether or not an instance identity sits behind it.
+ *
+ * What it no longer claims is that the billing stops. `set_key("")` clears
+ * `tinyhumans/key` and nothing else, while `finish_link` writes the granted
+ * value into `inference/key` too and declares the `managed` provider
+ * (`src/server/ops/company_key.rs`). On a company that connected through
+ * TinyHumans, every agent turn goes on being billed to this very account after
+ * the removal — so a dialog promising otherwise would be wrong on exactly the
+ * path the button beside it recommends.
+ */
+export const REMOVAL_CONSEQUENCE =
+  "Apps connected as this company stop being reachable, and the identity the platform presents " +
+  "on its behalf is gone. The company falls back to the identity of whoever runs this server, if " +
+  "this instance carries one — and to no account at all if it does not.";
+
+/**
+ * The half the removal does **not** cover, said before the press rather than
+ * found on the next invoice.
+ *
+ * Conditional, because it is conditional: a pasted key only ever set the
+ * identity, so there is nothing of it on the LLM page to leave behind.
+ */
+export const REMOVAL_LEAVES_THINKING =
+  "Thinking is not included. Connecting through TinyHumans also puts the same key on the LLM " +
+  "page and points this company's model provider at it; removing the identity here leaves that " +
+  "one in place, so agents keep thinking on this account until it is removed there too.";
 
 /** The balance row, once there is an account of this company's own to ask about. */
 export interface BalanceLine {
