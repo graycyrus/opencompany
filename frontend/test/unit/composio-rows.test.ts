@@ -15,6 +15,7 @@ import {
   modeOf,
 } from "@/composio/rows";
 import type { ComposioRow, ComposioRowId } from "@/composio/types";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
  * The Composio Connected card, decided.
@@ -401,20 +402,37 @@ describe("composioRows — controls that cannot act are not offered", () => {
     }
   });
 
-  it("never offers a control on the row a company is not on, except Use this", () => {
+  it("never rotates or removes a credential on the row a company is not on", () => {
+    // Narrower than it reads. `replaceKey` and `removeKey` act on a credential
+    // that is in use, so offering either on the inactive row is offering to
+    // change something the company is not running on.
+    //
+    // `addKey` is deliberately NOT in this set any more. The managed row offers
+    // it from BYOK in exactly one state — the managed chain resolving to
+    // `none`, where `select` is hidden because switching would be an outage —
+    // and that combination is the dead end it exists to open: no way in, and no
+    // way to provision the credential that would create one. Writing
+    // `composio/token` does not move the company off BYOK, so it is not a
+    // control acting on the active route. The assertion below pins that it is
+    // the ONLY such state, which is the half worth guarding.
     for (const mode of ["managed", "byok"] as const) {
       for (const source of SOURCES) {
         for (const managedCredentialSource of [...SOURCES, undefined]) {
+          const label = `${mode}/${source}/${managedCredentialSource}`;
           for (const r of composioRows(
             status({ mode, credentialSource: source, managedCredentialSource }),
           )) {
             if (r.active) continue;
             expect(
-              r.controls.addKey ||
-                r.controls.replaceKey ||
-                r.controls.removeKey,
-              `${r.id} ${mode}/${source}/${managedCredentialSource}`,
+              r.controls.replaceKey || r.controls.removeKey,
+              `${r.id} ${label} rotates or removes an inactive credential`,
             ).toBe(false);
+            if (r.controls.addKey) {
+              expect(
+                `${r.id}/${managedCredentialSource}`,
+                `${r.id} ${label} offers Add outside the dead end`,
+              ).toBe("managed/none");
+            }
           }
         }
       }
@@ -544,5 +562,97 @@ describe("the credential dialog's copy", () => {
     expect(credentialDialogBlurb(form("managed", "replace"))).toBe(
       credentialDialogBlurb(form("managed", "add")),
     );
+  });
+});
+
+describe("the way back to the managed route", () => {
+  it("offers a token to a BYOK company whose managed chain resolves to nothing", () => {
+    // The dead end this exists for. `select` is hidden in exactly this state —
+    // switching into an outage is not a choice — so if `Add a token` were also
+    // hidden, the managed route would be unreachable in both directions at
+    // once: no way in, and no way to provision the credential that would make
+    // a way in exist. The admin could neither switch first nor configure first.
+    const rows = composioRows(
+      status({
+        mode: "byok",
+        credentialSource: "static",
+        managedCredentialSource: "none",
+      }),
+    );
+    const managed = row(rows, "managed");
+    expect(managed.controls.select, "switching into an outage").toBe(false);
+    expect(managed.controls.addKey, "the only way out of the dead end").toBe(
+      !COMPOSIO_MANAGED_HIDDEN,
+    );
+  });
+
+  it("does not offer it where managed already resolves", () => {
+    // Not a dead end: `select` is offered, and a token is not the prerequisite
+    // for anything. Offering it here would be a second credential surface for a
+    // route that already works.
+    for (const source of ["company", "attested"] as const) {
+      const rows = composioRows(
+        status({
+          mode: "byok",
+          credentialSource: "static",
+          managedCredentialSource: source,
+        }),
+      );
+      expect(row(rows, "managed").controls.addKey, source).toBe(false);
+      expect(row(rows, "managed").controls.select, source).toBe(
+        !COMPOSIO_MANAGED_HIDDEN,
+      );
+    }
+  });
+
+  it("still opens a form for it, so the control is not a dead button", () => {
+    const rows = composioRows(
+      status({
+        mode: "byok",
+        credentialSource: "static",
+        managedCredentialSource: "none",
+      }),
+    );
+    const form = composioForm({ row: "managed", action: "add" }, rows);
+    if (COMPOSIO_MANAGED_HIDDEN) {
+      expect(form).toBeNull();
+      return;
+    }
+    expect(form).toEqual({
+      row: "managed",
+      credential: "composio-token",
+      keyNoun: "token",
+      rotating: false,
+    });
+  });
+});
+
+describe("COMPOSIO_MANAGED_HIDDEN, as the rows read it", () => {
+  // The flag promises it "hides the managed Composio route, leaving BYOK the
+  // only choice", and the rows did not read it at all — its one runtime
+  // consumer was onboarding copy. Turning it back on as a rollback would have
+  // changed the instructions and left every control that acts on the route
+  // exactly where it was. Written in the conditional idiom
+  // `onboarding-gate-integration-credential.test.ts` uses, so the branch is
+  // pinned to the flag rather than to its current value.
+  it("takes the way in, and only the way in", () => {
+    const rows = composioRows(
+      status({ mode: "byok", credentialSource: "static", managedCredentialSource: "company" }),
+    );
+    expect(row(rows, "managed").controls.select).toBe(!COMPOSIO_MANAGED_HIDDEN);
+  });
+
+  it("leaves a company that is ON the route its row and its controls", () => {
+    // Removing the checked option from a radiogroup leaves every remaining
+    // radio reporting `aria-checked="false"` — a control claiming the company
+    // chose nothing, which is a different and wrong statement from "it is on a
+    // route not offered here". Same regression `product-scope-hidden-surfaces`
+    // pins one level up.
+    const rows = composioRows(
+      status({ mode: "managed", credentialSource: "attested" }),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["managed", "byok"]);
+    expect(row(rows, "managed").active).toBe(true);
+    expect(row(rows, "managed").controls.addKey).toBe(true);
   });
 });

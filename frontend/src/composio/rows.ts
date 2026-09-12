@@ -6,6 +6,7 @@
 // was to render six layers and read the result off a screen.
 
 import type { ComposioCredentialSource, ComposioStatus } from "@/api/composio";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 import type {
   ComposioForm,
   ComposioMode,
@@ -185,8 +186,37 @@ export function composioRows(
       // nothing was *said* (an older host), because hiding it there would take
       // away the only route back to managed on every host predating the field
       // — "not said" is not evidence of `none`.
-      select: !onManaged && managedSource !== "none",
-      addKey: onManaged && !managedTokenStored,
+      //
+      // `COMPOSIO_MANAGED_HIDDEN` takes the way IN, and only that. The flag
+      // promises "leaving BYOK the only choice", and until now the rows did not
+      // read it at all: its one runtime consumer was onboarding copy, so
+      // turning it back on as a rollback would have changed the instructions
+      // and left every control that acts on the route exactly where it was.
+      //
+      // Taking the way in rather than the row is deliberate. A company already
+      // ON the managed route still gets its row, because removing the checked
+      // option from a radiogroup leaves every remaining radio reporting
+      // `aria-checked="false"` — a control claiming the company has chosen
+      // nothing, which is a different and wrong statement from "it is on a
+      // route not offered here". That regression is pinned in
+      // `product-scope-hidden-surfaces.test.ts`.
+      select: !COMPOSIO_MANAGED_HIDDEN && !onManaged && managedSource !== "none",
+      // Also offered from BYOK when the managed chain resolves to NOTHING, and
+      // for a reason the `onManaged` half cannot cover: that is the one state
+      // where `select` above is hidden, so without this the managed route is
+      // unreachable in both directions at once — no "Use this" because it would
+      // switch into an outage, and no way to store the token that would end the
+      // outage. Writing `composio/token` does not move the company off BYOK, so
+      // this provisions the prerequisite and leaves the active route alone;
+      // `select` appears on the next status read.
+      //
+      // The flag gates only the BYOK-side half of that: provisioning a token
+      // for a route that cannot then be chosen is an errand with no end. A
+      // company already on managed keeps its token controls either way, for the
+      // same reason it keeps its row — being on a route is not choosing it.
+      addKey:
+        !managedTokenStored &&
+        (onManaged || (!COMPOSIO_MANAGED_HIDDEN && managedSource === "none")),
       replaceKey: onManaged && managedTokenStored,
       removeKey: onManaged && managedTokenStored,
       // Not offered on this row, and not for want of a button. The host's
