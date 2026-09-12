@@ -41,17 +41,6 @@ export interface Provider {
   /** Whether a credential is stored — **never the credential**. */
   keyConfigured: boolean;
   /**
-   * Whether this row is the company's pre-list configuration.
-   *
-   * The write routes refuse it — it lives in the flat `inference/config` slot
-   * rather than the provider index — so a row that carries this offers none of
-   * the actions that would come back as an error, and says why instead.
-   *
-   * Optional because an older host does not send it; absent reads as a normal
-   * row, which is what every row was before the list.
-   */
-  legacy?: boolean;
-  /**
    * Whether an **unset** workload goes through this one.
    *
    * The resolved answer rather than the raw marker: a company that has never
