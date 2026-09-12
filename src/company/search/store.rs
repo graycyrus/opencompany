@@ -57,6 +57,58 @@ use crate::ports::types::{CompanyId, SecretValue};
 
 use super::{API_KEY_SECRET, ENDPOINT_SECRET, PROVIDER_SECRET, provider_is_byo};
 
+/// One lock per company, held across the provider index's read-modify-write.
+///
+/// # Why a lock and not a compare-and-swap
+///
+/// Every index mutation here is read-modify-write: list what is connected,
+/// change one row, write the whole list back. Two of them interleaving lose one
+/// of the two edits, and the loss is not cosmetic — two concurrent connects can
+/// each store their credential and leave only one row in the index, orphaning a
+/// secret at an address nothing reads; a remove racing a toggle can resurrect
+/// the removed row. This is reachable: the console deliberately keeps every
+/// other row live while one request is in flight, and the routes are a plain
+/// HTTP API besides.
+///
+/// A compare-and-swap would be better and is not available. [`SecretStore`] is
+/// `get` and `set` and nothing else — no CAS, no delete, no transaction — and
+/// widening that port is a change to every backend behind it rather than a fix
+/// to this surface.
+///
+/// # What this does and does not cover
+///
+/// It serialises the mutations **within one process**, which is the whole of a
+/// deployment: the manager runs one container per tenant and a company's
+/// requests all land in it. It is not a distributed lock and must not be read
+/// as one — if this workload is ever replicated per tenant, the index needs the
+/// port-level primitive rather than this.
+///
+/// The registry is keyed by company id and grows by one entry per company ever
+/// touched, which is bounded by the tenancy.
+static INDEX_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    >,
+> = std::sync::LazyLock::new(std::sync::Mutex::default);
+
+/// Takes this company's index lock, held until the returned guard is dropped.
+///
+/// The inner `std` mutex is held only long enough to clone an `Arc` — never
+/// across an await — so a panicking writer cannot poison anything a later
+/// request needs.
+async fn index_guard(company: &CompanyId) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = INDEX_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(company.as_ref().to_string())
+            .or_default()
+            .clone()
+    };
+    lock.lock_owned().await
+}
+
 /// Holds the JSON index of connected providers. Carries no credential.
 pub const PROVIDER_INDEX_KEY: &str = "search/providers";
 
@@ -218,6 +270,7 @@ pub async fn put_provider(
     secrets: &dyn SecretStore,
     provider: SearchProvider,
 ) -> Result<()> {
+    let _guard = index_guard(company).await;
     let mut providers: Vec<SearchProvider> = list_providers(company, secrets)
         .await?
         .into_iter()
@@ -249,6 +302,7 @@ pub async fn set_enabled(
     slug: &str,
     enabled: bool,
 ) -> Result<()> {
+    let _guard = index_guard(company).await;
     let mut providers = list_providers(company, secrets).await?;
     let Some(target) = providers.iter_mut().find(|p| p.slug == slug) else {
         return Ok(());
@@ -273,6 +327,7 @@ pub async fn delete_provider(
     secrets: &dyn SecretStore,
     slug: &str,
 ) -> Result<()> {
+    let _guard = index_guard(company).await;
     let providers: Vec<SearchProvider> = list_providers(company, secrets)
         .await?
         .into_iter()
