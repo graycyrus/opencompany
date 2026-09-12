@@ -51,10 +51,7 @@ export interface AddOptions {
  * connected. The check is on the slug the option **stores under**, not the slug
  * it is called.
  */
-export function isConnected(
-  providers: readonly Provider[],
-  optionSlug: string,
-): boolean {
+export function isConnected(providers: readonly Provider[], optionSlug: string): boolean {
   const cli = CLI_LOGINS.find((c) => c.optionSlug === optionSlug);
   const stored = cli?.storedSlug ?? optionSlug;
   return providers.some((p) => p.slug === stored);
@@ -102,9 +99,7 @@ export function providerMenu(
   // company, not a write to the row, and it is the one thing the operator may
   // genuinely want from this row.
   if (provider.origin === "entryZero") {
-    return provider.isDefault || !provider.enabled
-      ? []
-      : [{ id: "default", label: "Set as default" }];
+    return provider.isDefault || !provider.enabled ? [] : [{ id: "default", label: "Set as default" }];
   }
   const ask = credentialAsk(provider.kind);
   const actions: ProviderRowAction[] = [
@@ -187,30 +182,24 @@ export function addOptions(
     : [];
   return {
     cloud: managedEntry.concat(
-      CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map(
-        (p) => ({
+      CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map((p) => ({
         value: p.slug,
         label: p.label,
         // The host, not the whole URL: the path is noise at a glance and the
         // host is the part an operator recognises.
         detail: endpointHost(p.endpoint),
-        }),
-      ),
+      })),
     ),
-    local: LOCAL_RUNTIMES.filter((r) => !isConnected(providers, r.slug)).map(
-      (r) => ({
+    local: LOCAL_RUNTIMES.filter((r) => !isConnected(providers, r.slug)).map((r) => ({
       value: r.slug,
       label: r.label,
       detail: COPY.detailLocal,
-      }),
-    ),
-    cli: CLI_LOGINS.filter((c) => !isConnected(providers, c.optionSlug)).map(
-      (c) => ({
+    })),
+    cli: CLI_LOGINS.filter((c) => !isConnected(providers, c.optionSlug)).map((c) => ({
       value: c.optionSlug,
       label: c.label,
       detail: COPY.detailCli,
-      }),
-    ),
+    })),
   };
 }
 
@@ -259,10 +248,7 @@ export interface CredentialAsk {
  * Used to ask an endpoint what it publishes **before** a record is written, so
  * the dialog can offer a model rather than the host refusing after a round trip.
  */
-export function probeEndpoint(
-  optionSlug: string,
-  typed?: string,
-): string | null {
+export function probeEndpoint(optionSlug: string, typed?: string): string | null {
   const cloud = cloudProvider(optionSlug);
   if (cloud) return cloud.endpoint;
   if (optionSlug === MANAGED_OPTION_SLUG) return null;
@@ -299,11 +285,7 @@ export function credentialAsk(optionSlug: string): CredentialAsk {
   }
   const cli = CLI_LOGINS.find((c) => c.optionSlug === optionSlug);
   if (cli) {
-    return {
-      title: `Connect ${cli.label}`,
-      needsKey: false,
-      needsEndpoint: false,
-    };
+    return { title: `Connect ${cli.label}`, needsKey: false, needsEndpoint: false };
   }
   if (optionSlug === MANAGED_OPTION_SLUG) {
     // Its own shape: the endpoint is the platform's and is not typed, and the
@@ -360,10 +342,7 @@ export type SlugError = "empty" | "taken" | "reserved";
  * own `groq` entry *should* take the slug `groq` — that is the same provider,
  * not a collision.
  */
-export function checkSlug(
-  providers: readonly Provider[],
-  slug: string,
-): SlugError | null {
+export function checkSlug(providers: readonly Provider[], slug: string): SlugError | null {
   const trimmed = slug.trim();
   if (!trimmed) return "empty";
   if (providers.some((p) => p.slug === trimmed)) return "taken";

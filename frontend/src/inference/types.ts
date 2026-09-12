@@ -57,9 +57,9 @@ export interface Provider {
    *
    * `entryZero` is the pre-list company's single `inference/config` blob,
    * surfaced as element 0 of the list. It refuses edit, remove and disable with
-   * three separate 400s — correct rules, and the console could not tell which
-   * row they applied to, so it rendered all three controls live and every one of
-   * them was a round trip to a refusal.
+   * three separate 400s — correct rules, and the console could not tell which row
+   * they applied to, so it rendered all three controls live and every one of them
+   * was a round trip to a refusal.
    *
    * Optional because an older host does not send it; absent reads as `indexed`,
    * which is what every row was treated as before.
@@ -85,8 +85,7 @@ export interface ProviderHealth {
 }
 
 /** What a failed check means. See `classify.ts` for the copy each one gets. */
-export type ProbeClass =
-  "auth" | "model" | "quota" | "endpoint" | "timeout" | "unknown";
+export type ProbeClass = "auth" | "model" | "quota" | "endpoint" | "timeout" | "unknown";
 
 /** A workload that owns a routing row. */
 export type Workload = "chat" | "reasoning" | "agentic" | "vision";

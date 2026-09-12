@@ -31,8 +31,7 @@ import type { ProbeClass, Provider, ProviderHealth, RoutingMode } from "@/infere
  * `unconfigured_company_reports_the_platform_url_not_the_built_in_default` and
  * `status_defaults_to_managed_then_switches_to_runtime`.
  */
-export type InferenceProvider =
-  "managed" | "openrouter" | "openai_compatible" | "ollama";
+export type InferenceProvider = "managed" | "openrouter" | "openai_compatible" | "ollama";
 
 /**
  * Where the effective config came from — drives the source badge.
@@ -51,8 +50,7 @@ export type InferenceSource = "managed" | "default" | "manifest" | "runtime";
  * provider does not guarantee `harness`: a build without the harness, or a
  * config that fails to resolve at boot, falls back to `hosted`/`echo`.
  */
-export type CognitionPath =
-  "harness" | "hosted" | "sidecar" | "echo" | "custom" | "test";
+export type CognitionPath = "harness" | "hosted" | "sidecar" | "echo" | "custom" | "test";
 
 /**
  * Where that path's inference usage is metered (issue #174):
@@ -323,9 +321,7 @@ export function listInferenceModels(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<InferenceModelCatalog> {
-  return client.get<InferenceModelCatalog>(
-    `${client.scopeFor(company)}/inference/models`,
-  );
+  return client.get<InferenceModelCatalog>(`${client.scopeFor(company)}/inference/models`);
 }
 
 /** Set (or replace) the runtime provider override, optionally rotating the key. */
@@ -334,10 +330,7 @@ export function setInference(
   company: string | null,
   body: SetInferenceInput,
 ): Promise<InferenceMutation> {
-  return client.put<InferenceMutation>(
-    `${client.scopeFor(company)}/inference`,
-    body,
-  );
+  return client.put<InferenceMutation>(`${client.scopeFor(company)}/inference`, body);
 }
 
 /** Clear the runtime override, reverting to the manifest (or managed) config. */
@@ -372,10 +365,7 @@ export function restartInference(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<InferenceMutation> {
-  return client.post<InferenceMutation>(
-    `${client.scopeFor(company)}/inference/restart`,
-    {},
-  );
+  return client.post<InferenceMutation>(`${client.scopeFor(company)}/inference/restart`, {});
 }
 
 // ---- the provider list, and writing it ---------------------------------------
@@ -449,9 +439,8 @@ export interface AddProviderInput {
    *
    * Required by the host for an endpoint whose catalog resolves no tier name —
    * otherwise the bare tier goes out as the model id and the vendor 404s it,
-   * which is the reported defect. The dialog asks for it with that endpoint's
-   * own catalogue in hand rather than letting the host refuse after a round
-   * trip.
+   * which is the reported defect. The dialog asks for it with that endpoint's own
+   * catalogue in hand rather than letting the host refuse after a round trip.
    */
   model?: string;
   /**
@@ -488,10 +477,7 @@ export function addProvider(
   company: string | null,
   body: AddProviderInput,
 ): Promise<ProviderMutation> {
-  return client.post<ProviderMutation>(
-    `${client.scopeFor(company)}/inference/providers`,
-    body,
-  );
+  return client.post<ProviderMutation>(`${client.scopeFor(company)}/inference/providers`, body);
 }
 
 /** Change a connected provider. The slug is fixed; the kind cannot change. */
@@ -555,10 +541,7 @@ export function probeDraft(
   company: string | null,
   body: { baseUrl: string; key?: string; kind?: string },
 ): Promise<ProbeResult> {
-  return client.post<ProbeResult>(
-    `${client.scopeFor(company)}/inference/probe`,
-    body,
-  );
+  return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/probe`, body);
 }
 
 /**
@@ -572,12 +555,9 @@ export function setManagedEnabled(
   company: string | null,
   enabled: boolean,
 ): Promise<ProviderMutation> {
-  return client.post<ProviderMutation>(
-    `${client.scopeFor(company)}/inference/managed/enabled`,
-    {
-      enabled,
-    },
-  );
+  return client.post<ProviderMutation>(`${client.scopeFor(company)}/inference/managed/enabled`, {
+    enabled,
+  });
 }
 
 /**
@@ -591,10 +571,7 @@ export function testManaged(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<ProbeResult> {
-  return client.post<ProbeResult>(
-    `${client.scopeFor(company)}/inference/managed/test`,
-    {},
-  );
+  return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/managed/test`, {});
 }
 
 /** One provider's own model catalog. */
@@ -654,10 +631,7 @@ export function setManagedKey(
   company: string | null,
   key: string,
 ): Promise<ProviderMutation> {
-  return client.put<ProviderMutation>(
-    `${client.scopeFor(company)}/inference/managed/key`,
-    { key },
-  );
+  return client.put<ProviderMutation>(`${client.scopeFor(company)}/inference/managed/key`, { key });
 }
 
 /**
@@ -713,9 +687,7 @@ export function getRoutes(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<RoutesResponse> {
-  return client.get<RoutesResponse>(
-    `${client.scopeFor(company)}/inference/routes`,
-  );
+  return client.get<RoutesResponse>(`${client.scopeFor(company)}/inference/routes`);
 }
 
 /**
@@ -730,10 +702,7 @@ export function putRoutes(
   company: string | null,
   routes: Record<string, string>,
 ): Promise<RoutesResponse> {
-  return client.put<RoutesResponse>(
-    `${client.scopeFor(company)}/inference/routes`,
-    { routes },
-  );
+  return client.put<RoutesResponse>(`${client.scopeFor(company)}/inference/routes`, { routes });
 }
 
 /** Live-probe the resolved provider (one `ping` turn). */
@@ -741,8 +710,5 @@ export function testInference(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<InferenceTestResult> {
-  return client.post<InferenceTestResult>(
-    `${client.scopeFor(company)}/inference/test`,
-    {},
-  );
+  return client.post<InferenceTestResult>(`${client.scopeFor(company)}/inference/test`, {});
 }

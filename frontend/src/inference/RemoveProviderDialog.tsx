@@ -15,10 +15,11 @@ import type { ProviderIntent, RemovalImpact } from "./routing";
  * Which of the three is being confirmed.
  *
  * `disable` joined the two removals because **the toggle had no confirmation at
- * all**, and it is the one of the three that is fully reversible — so it gets
- * the same machinery and deliberately different language. See `removalWarnings`.
+ * all**, and it is the one of the three that is fully reversible — so it gets the
+ * same machinery and deliberately different language. See `removalWarnings`.
  */
 export type RemovalIntent = ProviderIntent;
+
 /**
  * Confirming a removal, with what it costs said out loud.
  *
@@ -79,18 +80,15 @@ export function RemoveProviderDialog({
   if (!intent) return null;
   const lines = removalWarnings(intent, label, impact, managedConfigured);
   // **Reversible, and the buttons say so.** Switching a provider off keeps its
-  // endpoint, its key and its routes; the host refuses to scrub them precisely
-  // so that switching it back on is a switch rather than a re-configuration.
+  // endpoint, its key and its routes; the host refuses to scrub them precisely so
+  // that switching it back on is a switch rather than a re-configuration.
   // Destructive styling here would teach an operator that the two are the same
   // act, which is the confusion the Remove dialog exists to clear up.
   const reversible = intent === "disable";
 
   return (
     <Dialog open onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent
-        className="sm:max-w-md"
-        data-testid="inference-remove-dialog"
-      >
+      <DialogContent className="sm:max-w-md" data-testid="inference-remove-dialog">
         <DialogHeader>
           <DialogTitle>
             {intent === "disable"
@@ -109,12 +107,7 @@ export function RemoveProviderDialog({
             {lines.slice(1).map((line) => (
               <li
                 key={line}
-                className={cn(
-                  "text-xs",
-                  reversible
-                    ? "text-muted-foreground"
-                    : "text-status-blocked-text",
-                )}
+                className={cn("text-xs", reversible ? "text-muted-foreground" : "text-status-blocked-text")}
               >
                 {line}
               </li>
@@ -123,12 +116,7 @@ export function RemoveProviderDialog({
         )}
 
         <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={busy}
-            onClick={onCancel}
-          >
+          <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>
             Cancel
           </Button>
           {onDisable && (
@@ -149,11 +137,7 @@ export function RemoveProviderDialog({
             data-testid="inference-remove-confirm"
             onClick={onConfirm}
           >
-            {intent === "disable"
-              ? "Continue"
-              : intent === "key"
-                ? "Remove key"
-                : "Remove provider"}
+            {intent === "disable" ? "Continue" : intent === "key" ? "Remove key" : "Remove provider"}
           </Button>
         </DialogFooter>
       </DialogContent>

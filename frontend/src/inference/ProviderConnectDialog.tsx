@@ -95,9 +95,9 @@ export function ProviderConnectDialog({
   /** Whether the last failure was a probe failure, which is the only one that unlocks "add anyway". */
   offerAddAnyway: boolean;
   /**
-   * The endpoint's catalogue, once it has said it cannot resolve a tier name
-   * on its own. `null` until then — the field does not appear at all for a
-   * gateway that resolves `agentic-v1` itself, because there is nothing to ask.
+   * The endpoint's catalogue, once it has said it cannot resolve a tier name on
+   * its own. `null` until then — the field does not appear at all for a gateway
+   * that resolves `agentic-v1` itself, because there is nothing to ask.
    */
   modelAsk: ModelAsk | null;
   onCancel: () => void;
@@ -112,6 +112,7 @@ export function ProviderConnectDialog({
   const [baseUrl, setBaseUrl] = useState("");
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
+
   // Seed from the chosen option each time the dialog opens on a new one. A
   // conventional endpoint is a starting point the operator still confirms — it
   // is the thing being chosen for this category, so it is never assumed.
@@ -134,8 +135,9 @@ export function ProviderConnectDialog({
   const modelOk = !modelAsk || model.trim().length > 0;
   const ready =
     (custom
-    ? customProviderReady(providers, { label, baseUrl })
+      ? customProviderReady(providers, { label, baseUrl })
       : endpointOk && (!ask.needsKey || key.trim().length > 0)) && modelOk;
+
   const submit = (addAnyway: boolean) =>
     onSubmit({
       kind: optionSlug ?? "custom",
@@ -148,10 +150,7 @@ export function ProviderConnectDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent
-        className="sm:max-w-md"
-        data-testid="inference-connect-provider"
-      >
+      <DialogContent className="sm:max-w-md" data-testid="inference-connect-provider">
         <DialogHeader>
           <DialogTitle>{ask.title}</DialogTitle>
           {/* Where the key goes, said plainly, or nothing. The reference this
@@ -185,10 +184,7 @@ export function ProviderConnectDialog({
                 Slug: {slug || "None"}
               </p>
               {slugError && (
-                <p
-                  className="text-xs text-status-blocked-text"
-                  data-testid="inference-slug-error"
-                >
+                <p className="text-xs text-status-blocked-text" data-testid="inference-slug-error">
                   {slugErrorCopy(slugError)}
                 </p>
               )}
@@ -248,11 +244,7 @@ export function ProviderConnectDialog({
               <Input
                 id="inference-connect-model"
                 value={model}
-                list={
-                  modelAsk.models.length > 0
-                    ? "inference-connect-model-options"
-                    : undefined
-                }
+                list={modelAsk.models.length > 0 ? "inference-connect-model-options" : undefined}
                 placeholder="claude-sonnet-5"
                 autoComplete="off"
                 spellCheck={false}
@@ -288,12 +280,10 @@ export function ProviderConnectDialog({
               it. So this links there rather than duplicating it. */}
           {managed && (
             <div className="grid gap-1.5 rounded-md border border-border px-3 py-2">
-              <p className="text-sm font-medium">
-                Or connect your TinyHumans account
-              </p>
+              <p className="text-sm font-medium">Or connect your TinyHumans account</p>
               <p className="text-xs text-muted-foreground">
-                One account key pays for thinking and for app connections, and
-                rotating it reaches both. Set it up on Connections → Account.
+                One account key pays for thinking and for app connections, and rotating it
+                reaches both. Set it up on Connections → Account.
               </p>
               <a
                 className="text-xs font-medium underline underline-offset-4"
@@ -308,8 +298,7 @@ export function ProviderConnectDialog({
 
           {!ask.needsKey && !ask.needsEndpoint && (
             <p className="text-sm text-muted-foreground">
-              Nothing to enter — another command line tool already holds this
-              credential.
+              Nothing to enter — another command line tool already holds this credential.
             </p>
           )}
 
@@ -328,12 +317,7 @@ export function ProviderConnectDialog({
         </div>
 
         <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onCancel}
-            disabled={busy}
-          >
+          <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
           {/* Gated on a typed probe failure, never on a boolean: a slug

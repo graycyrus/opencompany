@@ -48,6 +48,7 @@ export function managedRow(source: ManagedState["source"] | undefined): string {
       return "TinyHumans chooses a model for each task";
   }
 }
+
 /**
  * The sentence for a company nothing can answer for.
  *
@@ -58,8 +59,8 @@ export function managedRow(source: ManagedState["source"] | undefined): string {
  * constant now so the dead-end states that *are* reachable can say it: the empty
  * list below, and the Routing tab's unset banner.
  */
-export const NO_CREDENTIAL_RESOLVES =
-  "No credential resolves — agents cannot think";
+export const NO_CREDENTIAL_RESOLVES = "No credential resolves — agents cannot think";
+
 /** The managed row's name. */
 export const MANAGED_LABEL = "Managed";
 
@@ -221,18 +222,13 @@ export function ProviderList({
       >
         <p className="text-sm">
           <span className="font-medium">No providers connected yet.</span>{" "}
-          <span className="text-muted-foreground">
-            Connect one to get started.
-          </span>
+          <span className="text-muted-foreground">Connect one to get started.</span>
         </p>
         {/* The state A2 is actually in, said rather than implied. Managed does
             not resolve (that is the condition for this branch), so this company
             has no way to think at all — which is a stronger statement than "not
             connected yet" and is the one that makes Add the obvious next step. */}
-        <p
-          className="text-xs text-status-blocked-text"
-          data-testid="inference-providers-dead-end"
-        >
+        <p className="text-xs text-status-blocked-text" data-testid="inference-providers-dead-end">
           {NO_CREDENTIAL_RESOLVES}.
         </p>
         <Button type="button" disabled={!canManage} onClick={onAdd}>
@@ -255,15 +251,10 @@ export function ProviderList({
           nothing resolves it is not a connected row — it is an entry in the add
           dialog's Cloud list, like anything else that is not connected. */}
       {managed?.configured && (
-        <li
-          className="flex items-center gap-3 px-4 py-3"
-          data-testid="inference-provider-managed"
-        >
+        <li className="flex items-center gap-3 px-4 py-3" data-testid="inference-provider-managed">
           <Monogram label={MANAGED_LABEL} />
           <span className="grid min-w-0 flex-1 leading-tight">
-            <span className="truncate text-sm font-medium">
-              {MANAGED_LABEL}
-            </span>
+            <span className="truncate text-sm font-medium">{MANAGED_LABEL}</span>
             <span className="truncate text-xs text-muted-foreground">
               {managedRow(managed.source)}
             </span>
@@ -309,19 +300,14 @@ export function ProviderList({
               {/* No Test here. One affordance per action — the icon button on
                   the row is discoverable and its answer lands where it belongs. */}
               <DropdownMenuItem onClick={onManagedReplaceKey}>
-                {managed.source === "provider_key"
-                  ? "Replace key"
-                  : "Add a key"}
+                {managed.source === "provider_key" ? "Replace key" : "Add a key"}
               </DropdownMenuItem>
               {/* Offered only when there is a key of this row's own to remove.
                   The company account and the instance identity are not this
                   row's to take away — and the copy says what actually happens,
                   which is a fall back rather than a switch-off. */}
               {managed.source === "provider_key" && (
-                <DropdownMenuItem
-                  variant="destructive"
-                  onClick={onManagedRemoveKey}
-                >
+                <DropdownMenuItem variant="destructive" onClick={onManagedRemoveKey}>
                   Remove key
                 </DropdownMenuItem>
               )}
@@ -365,8 +351,7 @@ export function rowSubline(provider: Provider): string {
   // zero is the company's own `inference/config` blob surfaced as a list row: it
   // serves turns, it cannot be edited or removed from here, and nothing on the
   // row said so.
-  if (provider.origin === "entryZero")
-    return "This company's original configuration";
+  if (provider.origin === "entryZero") return "This company's original configuration";
   const category = categoryOf(provider.kind);
   if (category === "local") return "Runs on this machine";
   if (category === "cli") return "Uses a login another CLI already holds";
@@ -403,10 +388,10 @@ function ProviderRow({
   testState: (slug: string) => TestState;
 }) {
   const routing = routingBadge(routingState);
-  // **Entry zero has nowhere to store an `enabled` flag**, so it is always on
-  // and the host refuses to switch it off — "cannot be switched off from the
-  // list; reset the inference config instead". The console could not tell which
-  // row that was, so it rendered a live switch whose only outcome was a 400.
+  // **Entry zero has nowhere to store an `enabled` flag**, so it is always on and
+  // the host refuses to switch it off — "cannot be switched off from the list;
+  // reset the inference config instead". The console could not tell which row
+  // that was, so it rendered a live switch whose only outcome was a 400.
   const entryZero = provider.origin === "entryZero";
   const menu = providerMenu(provider);
   return (
@@ -417,19 +402,14 @@ function ProviderRow({
       <Monogram label={provider.label} slug={provider.slug} />
       <span className="grid min-w-0 flex-1 leading-tight">
         <span className="truncate text-sm font-medium">{provider.label}</span>
-        <span className="truncate text-xs text-muted-foreground">
-          {rowSubline(provider)}
-        </span>
+        <span className="truncate text-xs text-muted-foreground">{rowSubline(provider)}</span>
       </span>
 
       {/* A word, not a sentence. What a default is, is not something this page
           has to explain — where unrouted work goes is the only thing an
           operator needs to be able to see, and moving it is a menu item. */}
       {provider.isDefault && (
-        <Badge
-          variant="secondary"
-          data-testid={`inference-provider-${provider.slug}-default`}
-        >
+        <Badge variant="secondary" data-testid={`inference-provider-${provider.slug}-default`}>
           Default
         </Badge>
       )}
@@ -442,10 +422,7 @@ function ProviderRow({
       {routing && (
         <Badge
           variant="outline"
-          className={cn(
-            routingState === "parked" &&
-              "border-status-blocked text-status-blocked-text",
-          )}
+          className={cn(routingState === "parked" && "border-status-blocked text-status-blocked-text")}
           data-testid={`inference-provider-${provider.slug}-routing`}
         >
           {routing}
@@ -473,6 +450,7 @@ function ProviderRow({
         data-testid={`inference-provider-${provider.slug}-toggle`}
         onCheckedChange={(next) => onToggle(provider, next)}
       />
+
       {/* No trigger at all when there is nothing behind it. An overflow button
           that opens an empty menu is a control that reports a capability the row
           does not have — which is what entry zero had, three times over. */}
@@ -495,7 +473,7 @@ function ProviderRow({
             the same `credentialAsk` the connect dialog uses, so a local runtime
             or a CLI login is never offered a key it does not have. */}
         <DropdownMenuContent align="end">
-            {menu.map((action) => (
+          {menu.map((action) => (
             <DropdownMenuItem
               key={action.id}
               variant={action.destructive ? "destructive" : undefined}

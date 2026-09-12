@@ -25,11 +25,11 @@ import {
   MODE_COPY,
   OWN_MODE_EMPTY,
   OWN_MODE_SCOPE,
-  SELECTABLE_MODES,
   WORKLOADS,
   WORKLOAD_COPY,
   WORKLOAD_TIER,
   MANAGED_NOT_SET_UP_ELSEWHERE,
+  SELECTABLE_MODES,
   applyToEveryWorkload,
   managedModeBadge,
   formatRef,
@@ -93,10 +93,7 @@ export function RoutingTab({
    * mid-edit would otherwise overwrite what is being typed, which is the same
    * class of bug as stripping a model id mid-keystroke.
    */
-  const [ownDraft, setOwnDraft] = useState<{
-    slug: string;
-    model: string;
-  } | null>(null);
+  const [ownDraft, setOwnDraft] = useState<{ slug: string; model: string } | null>(null);
 
   if (state.load === "unavailable") return null;
   if (state.load === "loading") return <Skeleton className="h-64 rounded-xl" />;
@@ -119,9 +116,7 @@ export function RoutingTab({
     setError(null);
     const wire: Record<string, string> = {};
     for (const workload of WORKLOADS) {
-      wire[WORKLOAD_TIER[workload]] = formatRef(
-        next[workload] ?? { kind: "default" },
-      );
+      wire[WORKLOAD_TIER[workload]] = formatRef(next[workload] ?? { kind: "default" });
     }
     try {
       await actions.saveRoutes(wire);
@@ -130,11 +125,7 @@ export function RoutingTab({
       // rather than a draft that now says the same thing by coincidence.
       setOwnDraft(null);
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? err.message
-          : "That routing could not be saved.",
-      );
+      setError(err instanceof ApiError ? err.message : "That routing could not be saved.");
     }
   }
 
@@ -149,10 +140,7 @@ export function RoutingTab({
               tab, and this is the page where "Managed is always available as a
               fallback" would otherwise be read as true. */}
           {state.status?.managed?.configured === false && (
-            <p
-              className="text-xs text-muted-foreground"
-              data-testid="inference-managed-not-set-up"
-            >
+            <p className="text-xs text-muted-foreground" data-testid="inference-managed-not-set-up">
               {MANAGED_NOT_SET_UP_ELSEWHERE}
             </p>
           )}
@@ -167,9 +155,7 @@ export function RoutingTab({
               data-testid="inference-mode-unset"
             >
               <p className="text-sm font-medium text-status-blocked-text">
-                {dead
-                  ? "No credential resolves — agents cannot think."
-                  : "Routing is not set."}
+                {dead ? "No credential resolves — agents cannot think." : "Routing is not set."}
               </p>
               <p className="text-xs text-muted-foreground">
                 {dead
@@ -193,10 +179,7 @@ export function RoutingTab({
                 if (option === "managed") {
                   void save(
                     Object.fromEntries(
-                      WORKLOADS.map((w) => [
-                        w,
-                        { kind: "managed" } as ProviderRef,
-                      ]),
+                      WORKLOADS.map((w) => [w, { kind: "managed" } as ProviderRef]),
                     ) as RoutingMap,
                   );
                 }
@@ -226,18 +209,11 @@ export function RoutingTab({
                         // one provider is not a value at another.
                         setOwnDraft({
                           slug,
-                          model: modelAfterProviderChange(
-                            ownModel,
-                            ownSlug,
-                            slug,
-                          ),
+                          model: modelAfterProviderChange(ownModel, ownSlug, slug),
                         });
                       }}
                     >
-                      <SelectTrigger
-                        id="inference-own-provider"
-                        className="w-full"
-                      >
+                      <SelectTrigger id="inference-own-provider" className="w-full">
                         <SelectValue placeholder="Choose a provider…" />
                       </SelectTrigger>
                       <SelectContent>
@@ -256,25 +232,16 @@ export function RoutingTab({
                     id="inference-own-model"
                     value={ownModel}
                     disabled={!canManage}
-                    onChange={(next) =>
-                      setOwnDraft({ slug: ownSlug, model: next })
-                    }
+                    onChange={(next) => setOwnDraft({ slug: ownSlug, model: next })}
                   />
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {OWN_MODE_SCOPE}
-                </p>
+                <p className="text-xs text-muted-foreground">{OWN_MODE_SCOPE}</p>
                 <Button
                   type="button"
                   disabled={!canManage || !ownSlug}
                   data-testid="inference-own-save"
                   onClick={() =>
-                    void save(
-                      applyToEveryWorkload(
-                        ownSlug,
-                        ownModel.trim() || undefined,
-                      ),
-                    )
+                    void save(applyToEveryWorkload(ownSlug, ownModel.trim() || undefined))
                   }
                 >
                   Save
@@ -288,9 +255,7 @@ export function RoutingTab({
       {mode === "advanced" && (
         <Card>
           <CardContent className="space-y-1">
-            <p className="pb-2 text-xs text-muted-foreground">
-              {ADVANCED_INTRO}
-            </p>
+            <p className="pb-2 text-xs text-muted-foreground">{ADVANCED_INTRO}</p>
             {WORKLOADS.map((workload) => (
               <WorkloadRow
                 key={workload}
@@ -326,10 +291,7 @@ export function RoutingTab({
       )}
 
       {state.orphaned.length > 0 && (
-        <p
-          className="text-xs text-status-blocked-text"
-          data-testid="inference-orphaned-routes"
-        >
+        <p className="text-xs text-status-blocked-text" data-testid="inference-orphaned-routes">
           {orphanedRouteNote(state.orphaned)}
         </p>
       )}
@@ -342,11 +304,7 @@ export function RoutingTab({
         company={company}
         workload={editing}
         providers={state.providers}
-        current={
-          editing
-            ? (routing[editing] ?? { kind: "default" })
-            : { kind: "default" }
-        }
+        current={editing ? (routing[editing] ?? { kind: "default" }) : { kind: "default" }}
         testing={testing}
         testResult={testResult}
         onTest={(ref) => {
@@ -359,15 +317,9 @@ export function RoutingTab({
           // `checkOutcome`.
           void actions
             .test(slug, ref.kind === "cloud" ? ref.model : undefined)
-            .then((result) =>
-              setTestResult({ kind: "done", ...checkOutcome(result) }),
-            )
+            .then((result) => setTestResult({ kind: "done", ...checkOutcome(result) }))
             .catch(() =>
-              setTestResult({
-                kind: "done",
-                ok: false,
-                message: "The check did not complete.",
-              }),
+              setTestResult({ kind: "done", ok: false, message: "The check did not complete." }),
             )
             .finally(() => setTesting(false));
         }}
@@ -412,11 +364,7 @@ function ModeRow({
     <button
       type="button"
       disabled={disabled || unusable}
-      title={
-        unusable
-          ? "Managed is not set up on this company, so it cannot serve a workload."
-          : undefined
-      }
+      title={unusable ? "Managed is not set up on this company, so it cannot serve a workload." : undefined}
       aria-pressed={selected}
       data-testid={`inference-mode-${option}`}
       onClick={onSelect}
@@ -428,16 +376,12 @@ function ModeRow({
     >
       <span className="grid min-w-0 flex-1 gap-0.5">
         <span className="text-sm font-medium">{copy.label}</span>
-        <span className="text-xs text-muted-foreground">
-          {copy.description}
-        </span>
+        <span className="text-xs text-muted-foreground">{copy.description}</span>
       </span>
       {option === "managed" && (
         <Badge
           variant="outline"
-          className={cn(
-            managedConfigured && "border-status-done text-status-done-text",
-          )}
+          className={cn(managedConfigured && "border-status-done text-status-done-text")}
           data-testid="inference-mode-managed-state"
         >
           {managedModeBadge(managedConfigured)}
@@ -477,16 +421,11 @@ function WorkloadRow({
     >
       <span className="grid min-w-0 flex-1 leading-tight">
         <span className="truncate text-sm font-medium">{copy.label}</span>
-        <span className="truncate text-xs text-muted-foreground">
-          {copy.description}
-      </span>
+        <span className="truncate text-xs text-muted-foreground">{copy.description}</span>
       </span>
       <span className="grid min-w-0 justify-items-end leading-tight">
         <span
-          className={cn(
-            "truncate text-xs",
-            note ? "text-status-blocked-text" : "text-muted-foreground",
-          )}
+          className={cn("truncate text-xs", note ? "text-status-blocked-text" : "text-muted-foreground")}
         >
           {value}
         </span>
@@ -501,13 +440,7 @@ function WorkloadRow({
           </span>
         )}
       </span>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        disabled={!canManage}
-        onClick={onEdit}
-      >
+      <Button type="button" variant="outline" size="sm" disabled={!canManage} onClick={onEdit}>
         {action}
       </Button>
     </div>

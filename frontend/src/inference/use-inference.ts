@@ -77,11 +77,7 @@ export interface InferenceActions {
    * only honest moment to ask is with that endpoint's own list in hand. Nothing
    * is stored — the draft's key travels one way and is never written by this.
    */
-  probeDraftEndpoint: (draft: {
-    baseUrl: string;
-    key?: string;
-    kind?: string;
-  }) => Promise<ProbeResult>;
+  probeDraftEndpoint: (draft: { baseUrl: string; key?: string; kind?: string }) => Promise<ProbeResult>;
   test: (slug: string, model?: string) => Promise<ProbeResult>;
   saveRoutes: (routes: Record<string, string>) => Promise<void>;
   restart: () => Promise<void>;
@@ -126,9 +122,7 @@ export function useInference(
     } catch (err) {
       // A host that does not serve this route at all is not an error worth a
       // banner — the page simply is not available on that build.
-      setLoad(
-        err instanceof ApiError && err.status === 404 ? "unavailable" : "error",
-      );
+      setLoad(err instanceof ApiError && err.status === 404 ? "unavailable" : "error");
     }
   }, [client, company]);
 
@@ -173,11 +167,7 @@ export function useInference(
         }
         return result;
       } catch (err) {
-        toast.error(
-          err instanceof ApiError
-            ? err.message
-            : "That change could not be saved.",
-        );
+        toast.error(err instanceof ApiError ? err.message : "That change could not be saved.");
         throw err;
       } finally {
         setBusySlug(null);
