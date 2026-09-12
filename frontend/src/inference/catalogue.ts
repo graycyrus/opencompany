@@ -440,9 +440,21 @@ export function isReservedSlug(slug: string): boolean {
   return (
     cloudProvider(trimmed) !== undefined ||
     localRuntime(trimmed) !== undefined ||
-    CLI_LOGINS.some((c) => c.storedSlug === trimmed)
+    CLI_LOGINS.some((c) => c.storedSlug === trimmed) ||
+    INTERNAL_SLUGS.includes(trimmed)
   );
 }
+
+/**
+ * Slugs this product owns that are not catalogue rows.
+ *
+ * Managed is deliberately not a row — it is a chain, not a vendor — but it has a
+ * slug, and that slug is an address: `provider/tinyhumans/key` is where its
+ * credential lives, and `managed` is the word the route grammar uses. Mirrors
+ * `catalogue::INTERNAL_SLUGS`, and the host refuses these regardless; this is
+ * so the operator is told before a round trip rather than after one.
+ */
+const INTERNAL_SLUGS: readonly string[] = ["tinyhumans", "managed"];
 
 /**
  * Which of the three questions a provider answers.

@@ -90,6 +90,14 @@ pub struct HarnessScope {
     pub id: String,
     /// Whether it is the company's default harness.
     pub is_default: bool,
+    /// Whether this harness declared `[harness.inference]` of its own.
+    ///
+    /// **Only the harness knows.** `built_in_lane` hands the resolver its own
+    /// section where it has one and the company's `[inference]` where it does
+    /// not, so by the time the value arrives the two are indistinguishable —
+    /// and the difference decides whether the company's provider list outranks
+    /// it. See [`resolve_effective_scoped`].
+    pub declares_own_inference: bool,
 }
 
 impl HarnessScope {
@@ -99,6 +107,7 @@ impl HarnessScope {
         Self {
             id: id.into(),
             is_default: true,
+            declares_own_inference: false,
         }
     }
 
@@ -107,7 +116,14 @@ impl HarnessScope {
         Self {
             id: id.into(),
             is_default: false,
+            declares_own_inference: false,
         }
+    }
+
+    /// Records that this harness declared `[harness.inference]` of its own.
+    pub fn declaring_own_inference(mut self, declares: bool) -> Self {
+        self.declares_own_inference = declares;
+        self
     }
 
     /// This scope's runtime-config secret key.
@@ -890,6 +906,47 @@ pub async fn load_key_scoped(
     Ok(String::new())
 }
 
+/// Reads **managed's** credential, and only managed's.
+///
+/// Same two addresses as [`load_inference_key_scoped`] — `provider/tinyhumans/key`
+/// then the legacy flat slot — with the gate the flat slot needs and the general
+/// reader cannot have: `inference/key` is one address two different rows read
+/// through, and for an upgraded company whose entry zero is a vendor account it
+/// holds that vendor's key. Without the gate, an explicit Managed route sent a
+/// BYOK credential to the platform URL, and the status and Test Managed made the
+/// same ownership mistake.
+///
+/// The write path has always gated on this; see
+/// [`store::legacy_slot_is_managed`].
+pub async fn load_managed_key(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<String> {
+    if let Some(SecretValue(raw)) = secrets
+        .get(company, &provider_key_key(MANAGED_SLUG))
+        .await?
+        && !raw.trim().is_empty()
+    {
+        return Ok(raw);
+    }
+    // **The fallback is the *flat* slot, and only the default harness reads
+    // that.** For a named scope `load_key_scoped` answers
+    // `harness/<id>/inference/key`, which is that harness's own credential for
+    // whatever *it* declared — presenting it to the platform endpoint is the
+    // same ownership mistake as the BYOK one, a scope along. Managed still
+    // resolves for a named harness; it just resolves through the company
+    // account or the instance identity, which is what `managed_identity` does
+    // with an empty key.
+    if !scope.is_default {
+        return Ok(String::new());
+    }
+    if !store::legacy_slot_is_managed(company, secrets).await? {
+        return Ok(String::new());
+    }
+    load_key_scoped(company, secrets, None, scope).await
+}
+
 /// Reads the outbound inference credential for one provider slug.
 ///
 /// ```text
@@ -1123,14 +1180,28 @@ pub async fn resolve_effective_scoped(
     // deliberately, so the legacy path keeps every rule it has (the proxy
     // inheritance, the managed chain, `reject_unknown_provider`) rather than a
     // reimplementation of them here.
-    let providers = store::list_providers(company, secrets).await?;
-    if let Some(decl) = decl_for_primary(company, secrets, &providers).await? {
-        return Ok(Some(decl));
+    //
+    // **Skipped for a named harness that configured itself.** The provider list
+    // is a company-level statement, and a `[harness.inference]` section or a
+    // `harness/<id>/inference/config` blob is a narrower one that predates it:
+    // `docs/spec/runtime/providers.md` has said runtime-then-manifest-then-
+    // default *within a harness* all along. Putting the list unconditionally on
+    // top inverted that, so connecting the company's first provider in the
+    // console silently re-pointed a harness that had its own account at the
+    // company's — and charged the wrong one, with nothing on any screen saying
+    // the harness's own section had stopped applying.
+    if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+        let providers = store::list_providers(company, secrets).await?;
+        if let Some(decl) = decl_for_primary(company, secrets, &providers).await? {
+            return Ok(Some(decl));
+        }
     }
 
-    let legacy = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?;
-    if legacy.is_some() {
-        return Ok(legacy);
+    let fallback = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?;
+    if let Some(decl) =
+        refuse_a_managed_fallback_that_is_switched_off(company, secrets, fallback).await?
+    {
+        return Ok(Some(decl));
     }
 
     // 4. The routing table naming `managed` — after the legacy chain's steps
@@ -1155,8 +1226,15 @@ pub async fn resolve_effective_scoped(
     //
     // Tried **last**, so every company that resolves today resolves exactly
     // where it did: this branch only turns a `None` into a `Some`.
+    //
+    // Gated on the Managed switch for the same reason it goes through
+    // `managed_decl`: [`resolve_effective_for_tier`] *refuses* an explicit
+    // `managed` route while the switch is off, so a boot that selected the
+    // harness brain on the strength of those rows would hand every turn to a
+    // resolver that errors. Off means off on both paths, or this branch
+    // reintroduces the drift it exists to close.
     let routes = store::load_routes(company, secrets).await?;
-    if resolve::any_route_is_managed(&routes) {
+    if resolve::any_route_is_managed(&routes) && store::managed_enabled(company, secrets).await? {
         // Through `managed_decl` rather than a second opinion about the managed
         // chain. It is the same function the routed turn path calls, so "does
         // managed resolve for boot" and "what does a managed route resolve to"
@@ -1178,6 +1256,62 @@ pub async fn resolve_effective_scoped(
     }
 
     Ok(None)
+}
+
+/// Refuses a fallback that rides the managed chain once Managed is switched off.
+///
+/// The switch is honoured on the explicit `managed` route in
+/// [`resolve_effective_for_tier`], but an **unset** row does not take that
+/// branch: it falls through here, and for a company whose legacy config or
+/// environment resolves to the platform it kept spending. The console says
+/// "Managed is switched off, so it is not a fallback. Its credential is
+/// untouched" — a sentence about exactly this path — so the page was making a
+/// promise the resolver did not keep.
+///
+/// `is_proxied` is the marker because that is what riding the platform's
+/// endpoint on the platform's credential *is*; a company on its own key is not
+/// proxied whatever its provider is called.
+async fn refuse_a_managed_fallback_that_is_switched_off(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    decl: Option<InferenceDecl>,
+) -> Result<Option<InferenceDecl>> {
+    let Some(decl) = decl else {
+        return Ok(None);
+    };
+    if decl.is_proxied() && !store::managed_enabled(company, secrets).await? {
+        return Err(OpenCompanyError::Config(
+            "Managed is switched off and nothing else is connected, so there is \
+             nothing to think with. Switch it back on, or connect a provider in \
+             Settings → Inference."
+                .to_string(),
+        ));
+    }
+    Ok(Some(decl))
+}
+
+/// Whether a **named** harness holds inference configuration of its own.
+///
+/// Two tiers count, and they are the two `resolve_legacy_scoped` reads first: a
+/// blob in this harness's own `harness/<id>/inference/config` slot, and a
+/// `[harness.inference]` section in the manifest — which only the caller can
+/// report, because the section reaches the resolver already merged with the
+/// company's. Never true for the default harness: its "scoped" keys *are* the
+/// flat ones, and entry zero already carries them into the provider list.
+async fn harness_configures_itself(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<bool> {
+    if scope.is_default {
+        return Ok(false);
+    }
+    if scope.declares_own_inference {
+        return Ok(true);
+    }
+    Ok(load_runtime_config_scoped(company, secrets, scope)
+        .await?
+        .is_some())
 }
 
 /// The declaration the company's **primary** provider resolves to, if the list
@@ -1221,8 +1355,15 @@ async fn decl_for_indexed(
     // account, never the platform proxy, so `proxied` is false — and that is
     // what denies it both the instance identity and the company's, which is the
     // safety property the credential chain is built on.
+    //
+    // **Stated, not derived.** This used to read `is_managed_choice(&kind)`,
+    // which is `false` for every kind an indexed record can hold — the add
+    // route only ever writes a catalogue slug or `custom`, and the edit route
+    // carries the kind across unchanged — so the two lines agreed by accident
+    // rather than by construction. Saying it outright means a future kind
+    // cannot quietly hand an operator-typed endpoint the platform's identity.
     let credential = Credential::from_value(key);
-    let proxied = is_managed_choice(&provider.kind);
+    let proxied = false;
     let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
     Ok(InferenceDecl {
         provider: normalize_provider(&provider.kind).to_string(),
@@ -1408,19 +1549,52 @@ pub async fn resolve_effective_for_tier(
         // Unset. The whole existing chain, unchanged — which is what keeps a
         // company that has never opened the Routing tab resolving exactly where
         // it always did.
+        //
+        // Same carve-out as `resolve_effective_scoped` step 0, for the same
+        // reason: an unset row is not a choice, so it must not outrank a named
+        // harness's own `[harness.inference]` or scoped runtime blob. A row
+        // that *is* set outranks both — that one is a choice, made here.
         resolve::Resolution::Primary => {
-            match decl_for_primary(company, secrets, &providers).await? {
+            let primary =
+                if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+                    decl_for_primary(company, secrets, &providers).await?
+                } else {
+                    None
+                };
+            match primary {
                 Some(decl) => Ok(Some(decl)),
-                None => resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await,
+                None => {
+                    let fallback =
+                        resolve_legacy_scoped(company, manifest, env_default, secrets, scope)
+                            .await?;
+                    refuse_a_managed_fallback_that_is_switched_off(company, secrets, fallback).await
+                }
             }
         }
         // `managed` is a word in the route grammar, not a provider slug — it is
         // what the Managed mode button writes into every row. Read as a slug it
         // names nothing and the workload would fail closed against a provider
         // the operator never had.
-        resolve::Resolution::Managed => Ok(Some(
-            managed_decl(company, secrets, env_default, scope).await?,
-        )),
+        //
+        // Its switch is honoured **here**, on the turn path, and not only in the
+        // status the console renders. A row that is switched off and still
+        // billed is the same defect the routing table itself was added to fix,
+        // one provider along: the operator's statement was "stop spending on
+        // this", the page agreed, and the spend continued. It refuses in the
+        // same words a disabled provider does, because it is the same act.
+        resolve::Resolution::Managed => {
+            if !store::managed_enabled(company, secrets).await? {
+                return Err(OpenCompanyError::Config(format!(
+                    "the {} workload is routed to Managed, which is switched off. \
+                     Switch it back on, or point that workload somewhere else in \
+                     Settings → Inference → Routing.",
+                    workload.as_str()
+                )));
+            }
+            Ok(Some(
+                managed_decl(company, secrets, env_default, scope).await?,
+            ))
+        }
         resolve::Resolution::Missing { workload, slug } => Err(OpenCompanyError::Config(format!(
             "the {} workload is routed to `{slug}`, which this company does not have. \
              Point it somewhere else in Settings → Inference → Routing.",
@@ -1473,14 +1647,7 @@ async fn managed_decl(
     env_default: Option<&EnvDefault>,
     scope: &HarnessScope,
 ) -> Result<InferenceDecl> {
-    let key = load_inference_key_scoped(
-        company,
-        secrets,
-        credential_slug(LEGACY_MANAGED),
-        None,
-        scope,
-    )
-    .await?;
+    let key = load_managed_key(company, secrets, scope).await?;
     let had_key = !key.trim().is_empty();
     let (base_url, credential, proxied) = resolve_endpoint(LEGACY_MANAGED, None, key, env_default);
     let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
@@ -3262,6 +3429,236 @@ mod tests {
         assert!(decl.is_proxied(), "the managed route rides the platform");
         assert_eq!(decl.base_url, "https://platform.example/v1");
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+    }
+
+    #[tokio::test]
+    async fn a_named_harness_that_configured_itself_outranks_the_company_provider_list() {
+        // `docs/spec/runtime/providers.md` has always said runtime, then
+        // manifest, then default — **within a harness**. Putting the company's
+        // provider list unconditionally above that inverted it, so connecting
+        // the company's first provider in the console silently re-pointed a
+        // harness with an account of its own at the company's, and charged it.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+
+        // The default harness reads the company's list, which is the whole
+        // point of the list existing.
+        let default_scope = HarnessScope::default_harness("embedded");
+        let shared = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            None,
+            &secrets,
+            &default_scope,
+        )
+        .await
+        .unwrap()
+        .expect("the default harness resolves through the connected provider");
+        assert_eq!(shared.base_url, "https://first.example/v1");
+
+        // A named harness that declared `[harness.inference]` of its own does
+        // not. It resolves through what it declared.
+        let own = HarnessScope::named("deep").declaring_own_inference(true);
+        let mine =
+            resolve_effective_scoped(&company, &inference("openrouter"), None, &secrets, &own)
+                .await
+                .unwrap()
+                .expect("a harness with its own section resolves through it");
+        assert_ne!(
+            mine.base_url, "https://first.example/v1",
+            "the company's connected provider must not outrank this harness's own section"
+        );
+        assert_eq!(
+            mine.base_url, PLATFORM_BASE_URL,
+            "with a section of its own and no key in it, this harness rides the subscription"
+        );
+
+        // And a named harness that declared nothing still inherits the
+        // company's list — the carve-out is for a statement, not for a name.
+        let inherits = HarnessScope::named("shallow");
+        let theirs = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            None,
+            &secrets,
+            &inherits,
+        )
+        .await
+        .unwrap()
+        .expect("a harness with nothing of its own inherits");
+        assert_eq!(theirs.base_url, "https://first.example/v1");
+    }
+
+    #[tokio::test]
+    async fn managed_never_reads_a_legacy_slot_that_belongs_to_a_vendor_account() {
+        // `inference/key` is one address with two possible owners. For a company
+        // upgraded from a BYOK config it holds that vendor's key, and reading it
+        // as managed's sent an OpenRouter credential to the platform URL — a
+        // credential presented to an account that does not own it.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        // Entry zero is a vendor account, with its key still in the flat slot.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(&company, KEY_KEY, SecretValue("sk-or-byok".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            load_managed_key(&company, &secrets, &HarnessScope::default())
+                .await
+                .unwrap(),
+            "",
+            "the vendor's key is not managed's to present"
+        );
+        // And the general reader still finds it for the row it belongs to.
+        assert_eq!(
+            load_inference_key_scoped(
+                &company,
+                &secrets,
+                "openrouter",
+                None,
+                &HarnessScope::default()
+            )
+            .await
+            .unwrap(),
+            "sk-or-byok"
+        );
+
+        // Same rule a scope along: a named harness's own slot holds that
+        // harness's credential for whatever it declared, which managed has no
+        // more claim on than it does on entry zero's.
+        let named = HarnessScope::named("deep");
+        store_key_scoped(&company, &secrets, "sk-deep-byok", &named)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_managed_key(&company, &secrets, &named).await.unwrap(),
+            "",
+            "a named harness's key is not managed's to present either"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unset_workload_stops_falling_back_to_managed_once_it_is_switched_off() {
+        // The unset row does not take the `Managed` branch — it falls through
+        // the primary to the legacy chain — so honouring the switch only there
+        // left a company whose environment resolves to the platform spending
+        // after it had been told to stop. The console's own sentence for this
+        // state is "Managed is switched off, so it is not a fallback."
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+
+        // On, and nothing connected: the platform is the fallback.
+        let decl = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("managed is the fallback while it is on");
+        assert!(decl.is_proxied());
+
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+        let err = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a switched-off managed must not keep serving unset workloads");
+        assert!(err.to_string().contains("switched off"), "{err}");
+
+        // A company on its own key is untouched by the switch: it was never
+        // riding the platform, so there is nothing here to refuse.
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        let own = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a connected provider is not managed");
+        assert_eq!(own.base_url, "https://first.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_managed_fails_closed_once_managed_is_switched_off() {
+        // The switch is a statement about spend — "stop billing this account" —
+        // and a switch that only moves a badge on the settings page keeps
+        // billing it. That is the defect the routing table itself was added to
+        // fix, one provider along: the page agreed and the spend continued.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        route(&secrets, "agentic-v1", "managed").await;
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .expect_err("a switched-off managed row must not keep serving turns");
+        let message = err.to_string();
+        assert!(message.contains("switched off"), "{message}");
+        assert!(message.contains("agentic"), "{message}");
+
+        // And switching it back on restores it, so the refusal is the switch
+        // rather than a route that has been broken by being touched.
+        store::set_managed_enabled(&company, &secrets, true)
+            .await
+            .unwrap();
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a managed route resolves again once it is switched back on");
+        assert_eq!(decl.base_url, "https://platform.example/v1");
     }
 
     #[tokio::test]

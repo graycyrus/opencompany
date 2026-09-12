@@ -39,7 +39,8 @@ import type {
   ProbeResult,
   ProviderMutation,
 } from "@/api/inference";
-import type { Provider, RoutingMode } from "./types";
+import { WORKLOADS, WORKLOAD_TIER, inferRoutingMode, parseRef } from "./routing";
+import type { Provider, RoutingMap, RoutingMode } from "./types";
 
 /** What the page is doing. */
 export type InferenceLoad = "loading" | "ready" | "unavailable" | "error";
@@ -116,8 +117,29 @@ export function useInference(
       } catch (err) {
         // A member rather than an admin reads the status fine and is refused
         // the routing table, which is an authority answer rather than a broken
-        // page: show the providers and leave the routing tab empty.
+        // page. Leaving the state alone was the wrong answer twice over: the
+        // read-only Routing tab then showed every workload on its default and
+        // the mode as Managed, which is a claim about this company nobody
+        // made — and on a company switch it showed the *previous* company's
+        // routes, which is worse than showing none.
+        //
+        // The status carries the same table, so the honest fill is the one the
+        // caller already has. The mode is derived from it here rather than read
+        // off a second response, for the same reason the host derives it: a
+        // stored mode is a fifth thing that can disagree with the four routes.
         if (!(err instanceof ApiError && err.status === 403)) throw err;
+        const readable = next.routes ?? {};
+        setRoutes(readable);
+        setMode(
+          inferRoutingMode(
+            Object.fromEntries(
+              WORKLOADS.map((w) => [w, parseRef(readable[WORKLOAD_TIER[w]] ?? "")]),
+            ) as RoutingMap,
+          ),
+        );
+        // Orphans are an admin's to clear, and this reader cannot. Saying
+        // nothing is right; carrying the last company's list is not.
+        setOrphaned([]);
       }
     } catch (err) {
       // A host that does not serve this route at all is not an error worth a
@@ -155,15 +177,31 @@ export function useInference(
         toast.success(result.note);
         // A delete or a disable can move routes, so the table is re-read rather
         // than assumed unchanged. It is the one thing a provider write can
-        // change that the provider write's own response does not carry.
+        // change that the write's own response does not carry *in full* — the
+        // orphan list is only on the routing route.
         try {
           const table = await getRoutes(client, company);
           setRoutes(table.routes);
           setMode(table.mode);
           setOrphaned(table.orphaned);
         } catch {
-          // Already handled by `reload`'s reasoning: a member is refused here
-          // and the providers are still correct.
+          // Refused (a member) or simply failed. Either way the write itself
+          // succeeded, and the status it answered with carries the persisted
+          // table — so the routing state follows the write rather than staying
+          // at its pre-write value. Leaving it alone showed routes to a
+          // provider the Providers tab had just removed, and the next edit
+          // would have been computed from that stale table.
+          const persisted = result.status.routes ?? {};
+          setRoutes(persisted);
+          setMode(
+            inferRoutingMode(
+              Object.fromEntries(
+                WORKLOADS.map((w) => [w, parseRef(persisted[WORKLOAD_TIER[w]] ?? "")]),
+              ) as RoutingMap,
+            ),
+          );
+          // Orphans are only known to the routing route, and we did not get it.
+          setOrphaned([]);
         }
         return result;
       } catch (err) {

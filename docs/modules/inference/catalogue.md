@@ -153,7 +153,15 @@ Three, all keyed on an endpoint rather than a credential:
 |---|---|---|---|
 | `ollama` | Ollama | endpoint | default `http://localhost:11434` |
 | `lmstudio` | LM Studio | endpoint | |
-| `omlx` | OMLX | endpoint **and** key | the only local runtime that takes both |
+| `omlx` | OMLX | endpoint | no build of any candidate project requires a key |
+
+**None of the three requires a key**, and the row above used to say `omlx`
+needed one. The host enforces that value, so the entry it described could not
+be added at all. `omlx` is the one that will *accept* an optional bearer where
+the operator started it with `--api-key`, and the console offers no path to
+entering one — the same gap `lmstudio`'s opt-in server toggle has, recorded in
+`provider-contracts.md`. Requiring a credential and accepting one are separate
+questions, and only the first is modelled here.
 
 Client-side endpoint validation for this category only: parse as a URL, require
 `http:`/`https:`, and append `/v1` when the path is empty or `/`. Cloud providers

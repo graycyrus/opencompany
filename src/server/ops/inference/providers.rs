@@ -362,7 +362,13 @@ async fn add_provider(
     }
 
     // Step 4: flush the record.
-    let provider = store::put_provider(
+    //
+    // A failure here has to take the credential back out. The key is already at
+    // `provider/<slug>/key` and there is now no record owning it, which is the
+    // invisible half of the rollback invariant `roll_back_add` exists for: a
+    // record left behind is on screen and removable, an orphaned credential is
+    // neither, and the next add of that slug would silently present it.
+    let provider = match store::put_provider(
         runtime.id(),
         secrets,
         store::ProviderDraft {
@@ -377,7 +383,15 @@ async fn add_provider(
         },
     )
     .await
-    .map_err(ApiError)?;
+    {
+        Ok(provider) => provider,
+        Err(err) => {
+            if !key.is_empty() {
+                clear_orphaned_key(runtime, &plan.slug).await;
+            }
+            return Err(ApiError(err));
+        }
+    };
     // The credential just changed for this company, and the catalog cache key is
     // made of non-secret ids on purpose — so a rotation would otherwise keep
     // answering from the previous credential's read for the rest of its TTL.
@@ -816,6 +830,30 @@ async fn roll_back_add(runtime: &CompanyRuntime, provider: &store::Provider) {
     }
 }
 
+/// Clears a credential whose provider record was never written.
+///
+/// The same loud-failure rule [`roll_back_add`] follows, for the same reason,
+/// and separate from it because there is no `Provider` to delete yet — the
+/// write that would have produced one is what failed.
+async fn clear_orphaned_key(runtime: &CompanyRuntime, slug: &str) {
+    let secrets = runtime.secrets().as_ref();
+    if let Err(err) = secrets
+        .set(
+            runtime.id(),
+            &store::provider_key_key(slug),
+            crate::ports::types::SecretValue(String::new()),
+        )
+        .await
+    {
+        tracing::error!(
+            company = %runtime.id(),
+            provider = %slug,
+            error = %err,
+            "could not clear the credential of a provider whose record failed to write;              it is orphaned at provider/<slug>/key and re-adding this slug would reuse it",
+        );
+    }
+}
+
 /// Records health, never failing the request over it.
 ///
 /// A health record is a decoration on a row. Failing an otherwise successful add
@@ -886,7 +924,35 @@ async fn edit_provider(
         }
     };
 
-    let provider = store::put_provider(
+    // **The credential goes first, for the same reason it does on the add path.**
+    // An edit can move the endpoint and rotate the key in one request, and
+    // committing the endpoint first meant a failed key write returned an error
+    // with the new host live and the *old* host's secret still in the slot — so
+    // the next routed turn would present one provider's credential to another.
+    // Written first, that failure leaves the row exactly as it was.
+    //
+    // **And the old one is kept, so the ordering is a rollback rather than a
+    // preference.** Either write can fail, and either failure alone leaves one
+    // host holding the other's secret — the endpoint moving without the key is
+    // the old host with the new credential, the key moving without the endpoint
+    // is the reverse. There is no transaction across two store keys, so the
+    // second-best thing is to put the recoverable one first and undo it.
+    let previous_key = if body.key.is_some() {
+        Some(
+            store::load_provider_key(runtime.id(), secrets, &existing)
+                .await
+                .map_err(ApiError)?,
+        )
+    } else {
+        None
+    };
+    if let Some(key) = body.key.as_deref() {
+        store::store_provider_key(runtime.id(), secrets, &existing, key.trim())
+            .await
+            .map_err(ApiError)?;
+    }
+
+    let written = store::put_provider(
         runtime.id(),
         secrets,
         store::ProviderDraft {
@@ -904,13 +970,30 @@ async fn edit_provider(
             enabled: existing.enabled,
         },
     )
-    .await
-    .map_err(ApiError)?;
+    .await;
+    let provider = match written {
+        Ok(provider) => provider,
+        Err(err) => {
+            // The record did not move, so neither may the credential.
+            if let Some(previous) = previous_key
+                && let Err(restore) =
+                    store::store_provider_key(runtime.id(), secrets, &existing, previous.trim())
+                        .await
+            {
+                tracing::error!(
+                    company = %runtime.id(),
+                    provider = %existing.slug,
+                    error = %restore,
+                    "an edit failed to write the provider record and then failed to put the \
+                     previous credential back; this row's stored key is the one that was \
+                     being rotated to, against the endpoint it had before",
+                );
+            }
+            return Err(ApiError(err));
+        }
+    };
 
-    if let Some(key) = body.key {
-        store::store_provider_key(runtime.id(), secrets, &provider, key.trim())
-            .await
-            .map_err(ApiError)?;
+    if body.key.is_some() {
         crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
         // A rotation makes whatever was learnt about the old credential
         // meaningless — including a latched `auth` failure, which would
@@ -977,17 +1060,29 @@ async fn delete_provider(
         .filter(|p| p.slug != provider.slug)
         .collect();
     let reset = resolve::scrub_removed(&mut routes, &provider, &remaining);
+
+    // **Computed before the removal, written after it.** The scrub rules need
+    // the provider list as it will be *afterwards*, which is why the
+    // calculation happens here — but writing the scrubbed table first meant a
+    // failed removal returned an error with the provider still on screen and
+    // the routes that named it already reset, which is a state nobody asked
+    // for and nothing reports.
+    //
+    // Written after, the two failure modes are both readable: a failed removal
+    // changes nothing, and a failed route write leaves routes naming a provider
+    // that is gone — which `orphaned_routes` already finds and the Routing tab
+    // already shows.
+    //
+    // `delete_provider` clears the credential first and refuses the removal if
+    // that clear fails, which is the half-state the operator can see and act on.
+    store::delete_provider(runtime.id(), secrets, &provider.slug)
+        .await
+        .map_err(ApiError)?;
     if !reset.is_empty() {
         store::save_routes(runtime.id(), secrets, &routes)
             .await
             .map_err(ApiError)?;
     }
-
-    // Clears the credential first and refuses the removal if that clear fails,
-    // which is the half-state the operator can actually see and act on.
-    store::delete_provider(runtime.id(), secrets, &provider.slug)
-        .await
-        .map_err(ApiError)?;
     if let Err(err) = store::forget_health(runtime.id(), secrets, &provider.slug).await {
         tracing::warn!(
             company = %runtime.id(),
@@ -1258,15 +1353,10 @@ async fn test_managed(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let platform = super::platform_default(&crate::app::config::ProcessEnv);
-    let inference_key = inference::load_inference_key_scoped(
-        runtime.id(),
-        secrets,
-        inference::MANAGED_SLUG,
-        None,
-        &inference::HarnessScope::default(),
-    )
-    .await
-    .map_err(ApiError)?;
+    let inference_key =
+        inference::load_managed_key(runtime.id(), secrets, &inference::HarnessScope::default())
+            .await
+            .map_err(ApiError)?;
     let company_account = crate::company::company_key::load(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
@@ -1470,12 +1560,9 @@ async fn set_managed_key(
     // from "•••• configured" to showing a bare host.
     //
     // Found in a browser, not by a test. The test is below it now.
-    let legacy_is_managed = store::list_providers(runtime.id(), secrets)
+    let legacy_is_managed = store::legacy_slot_is_managed(runtime.id(), secrets)
         .await
-        .map_err(ApiError)?
-        .iter()
-        .find(|p| p.origin == store::ProviderOrigin::EntryZero)
-        .is_none_or(|zero| zero.slug == crate::company::inference::MANAGED_SLUG);
+        .map_err(ApiError)?;
     if legacy_is_managed
         && let Err(err) = secrets
             .set(
@@ -1488,9 +1575,23 @@ async fn set_managed_key(
         tracing::error!(
             company = %runtime.id(),
             error = %err,
-            "wrote the managed credential to its own address but could not clear the \
-             legacy slot; a secret is now orphaned there",
+            "could not clear managed's legacy credential slot",
         );
+        // **Reported, not just logged, and specifically on a clear.** The read
+        // chain falls back to `inference/key` when the new slot is empty, so a
+        // failure here leaves the old credential live and still billed while
+        // the console says "Cleared the managed key." A save is different: the
+        // new key is already in the slot that outranks this one, so the stale
+        // legacy value is unreachable and the write succeeded in the only sense
+        // the operator asked about.
+        if key.is_empty() {
+            return Err(ApiError(OpenCompanyError::Store(
+                "The managed key could not be fully cleared — the older of its two \
+                 storage slots still holds it, so turns may still be billed to it. \
+                 Try again."
+                    .to_string(),
+            )));
+        }
     }
     crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 

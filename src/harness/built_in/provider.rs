@@ -1365,6 +1365,7 @@ fn output_cap(requested: Option<u32>) -> Option<u32> {
 /// function growing a vendor name the next time a model behaves differently.
 fn apply_sampling(
     body: &mut serde_json::Value,
+    endpoint: &str,
     model: &str,
     sampling: inference::dialect::Sampling,
     max_tokens: Option<u32>,
@@ -1377,7 +1378,7 @@ fn apply_sampling(
         });
     }
     let mut sent = Vec::new();
-    for (name, value) in inference::dialect::translate(model, knobs) {
+    for (name, value) in inference::dialect::translate(endpoint, model, knobs) {
         body[&name] = value;
         sent.push(name);
     }
@@ -1501,6 +1502,7 @@ impl ChatModel<()> for HostedProvider {
         // Intent in, this model's dialect out — see `apply_sampling`.
         let _sent = apply_sampling(
             &mut body,
+            &self.config.base_url,
             model,
             inference::dialect::Sampling::from_request(request.temperature),
             request.max_tokens,
@@ -1700,7 +1702,7 @@ pub async fn request_plan(
     // Intent in, this model's dialect out. `sent` is the field names that
     // actually went, which the retry needs — a rename means the caller's name
     // and the wire name differ. See `apply_sampling`.
-    let sent = apply_sampling(&mut body, &model, sampling, max_tokens);
+    let sent = apply_sampling(&mut body, &url, &model, sampling, max_tokens);
     let supports_parallel_control =
         decl.is_proxied() || inference::normalize_provider(&decl.provider) == "openrouter";
     attach_tools(&mut body, tools, tool_choice, supports_parallel_control);
@@ -1875,7 +1877,7 @@ async fn send_plan(
             // stays broken until someone ships a table row. It is what makes
             // `dialect::RULES` an optimisation rather than a dependency — a
             // vendor that changes silently corrects us without a release.
-            inference::dialect::remember_omit(&plan.model, &parameter);
+            inference::dialect::remember_omit(&plan.url, &plan.model, &parameter);
             let mut body = plan.body.clone();
             if let Some(object) = body.as_object_mut() {
                 object.remove(&parameter);
@@ -2327,6 +2329,7 @@ mod tests {
         let mut body = serde_json::json!({ "model": "claude-sonnet-5" });
         let sent = apply_sampling(
             &mut body,
+            "https://api.example/v1",
             "claude-sonnet-5",
             inference::dialect::Sampling::Default,
             None,
@@ -2342,6 +2345,7 @@ mod tests {
         let mut body = serde_json::json!({ "model": "gpt-5.6-sol" });
         let sent = apply_sampling(
             &mut body,
+            "https://api.example/v1",
             "gpt-5.6-sol",
             inference::dialect::Sampling::Deterministic,
             Some(16384),

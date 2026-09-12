@@ -169,6 +169,10 @@ export function managedFallbackNote(
   return null;
 }
 
+/** The same statement plus where to fix it, for the page that cannot switch it. */
+export const MANAGED_SWITCHED_OFF_ELSEWHERE =
+  "Managed is switched off, so it cannot be routed to. Switch it back on from its row on the LLM Providers tab.";
+
 /** Set up, but switched out of routing — which is also not a fallback. */
 export const MANAGED_SWITCHED_OFF =
   "Managed is switched off, so it is not a fallback. Its credential is untouched.";

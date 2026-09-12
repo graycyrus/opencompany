@@ -430,6 +430,11 @@ struct ProviderDto {
     ///
     /// The rules stay exactly where they are — this is what lets the console
     /// stop offering the controls that cannot work.
+    ///
+    /// It is not a *kind* — entry zero can be any kind — it is where the record
+    /// lives, and that is the thing the write routes branch on. One field rather
+    /// than a `legacy` boolean beside it, because two spellings of the same fact
+    /// are two things to keep in step.
     origin: &'static str,
     /// Whether this is the provider an **unset** workload goes through.
     ///
@@ -452,10 +457,18 @@ struct ProviderDto {
 
 /// What the system last learnt about reaching a provider.
 ///
-/// Recorded from things that already happen — the add-time probe, the manual
-/// Test, and the turn path's own 401 — rather than from a poller. A poller costs
-/// a request per provider per interval across every company on this host to
-/// learn something the next real turn learns for free.
+/// Recorded from things that already happen — the add-time probe and the manual
+/// Test — rather than from a poller. A poller costs a request per provider per
+/// interval across every company on this host, most of them answering about a
+/// provider nobody is using this hour.
+///
+/// **The turn path does not write here, and this field does not claim it does.**
+/// `send_plan` invalidates a credential on a 401 and goes no further, so a key
+/// revoked after its last Test leaves this reading whatever that Test found
+/// until somebody presses Test again. That is the same honesty the `Option`
+/// above is for: absent means nobody has checked, not that it works. Latching
+/// `auth` from a real turn needs the secret store threaded into the turn path,
+/// which is a feature rather than a wording fix.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderHealthDto {
@@ -932,15 +945,10 @@ async fn managed_state(
     let secrets = runtime.secrets().as_ref();
     // Both addresses for the one meaning: the new per-provider slot and the
     // legacy flat slot it converges from.
-    let inference_key = inference::load_inference_key_scoped(
-        runtime.id(),
-        secrets,
-        inference::MANAGED_SLUG,
-        None,
-        &inference::HarnessScope::default(),
-    )
-    .await
-    .map_err(ApiError)?;
+    let inference_key =
+        inference::load_managed_key(runtime.id(), secrets, &inference::HarnessScope::default())
+            .await
+            .map_err(ApiError)?;
     let company_account = crate::company::company_key::load(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;

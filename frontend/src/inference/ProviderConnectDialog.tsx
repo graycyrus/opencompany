@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -76,9 +76,27 @@ export interface ModelAsk {
  * attempt that fails for an unrelated reason does not still offer to skip
  * verification.
  */
+/**
+ * What to put in the write-only key field of a submit.
+ *
+ * Three answers, and the middle one is the whole reason this is a function:
+ * a provider that takes no key sends nothing, an **edit** with an untouched
+ * field sends nothing (empty means unchanged, because a stored key cannot be
+ * shown for the operator to leave alone), and everything else sends what was
+ * typed. Only the explicit Remove key action sends an empty string, and it does
+ * not come through this dialog.
+ */
+function keyToSend(needsKey: boolean, editing: boolean, typed: string): string | undefined {
+  if (!needsKey) return undefined;
+  const trimmed = typed.trim();
+  if (editing && trimmed.length === 0) return undefined;
+  return trimmed;
+}
+
 export function ProviderConnectDialog({
   optionSlug,
   providers,
+  editing,
   busy,
   error,
   offerAddAnyway,
@@ -89,6 +107,14 @@ export function ProviderConnectDialog({
   /** The chosen option, or `null` when the dialog is closed. */
   optionSlug: string | null;
   providers: readonly Provider[];
+  /**
+   * The row this dialog is editing, or `null` when it is adding one.
+   *
+   * Carries the two things an edit must not invent: the stored label and the
+   * stored endpoint. It is also what excludes the row from its own slug
+   * collision check.
+   */
+  editing?: Provider | null;
   busy: boolean;
   /** What went wrong last time, if anything. */
   error: string | null;
@@ -108,34 +134,48 @@ export function ProviderConnectDialog({
   const custom = optionSlug === "custom";
   const managed = optionSlug === MANAGED_OPTION_SLUG;
 
-  const [label, setLabel] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
+  // Seeded at mount, not in an effect.
+  //
+  // The caller gives this component a `key` of the option plus the row being
+  // edited, so React unmounts and remounts it on every open and these
+  // initialisers run once, before first paint. An effect that reset the same
+  // three fields was a race with its own dialog: `useEffect` is passive, so it
+  // runs *after* the browser paints the visible dialog, and anything typed into
+  // a field in between — a fast operator, or a browser test — was wiped by it
+  // with nothing on screen to say so.
+  //
+  // **A conventional endpoint is a starting point for an ADD and a wrong answer
+  // for an edit.** Seeding a local runtime's catalogue default over a stored one
+  // turned "Edit endpoint" into one click that relocated an Ollama at
+  // `http://10.0.0.5:11435` back to `localhost` without saying so, and the two
+  // local runtimes that ship no default (LM Studio, OMLX) opened blank with the
+  // button disabled until the operator retyped a URL from memory.
+  const [label, setLabel] = useState(() => editing?.label ?? "");
+  const [baseUrl, setBaseUrl] = useState(
+    () => editing?.baseUrl ?? ask.defaultEndpoint ?? "",
+  );
+  // Never seeded. A stored credential is write-only — the host does not return
+  // it and nothing here could display it — so an empty field in edit mode means
+  // "leave it alone", which is what `submit` sends.
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
 
-  // Seed from the chosen option each time the dialog opens on a new one. A
-  // conventional endpoint is a starting point the operator still confirms — it
-  // is the thing being chosen for this category, so it is never assumed.
-  useEffect(() => {
-    if (!open) return;
-    setLabel("");
-    setBaseUrl(ask.defaultEndpoint ?? "");
-    setKey("");
-    setModel("");
-    // `optionSlug` is the identity of "which dialog is this"; `ask` is derived
-    // from it, so it is not a second dependency.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [optionSlug, open]);
+  // The row being edited is not its own collision. Its slug is already taken —
+  // by it — and `edit` is keyed on the stored slug rather than on this one, so
+  // including it made a custom provider's own name read as "taken" and left
+  // both buttons disabled. Rotating its key meant inventing a name it would
+  // never actually be given.
+  const rivals = editing ? providers.filter((p) => p.slug !== editing.slug) : providers;
 
   const slug = slugify(label);
-  const slugError = custom ? checkSlug(providers, slug) : null;
+  const slugError = custom ? checkSlug(rivals, slug) : null;
   const endpointOk = !ask.needsEndpoint || normalizeEndpoint(baseUrl) !== null;
   // Once the endpoint has said it needs a model, it needs one: adding without it
   // is the reported dead end, and the host refuses it anyway.
   const modelOk = !modelAsk || model.trim().length > 0;
   const ready =
     (custom
-      ? customProviderReady(providers, { label, baseUrl })
+      ? customProviderReady(rivals, { label, baseUrl })
       : endpointOk && (!ask.needsKey || key.trim().length > 0)) && modelOk;
 
   const submit = (addAnyway: boolean) =>
@@ -143,7 +183,12 @@ export function ProviderConnectDialog({
       kind: optionSlug ?? "custom",
       label: custom ? label.trim() : undefined,
       baseUrl: ask.needsEndpoint ? (normalizeEndpoint(baseUrl) ?? baseUrl.trim()) : undefined,
-      key: ask.needsKey ? key.trim() : undefined,
+      // **An untouched field in edit mode is not an instruction.** The host
+      // reads `Some("")` as "clear the credential", which is right for the
+      // Remove key action and catastrophic here: renaming a provider would
+      // silently disable every turn routed through it. The field starts empty
+      // because a stored key cannot be shown, so empty has to mean "unchanged".
+      key: keyToSend(ask.needsKey, editing != null, key),
       model: model.trim() || undefined,
       addAnyway,
     });

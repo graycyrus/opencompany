@@ -429,6 +429,29 @@ pub async fn list_providers(
     Ok(out)
 }
 
+/// Whether the legacy flat `inference/key` slot belongs to **managed**.
+///
+/// One address, two possible owners: entry zero's credential and managed's both
+/// read through it. Which one it is depends on what entry zero's kind normalises
+/// to — and a company whose original provider is a vendor account has its *BYOK*
+/// key in there. The managed write path has always gated on this; the read paths
+/// did not, so an upgraded BYOK company's vendor key was offered to the platform
+/// URL as though it were a TinyHumans one.
+///
+/// `true` when there is no entry zero at all: the slot is then nobody else's,
+/// and a company that predates the list and has only ever used managed is the
+/// case the fallback exists for.
+pub async fn legacy_slot_is_managed(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<bool> {
+    Ok(list_providers(company, secrets)
+        .await?
+        .iter()
+        .find(|p| p.origin == ProviderOrigin::EntryZero)
+        .is_none_or(|zero| zero.slug == super::MANAGED_SLUG))
+}
+
 /// One provider by slug, or `None`.
 pub async fn get_provider(
     company: &CompanyId,
@@ -613,16 +636,22 @@ pub async fn load_provider_key(
     secrets: &dyn SecretStore,
     provider: &Provider,
 ) -> Result<String> {
+    // Trimmed on the way out, because it is trimmed on the way in to decide
+    // whether it is set at all: `provider_key_configured` calls `!raw.trim()
+    // .is_empty()` a stored `"sk-…\n"` true, and this returning the newline
+    // meant the value that answered "yes, configured" and the value put in an
+    // `Authorization` header were not the same string. A pasted key keeps its
+    // trailing newline far more often than anyone would like.
     if let Some(SecretValue(raw)) = secrets.get(company, &provider.key_key()).await?
         && !raw.trim().is_empty()
     {
-        return Ok(raw);
+        return Ok(raw.trim().to_string());
     }
     if let Some(legacy) = provider.legacy_key_key()
         && let Some(SecretValue(raw)) = secrets.get(company, legacy).await?
         && !raw.trim().is_empty()
     {
-        return Ok(raw);
+        return Ok(raw.trim().to_string());
     }
     Ok(String::new())
 }

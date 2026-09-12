@@ -16,6 +16,7 @@ is what stops the sixth.
 |---|---|
 | **V** | Read in the vendor's own documentation. |
 | **S** | Secondary source only — an integrator's docs, an issue tracker. **A lead, not a fact.** Do not build behaviour on one. |
+| **I** | Inferred from a response we observed rather than from anything published. Weaker than **S**: it is one endpoint on one day. |
 | **ND** | Not documented anywhere reachable. Not "probably fine" — unknown. |
 
 Where a cell would be a guess it says ND. Three vendors we ship
@@ -173,7 +174,7 @@ Anthropic now documents Bearer as the **primary** scheme with `x-api-key` as a
 |---|---|---|
 | ollama | no — *"No authentication is required … locally"*; `OLLAMA_API_KEY` is Cloud-only and sending it locally is a documented cause of spurious 401s **V** | no |
 | lmstudio | no **V** | opt-in toggle exists; **we offer no path to it** |
-| omlx | no — see below | yes, if the operator enabled it |
+| omlx | no — see below | yes, if the operator enabled it; **we offer no path to it** |
 
 **"omlx" is ambiguous and our row does not say which project it means.** Three
 candidates, three ports, three auth stories, all **V** by repository:
@@ -333,6 +334,9 @@ Carried deliberately, each with what it would take to close.
 | 8 | **`parallel_tool_calls: false` reaches only proxied endpoints and OpenRouter.** The gate is a payer test, not a capability test, so the turn-boundary promise is not enforced on the wire for most BYOK endpoints. Whether each gateway accepts the field is **ND**. | Per-endpoint capability discovery. |
 | 9 | **Which project `omlx` means is unresolved** (see above). | An operator decision. |
 | 10 | **ModelScope's free tier is 2,000 calls/day, ≤200/model/day** **S**, and our own probes spend it. | A rate note in the UI, or fewer probes. |
+| 11 | **The managed brain never learns from a 400.** The retry-and-remember layer is keyed on `RequestPlan::tunable_fields`, and `HostedProvider` sends its body with no plan, so an unknown or changed managed model keeps failing where a BYOK one would correct itself after one round-trip. | Routing the hosted path through the shared send logic, or giving it the same bounded retry. |
+| 13 | **A credential over plain `http` is refused by the probe, not by the turn.** `check_endpoint_with_credential` stops us presenting a key to an `http` endpoint off this host, but the stored row survives — an endpoint-class refusal is non-destructive — and `send_body` applies no guard, so turns still reach it. Refusing at the write path would also refuse an intranet gateway that works today. | A decision about whether to refuse the configuration outright, and the same predicate on the turn path if so. |
+| 12 | **The console offers no way to give a local runtime an optional key.** `credentialAsk` models whether a key is *required*, so an `omlx` started with `--api-key` (and LM Studio with its server toggle on) cannot be authenticated from this surface even though the host would accept it. | Separating "accepts a key" from "requires one", through the dialog, the row menu and the host's own check. |
 
 ## Sources
 

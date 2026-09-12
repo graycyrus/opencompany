@@ -386,6 +386,8 @@ pub enum EndpointRefusal {
     LinkLocal,
     /// A private or otherwise non-routable address.
     PrivateNetwork,
+    /// `http` to somewhere other than this host, with a credential to present.
+    Cleartext,
 }
 
 impl std::fmt::Display for EndpointRefusal {
@@ -399,6 +401,12 @@ impl std::fmt::Display for EndpointRefusal {
                 write!(
                     f,
                     "a model endpoint is never on this host's private network"
+                )
+            }
+            Self::Cleartext => {
+                write!(
+                    f,
+                    "a key cannot be sent to an http endpoint off this host — use https"
                 )
             }
         }
@@ -467,6 +475,99 @@ pub fn check_endpoint(url: &str, policy: ProbePolicy) -> Result<(), EndpointRefu
         return Ok(());
     };
     check_address(ip, policy)
+}
+
+/// [`check_endpoint`], plus the rule that only applies when there is a key.
+///
+/// **A bearer over plain `http` is the key, in the clear, to everything on the
+/// path.** `http` is in the allowed set for the local-runtime category — Ollama
+/// documents `http://localhost:11434` and there is no certificate to have — so
+/// the scheme cannot simply be narrowed to `https`. The rule that separates the
+/// two is the destination, not the scheme: loopback never leaves this host, and
+/// anything else with a credential attached does.
+///
+/// Loopback by **name** as well as by literal, because `localhost` is what the
+/// vendor's own documentation prints and it is the address an operator will
+/// type. A name is not resolved here for the reason [`check_endpoint`] gives.
+///
+/// This governs what *we* send. An endpoint stored despite it is still reached
+/// by the turn path, which applies no guard of its own — recorded in
+/// `docs/modules/inference/provider-contracts.md`.
+pub fn check_endpoint_with_credential(
+    url: &str,
+    policy: ProbePolicy,
+    has_credential: bool,
+) -> Result<(), EndpointRefusal> {
+    check_endpoint(url, policy)?;
+    if !has_credential {
+        return Ok(());
+    }
+    let trimmed = url.trim();
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Ok(());
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return Ok(());
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    let host = if let Some(after) = host_port.strip_prefix('[') {
+        after.split_once(']').map(|(h, _)| h).unwrap_or(after)
+    } else {
+        host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    let on_this_host = host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| match ip {
+                IpAddr::V4(v4) => v4.is_loopback(),
+                IpAddr::V6(v6) => {
+                    v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+                }
+            })
+            .unwrap_or(false);
+    if on_this_host {
+        return Ok(());
+    }
+    Err(EndpointRefusal::Cleartext)
+}
+
+/// Whether two URLs name the same origin — scheme, host and port.
+///
+/// **A credentialed request must not follow a redirect off its origin.** `reqwest`
+/// strips `Authorization` when the host changes, but it does **not** strip a
+/// custom header, and the one non-bearer entry in the catalogue sends the key as
+/// `x-api-key`. A provider that can answer `302` could therefore hand an
+/// operator's Anthropic key to any host it names. The check is here rather than
+/// in the redirect closure so both clients — the probe and the catalogue reader —
+/// apply the same rule.
+pub fn same_origin(a: &str, b: &str) -> bool {
+    fn origin(url: &str) -> Option<(String, String)> {
+        let (scheme, rest) = url.trim().split_once("://")?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let host_port = authority
+            .rsplit_once('@')
+            .map(|(_, host)| host)
+            .unwrap_or(authority);
+        Some((
+            scheme.to_ascii_lowercase(),
+            host_port.trim().to_ascii_lowercase(),
+        ))
+    }
+    match (origin(a), origin(b)) {
+        (Some(left), Some(right)) => left == right,
+        // Unparseable on either side is not a match. Refusing to follow costs a
+        // catalogue read; following costs the key.
+        _ => false,
+    }
 }
 
 /// The address half of [`check_endpoint`], exposed so a redirect target can be
@@ -676,7 +777,12 @@ pub async fn probe_models(
     auth: catalogue::AuthStyle,
     policy: ProbePolicy,
 ) -> Result<Vec<String>, ProbeFailure> {
-    check_endpoint(base_url, policy).map_err(ProbeFailure::refused)?;
+    check_endpoint_with_credential(
+        base_url,
+        policy,
+        credential.is_some_and(|c| !c.trim().is_empty()),
+    )
+    .map_err(ProbeFailure::refused)?;
     let base = base_url.trim().trim_end_matches('/');
     // No credential here to scope a catalogue *by*, but the catalogue's shape
     // parameters apply regardless: without them OpenRouter answers text-only and
@@ -687,8 +793,16 @@ pub async fn probe_models(
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
     // inspected is here, before the next request goes out.
+    let origin = url.clone();
+    let credentialed = credential.is_some_and(|c| !c.trim().is_empty());
     let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= PROBE_MAX_REDIRECTS {
+            return attempt.stop();
+        }
+        // A credentialed request stays on its origin. `reqwest` drops
+        // `Authorization` across hosts but keeps a custom header, and the
+        // catalogue's one non-bearer entry sends the key as `x-api-key`.
+        if credentialed && !same_origin(&origin, attempt.url().as_str()) {
             return attempt.stop();
         }
         match check_endpoint(attempt.url().as_str(), policy) {
@@ -1173,6 +1287,70 @@ mod tests {
             check_endpoint("http://[fc00::1]/v1", LOCAL_OFFERED),
             Err(EndpointRefusal::PrivateNetwork)
         );
+    }
+
+    #[test]
+    fn a_key_is_never_sent_to_an_http_endpoint_off_this_host() {
+        // `http` stays in the allowed set because the local-runtime category
+        // needs it and there is no certificate to have at `localhost`. What is
+        // refused is a **credential** leaving this host in the clear.
+        assert_eq!(
+            check_endpoint_with_credential("http://gateway.acme.test/v1", SERVER_SIDE, true),
+            Err(EndpointRefusal::Cleartext)
+        );
+        // Without one there is nothing to leak, and this is a real shape: a
+        // keyless gateway on an intranet.
+        assert_eq!(
+            check_endpoint_with_credential("http://gateway.acme.test/v1", SERVER_SIDE, false),
+            Ok(())
+        );
+        // https is the point of the rule, not a coincidence of it.
+        assert_eq!(
+            check_endpoint_with_credential("https://gateway.acme.test/v1", SERVER_SIDE, true),
+            Ok(())
+        );
+        // Loopback never leaves the host — by name, which is what Ollama's own
+        // documentation prints, as well as by literal.
+        for local in [
+            "http://localhost:11434/v1",
+            "http://ollama.localhost:11434/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434/v1",
+            "http://[::ffff:127.0.0.1]:11434/v1",
+        ] {
+            assert_eq!(
+                check_endpoint_with_credential(local, LOCAL_OFFERED, true),
+                Ok(()),
+                "{local} is this host"
+            );
+        }
+        // And the address rules still run first: a credentialed https probe at
+        // the metadata address is refused as link-local, not waved through.
+        assert_eq!(
+            check_endpoint_with_credential("https://169.254.169.254/v1", SERVER_SIDE, true),
+            Err(EndpointRefusal::LinkLocal)
+        );
+    }
+
+    #[test]
+    fn a_credentialed_request_does_not_follow_a_redirect_off_its_origin() {
+        // `reqwest` strips `Authorization` when the host changes and keeps a
+        // custom header, and the catalogue's one non-bearer entry sends the key
+        // as `x-api-key` — so a provider that can answer `302` could name any
+        // host to hand it to.
+        let origin = "https://api.acme.test/v1/models";
+        assert!(same_origin(origin, "https://api.acme.test/v2/models"));
+        assert!(same_origin(
+            origin,
+            "https://API.ACME.TEST/v1/models?page=2"
+        ));
+        assert!(!same_origin(origin, "https://elsewhere.test/v1/models"));
+        // Scheme and port are part of an origin, both ways.
+        assert!(!same_origin(origin, "http://api.acme.test/v1/models"));
+        assert!(!same_origin(origin, "https://api.acme.test:8443/v1/models"));
+        // Unparseable is not a match: refusing costs a catalogue read, and
+        // following costs the key.
+        assert!(!same_origin(origin, "api.acme.test/v1/models"));
     }
 
     #[test]

@@ -33,9 +33,15 @@
 //!    it is handed, looks each one up, and applies the rule.
 //! 4. **Learning from the 400** — [`parameter_blamed_by`] and [`remember_omit`].
 //!    When a model rejects a parameter by name, we drop that one parameter,
-//!    retry once, and remember. This is what stops the table from being a
-//!    dependency: if a row is wrong, or a vendor changes silently between
-//!    releases, the retry corrects us without one.
+//!    retry once, and remember — scoped to the endpoint that rejected it, since
+//!    a model id is not unique across gateways. This is what stops the table
+//!    from being a dependency: if a row is wrong, or a vendor changes silently
+//!    between releases, the retry corrects us without one.
+//!
+//!    **On the `RequestPlan` path only.** `HostedProvider` sends its body
+//!    directly and has no plan to name tunable fields against, so the managed
+//!    brain does not learn — it gets the table's answer and a 400 if the table
+//!    is wrong. Recorded in `docs/modules/inference/provider-contracts.md`.
 //!
 //! The table is an **optimisation, not a requirement**. An unknown model costs
 //! one wasted round-trip — a 400 is billed nothing — and then works.
@@ -298,13 +304,18 @@ pub const RULES: &[DialectRule] = &[
     },
 ];
 
-/// The rule for one parameter on one model.
+/// The rule for one parameter on one model at one endpoint.
 ///
 /// A learned omission outranks the table: it was observed from the model's own
-/// rejection, and the table is only what we believed beforehand.
-pub fn rule_for(model: &str, parameter: &str) -> Rule {
+/// rejection, and the table is only what we believed beforehand. It is scoped to
+/// the endpoint that did the rejecting — see [`remember_omit`].
+pub fn rule_for(endpoint: &str, model: &str, parameter: &str) -> Rule {
     let model = model.to_ascii_lowercase();
-    if learned_omissions().contains(&(model.clone(), parameter.to_string())) {
+    if learned_omissions().contains(&(
+        endpoint_scope(endpoint),
+        model.clone(),
+        parameter.to_string(),
+    )) {
         return Rule::Omit;
     }
     RULES
@@ -318,10 +329,14 @@ pub fn rule_for(model: &str, parameter: &str) -> Rule {
 ///
 /// **Contains no vendor name and no parameter name.** It walks whatever it is
 /// handed; teaching it a new parameter is a [`RULES`] row, not an edit here.
-pub fn translate(model: &str, knobs: Vec<Knob>) -> Vec<(String, serde_json::Value)> {
+pub fn translate(
+    endpoint: &str,
+    model: &str,
+    knobs: Vec<Knob>,
+) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
     for knob in knobs {
-        match rule_for(model, knob.name) {
+        match rule_for(endpoint, model, knob.name) {
             Rule::Omit => {}
             Rule::Free => out.push((knob.name.to_string(), knob.value)),
             Rule::RenameTo(name) => out.push((name.to_string(), knob.value)),
@@ -389,26 +404,78 @@ pub fn parameter_blamed_by(body: &str, sent: &[String]) -> Option<String> {
 /// costs one round-trip per model, which is the same price a cold start pays
 /// anyway, and it means a vendor that fixes a restriction is not remembered as
 /// broken forever.
-fn learned_omissions() -> std::sync::RwLockReadGuard<'static, HashSet<(String, String)>> {
+fn learned_omissions() -> std::sync::RwLockReadGuard<'static, HashSet<(String, String, String)>> {
     learned_store()
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Records that `model` rejects `parameter`, so the next request omits it
-/// without spending a round-trip.
-pub fn remember_omit(model: &str, parameter: &str) {
+/// Records that `model` **at `endpoint`** rejects `parameter`, so the next
+/// request there omits it without spending a round-trip.
+///
+/// **Keyed on the endpoint as well as the model, because that is who answered.**
+/// A model id is not unique across endpoints: two OpenAI-compatible gateways
+/// both publishing `gpt-4o` are two different services, and one of them
+/// rejecting `max_tokens` says nothing about the other. Keyed on the model
+/// alone, one gateway's 400 silently dropped that parameter from every later
+/// request for that id — in any company on this host, since the cache is
+/// process-wide — and dropping an output cap is a bill, not just a difference.
+pub fn remember_omit(endpoint: &str, model: &str, parameter: &str) {
     let mut set = learned_store()
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    set.insert((model.to_ascii_lowercase(), parameter.to_string()));
+    set.insert((
+        endpoint_scope(endpoint),
+        model.to_ascii_lowercase(),
+        parameter.to_string(),
+    ));
+}
+
+/// The part of a URL that identifies the service, for the learned-omission key.
+///
+/// Scheme, host, port **and base path**, with the operation stripped: two
+/// requests differ in `/chat/completions` vs `/responses`, which is the same
+/// service answering two ways, and they should share what was learnt. What must
+/// not share it is `/vendor-a/v1` and `/vendor-b/v1` on one host — a path-routed
+/// gateway is how a single origin fronts several upstreams, and that is the
+/// arrangement most likely to disagree about a parameter in the first place.
+///
+/// Query and fragment go: `catalogue::catalog_query` appends shape parameters
+/// that say nothing about who is answering.
+///
+/// Anything that will not parse as a URL is used whole and lowercased. A key
+/// that is merely too specific costs one round-trip; one that is too broad is
+/// the bug this exists to close.
+fn endpoint_scope(endpoint: &str) -> String {
+    /// Suffixes that name an *operation* rather than a service.
+    const OPERATIONS: &[&str] = &[
+        "/chat/completions",
+        "/completions",
+        "/responses",
+        "/messages",
+        "/models",
+    ];
+    let lowered = endpoint.trim().to_ascii_lowercase();
+    let Some((scheme, rest)) = lowered.split_once("://") else {
+        return lowered;
+    };
+    let path_and_authority = rest.split(['?', '#']).next().unwrap_or(rest);
+    let trimmed = path_and_authority.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return lowered;
+    }
+    let base = OPERATIONS
+        .iter()
+        .find_map(|op| trimmed.strip_suffix(op))
+        .unwrap_or(trimmed);
+    format!("{scheme}://{}", base.trim_end_matches('/'))
 }
 
 /// The one cell the reader and the writer share. A single `OnceLock` rather than
 /// one per accessor — two cells would each initialise their own empty set, and
 /// everything written through one would be invisible to the other.
-fn learned_store() -> &'static RwLock<HashSet<(String, String)>> {
-    static LEARNED: OnceLock<RwLock<HashSet<(String, String)>>> = OnceLock::new();
+fn learned_store() -> &'static RwLock<HashSet<(String, String, String)>> {
+    static LEARNED: OnceLock<RwLock<HashSet<(String, String, String)>>> = OnceLock::new();
     LEARNED.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
@@ -416,12 +483,16 @@ fn learned_store() -> &'static RwLock<HashSet<(String, String)>> {
 mod tests {
     use super::*;
 
+    /// One endpoint for the table tests: the rules under test are the static
+    /// ones, and only a learned omission is endpoint-scoped.
+    const AT: &str = "https://api.example/v1";
+
     #[test]
     fn an_intent_with_no_opinion_puts_nothing_on_the_wire() {
         // The original defect, stated as intent: `Default` is "no opinion", and
         // `unwrap_or(0.0)` turned it into the most opinionated value there is.
         assert!(Sampling::Default.knobs().is_empty());
-        assert!(translate("claude-sonnet-5", Sampling::Default.knobs()).is_empty());
+        assert!(translate(AT, "claude-sonnet-5", Sampling::Default.knobs()).is_empty());
     }
 
     #[test]
@@ -430,7 +501,7 @@ mod tests {
         // temperature but 1.0, so a caller asking for determinism used to get a
         // hard 400. Now the request goes out, and `seed` carries what
         // repeatability is available.
-        let fields = translate("claude-sonnet-5", Sampling::Deterministic.knobs());
+        let fields = translate(AT, "claude-sonnet-5", Sampling::Deterministic.knobs());
         let by_name: std::collections::HashMap<_, _> = fields.into_iter().collect();
         assert_eq!(by_name["temperature"], serde_json::json!(1.0));
         assert!(
@@ -442,20 +513,24 @@ mod tests {
     #[test]
     fn the_same_intent_is_spelled_differently_per_model() {
         // One intent, three dialects, no caller aware of any of them.
-        let anthropic = translate("anthropic/claude-opus-5", Sampling::Deterministic.knobs());
+        let anthropic = translate(
+            AT,
+            "anthropic/claude-opus-5",
+            Sampling::Deterministic.knobs(),
+        );
         assert!(
             anthropic
                 .iter()
                 .any(|(k, v)| k == "temperature" && *v == serde_json::json!(1.0))
         );
 
-        let openai = translate("gpt-6-astra", Sampling::Deterministic.knobs());
+        let openai = translate(AT, "gpt-6-astra", Sampling::Deterministic.knobs());
         assert!(
             !openai.iter().any(|(k, _)| k == "temperature"),
             "a reasoning model takes no temperature at all"
         );
 
-        let ordinary = translate("llama3:latest", Sampling::Deterministic.knobs());
+        let ordinary = translate(AT, "llama3:latest", Sampling::Deterministic.knobs());
         assert!(
             ordinary
                 .iter()
@@ -469,14 +544,14 @@ mod tests {
         // gateway. A rule that only matched one of the two would be right half
         // the time and silent about the other half.
         assert_eq!(
-            rule_for("claude-opus-5", "temperature"),
-            rule_for("anthropic/claude-opus-5", "temperature")
+            rule_for(AT, "claude-opus-5", "temperature"),
+            rule_for(AT, "anthropic/claude-opus-5", "temperature")
         );
     }
 
     #[test]
     fn a_rename_moves_the_value_and_drops_the_old_name() {
-        let fields = translate("gpt-5.6-sol", vec![Knob::new("max_tokens", 16384)]);
+        let fields = translate(AT, "gpt-5.6-sol", vec![Knob::new("max_tokens", 16384)]);
         assert_eq!(
             fields,
             vec![(
@@ -489,6 +564,7 @@ mod tests {
     #[test]
     fn a_clamp_brings_a_value_inside_the_range_rather_than_failing() {
         let fields = translate(
+            AT,
             "meta-llama/Llama-3.3-70B",
             vec![Knob::new("temperature", 1.8)],
         );
@@ -515,6 +591,7 @@ mod tests {
         // And the whole point: that intent, through the boundary, onto a model
         // that rejects every temperature — without a 400.
         let fields = translate(
+            AT,
             "claude-opus-5",
             Sampling::from_request(Some(DETERMINISTIC)).knobs(),
         );
@@ -531,7 +608,7 @@ mod tests {
         // gets exactly what the caller asked for, and the 400-learning layer
         // corrects us if that turns out to be wrong.
         assert_eq!(
-            rule_for("some-model-nobody-has-seen", "temperature"),
+            rule_for(AT, "some-model-nobody-has-seen", "temperature"),
             Rule::Free
         );
     }
@@ -595,9 +672,58 @@ mod tests {
         // dependency: a vendor that changes silently corrects us without a
         // release.
         let model = "learning-test-model-v1";
-        assert_eq!(rule_for(model, "top_p"), Rule::Free);
-        remember_omit(model, "top_p");
-        assert_eq!(rule_for(model, "top_p"), Rule::Omit);
-        assert!(translate(model, vec![Knob::new("top_p", 0.5)]).is_empty());
+        assert_eq!(rule_for(AT, model, "top_p"), Rule::Free);
+        remember_omit(AT, model, "top_p");
+        assert_eq!(rule_for(AT, model, "top_p"), Rule::Omit);
+        assert!(translate(AT, model, vec![Knob::new("top_p", 0.5)]).is_empty());
+    }
+
+    #[test]
+    fn a_rejection_is_learned_about_the_endpoint_that_made_it() {
+        // A model id is not unique across endpoints. Two OpenAI-compatible
+        // gateways both publishing one id are two services, and one of them
+        // refusing a parameter says nothing about the other — keyed on the
+        // model alone, one gateway's 400 dropped that parameter from every
+        // later request for that id in every company on this host, and for
+        // `max_tokens` that is a bill rather than a difference.
+        let model = "endpoint-scope-test-model-v1";
+        let one = "https://gateway-one.example/v1";
+        let two = "https://gateway-two.example/v1";
+
+        remember_omit(one, model, "max_tokens");
+        assert_eq!(rule_for(one, model, "max_tokens"), Rule::Omit);
+        assert_eq!(
+            rule_for(two, model, "max_tokens"),
+            Rule::Free,
+            "the other gateway never rejected anything"
+        );
+
+        // Same service, different operation: `/chat/completions` and
+        // `/responses` are one endpoint answering two ways, so what one learns
+        // the other knows.
+        for operation in [
+            "https://gateway-one.example/v1/chat/completions",
+            "https://gateway-one.example/v1/responses",
+            "https://gateway-one.example/v1/",
+        ] {
+            assert_eq!(
+                rule_for(operation, model, "max_tokens"),
+                Rule::Omit,
+                "{operation} is the same service"
+            );
+        }
+
+        // But a path-routed gateway is several services behind one origin, and
+        // that is the arrangement most likely to disagree about a parameter at
+        // all — one upstream's 400 says nothing about the next.
+        assert_eq!(
+            rule_for(
+                "https://gateway-one.example/vendor-b/v1",
+                model,
+                "max_tokens"
+            ),
+            Rule::Free,
+            "another upstream behind the same host has not rejected anything"
+        );
     }
 }
