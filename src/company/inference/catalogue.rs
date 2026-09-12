@@ -96,10 +96,17 @@ pub struct CloudProvider {
 /// ## The endpoints are presets, not a pattern
 ///
 /// Look at the paths: `/openai/v1`, `/inference/v1`, `/v1beta/openai`,
-/// `/v1/openai`, `/v3/openai`, `/api/paas/v4`, `/api/gateway`, `/step_plan/v1`.
-/// Any attempt to derive an endpoint as `https://{host}/v1` is wrong for
-/// roughly a third of this list. That is why each row carries its own URL and
-/// why the cloud category never asks the operator to type one.
+/// `/v1/openai`, `/v3/openai`, `/api/paas/v4`, `/api/gateway`, and DeepSeek's
+/// bare host with no version segment at all. Any attempt to derive an endpoint
+/// as `https://{host}/v1` is wrong for roughly a third of this list. That is why
+/// each row carries its own URL and why the cloud category never asks the
+/// operator to type one.
+///
+/// **That last part is also a limitation**, and the rows it bites are named in
+/// `docs/modules/inference/provider-contracts.md`: a preset is one value, so a
+/// vendor running two products or two regions behind different paths can be
+/// served for at most one of them. A GLM Coding Plan key and a StepFun Step Plan
+/// key both have nowhere to go today.
 pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
     CloudProvider {
         slug: "openai",
@@ -171,14 +178,29 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
     CloudProvider {
         slug: "deepseek",
         label: "DeepSeek",
-        endpoint: "https://api.deepseek.com/v1",
+        // The bare host, which is the only form DeepSeek documents. Its landing
+        // page names exactly two base URLs — `https://api.deepseek.com` and
+        // `https://api.deepseek.com/anthropic` — and its listing reference shows
+        // `GET /models` with no `/v1`. The old "you may also use /v1" sentence
+        // is gone from the current docs; whether `/v1` still resolves is
+        // undocumented, and shipping the form the vendor does not publish is how
+        // a base-URL defect reads to an operator as a model problem, against a
+        // `const` they cannot edit.
+        endpoint: "https://api.deepseek.com",
         auth: AuthStyle::Bearer,
         key_placeholder: Some("sk-..."),
     },
     CloudProvider {
         slug: "together",
         label: "Together AI",
-        endpoint: "https://api.together.xyz/v1",
+        // `.ai`, not the `.xyz` this shipped. Every current Together page — the
+        // quickstart, the OpenAI-compatibility guide, the chat reference and the
+        // OpenAPI spec — uses `https://api.together.ai/v1`; `.xyz` appears on no
+        // live page, and the search results carrying it resolve to stale index
+        // snapshots. Whether `.xyz` is deprecated is undocumented in both
+        // directions, so this is latent rather than broken — but it is the same
+        // shape as the MiniMax defect already fixed below.
+        endpoint: "https://api.together.ai/v1",
         auth: AuthStyle::Bearer,
         key_placeholder: None,
     },
@@ -243,7 +265,15 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
     CloudProvider {
         slug: "stepfun",
         label: "StepFun",
-        endpoint: "https://api.stepfun.ai/step_plan/v1",
+        // **Contested, and settled on the vendor's own documentation.** StepFun's
+        // platform docs show `https://api.stepfun.ai/v1/chat/completions` with no
+        // `/step_plan` segment; an OpenCode issue reports the opposite, that a
+        // Step Plan key works only at `/step_plan/v1`. Both can be true if they
+        // are two products, and a single `const` can be right for at most one of
+        // them — so it ships the one the vendor publishes rather than the one a
+        // third party reports. A Step Plan subscriber has no way to reach their
+        // own endpoint; see `docs/modules/inference/provider-contracts.md`.
+        endpoint: "https://api.stepfun.ai/v1",
         auth: AuthStyle::Bearer,
         key_placeholder: None,
     },

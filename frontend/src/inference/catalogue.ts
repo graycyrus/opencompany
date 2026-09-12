@@ -54,7 +54,7 @@ export interface CloudProvider {
  *
  * The endpoints are presets rather than a pattern, and the paths are the reason:
  * `/openai/v1`, `/inference/v1`, `/v1beta/openai`, `/v1/openai`, `/v3/openai`,
- * `/api/paas/v4`, `/api/gateway`, `/step_plan/v1`. Deriving one as
+ * `/api/paas/v4`, `/api/gateway`, and DeepSeek's bare host. Deriving one as
  * `https://{host}/v1` is wrong for about a third of this list, which is why the
  * cloud category never asks the operator to type an endpoint.
  *
@@ -130,14 +130,14 @@ export const CLOUD_PROVIDERS: readonly CloudProvider[] = [
   {
     slug: "deepseek",
     label: "DeepSeek",
-    endpoint: "https://api.deepseek.com/v1",
+    endpoint: "https://api.deepseek.com",
     auth: "bearer",
     keyPlaceholder: "sk-...",
   },
   {
     slug: "together",
     label: "Together AI",
-    endpoint: "https://api.together.xyz/v1",
+    endpoint: "https://api.together.ai/v1",
     auth: "bearer",
   },
   {
@@ -186,7 +186,7 @@ export const CLOUD_PROVIDERS: readonly CloudProvider[] = [
   {
     slug: "stepfun",
     label: "StepFun",
-    endpoint: "https://api.stepfun.ai/step_plan/v1",
+    endpoint: "https://api.stepfun.ai/v1",
     auth: "bearer",
   },
   {
