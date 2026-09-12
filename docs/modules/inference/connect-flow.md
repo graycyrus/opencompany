@@ -251,6 +251,12 @@ valid credentials.
                           │ no                         │  BEFORE endpoint: the
                           ▼                            │  endpoint branch matches
         ┌───────────────────────────────────────┐      │  a bare "not found"
+        │ quota / insufficient / billing / 429  │──▶ quota     (non-destructive)
+        │ / rate limit                          │
+        └───────────────────────────────────────┘
+                          │ no
+                          ▼
+        ┌───────────────────────────────────────┐
         │ 404 / not found / DNS / refused       │──▶ endpoint  (non-destructive)
         └───────────────────────────────────────┘
                           │ no

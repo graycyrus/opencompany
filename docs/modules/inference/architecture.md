@@ -109,11 +109,18 @@ loopback, link-local, metadata addresses, and a redirect target.
     types.ts            Provider, ProviderRef, RoutingMap, ProbeClass
     routing.ts          inferRoutingMode, refSignature, scrub-on-remove   PURE
     classify.ts         probe-class -> copy                                PURE
+    connect.ts          what each category asks for; the row's menu        PURE
+    model-filter.ts     the picker's filter                                PURE
+    proxy-compat.ts     whether an override is sendable through the proxy  PURE
+    use-inference.ts    the one read, the writes, and where they land
+    ProvidersTab.tsx    the Providers tab
     ProviderList.tsx    the connected rows
+    ProviderConnectDialog.tsx
     AddProviderDialog.tsx
-    ProviderKeyDialog.tsx
+    RemoveProviderDialog.tsx
+    ModelField.tsx
+    provider-icon.tsx
     RoutingTab.tsx
-    WorkloadRow.tsx
     WorkloadModelDialog.tsx
 ```
 

@@ -16,6 +16,7 @@ is what stops the sixth.
 |---|---|
 | **V** | Read in the vendor's own documentation. |
 | **S** | Secondary source only — an integrator's docs, an issue tracker. **A lead, not a fact.** Do not build behaviour on one. |
+| **I** | Inferred from a response we observed rather than from anything published. Weaker than **S**: it is one endpoint on one day. |
 | **ND** | Not documented anywhere reachable. Not "probably fine" — unknown. |
 
 Where a cell would be a guess it says ND. Three vendors we ship
