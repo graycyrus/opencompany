@@ -961,6 +961,16 @@ pub async fn load_managed_key(
 /// company by company and can be deleted outright once nothing reads it. That is
 /// lazy convergence rather than a migration: no flag day, and no half-migrated
 /// state on a store with no transaction.
+///
+/// **A named harness reads its own slot first.** Step 1 is company-wide, so for
+/// a harness with inference of its own it is a *different owner's* credential
+/// wearing the same slug: a company that connects OpenRouter would otherwise
+/// have its key substituted for the harness's, and a harness with its own
+/// `base_url` would present it to a different gateway. The convergence order is
+/// right for the company's own resolution and wrong one scope in, so the scope
+/// decides which of the two comes first. A named harness holding no key of its
+/// own still inherits the company's, which is what it did before harness scopes
+/// existed and what a harness that declared only a model expects.
 pub async fn load_inference_key_scoped(
     company: &CompanyId,
     secrets: &dyn SecretStore,
@@ -968,6 +978,12 @@ pub async fn load_inference_key_scoped(
     override_key: Option<&str>,
     scope: &HarnessScope,
 ) -> Result<String> {
+    if !scope.is_default {
+        let own = load_key_scoped(company, secrets, override_key, scope).await?;
+        if !own.trim().is_empty() {
+            return Ok(own);
+        }
+    }
     if let Some(SecretValue(raw)) = secrets.get(company, &provider_key_key(slug)).await?
         && !raw.trim().is_empty()
     {
@@ -3430,6 +3446,59 @@ mod tests {
         .unwrap()
         .expect("a harness with nothing of its own inherits");
         assert_eq!(theirs.base_url, "https://first.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_named_harness_reads_its_own_credential_before_the_company_wide_one() {
+        // Step 1 of the chain is company-wide, so for a harness with inference
+        // of its own it is a different owner's credential wearing the same
+        // slug. A company connecting OpenRouter would otherwise have its key
+        // substituted for the harness's — and a harness with its own base_url
+        // would present it to a different gateway.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let named = HarnessScope::named("deep");
+
+        secrets
+            .set(
+                &company,
+                &provider_key_key("openrouter"),
+                SecretValue("sk-company".into()),
+            )
+            .await
+            .unwrap();
+        // With nothing of its own, the harness inherits — which is what it did
+        // before harness scopes existed.
+        assert_eq!(
+            load_inference_key_scoped(&company, &secrets, "openrouter", None, &named)
+                .await
+                .unwrap(),
+            "sk-company"
+        );
+
+        store_key_scoped(&company, &secrets, "sk-deep", &named)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_inference_key_scoped(&company, &secrets, "openrouter", None, &named)
+                .await
+                .unwrap(),
+            "sk-deep",
+            "the harness's own key wins once it has one"
+        );
+        // And the company's own resolution is untouched by either.
+        assert_eq!(
+            load_inference_key_scoped(
+                &company,
+                &secrets,
+                "openrouter",
+                None,
+                &HarnessScope::default()
+            )
+            .await
+            .unwrap(),
+            "sk-company"
+        );
     }
 
     #[tokio::test]
