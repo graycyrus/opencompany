@@ -84,8 +84,18 @@ export interface ProviderRowAction {
  * against nothing would be a destructive-looking no-op.
  */
 export function providerMenu(
-  provider: Pick<Provider, "kind" | "enabled" | "keyConfigured"> & { isDefault?: boolean },
+  provider: Pick<Provider, "kind" | "enabled" | "keyConfigured"> & {
+    isDefault?: boolean;
+    legacy?: boolean;
+  },
 ): ProviderRowAction[] {
+  // **The company's pre-list configuration has no actions here.** It lives in
+  // the flat `inference/config` slot, and every write route refuses that
+  // origin — so offering Edit, Replace key and Remove produced three buttons
+  // whose only outcome was an error naming a form this page replaced. An empty
+  // menu plus the row's own explanation is the honest surface until the write
+  // routes can accept it.
+  if (provider.legacy) return [];
   const ask = credentialAsk(provider.kind);
   const actions: ProviderRowAction[] = [
     { id: "edit", label: ask.needsEndpoint ? "Edit endpoint" : "Edit" },

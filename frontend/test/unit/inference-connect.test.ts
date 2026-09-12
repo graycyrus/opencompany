@@ -241,4 +241,22 @@ describe("providerMenu", () => {
     expect(labels.removeKey).toBe("Remove key");
     expect(labels.remove).toBe("Remove provider");
   });
+  it("offers nothing for the company's pre-list configuration", () => {
+    // Entry zero lives in the flat `inference/config` slot and every write
+    // route refuses that origin, so Edit, Replace key and Remove were three
+    // buttons whose only outcome was an error naming a form this page replaced.
+    expect(
+      providerMenu({
+        kind: "openrouter",
+        enabled: true,
+        keyConfigured: true,
+        legacy: true,
+      }),
+    ).toEqual([]);
+    // And the same row without that origin is a normal one.
+    expect(
+      providerMenu({ kind: "openrouter", enabled: true, keyConfigured: true }).length,
+    ).toBeGreaterThan(0);
+  });
+
 });

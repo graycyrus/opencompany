@@ -417,6 +417,14 @@ struct ProviderDto {
     enabled: bool,
     /// Whether a credential is stored. **Never the credential.**
     key_configured: bool,
+    /// Whether this row is the company's pre-list configuration (entry zero).
+    ///
+    /// Sent because the write routes refuse it and the console otherwise has no
+    /// way to know: it offered Edit, Replace key and Remove on a row where all
+    /// three come back as an error. It is not a *kind* — entry zero can be any
+    /// kind — it is where the record lives, and that is the thing the routes
+    /// branch on.
+    legacy: bool,
     /// Whether this is the provider an **unset** workload goes through.
     ///
     /// The *resolved* answer, not the raw marker: a company that has never said
@@ -494,6 +502,7 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
         });
         out.push(ProviderDto {
             is_default: primary.as_deref() == Some(provider.slug.as_str()),
+            legacy: provider.origin == store::ProviderOrigin::EntryZero,
             id: provider.id.as_str().to_string(),
             slug: provider.slug,
             label: provider.label,

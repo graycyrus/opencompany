@@ -351,6 +351,9 @@ function ProviderRow({
   onMakeDefault: (provider: Provider) => void;
   testState: (slug: string) => TestState;
 }) {
+  // Every action this row could offer is refused by the write routes for the
+  // company's pre-list configuration, so it offers none — see `providerMenu`.
+  const actions = providerMenu(provider);
   return (
     <li
       className="flex items-center gap-3 px-4 py-3"
@@ -382,12 +385,25 @@ function ProviderRow({
 
       <Switch
         checked={provider.enabled}
-        disabled={!canManage || busy}
+        disabled={!canManage || busy || provider.legacy === true}
         aria-label={`${provider.label} enabled`}
         data-testid={`inference-provider-${provider.slug}-toggle`}
         onCheckedChange={(next) => onToggle(provider, next)}
       />
 
+      {/* No menu rather than an empty one: a trigger that opens onto nothing
+          reads as a page that failed to load, and every item this row could
+          carry is refused by the write routes. */}
+      {actions.length === 0 && (
+        <span
+          className="text-xs text-muted-foreground"
+          data-testid={`inference-provider-${provider.slug}-unmanaged`}
+        >
+          Set in this company&rsquo;s config
+        </span>
+      )}
+
+      {actions.length > 0 && (
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
@@ -406,7 +422,7 @@ function ProviderRow({
             the same `credentialAsk` the connect dialog uses, so a local runtime
             or a CLI login is never offered a key it does not have. */}
         <DropdownMenuContent align="end">
-          {providerMenu(provider).map((action) => (
+          {actions.map((action) => (
             <DropdownMenuItem
               key={action.id}
               variant={action.destructive ? "destructive" : undefined}
@@ -431,6 +447,7 @@ function ProviderRow({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+      )}
     </li>
   );
 }
