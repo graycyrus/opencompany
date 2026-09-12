@@ -16,7 +16,7 @@
 import { categoryOf } from "./catalogue";
 import { MANAGED_OPTION_SLUG } from "./connect";
 import { overrideIsSendable } from "./proxy-compat";
-import type { Provider, ProviderRef, RoutingMap, Workload } from "./types";
+import type { Provider, ProviderRef, RoutingMap, RoutingMode, Workload } from "./types";
 
 /**
  * The workloads with a row of their own — one per abstract tier the runtime
@@ -245,18 +245,43 @@ export function refFor(routing: RoutingMap, workload: Workload): ProviderRef {
 }
 
 /*
- * `inferRoutingMode` used to live here, a faithful port of the host's
- * `infer_routing_mode`. **It was never called.** The rendered mode comes from
- * the host's `RoutesDto.mode` (`use-inference.ts`), so this copy decided
- * nothing, rendered nothing, and was pinned by six unit tests — a green suite
- * over a rule the product did not follow. It is deleted rather than corrected:
- * two implementations of one rule, only one of which ships, is how the console
- * came to disagree with the turn path about where work goes.
- *
- * `orphanedRoutes` was the same shape and went the same way. The host's
- * `orphaned_routes` reports orphans on `GET …/inference/routes` and the console
- * renders `state.orphaned`.
+ * `orphanedRoutes` used to live here, a faithful port of the host's
+ * `orphaned_routes`. **It was never called** — the host reports orphans on
+ * `GET …/inference/routes` and the console renders `state.orphaned` — so it
+ * decided nothing, rendered nothing, and was pinned by unit tests that made a
+ * rule the product did not follow look covered. Deleted rather than corrected.
  */
+
+/**
+ * Which mode the current routes describe.
+ *
+ * **Inferred, never stored.** A mode field would be a fifth thing that can
+ * disagree with the four routes, and the routes are the truth.
+ *
+ * Normally the rendered mode is the host's — `RoutesDto.mode`, which calls
+ * `resolve::infer_routing_mode`. This exists for the two paths in
+ * `use-inference.ts` where that response is the thing that did not arrive: a
+ * member is refused `GET …/inference/routes` with a 403, and a provider write's
+ * follow-up re-read can fail. Both still hold the persisted table, on the
+ * status the other call answered with, so the mode is derived from the same
+ * four routes the host would have derived it from rather than left at whatever
+ * it was before.
+ *
+ * `managedResolves` is the host's `managed_resolves` — `status.managed.configured`
+ * — and it is the whole difference between `managed` and `unset`: an all-default
+ * table with nothing behind Managed is not a company that chose Managed, it is a
+ * company that has not chosen. Keep this in step with `infer_routing_mode` in
+ * `src/company/inference/resolve.rs`; the tests below mirror its own.
+ */
+export function inferRoutingMode(routing: RoutingMap, managedResolves: boolean): RoutingMode {
+  const refs = WORKLOADS.map((w) => refFor(routing, w));
+  if (refs.every((r) => r.kind === "managed" || r.kind === "default")) {
+    return managedResolves ? "managed" : "unset";
+  }
+  const first = refSignature(refs[0]);
+  if (refs.every((r) => refSignature(r) === first)) return "own";
+  return "advanced";
+}
 
 /**
  * The routes a removal orphans, and the map with them reset.

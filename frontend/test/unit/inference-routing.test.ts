@@ -9,6 +9,7 @@ import {
   WORKLOAD_TIER,
   applyToEveryWorkload,
   formatRef,
+  inferRoutingMode,
   MANAGED_TARGET_LABEL,
   UNSET_TARGET,
   modelTarget,
@@ -35,7 +36,7 @@ import {
   tierLabel,
 } from "@/inference/routing";
 import type { RemovalImpact } from "@/inference/routing";
-import type { Provider, RoutingMap } from "@/inference/types";
+import type { Provider, ProviderRef, RoutingMap } from "@/inference/types";
 
 /**
  * Manage Routing, as decisions.
@@ -118,16 +119,59 @@ describe("the hand-editable route grammar", () => {
 });
 
 /*
- * The six tests that pinned `inferRoutingMode` are gone with the function.
- * They were a green suite over a rule the product did not follow: the rendered
- * mode has always come from the host's `RoutesDto.mode`, and the console's copy
- * was never called by anything. The rule itself now lives in exactly one place,
- * `infer_routing_mode` in `src/company/inference/resolve.rs`, and is pinned
- * there — including the case these tests asserted the wrong answer for, an empty
- * table on a company where Managed resolves to nothing.
- *
- * `orphanedRoutes` and its test went the same way, for the same reason.
+ * `orphanedRoutes` and its test are gone with the function. It was a green
+ * suite over a rule the product did not follow: the host reports orphans on
+ * `GET …/inference/routes` and the console renders `state.orphaned`, so the
+ * console's copy was never called by anything.
  */
+
+describe("inferring the mode the routes describe", () => {
+  // The rendered mode is normally the host's. This is the fallback
+  // `use-inference` uses when `GET …/inference/routes` is the response that did
+  // not arrive — a member's 403, or a failed re-read after a provider write —
+  // so it has to answer what `infer_routing_mode` would have answered. These
+  // mirror its own tests in `src/company/inference/resolve.rs`.
+  const every = (ref: ProviderRef): RoutingMap =>
+    Object.fromEntries(WORKLOADS.map((w) => [w, ref])) as RoutingMap;
+
+  it("reads an all-default table as Managed only when Managed resolves", () => {
+    // The distinction the `unset` mode exists for: a company that has chosen
+    // nothing and has nothing behind Managed has not chosen Managed, and saying
+    // it did is the claim that put a selected radio on a card badged Not set up.
+    expect(inferRoutingMode({} as RoutingMap, true)).toBe("managed");
+    expect(inferRoutingMode({} as RoutingMap, false)).toBe("unset");
+  });
+
+  it("treats an explicit managed row beside unset ones the same way", () => {
+    const partial = { chat: { kind: "managed" } } as RoutingMap;
+    expect(inferRoutingMode(partial, true)).toBe("managed");
+    expect(inferRoutingMode(partial, false)).toBe("unset");
+  });
+
+  it("reads four rows pointing at one provider as Own, whatever Managed does", () => {
+    const own = every({ kind: "cloud", providerSlug: "acme", model: "gpt-5" });
+    expect(inferRoutingMode(own, true)).toBe("own");
+    expect(inferRoutingMode(own, false)).toBe("own");
+  });
+
+  it("ignores an absent versus undefined model when comparing rows", () => {
+    // `refSignature`, not structural equality — the reason that helper exists.
+    const own = {
+      ...every({ kind: "cloud", providerSlug: "acme" }),
+      chat: { kind: "cloud", providerSlug: "acme", model: undefined },
+    } as RoutingMap;
+    expect(inferRoutingMode(own, true)).toBe("own");
+  });
+
+  it("reads rows that disagree as Advanced", () => {
+    const mixed = {
+      ...every({ kind: "cloud", providerSlug: "acme" }),
+      vision: { kind: "managed" },
+    } as RoutingMap;
+    expect(inferRoutingMode(mixed, true)).toBe("advanced");
+    expect(inferRoutingMode(mixed, false)).toBe("advanced");
+  });
+});
 
 describe("scrubbing the routes a removal orphans", () => {
   it("matches a cloud provider precisely by slug", () => {

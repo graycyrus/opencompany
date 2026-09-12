@@ -135,6 +135,7 @@ export function useInference(
             Object.fromEntries(
               WORKLOADS.map((w) => [w, parseRef(readable[WORKLOAD_TIER[w]] ?? "")]),
             ) as RoutingMap,
+            next.managed?.configured === true,
           ),
         );
         // Orphans are an admin's to clear, and this reader cannot. Saying
@@ -198,6 +199,7 @@ export function useInference(
               Object.fromEntries(
                 WORKLOADS.map((w) => [w, parseRef(persisted[WORKLOAD_TIER[w]] ?? "")]),
               ) as RoutingMap,
+              result.status.managed?.configured === true,
             ),
           );
           // Orphans are only known to the routing route, and we did not get it.
