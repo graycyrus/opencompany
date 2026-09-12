@@ -761,17 +761,29 @@ async fn delete_provider(
         .filter(|p| p.slug != provider.slug)
         .collect();
     let reset = resolve::scrub_removed(&mut routes, &provider, &remaining);
+
+    // **Computed before the removal, written after it.** The scrub rules need
+    // the provider list as it will be *afterwards*, which is why the
+    // calculation happens here — but writing the scrubbed table first meant a
+    // failed removal returned an error with the provider still on screen and
+    // the routes that named it already reset, which is a state nobody asked
+    // for and nothing reports.
+    //
+    // Written after, the two failure modes are both readable: a failed removal
+    // changes nothing, and a failed route write leaves routes naming a provider
+    // that is gone — which `orphaned_routes` already finds and the Routing tab
+    // already shows.
+    //
+    // `delete_provider` clears the credential first and refuses the removal if
+    // that clear fails, which is the half-state the operator can see and act on.
+    store::delete_provider(runtime.id(), secrets, &provider.slug)
+        .await
+        .map_err(ApiError)?;
     if !reset.is_empty() {
         store::save_routes(runtime.id(), secrets, &routes)
             .await
             .map_err(ApiError)?;
     }
-
-    // Clears the credential first and refuses the removal if that clear fails,
-    // which is the half-state the operator can actually see and act on.
-    store::delete_provider(runtime.id(), secrets, &provider.slug)
-        .await
-        .map_err(ApiError)?;
     if let Err(err) = store::forget_health(runtime.id(), secrets, &provider.slug).await {
         tracing::warn!(
             company = %runtime.id(),
