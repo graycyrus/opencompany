@@ -7,6 +7,8 @@ import {
   MANAGED_LABEL,
   composioForm,
   composioRows,
+  credentialDialogBlurb,
+  credentialDialogTitle,
   endpointHost,
   managedSourceOf,
   managedSubline,
@@ -478,5 +480,69 @@ describe("composioForm", () => {
     expect(
       composioForm({ row: "managed", action: "replace" }, cleared),
     ).toBeNull();
+  });
+});
+
+describe("the credential dialog's copy", () => {
+  // The form is a modal now, and a modal with a generic heading is worse than
+  // the inline card it replaces: the rows that opened it are behind an overlay,
+  // so the title is the only thing left saying which route this credential is
+  // for.
+  const form = (row: ComposioRowId, action: "add" | "replace") =>
+    composioForm(
+      { row, action },
+      composioRows(
+        status(
+          row === "byok" && action === "replace"
+            ? { mode: "byok", credentialSource: "static" }
+            : action === "replace"
+              ? { mode: "managed", credentialSource: "static" }
+              : { mode: "managed", credentialSource: "attested" },
+        ),
+      ),
+    )!;
+
+  it("names the route, and says add or replace", () => {
+    expect(credentialDialogTitle(form("byok", "add"))).toBe(
+      "Connect this company's own Composio account",
+    );
+    expect(credentialDialogTitle(form("byok", "replace"))).toBe(
+      "Replace this company's Composio API key",
+    );
+    expect(credentialDialogTitle(form("managed", "add"))).toBe(
+      "Add a token for the managed route",
+    );
+    expect(credentialDialogTitle(form("managed", "replace"))).toBe(
+      "Replace the token for the managed route",
+    );
+  });
+
+  it("never titles a dialog with the field's own label", () => {
+    // The popup takes its accessible name from this string, so a title
+    // containing the field's label makes `getByLabel(/Composio token/)` match
+    // both the dialog and the input inside it — which is a strict-mode
+    // violation in the e2e that rotates the managed token, not a cosmetic
+    // complaint.
+    for (const row of ["byok", "managed"] as const) {
+      for (const action of ["add", "replace"] as const) {
+        expect(credentialDialogTitle(form(row, action))).not.toContain(
+          "Composio token",
+        );
+      }
+    }
+  });
+
+  it("says what storing it does, per route", () => {
+    expect(credentialDialogBlurb(form("byok", "add"))).toContain(
+      "instead of the managed route's",
+    );
+    expect(credentialDialogBlurb(form("managed", "add"))).toContain(
+      "this company only",
+    );
+    // The blurb is about the route, so rotating does not change it — what
+    // changes is the title and the button.
+    expect(credentialDialogBlurb(form("managed", "replace"))).toBe(
+      credentialDialogBlurb(form("managed", "add")),
+    );
   });
 });

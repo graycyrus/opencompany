@@ -20,7 +20,13 @@ import {
 import type { ComposioSubmitOutcome } from "@/composio/classify";
 import { ComposioRowList } from "@/composio/ComposioRowList";
 import { ProbeAdvisory } from "@/composio/ProbeAdvisory";
-import { composioForm, composioRows, modeOf } from "@/composio/rows";
+import {
+  composioForm,
+  composioRows,
+  credentialDialogBlurb,
+  credentialDialogTitle,
+  modeOf,
+} from "@/composio/rows";
 import type {
   ComposioPending,
   ComposioRow,
@@ -33,6 +39,14 @@ import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -369,6 +383,20 @@ export function ComposioSection({
     setConfirmSwitch(false);
   }
 
+  /**
+   * Close the credential dialog, discarding what was typed into it.
+   *
+   * Every exit runs through here — Cancel, the X, Escape, a click on the
+   * backdrop — so none of them can leave a secret in state behind a closed
+   * modal, and none can leave `confirmSwitch` armed for the next opening.
+   */
+  function closeForm() {
+    setPending(null);
+    setSecret("");
+    setOutcome(null);
+    setConfirmSwitch(false);
+  }
+
   if (load === "unavailable") return null;
 
   // The composio-grant tri-state, narrowed the same way `ProvidersSection` does
@@ -453,13 +481,18 @@ export function ComposioSection({
             restart.
           </p>
 
-          {/* Rendered outside the form as well, because an advisory outlives it:
-              the key WAS stored, the form closed, and the sentence about the
-              failed check is the only thing left saying so. */}
-          {outcome && (!form || outcome.kind === "rejected") && (
+          {/* An advisory outlives the dialog: the key WAS stored, the dialog
+              closed on it, and this sentence is the only thing left saying the
+              check failed.
+
+              A REJECTION is the other half and does NOT render here — it keeps
+              the dialog open, and a message printed on the page behind a modal
+              overlay is a message nobody can read. It goes inside, next to the
+              field it is about. */}
+          {outcome && !form && (
             <ProbeAdvisory
               outcome={outcome}
-              skipOffered={skipOffered && !!form}
+              skipOffered={false}
               busy={busy}
               onSkip={() => submit(true)}
               onDismiss={() => setOutcome(null)}
@@ -481,18 +514,53 @@ export function ComposioSection({
             />
           )}
 
+          {/* The credential surface is a MODAL, and that is the fix rather
+              than the decoration.
+
+              It was an inline card appended to the bottom of this section —
+              after the rows, after the "takes effect next turn" line, after two
+              advisory slots. Clicking "Add a token" on a row near the top of a
+              scrolling page therefore rendered a form roughly a screenful below
+              the fold, with nothing scrolling to it: the operator pressed the
+              button, the page did not visibly move, and the honest reading of
+              that is "the button is broken". It was reported as exactly that.
+
+              A modal also matches what the action is. Pasting the credential
+              every agent in the company presents is not an edit alongside the
+              rows — it is one decision taken to the exclusion of the page
+              behind it, and it either lands or is refused before anything else
+              can be touched. Which is also why the host's answer is rendered in
+              here (`outcome`) instead of on the page underneath. */}
           {form && canManage && (
-            <Card>
-              <CardContent className="space-y-4">
+            <Dialog
+              open
+              onOpenChange={(next) => {
+                // A write in flight holds the dialog open: dismissing it now
+                // would take away the only place its answer is reported, while
+                // the credential lands anyway.
+                if (next || busy) return;
+                closeForm();
+              }}
+            >
+              <DialogContent
+                className="sm:max-w-md"
+                showCloseButton={!busy}
+                data-testid="composio-form-dialog"
+              >
+                <DialogHeader>
+                  <DialogTitle>{credentialDialogTitle(form)}</DialogTitle>
+                  <DialogDescription>
+                    {credentialDialogBlurb(form)}
+                  </DialogDescription>
+                </DialogHeader>
+
                 <div className="space-y-1.5">
                   <Label
                     htmlFor={form.credential}
                     className="text-xs"
                     data-testid="composio-form-label"
                   >
-                    {form.row === "byok"
-                      ? "Composio API key"
-                      : "Composio token"}
+                    {form.row === "byok" ? "Composio API key" : "Composio token"}
                     {form.rotating
                       ? " — stored; paste a new value to rotate"
                       : ""}
@@ -501,6 +569,7 @@ export function ComposioSection({
                     id={form.credential}
                     type="password"
                     autoComplete="off"
+                    disabled={busy}
                     placeholder={
                       form.row === "byok"
                         ? "ak_…"
@@ -508,15 +577,39 @@ export function ComposioSection({
                     }
                     value={secret}
                     onChange={(e) => setSecret(e.target.value)}
+                    // Enter submits, the way every other single-field dialog in
+                    // the console does. Never while the confirmation is up:
+                    // there the keyboard belongs to the choice being put, not
+                    // to the field behind it.
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      if (busy || confirmSwitch || !secret.trim()) return;
+                      e.preventDefault();
+                      requestSubmit();
+                    }}
                   />
                   {/* Where to get it, which is the one thing the field cannot
-                      say for itself. */}
+                      say for itself. What storing it *does* is the line under
+                      the title, so it is not repeated here. */}
                   <p className="text-xs text-muted-foreground">
                     {form.row === "byok"
                       ? "From your Composio dashboard at app.composio.dev. Stored on this host, never shown again."
-                      : "Overrides the managed route's credential for this company only. Stored on this host, never shown again."}
+                      : "Stored on this host, never shown again."}
                   </p>
                 </div>
+
+                {/* The refusal, where the operator is looking — and "add
+                    anyway", which answers a refused write and so can only be
+                    offered next to the field that was refused. */}
+                {outcome && (
+                  <ProbeAdvisory
+                    outcome={outcome}
+                    skipOffered={skipOffered}
+                    busy={busy}
+                    onSkip={() => submit(true)}
+                    onDismiss={() => setOutcome(null)}
+                  />
+                )}
 
                 {/* Said before the switch, not after: what it costs is not
                     readable off a row. */}
@@ -565,7 +658,15 @@ export function ComposioSection({
                     </div>
                   </div>
                 ) : (
-                  <div className="flex flex-wrap items-center gap-2">
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      data-testid="composio-form-cancel"
+                      onClick={closeForm}
+                    >
+                      Cancel
+                    </Button>
                     <Button
                       disabled={busy || !secret.trim()}
                       data-testid="composio-form-save"
@@ -580,22 +681,10 @@ export function ComposioSection({
                         ? `Rotate ${form.keyNoun}`
                         : `Save ${form.keyNoun}`}
                     </Button>
-                    <Button
-                      variant="outline"
-                      disabled={busy}
-                      data-testid="composio-form-cancel"
-                      onClick={() => {
-                        setPending(null);
-                        setSecret("");
-                        setOutcome(null);
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
+                  </DialogFooter>
                 )}
-              </CardContent>
-            </Card>
+              </DialogContent>
+            </Dialog>
           )}
         </>
       )}

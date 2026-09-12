@@ -233,6 +233,42 @@ export function composioRows(
 }
 
 /**
+ * The credential dialog's heading.
+ *
+ * Four branches, because the dialog is opened from four places and a modal that
+ * says only "Add a token" leaves the operator to remember which of two routes
+ * they clicked on. It names the route, not the field — the field is labelled
+ * underneath it.
+ *
+ * Deliberately never the exact phrase "Composio token": the popup's accessible
+ * name comes from this string, and a Playwright `getByLabel(/Composio token/)`
+ * would then match both the dialog and the input it is looking for.
+ */
+export function credentialDialogTitle(form: ComposioForm): string {
+  if (form.row === "byok") {
+    return form.rotating
+      ? "Replace this company's Composio API key"
+      : "Connect this company's own Composio account";
+  }
+  return form.rotating
+    ? "Replace the token for the managed route"
+    : "Add a token for the managed route";
+}
+
+/**
+ * The line under that heading: what storing this credential does.
+ *
+ * Says the consequence rather than repeating the field's own label, because
+ * that is the half an operator cannot read off the form — one of these two
+ * moves every agent in the company onto another Composio account.
+ */
+export function credentialDialogBlurb(form: ComposioForm): string {
+  return form.row === "byok"
+    ? "The key this company's agents will present to Composio, instead of the managed route's."
+    : "Used for this company only, in place of whatever the managed route would otherwise resolve to.";
+}
+
+/**
  * The credential form to render, or `null`.
  *
  * Checked against the rows rather than trusted: a pending form is an intent
