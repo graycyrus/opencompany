@@ -241,7 +241,7 @@ export function ApiKeyView({ client, company }: Props) {
   const account = status?.account;
 
   return (
-    <section className="space-y-4">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* The console's one page header (#1763) rather than a hand-rolled `h1`:
           a routed view that titles itself is how twelve heading styles happened
           the first time, and `page-header-adoption` is the test that says so. */}
@@ -251,263 +251,265 @@ export function ApiKeyView({ client, company }: Props) {
         description="The TinyHumans account this company acts and spends through."
       />
 
-      {/* The action, and the one sentence the action does not itself say: that
-          a single key covers both halves. Everything else the old page opened
-          with — what write-only means, what Clear does, what happens at zero —
-          described a control that was visible while it was being read. */}
-      <Card>
-        <CardContent className="flex flex-wrap items-center justify-between gap-3">
-          <div className="grid gap-0.5">
-            <h2 className="text-sm font-medium">{ACCOUNT_LABEL}</h2>
-            {/* The billing consequence, on the card carrying the button it is
-                true of, and visible before anything is saved. Connecting
-                writes `inference/key` and declares the managed provider as
-                well as the identity, so it moves the thinking bill; the paste
-                dialog says the narrower thing, because it does the narrower
-                thing. */}
-            <p className="text-xs text-muted-foreground">
-              One key for the apps your agents act through and the models they think with.
-              Connecting moves both onto this company&apos;s account.
-            </p>
-          </div>
-          {/* Whichever action is live, never both and never a dead one. The
-              grant is the short path where the host has a hub; the paste
-              dialog is the only route where it does not. */}
-          {action === "connect" && (
-            <ConnectTinyHumansButton
-              client={client}
-              company={company}
-              available={status?.hubLink ?? false}
-              canManage={canManage}
-              configured={configured}
-              hint={false}
-              onConnected={() => setGeneration((n) => n + 1)}
-            />
-          )}
-          {action === "key" && (
-            <Button type="button" onClick={() => setEditing(true)} data-testid="account-add-key">
-              <KeyRound className="size-4" />
-              {removable ? "Replace key" : "Add a key"}
-            </Button>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* The state. One row for the account, one for what is left on it. */}
-      <Card>
-        <CardContent className="px-0">
-          <h3 className="px-4 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Connected
-          </h3>
-
-          {load === "loading" ? (
-            <div className="px-4 pb-2">
-              <Skeleton className="h-10 rounded-md" />
-            </div>
-          ) : shape === "empty" ? (
-            // Nothing resolves anywhere. Not a row: there is no account to
-            // describe, and a row saying so would be a heading over blank space.
-            <div
-              className="flex flex-col items-start gap-3 px-4 py-6"
-              data-testid="account-empty"
-            >
-              {/* Scoped to what this credential actually governs. The old page
-                  said "agents cannot think and no provider can be connected"
-                  here, which is false on a company whose LLM page holds a
-                  provider key of its own — `inference/key` resolves without
-                  this one, so such a company thinks perfectly well and would
-                  be sent to fix something that is not broken. The exception is
-                  named rather than denied. */}
-              <p className="text-sm">
-                <span className="font-medium">No account connected yet.</span>{" "}
-                <span className="text-muted-foreground">
-                  Apps cannot be connected, and there is no TinyHumans balance to think
-                  against — though a provider key set on the LLM page still works.
-                </span>
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
+        {/* The action, and the one sentence the action does not itself say: that
+            a single key covers both halves. Everything else the old page opened
+            with — what write-only means, what Clear does, what happens at zero —
+            described a control that was visible while it was being read. */}
+        <Card>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3">
+            <div className="grid gap-0.5">
+              <h2 className="text-sm font-medium">{ACCOUNT_LABEL}</h2>
+              {/* The billing consequence, on the card carrying the button it is
+                  true of, and visible before anything is saved. Connecting
+                  writes `inference/key` and declares the managed provider as
+                  well as the identity, so it moves the thinking bill; the paste
+                  dialog says the narrower thing, because it does the narrower
+                  thing. */}
+              <p className="text-xs text-muted-foreground">
+                One key for the apps your agents act through and the models they think with.
+                Connecting moves both onto this company&apos;s account.
               </p>
-              {/* No button here, deliberately, though the list this borrows its
-                  shape from has one. The page it replaces carried the warning
-                  in its own source: two identical primary buttons on one screen
-                  leave a reader working out whether they do the same thing. On
-                  a list of providers the header action and the empty-state
-                  action are inches apart in a long card; on a page with one
-                  credential they are adjacent and identical, and the header
-                  card's action is already in view directly above this. The
-                  sentence stays — it is what the empty state is for. */}
             </div>
-          ) : (
-            <ul className="divide-y divide-border" data-testid="account-rows">
-              <li className="flex items-center gap-3 px-4 py-3" data-testid="account-row">
-                <Mark label={ACCOUNT_LABEL} />
-                <span className="grid min-w-0 flex-1 leading-tight">
-                  <span className="truncate text-sm font-medium">{ACCOUNT_LABEL}</span>
-                  <span
-                    className="truncate text-xs text-muted-foreground"
-                    data-testid="account-row-subline"
-                  >
-                    {accountSubline(load, status)}
+            {/* Whichever action is live, never both and never a dead one. The
+                grant is the short path where the host has a hub; the paste
+                dialog is the only route where it does not. */}
+            {action === "connect" && (
+              <ConnectTinyHumansButton
+                client={client}
+                company={company}
+                available={status?.hubLink ?? false}
+                canManage={canManage}
+                configured={configured}
+                hint={false}
+                onConnected={() => setGeneration((n) => n + 1)}
+              />
+            )}
+            {action === "key" && (
+              <Button type="button" onClick={() => setEditing(true)} data-testid="account-add-key">
+                <KeyRound className="size-4" />
+                {removable ? "Replace key" : "Add a key"}
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* The state. One row for the account, one for what is left on it. */}
+        <Card>
+          <CardContent className="px-0">
+            <h3 className="px-4 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+              Connected
+            </h3>
+
+            {load === "loading" ? (
+              <div className="px-4 pb-2">
+                <Skeleton className="h-10 rounded-md" />
+              </div>
+            ) : shape === "empty" ? (
+              // Nothing resolves anywhere. Not a row: there is no account to
+              // describe, and a row saying so would be a heading over blank space.
+              <div
+                className="flex flex-col items-start gap-3 px-4 py-6"
+                data-testid="account-empty"
+              >
+                {/* Scoped to what this credential actually governs. The old page
+                    said "agents cannot think and no provider can be connected"
+                    here, which is false on a company whose LLM page holds a
+                    provider key of its own — `inference/key` resolves without
+                    this one, so such a company thinks perfectly well and would
+                    be sent to fix something that is not broken. The exception is
+                    named rather than denied. */}
+                <p className="text-sm">
+                  <span className="font-medium">No account connected yet.</span>{" "}
+                  <span className="text-muted-foreground">
+                    Apps cannot be connected, and there is no TinyHumans balance to think
+                    against — though a provider key set on the LLM page still works.
                   </span>
-                </span>
-
-                {/* Revoking a key is not something this console can do — it
-                    ends an instance's access and lives behind that person's own
-                    sign-in — so it is a link out, and it sits on the row it is
-                    about rather than in a footer. */}
-                {account && (
-                  <a
-                    className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-4"
-                    href={account.manageKeysUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    data-testid="hub-manage-keys"
-                  >
-                    Manage keys <ExternalLink className="size-3" />
-                  </a>
-                )}
-
-                <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        disabled={!canManage || busy}
-                        aria-label={`${ACCOUNT_LABEL} actions`}
-                        data-testid="account-row-menu"
-                      />
-                    }
-                  >
-                    <EllipsisVertical className="size-4" />
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => setEditing(true)}>
-                      {removable ? "Replace key" : "Add a key"}
-                    </DropdownMenuItem>
-                    {/* Offered only when there is a key of this row's own to
-                        remove. The instance's identity is not this row's to
-                        take away, and a Remove that clears nothing is the
-                        control-that-cannot-act the LLM page deleted a toggle
-                        over. */}
-                    {/* Opens the confirmation rather than clearing on the
-                        press. Clearing is destructive, irreversible from this
-                        console — the hub emits a key's plaintext once — and
-                        what it costs depends on state the menu item cannot
-                        show. A menu item that silently revokes a company's
-                        identity is the shape of mistake that cost this repo a
-                        live key today. */}
-                    {removable && (
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onClick={() => setRemoving(true)}
-                        data-testid="account-remove-key"
-                      >
-                        Remove key
-                      </DropdownMenuItem>
-                    )}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </li>
-
-              {/* Only once there is an account of this company's own: a row
-                  reading "$0.00" for a company with no wallet would be a
-                  made-up fact. */}
-              {balance && (
-                <li className="flex items-center gap-3 px-4 py-3" data-testid="account-balance">
-                  <Mark icon={<Wallet className="size-4" />} label="Balance" />
+                </p>
+                {/* No button here, deliberately, though the list this borrows its
+                    shape from has one. The page it replaces carried the warning
+                    in its own source: two identical primary buttons on one screen
+                    leave a reader working out whether they do the same thing. On
+                    a list of providers the header action and the empty-state
+                    action are inches apart in a long card; on a page with one
+                    credential they are adjacent and identical, and the header
+                    card's action is already in view directly above this. The
+                    sentence stays — it is what the empty state is for. */}
+              </div>
+            ) : (
+              <ul className="divide-y divide-border" data-testid="account-rows">
+                <li className="flex items-center gap-3 px-4 py-3" data-testid="account-row">
+                  <Mark label={ACCOUNT_LABEL} />
                   <span className="grid min-w-0 flex-1 leading-tight">
+                    <span className="truncate text-sm font-medium">{ACCOUNT_LABEL}</span>
                     <span
-                      className={cn(
-                        "truncate text-sm font-medium tabular-nums",
-                        balance.low && "text-status-blocked-text",
-                      )}
-                      data-testid="billing-balance"
+                      className="truncate text-xs text-muted-foreground"
+                      data-testid="account-row-subline"
                     >
-                      {balance.amount ?? "Balance unknown"}
-                    </span>
-                    <span className="truncate text-xs text-muted-foreground">
-                      {balance.detail}
+                      {accountSubline(load, status)}
                     </span>
                   </span>
 
-                  {billing?.summary?.manageUrl && (
+                  {/* Revoking a key is not something this console can do — it
+                      ends an instance's access and lives behind that person's own
+                      sign-in — so it is a link out, and it sits on the row it is
+                      about rather than in a footer. */}
+                  {account && (
                     <a
                       className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-4"
-                      href={billing.summary.manageUrl}
+                      href={account.manageKeysUrl}
                       target="_blank"
                       rel="noreferrer"
-                      data-testid="billing-manage-plan"
+                      data-testid="hub-manage-keys"
                     >
-                      Manage plan <ExternalLink className="size-3" />
+                      Manage keys <ExternalLink className="size-3" />
                     </a>
                   )}
 
-                  {/* The hub's own top-up address where it sent one, else the
-                      one the host derived. Moving money is a decision made
-                      signed in on the hub, so this is a link and never a
-                      route here. */}
-                  {(billing?.summary?.topUpUrl ?? account?.topUpUrl) && (
-                    <a
-                      className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-4"
-                      href={billing?.summary?.topUpUrl ?? account?.topUpUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      data-testid="billing-top-up"
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      render={
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          disabled={!canManage || busy}
+                          aria-label={`${ACCOUNT_LABEL} actions`}
+                          data-testid="account-row-menu"
+                        />
+                      }
                     >
-                      <CreditCard className="size-3" /> Top up <ExternalLink className="size-3" />
-                    </a>
-                  )}
+                      <EllipsisVertical className="size-4" />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => setEditing(true)}>
+                        {removable ? "Replace key" : "Add a key"}
+                      </DropdownMenuItem>
+                      {/* Offered only when there is a key of this row's own to
+                          remove. The instance's identity is not this row's to
+                          take away, and a Remove that clears nothing is the
+                          control-that-cannot-act the LLM page deleted a toggle
+                          over. */}
+                      {/* Opens the confirmation rather than clearing on the
+                          press. Clearing is destructive, irreversible from this
+                          console — the hub emits a key's plaintext once — and
+                          what it costs depends on state the menu item cannot
+                          show. A menu item that silently revokes a company's
+                          identity is the shape of mistake that cost this repo a
+                          live key today. */}
+                      {removable && (
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onClick={() => setRemoving(true)}
+                          data-testid="account-remove-key"
+                        >
+                          Remove key
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </li>
-              )}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
 
-      <AccountKeyDialog
-        open={editing}
-        onOpenChange={setEditing}
-        replacing={removable}
-        busy={busy}
-        onSubmit={(key) => void write(key, "save")}
-      />
+                {/* Only once there is an account of this company's own: a row
+                    reading "$0.00" for a company with no wallet would be a
+                    made-up fact. */}
+                {balance && (
+                  <li className="flex items-center gap-3 px-4 py-3" data-testid="account-balance">
+                    <Mark icon={<Wallet className="size-4" />} label="Balance" />
+                    <span className="grid min-w-0 flex-1 leading-tight">
+                      <span
+                        className={cn(
+                          "truncate text-sm font-medium tabular-nums",
+                          balance.low && "text-status-blocked-text",
+                        )}
+                        data-testid="billing-balance"
+                      >
+                        {balance.amount ?? "Balance unknown"}
+                      </span>
+                      <span className="truncate text-xs text-muted-foreground">
+                        {balance.detail}
+                      </span>
+                    </span>
 
-      {/* Names what actually depends on the key, and what happens next rather
-          than only what is lost.
+                    {billing?.summary?.manageUrl && (
+                      <a
+                        className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-4"
+                        href={billing.summary.manageUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        data-testid="billing-manage-plan"
+                      >
+                        Manage plan <ExternalLink className="size-3" />
+                      </a>
+                    )}
 
-          It offers **both** outcomes rather than picking one, because the
-          console genuinely cannot tell which applies: `GET …/credential`
-          reports the tier that *won*, and while this company's own key is set
-          that is always `company` — whether or not an instance identity sits
-          behind it. Naming one confidently would be a guess dressed as a fact,
-          on the screen where being wrong costs a credential. */}
-      <AlertDialog open={removing} onOpenChange={setRemoving}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove this company&apos;s account key?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Apps connected as this company stop being reachable, and anything billed to this
-              account stops being billed to it. The company then falls back to the identity of
-              whoever runs this server, if this instance carries one — and to no account at all if
-              it does not.
-            </AlertDialogDescription>
-            <AlertDialogDescription>
-              The key itself cannot be recovered from here — TinyHumans shows a key&apos;s value
-              once, when it is created. You would have to connect again or paste a new one.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep the key</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => void write("", "clear")}
-              className="bg-destructive text-white hover:bg-destructive/90"
-              data-testid="account-remove-key-confirm"
-            >
-              Remove key
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </section>
+                    {/* The hub's own top-up address where it sent one, else the
+                        one the host derived. Moving money is a decision made
+                        signed in on the hub, so this is a link and never a
+                        route here. */}
+                    {(billing?.summary?.topUpUrl ?? account?.topUpUrl) && (
+                      <a
+                        className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-4"
+                        href={billing?.summary?.topUpUrl ?? account?.topUpUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        data-testid="billing-top-up"
+                      >
+                        <CreditCard className="size-3" /> Top up <ExternalLink className="size-3" />
+                      </a>
+                    )}
+                  </li>
+                )}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+
+        <AccountKeyDialog
+          open={editing}
+          onOpenChange={setEditing}
+          replacing={removable}
+          busy={busy}
+          onSubmit={(key) => void write(key, "save")}
+        />
+
+        {/* Names what actually depends on the key, and what happens next rather
+            than only what is lost.
+
+            It offers **both** outcomes rather than picking one, because the
+            console genuinely cannot tell which applies: `GET …/credential`
+            reports the tier that *won*, and while this company's own key is set
+            that is always `company` — whether or not an instance identity sits
+            behind it. Naming one confidently would be a guess dressed as a fact,
+            on the screen where being wrong costs a credential. */}
+        <AlertDialog open={removing} onOpenChange={setRemoving}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Remove this company&apos;s account key?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Apps connected as this company stop being reachable, and anything billed to this
+                account stops being billed to it. The company then falls back to the identity of
+                whoever runs this server, if this instance carries one — and to no account at all if
+                it does not.
+              </AlertDialogDescription>
+              <AlertDialogDescription>
+                The key itself cannot be recovered from here — TinyHumans shows a key&apos;s value
+                once, when it is created. You would have to connect again or paste a new one.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep the key</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => void write("", "clear")}
+                className="bg-destructive text-white hover:bg-destructive/90"
+                data-testid="account-remove-key-confirm"
+              >
+                Remove key
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </div>
   );
 }
 
