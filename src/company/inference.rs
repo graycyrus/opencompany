@@ -1155,7 +1155,38 @@ pub async fn resolve_effective_scoped(
         }
     }
 
-    resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await
+    let fallback = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?;
+    refuse_a_managed_fallback_that_is_switched_off(company, secrets, fallback).await
+}
+
+/// Refuses a fallback that rides the managed chain once Managed is switched off.
+///
+/// The switch is honoured on the explicit `managed` route in
+/// [`resolve_effective_for_tier`], but an **unset** row does not take that
+/// branch: it falls through here, and for a company whose legacy config or
+/// environment resolves to the platform it kept spending. The console says
+/// "Managed is switched off, so it is not a fallback. Its credential is
+/// untouched" — a sentence about exactly this path — so the page was making a
+/// promise the resolver did not keep.
+///
+/// `is_proxied` is the marker because that is what riding the platform's
+/// endpoint on the platform's credential *is*; a company on its own key is not
+/// proxied whatever its provider is called.
+async fn refuse_a_managed_fallback_that_is_switched_off(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    decl: Option<InferenceDecl>,
+) -> Result<Option<InferenceDecl>> {
+    let Some(decl) = decl else {
+        return Ok(None);
+    };
+    if decl.is_proxied() && !store::managed_enabled(company, secrets).await? {
+        return Err(OpenCompanyError::Config(
+            "Managed is switched off and nothing else is connected, so there is              nothing to think with. Switch it back on, or connect a provider in              Settings → Inference."
+                .to_string(),
+        ));
+    }
+    Ok(Some(decl))
 }
 
 /// Whether a **named** harness holds inference configuration of its own.
@@ -1431,7 +1462,12 @@ pub async fn resolve_effective_for_tier(
                 };
             match primary {
                 Some(decl) => Ok(Some(decl)),
-                None => resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await,
+                None => {
+                    let fallback =
+                        resolve_legacy_scoped(company, manifest, env_default, secrets, scope)
+                            .await?;
+                    refuse_a_managed_fallback_that_is_switched_off(company, secrets, fallback).await
+                }
             }
         }
         // `managed` is a word in the route grammar, not a provider slug — it is
@@ -3358,6 +3394,66 @@ mod tests {
         .unwrap()
         .expect("a harness with nothing of its own inherits");
         assert_eq!(theirs.base_url, "https://first.example/v1");
+    }
+
+    #[tokio::test]
+    async fn an_unset_workload_stops_falling_back_to_managed_once_it_is_switched_off() {
+        // The unset row does not take the `Managed` branch — it falls through
+        // the primary to the legacy chain — so honouring the switch only there
+        // left a company whose environment resolves to the platform spending
+        // after it had been told to stop. The console's own sentence for this
+        // state is "Managed is switched off, so it is not a fallback."
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+
+        // On, and nothing connected: the platform is the fallback.
+        let decl = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("managed is the fallback while it is on");
+        assert!(decl.is_proxied());
+
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+        let err = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a switched-off managed must not keep serving unset workloads");
+        assert!(err.to_string().contains("switched off"), "{err}");
+
+        // A company on its own key is untouched by the switch: it was never
+        // riding the platform, so there is nothing here to refuse.
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        let own = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a connected provider is not managed");
+        assert_eq!(own.base_url, "https://first.example/v1");
     }
 
     #[tokio::test]
