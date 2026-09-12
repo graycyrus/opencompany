@@ -38,6 +38,41 @@ function clientFor(handlers: {
   } as unknown as OpenCompanyClient;
 }
 
+/** An admin client, so the controls a member never sees are actually rendered.
+ * `writes` collects every PUT body, which is how the confirmation tests tell a
+ * cleared key from an offered one. */
+function adminClient(
+  credentialFor: () => Promise<CompanyCredentialStatus>,
+  writes: unknown[] = [],
+): OpenCompanyClient {
+  return {
+    scopeFor: () => "/api/v1/companies/acme",
+    get: async (path: string) => {
+      if (path.endsWith("/credential/billing")) return { configured: false };
+      if (path.endsWith("/auth/me")) return { role: "admin" };
+      if (path.endsWith("/credential")) return credentialFor();
+      throw new Error(`unexpected GET ${path}`);
+    },
+    put: async (_path: string, body: unknown) => {
+      writes.push(body);
+      return { status: await credentialFor(), note: "" };
+    },
+  } as unknown as OpenCompanyClient;
+}
+
+/** Clicks a rendered control and lets the resulting state settle.
+ *
+ * Menus and dialogs render into a portal on `document.body`, not into the
+ * container, so the queries below deliberately ask the document. */
+async function press(selector: string) {
+  const el = document.querySelector(selector);
+  if (el === null) throw new Error(`nothing to press at ${selector}`);
+  await act(async () => {
+    (el as HTMLElement).click();
+  });
+  await act(async () => {});
+}
+
 async function mount(client: OpenCompanyClient) {
   await act(async () => {
     root.render(createElement(ApiKeyView, { client, company: "acme" }));
@@ -178,20 +213,34 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
   // states the move, and the dialog must not: telling someone that pasting a
   // key moved their model spend is the same defect pointing the other way.
   it("puts the billing move on the connect path, not on the paste field", async () => {
-    const client = clientFor({
-      credential: async () => credential({ configured: false, source: "none", hubLink: true }),
-      billing: async () => ({ configured: false }),
-    });
-
-    await mount(client);
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: true })),
+    );
 
     // The header card says it, beside the button it is true of.
     expect(container.textContent ?? "").toContain(
       "Connecting moves both onto this company's account",
     );
-    // And nothing on the page claims a paste does it. The dialog is closed
-    // here, so this also pins that the claim has not migrated into the page.
-    expect(container.textContent ?? "").not.toContain("Saving it also moves every agent turn");
+  });
+
+  // The other half, and it has to open the dialog to be worth anything: with a
+  // hub wired the header renders Connect and no paste field exists, so an
+  // assertion against the closed page could not fail however the dialog were
+  // worded. `hubLink: false` is the path that offers the field.
+  it("says in the paste dialog that a paste sets the identity only", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
+    );
+
+    await press('[data-testid="account-add-key"]');
+
+    const dialog = document.body.textContent ?? "";
+    expect(dialog).toContain("Pasting one sets the identity only");
+    expect(dialog).toContain("it does not change which model your agents think on");
+    // `PUT …/credential` writes `tinyhumans/key` and stops; only `finish_link`
+    // also writes `inference/key`. Telling someone a paste moved their model
+    // spend is this page's own defect pointing the other way.
+    expect(dialog).not.toContain("moves every agent turn");
   });
 });
 
@@ -202,30 +251,26 @@ describe("ApiKeyView confirms before clearing a credential", () => {
   // once), and the menu item cannot show what it costs.
   it("offers Remove key as a confirmation, never as a direct write", async () => {
     const writes: unknown[] = [];
-    const client = {
-      scopeFor: () => "/api/v1/companies/acme",
-      get: async (path: string) => {
-        if (path.endsWith("/credential/billing")) return { configured: false };
-        if (path.endsWith("/auth/me")) return { role: "admin" };
-        if (path.endsWith("/credential")) return credential({ source: "company" });
-        throw new Error(`unexpected GET ${path}`);
-      },
-      put: async (_path: string, body: unknown) => {
-        writes.push(body);
-        return { status: credential({ source: "company" }), note: "" };
-      },
-    } as unknown as OpenCompanyClient;
-
-    await mount(client);
+    await mount(adminClient(async () => credential({ source: "company" }), writes));
 
     // Mounting and rendering the row must never have written anything.
     expect(writes).toHaveLength(0);
-    // The destructive item exists but is wired to the confirmation, so no
-    // clear can reach the host without a second, deliberate press.
-    const item = container.querySelector('[data-testid="account-remove-key"]');
-    // The menu is closed at rest, so the item is not in the document — which
-    // is itself the point: there is no one-press path to a cleared key.
-    expect(item).toBeNull();
+    // At rest the menu is closed, so there is no one-press path to a cleared
+    // key on the page at all.
+    expect(document.querySelector('[data-testid="account-remove-key"]')).toBeNull();
+
+    // Open it and press the destructive item. This is the press that used to
+    // clear the key outright, and the assertion that matters is that it still
+    // has not written anything.
+    await press('[data-testid="account-row-menu"]');
+    await press('[data-testid="account-remove-key"]');
+    expect(writes).toHaveLength(0);
+    expect(document.body.textContent ?? "").toContain("Remove this company's account key?");
+
+    // Only the second, deliberate press reaches the host — and reaches it once,
+    // with the empty value that is how the store spells a delete.
+    await press('[data-testid="account-remove-key-confirm"]');
+    expect(writes).toEqual([{ key: "" }]);
   });
 });
 
@@ -295,15 +340,19 @@ describe("ApiKeyView offers no control that cannot act", () => {
   // not have — so offering it would be a destructive control that changes
   // nothing.
   it("does not offer Remove key when the identity is the instance's", async () => {
-    const client = clientFor({
-      credential: async () => credential({ configured: false, source: "static" }),
-      billing: async () => ({ configured: false }),
-    });
+    const writes: unknown[] = [];
+    // An **admin**, so the gate under test is the source rather than the role:
+    // a member's menu is disabled whatever the tier, and asserting through one
+    // would pass for the wrong reason.
+    await mount(adminClient(async () => credential({ configured: false, source: "static" }), writes));
 
-    await mount(client);
+    await press('[data-testid="account-row-menu"]');
 
-    // The menu is closed, so this asserts on the page's rendered text: the
-    // destructive item must not be reachable at all.
-    expect(container.textContent ?? "").not.toContain("Remove key");
+    // The menu opens — the admin gets the other item — and the destructive one
+    // is simply not in it. `tinyhumans/key` is not what resolved here, so a
+    // Remove would clear nothing.
+    expect(document.body.textContent ?? "").toContain("Add a key");
+    expect(document.querySelector('[data-testid="account-remove-key"]')).toBeNull();
+    expect(writes).toHaveLength(0);
   });
 });
