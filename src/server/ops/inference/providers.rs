@@ -414,6 +414,7 @@ async fn add_provider(
                 credential,
                 auth,
                 probe::default_policy(),
+                inference::CatalogShape::OpenAi,
             )
             .await,
         )
@@ -1505,10 +1506,10 @@ async fn test_managed(
         }
     };
 
-    let base_url = platform
-        .as_ref()
-        .map(|p| p.base_url.clone())
-        .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string());
+    // The endpoint managed turns reach, through the one derivation every managed
+    // path uses (issue #2303), and its catalog in the shape that endpoint
+    // publishes.
+    let base_url = inference::managed_base_url(platform.as_ref());
     let subject = catalogue::endpoint_host(&base_url).unwrap_or_else(|| "the managed brain".into());
 
     match probe::probe_models(
@@ -1516,6 +1517,7 @@ async fn test_managed(
         bearer.as_deref(),
         catalogue::AuthStyle::Bearer,
         probe::default_policy(),
+        inference::CatalogShape::PlatformProxy,
     )
     .await
     {
@@ -1608,6 +1610,7 @@ async fn list_provider_models(
         (!key.trim().is_empty()).then(|| key.trim()),
         Some(&scope),
         catalogue::auth_style_for(&provider.kind),
+        inference::CatalogShape::OpenAi,
     )
     .await
     {
@@ -1767,6 +1770,7 @@ async fn test_provider(
         (!key.trim().is_empty()).then(|| key.trim()),
         catalogue::auth_style_for(&provider.kind),
         probe::default_policy(),
+        inference::CatalogShape::OpenAi,
     )
     .await
     {
@@ -1840,6 +1844,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
         body.key.as_deref().filter(|k| !k.trim().is_empty()),
         auth,
         probe::default_policy(),
+        inference::CatalogShape::OpenAi,
     )
     .await
     {

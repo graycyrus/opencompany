@@ -65,7 +65,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use super::catalogue;
+use super::{CatalogShape, catalogue, platform_proxy};
 
 /// What a failed probe means.
 ///
@@ -771,11 +771,18 @@ pub fn apply_auth(
 /// only [`ProbeClass::Auth`] means the credential should be rolled back — see
 /// the module header for why the naive "roll everything back" answer destroys
 /// valid keys.
+///
+/// `shape` is the caller's statement of which catalog shape the endpoint
+/// publishes. [`CatalogShape::PlatformProxy`] — the managed endpoint — is read
+/// page by page through the same client and redirect guard, and its success
+/// bodies get a larger cap than an error's, because a page of model entries is
+/// the document being asked for rather than wording to classify.
 pub async fn probe_models(
     base_url: &str,
     credential: Option<&str>,
     auth: catalogue::AuthStyle,
     policy: ProbePolicy,
+    shape: CatalogShape,
 ) -> Result<Vec<String>, ProbeFailure> {
     check_endpoint_with_credential(
         base_url,
@@ -788,7 +795,10 @@ pub async fn probe_models(
     // parameters apply regardless: without them OpenRouter answers text-only and
     // caps at 500, so the picker this probe populates silently has no vision
     // model in it. See `catalogue::catalog_query`.
-    let url = format!("{base}/models{}", catalogue::catalog_query(base));
+    let url = match shape {
+        CatalogShape::OpenAi => format!("{base}/models{}", catalogue::catalog_query(base)),
+        CatalogShape::PlatformProxy => format!("{base}{}", platform_proxy::page_path(0)),
+    };
 
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
@@ -820,10 +830,52 @@ pub async fn probe_models(
         .build()
         .map_err(|e| ProbeFailure::from_raw(format!("could not build the probe client: {e}")))?;
 
+    if shape == CatalogShape::PlatformProxy {
+        let mut collector = platform_proxy::Collector::default();
+        loop {
+            let page_url = format!("{base}{}", platform_proxy::page_path(collector.offset()));
+            let body = probe_get(&client, &page_url, auth, credential, PROXY_PAGE_BODY_CAP).await?;
+            let page = platform_proxy::parse_page(&body)
+                .map_err(|e| ProbeFailure::from_raw(format!("{page_url}: {e}")))?;
+            match collector.push(page) {
+                platform_proxy::NextPage::At(_) => {}
+                platform_proxy::NextPage::Done | platform_proxy::NextPage::Truncated { .. } => {
+                    break;
+                }
+            }
+        }
+        return Ok(collector.finish().into_iter().map(|e| e.id).collect());
+    }
+
+    let body = probe_get(&client, &url, auth, credential, PROBE_BODY_CAP).await?;
+    Ok(parse_model_ids(&body))
+}
+
+/// A success body of the managed endpoint's catalog, read in full up to here.
+///
+/// A page of up to [`platform_proxy::PAGE_LIMIT`] entries, each carrying pricing
+/// and modality fields, runs to a few hundred KiB — past [`PROBE_BODY_CAP`],
+/// which is sized for error wording. Truncating one would fail the parse and
+/// report a healthy endpoint as broken. Still a cap, so a body that never ends
+/// cannot buffer without bound.
+const PROXY_PAGE_BODY_CAP: usize = 4 * 1024 * 1024;
+
+/// One probe `GET`: auth applied, transport and status classified, the body
+/// returned on success.
+///
+/// `success_cap` bounds a success body; an error body is always read to
+/// [`PROBE_BODY_CAP`], which is all its wording ever needs.
+async fn probe_get(
+    client: &reqwest::Client,
+    url: &str,
+    auth: catalogue::AuthStyle,
+    credential: Option<&str>,
+    success_cap: usize,
+) -> Result<String, ProbeFailure> {
     // The one non-bearer entry in the whole catalogue. A probe that assumed one
     // auth style would fail exactly one provider — the one people try first —
     // and would classify the result as `auth`, deleting a perfectly good key.
-    let request = apply_auth(client.get(&url), auth, credential);
+    let request = apply_auth(client.get(url), auth, credential);
 
     let response = request.send().await.map_err(|e| {
         // Classified on the condition alone; the full error, URL and all, is
@@ -831,7 +883,12 @@ pub async fn probe_models(
         ProbeFailure::classified_as(transport_condition(&e), format!("{url}: {e}"))
     })?;
     let status = response.status();
-    let body = read_capped(response).await;
+    let cap = if status.is_success() {
+        success_cap
+    } else {
+        PROBE_BODY_CAP
+    };
+    let body = read_capped_to(response, cap).await;
     if !status.is_success() {
         // The body is included in the string the classifier reads, and only
         // there: vendors put "invalid api key" and "model not found" in the
@@ -848,7 +905,7 @@ pub async fn probe_models(
         );
         return Err(ProbeFailure::classified_as(&classified, detail));
     }
-    Ok(parse_model_ids(&body))
+    Ok(body)
 }
 
 /// The text [`classify`] reads for an HTTP failure: the status code and the
@@ -899,9 +956,9 @@ fn transport_condition(error: &reqwest::Error) -> &'static str {
 /// Chunk by chunk rather than `text()`, because `text()` trusts the endpoint to
 /// stop sending. A `Content-Length` header is not a promise either — it is
 /// whatever the far side wrote.
-async fn read_capped(mut response: reqwest::Response) -> String {
+async fn read_capped_to(mut response: reqwest::Response, cap: usize) -> String {
     let mut buf: Vec<u8> = Vec::new();
-    while buf.len() < PROBE_BODY_CAP {
+    while buf.len() < cap {
         match response.chunk().await {
             Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
             // A body that stops mid-stream is still worth classifying on what

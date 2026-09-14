@@ -9042,7 +9042,8 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                // A managed turn sends only an explicitly chosen model (#2303).
+                Some("stub/model".to_string()),
             )
             .build()
             .await
@@ -9450,19 +9451,24 @@ needs_reason = true
     /// Spawns an in-process OpenAI-compatible stub that answers every
     /// chat-completion with `marker`, so a harness turn can run without a real
     /// inference backend. Mirrors the provider-test helper of the same name.
+    ///
+    /// Served on the managed proxy path as well as the root: this stub is
+    /// handed to the builder as the injected managed endpoint, and since #2303
+    /// a managed turn posts to `{origin}/agent-integrations/openrouter`.
     #[cfg(feature = "openhuman")]
     async fn spawn_stub(marker: &'static str) -> String {
         use axum::routing::post;
         use axum::{Json, Router};
 
-        let app = Router::new().route(
-            "/chat/completions",
-            post(move || async move {
-                Json(serde_json::json!({
-                    "choices": [{ "message": { "role": "assistant", "content": marker } }],
-                    "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
-                }))
-            }),
+        let reply = move || async move {
+            Json(serde_json::json!({
+                "choices": [{ "message": { "role": "assistant", "content": marker } }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            }))
+        };
+        let app = Router::new().route("/chat/completions", post(reply)).route(
+            "/agent-integrations/openrouter/chat/completions",
+            post(reply),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -9561,7 +9567,8 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                // A managed turn sends only an explicitly chosen model (#2303).
+                Some("stub/model".to_string()),
             )
             .build()
             .await
@@ -9688,7 +9695,8 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                // A managed turn sends only an explicitly chosen model (#2303).
+                Some("stub/model".to_string()),
             )
             .build()
             .await
@@ -9847,7 +9855,8 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                // A managed turn sends only an explicitly chosen model (#2303).
+                Some("stub/model".to_string()),
             )
             .build()
             .await

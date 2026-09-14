@@ -318,7 +318,7 @@ async fn spawn_model(rules: Vec<Rule>) -> (String, Arc<Script>) {
         cleared: Mutex::new(Vec::new()),
     });
     let handle = Arc::clone(&script);
-    let app = axum::Router::new().route(
+    let chat = axum::Router::new().route(
         "/chat/completions",
         post(move |Json(body): Json<Value>| {
             let script = Arc::clone(&handle);
@@ -356,6 +356,10 @@ async fn spawn_model(rules: Vec<Rule>) -> (String, Arc<Script>) {
             }
         }),
     );
+    // Served at the root and on the managed proxy path: this endpoint is the
+    // injected managed default, and since #2303 a managed turn posts to
+    // `{origin}/agent-integrations/openrouter/chat/completions`.
+    let app = chat.clone().nest("/agent-integrations/openrouter", chat);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind model");
@@ -451,7 +455,9 @@ async fn spawn_host(model: String) -> Host {
                 credential: Credential::from_value("scripted"),
                 extra_headers: Vec::new(),
             },
-            None,
+            // The company has no `[inference]`, so its turns ride the managed
+            // default — which sends only an explicitly chosen model (#2303).
+            Some("scripted/model".to_string()),
         )
         .build()
         .await

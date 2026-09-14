@@ -140,7 +140,15 @@ struct ModelCatalogDto {
 /// exactly the companies that never configured anything.
 async fn resolved_endpoint(
     runtime: &CompanyRuntime,
-) -> Result<Option<(String, Option<String>, catalogue::AuthStyle)>, ApiError> {
+) -> Result<
+    Option<(
+        String,
+        Option<String>,
+        catalogue::AuthStyle,
+        inference::CatalogShape,
+    )>,
+    ApiError,
+> {
     let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
     let platform = platform_default(&crate::app::config::ProcessEnv);
@@ -155,7 +163,12 @@ async fn resolved_endpoint(
     // value and the header it belongs in. Splitting them is how the catalog
     // read came to send every provider a bearer.
     let auth = catalogue::auth_style_for(&decl.provider);
-    Ok(Some((decl.base_url.clone(), bearer, auth)))
+    Ok(Some((
+        decl.base_url.clone(),
+        bearer,
+        auth,
+        decl.catalog_shape(),
+    )))
 }
 
 /// `GET …/inference/models` — the model catalog of the endpoint **this company**
@@ -169,7 +182,7 @@ async fn resolved_endpoint(
 /// serves.
 async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let Some((base_url, bearer, auth)) = resolved_endpoint(runtime).await? else {
+    let Some((base_url, bearer, auth, shape)) = resolved_endpoint(runtime).await? else {
         // Nothing resolves — not even a platform default on this host. There is
         // no endpoint to ask, and saying so beats listing some other vendor's
         // catalog as if it were this company's.
@@ -194,9 +207,23 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
         bearer.as_deref(),
         Some(runtime.id().as_ref()),
         auth,
+        shape,
     )
     .await
     {
+        // The managed endpoint lists real OpenRouter ids and its turns send
+        // only one chosen explicitly, so there is no tier vocabulary to report
+        // and no tier → model defaults to offer: prefilling the shipped slugs
+        // would be choosing a model on the operator's behalf (issue #2303).
+        Ok(models) if shape == inference::CatalogShape::PlatformProxy => {
+            Ok(Json(ModelCatalogDto {
+                base_url,
+                models,
+                tier_vocabulary: None,
+                tier_defaults: BTreeMap::new(),
+                error: None,
+            }))
+        }
         Ok(models) => {
             let vocabulary = inference::TierVocabulary::from_catalog_ids(
                 models.iter().map(|model| model.id.as_str()),
@@ -965,9 +992,10 @@ async fn managed_state(
     Ok(ManagedDto {
         source: source.as_str().to_string(),
         configured: source.resolves(),
-        base_url: platform
-            .map(|p| p.base_url.clone())
-            .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        // The endpoint managed turns actually reach — the injected origin on
+        // the proxy path — rather than the raw injected URL, which after #2303
+        // names the curated surface managed no longer calls.
+        base_url: inference::managed_base_url(platform),
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await
             .map_err(ApiError)?,
@@ -1319,7 +1347,12 @@ async fn test_config(company: ScopedCompany) -> Response {
             // TinyHumans config fail Test with `Model
             // 'anthropic/claude-sonnet-5' is not available` — an id neither the
             // operator nor the provider ever named.
-            let decl = {
+            let decl = if decl.is_proxied() {
+                // The managed endpoint sends only an explicitly chosen model
+                // (`inference::proxied_model`), so there is no vocabulary to
+                // discover for it and no catalog read to spend (issue #2303).
+                decl
+            } else {
                 let bearer = match decl.bearer().await {
                     Ok(bearer) => bearer,
                     Err(err) => return ApiError(err).into_response(),
@@ -2173,6 +2206,12 @@ base_url = "https://byo.example/v1"
     /// Where a staging deployment is pointed with `OPENCOMPANY_INFERENCE_URL`.
     const STAGING_URL: &str = "https://staging-api.tinyhumans.ai/openai/v1";
 
+    /// Where that deployment's managed turns actually go since #2303: the same
+    /// staging origin, on the OpenRouter proxy path. The card reports this, not
+    /// the raw injected URL, because this is the endpoint requests travel to.
+    const STAGING_PROXY_URL: &str =
+        "https://staging-api.tinyhumans.ai/agent-integrations/openrouter";
+
     /// The platform default a staging tenant is injected with.
     fn staging_platform() -> EnvDefault {
         EnvDefault {
@@ -2214,7 +2253,7 @@ base_url = "https://byo.example/v1"
         let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
-        assert_eq!(dto.base_url, STAGING_URL);
+        assert_eq!(dto.base_url, STAGING_PROXY_URL);
         assert_eq!(dto.provider, "managed");
         assert_eq!(
             dto.source, "managed",
@@ -2283,7 +2322,7 @@ base_url = "https://byo.example/v1"
         let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
-        assert_eq!(dto.base_url, STAGING_URL);
+        assert_eq!(dto.base_url, STAGING_PROXY_URL);
         assert_eq!(dto.source, "manifest");
         assert!(
             !dto.key_configured,
@@ -2316,7 +2355,7 @@ base_url = "https://byo.example/v1"
             !dto.key_configured,
             "the platform token is not a stored tenant key"
         );
-        assert_eq!(dto.base_url, STAGING_URL);
+        assert_eq!(dto.base_url, STAGING_PROXY_URL);
 
         // An admin sets one from the console — the write #634's screen performs.
         inference::store_key(runtime.id(), runtime.secrets().as_ref(), "sk-console-set")
@@ -2391,7 +2430,7 @@ base_url = "https://byo.example/v1"
         let dto = effective_status_with(&runtime, Some(&platform), false)
             .await
             .unwrap();
-        assert_eq!(dto.base_url, STAGING_URL, "proxied");
+        assert_eq!(dto.base_url, STAGING_PROXY_URL, "proxied");
         assert_eq!(dto.slug, "subscription");
         assert!(!dto.key_configured);
 

@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::company::inference::catalogue::{self, AuthStyle};
-use crate::company::inference::{TierVocabulary, probe};
+use crate::company::inference::platform_proxy::{self, NextPage};
+use crate::company::inference::{CatalogShape, TierVocabulary, probe};
 
 /// How long a successful catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
@@ -224,10 +225,17 @@ impl std::fmt::Display for DiscoveryError {
 /// admin on a hosted instance can point a provider at `169.254.169.254` and
 /// have this process read it for them, and a permitted host that redirects
 /// there does it without even needing the URL stored.
+///
+/// ## `shape` is the caller's statement, not a guess
+///
+/// [`CatalogShape::PlatformProxy`] reads the managed endpoint's enveloped,
+/// paginated catalog ([`platform_proxy`]) and every page goes through the same
+/// client, and so the same redirect guard, as the OpenAI-shaped read.
 pub(crate) async fn discover_models(
     base_url: &str,
     bearer: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
     let policy = probe::default_policy();
     let credentialed = bearer.is_some_and(|b| !b.trim().is_empty());
@@ -279,6 +287,13 @@ pub(crate) async fn discover_models(
             ))
         })?;
 
+    // The managed endpoint publishes its own shape, and none of the
+    // OpenRouter-host rules below apply to it: it is not OpenRouter's host, and
+    // its catalog is already the platform account's.
+    if shape == CatalogShape::PlatformProxy {
+        return fetch_platform_proxy_catalog(&client, base, bearer, auth).await;
+    }
+
     // The account-scoped catalogue first, where the endpoint has one — see
     // `catalogue::scoped_catalog_path` for why, and why it is one host's rule
     // rather than a general assumption.
@@ -320,6 +335,77 @@ async fn fetch_catalog(
     bearer: Option<&str>,
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
+    let response = send_classified(client, url, bearer, auth).await?;
+    let payload = response.json::<RegistryResponse>().await.map_err(|error| {
+        DiscoveryError::endpoint(format!("model catalog from {url} was invalid: {error}"))
+    })?;
+    Ok(parse_models(payload))
+}
+
+/// Every page of the managed endpoint's catalog, in listing order.
+///
+/// Paged by [`platform_proxy::Collector`] until the envelope's `total`. Each page
+/// is one [`send_classified`] request, so a `401`/`403` on any page is still an
+/// answer about the credential, and a `503` — the backend's "catalog is not
+/// available yet", before its snapshot loads — is an endpoint failure that the
+/// memo in [`catalog_models`] remembers, never an empty catalog.
+async fn fetch_platform_proxy_catalog(
+    client: &reqwest::Client,
+    base: &str,
+    bearer: Option<&str>,
+    auth: AuthStyle,
+) -> Result<Vec<InferenceModel>, DiscoveryError> {
+    let mut collector = platform_proxy::Collector::default();
+    loop {
+        let url = format!("{base}{}", platform_proxy::page_path(collector.offset()));
+        let body = send_classified(client, &url, bearer, auth)
+            .await?
+            .text()
+            .await
+            .map_err(|error| {
+                DiscoveryError::endpoint(format!(
+                    "reading the model catalog from {url} failed: {error}"
+                ))
+            })?;
+        let page = platform_proxy::parse_page(&body).map_err(|error| {
+            DiscoveryError::endpoint(format!("model catalog from {url} was invalid: {error}"))
+        })?;
+        match collector.push(page) {
+            NextPage::At(_) => {}
+            NextPage::Done => break,
+            NextPage::Truncated { read, total } => {
+                tracing::warn!(
+                    %base,
+                    read,
+                    total,
+                    "the managed model catalog has more pages than a read follows; \
+                     the picker is missing the rest"
+                );
+                break;
+            }
+        }
+    }
+    Ok(collector
+        .finish()
+        .into_iter()
+        .map(|entry| InferenceModel {
+            id: entry.id,
+            name: entry.name,
+            context_length: entry.context_length,
+        })
+        .collect())
+}
+
+/// Send one catalog request and classify a failure status.
+///
+/// Shared by both shapes so they cannot disagree about auth or about what a
+/// status means to the cache.
+async fn send_classified(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: Option<&str>,
+    auth: AuthStyle,
+) -> Result<reqwest::Response, DiscoveryError> {
     // **The provider's own style, not bearer-for-everyone.** This is a NATIVE
     // endpoint — `GET /v1/models` — and Anthropic's native API rejects a
     // bearer-authenticated request with no `anthropic-version` header as
@@ -335,7 +421,7 @@ async fn fetch_catalog(
         .await
         .map_err(|error| DiscoveryError::endpoint(format!("request to {url} failed: {error}")))?;
     let status = response.status();
-    let response = response.error_for_status().map_err(|error| {
+    response.error_for_status().map_err(|error| {
         let message = format!("request to {url} failed: {error}");
         match status {
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
@@ -344,11 +430,7 @@ async fn fetch_catalog(
             reqwest::StatusCode::NOT_FOUND => DiscoveryError::missing(message),
             _ => DiscoveryError::endpoint(message),
         }
-    })?;
-    let payload = response.json::<RegistryResponse>().await.map_err(|error| {
-        DiscoveryError::endpoint(format!("model catalog from {url} was invalid: {error}"))
-    })?;
-    Ok(parse_models(payload))
+    })
 }
 
 struct CacheEntry {
@@ -438,6 +520,20 @@ fn cache_key(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
 }
 
+/// The endpoint half of a cache key, with the catalog shape folded in.
+///
+/// The same URL read in two shapes is two answers — an OpenAI-shaped read of
+/// the proxy fails, an enveloped one succeeds — so they must not share a slot.
+/// The OpenAI shape keeps the bare endpoint, which is every key that existed
+/// before; the proxy's carries a suffix after a control character no URL can
+/// contain, so it cannot collide with one.
+fn shaped_endpoint(base_url: &str, shape: CatalogShape) -> String {
+    match shape {
+        CatalogShape::OpenAi => cache_key(base_url),
+        CatalogShape::PlatformProxy => format!("{}\u{2}platform-proxy", cache_key(base_url)),
+    }
+}
+
 /// The cache slot for an endpoint read within `scope`.
 ///
 /// `scope` is `None` for a read that presented no credential — a public catalog,
@@ -524,6 +620,7 @@ pub(crate) async fn catalog_models(
     bearer: Option<&str>,
     scope: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Result<Vec<InferenceModel>, String> {
     // The partition follows the credential, not the caller: a read that presents
     // nothing has nothing company-specific to leak, and sharing it keeps one
@@ -532,7 +629,7 @@ pub(crate) async fn catalog_models(
         .filter(|bearer| !bearer.trim().is_empty())
         .and(scope)
         .filter(|scope| !scope.trim().is_empty());
-    let cache = catalog_cache_scoped(base_url, authenticated_scope);
+    let cache = catalog_cache_scoped(&shaped_endpoint(base_url, shape), authenticated_scope);
     let now = Instant::now();
     if let Some(models) = cache.lookup(now) {
         return Ok(models);
@@ -554,7 +651,7 @@ pub(crate) async fn catalog_models(
             return Err(FetchError::Failed(failure));
         }
 
-        let mut models = discover_models(base_url, bearer, auth)
+        let mut models = discover_models(base_url, bearer, auth, shape)
             .await
             .map_err(|error| {
                 if error.credential_specific {
@@ -614,7 +711,12 @@ pub(crate) async fn discovered_vocabulary(
     scope: Option<&str>,
     auth: AuthStyle,
 ) -> Option<TierVocabulary> {
-    let models = catalog_models(base_url, bearer, scope, auth).await.ok()?;
+    // OpenAI-shaped only. Vocabulary discovery is for the endpoints that still
+    // resolve tiers through it; a proxied (managed) decl sends an explicitly
+    // chosen model and its callers skip this entirely (issue #2303).
+    let models = catalog_models(base_url, bearer, scope, auth, CatalogShape::OpenAi)
+        .await
+        .ok()?;
     Some(TierVocabulary::from_catalog_ids(
         models.iter().map(|model| model.id.as_str()),
     ))
@@ -1239,5 +1341,211 @@ mod tests {
                  than scheduling slack — queue position must not multiply the wait"
             );
         }
+    }
+
+    // ---- the managed endpoint's catalog (issue #2303) ----------------------
+
+    /// What the mock proxy saw: each request's query string and `Authorization`.
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    /// A loopback stand-in for `GET /agent-integrations/openrouter/models`,
+    /// answering by page offset. Returns the proxy **base** — what a managed
+    /// decl carries — and the request log.
+    async fn spawn_proxy_catalog(respond: fn(usize) -> (u16, String)) -> (String, Seen) {
+        use axum::http::{HeaderMap, StatusCode, Uri};
+
+        let seen: Seen = Arc::default();
+        let log = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/agent-integrations/openrouter/models",
+            axum::routing::get(move |uri: Uri, headers: HeaderMap| {
+                let log = Arc::clone(&log);
+                async move {
+                    let query = uri.query().unwrap_or_default().to_string();
+                    let authorization = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    log.lock().unwrap().push((query.clone(), authorization));
+                    let offset = query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("offset="))
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    let (status, body) = respond(offset);
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        [("content-type", "application/json")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}{}", platform_proxy::PATH), seen)
+    }
+
+    const FAKE_KEY: &str = "th-not-a-real-key";
+
+    #[tokio::test]
+    async fn the_managed_catalog_is_unwrapped_and_paged_to_total_with_the_bearer() {
+        let (base, seen) = spawn_proxy_catalog(|offset| match offset {
+            0 => (
+                200,
+                r#"{"success":true,"data":{"object":"list","data":[
+                    {"id":"anthropic/claude-sonnet-5","display_name":"Claude Sonnet 5","context_length":200000},
+                    {"id":"openai/gpt-5.6-sol-pro"}
+                ],"total":3,"limit":2,"offset":0}}"#
+                    .to_string(),
+            ),
+            _ => (
+                200,
+                r#"{"success":true,"data":{"object":"list","data":[
+                    {"id":"qwen/qwen3.8-max"}
+                ],"total":3,"limit":2,"offset":2}}"#
+                    .to_string(),
+            ),
+        })
+        .await;
+
+        let models = discover_models(
+            &base,
+            Some(FAKE_KEY),
+            AuthStyle::Bearer,
+            CatalogShape::PlatformProxy,
+        )
+        .await
+        .expect("a two-page catalog reads");
+
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "anthropic/claude-sonnet-5",
+                "openai/gpt-5.6-sol-pro",
+                "qwen/qwen3.8-max"
+            ]
+        );
+        assert_eq!(models[0].name.as_deref(), Some("Claude Sonnet 5"));
+        assert_eq!(models[0].context_length, Some(200_000));
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "one request per page, stopping at total");
+        assert_eq!(seen[0].0, "limit=500&offset=0");
+        assert_eq!(
+            seen[1].0, "limit=500&offset=2",
+            "a clamped page advances by what arrived"
+        );
+        for (_, authorization) in &seen {
+            assert_eq!(authorization.as_deref(), Some("Bearer th-not-a-real-key"));
+        }
+    }
+
+    /// The backend answers `503` until its catalog snapshot loads. That is an
+    /// outage to retry after the memo, never "this endpoint has no models".
+    #[tokio::test]
+    async fn a_503_before_the_snapshot_loads_is_a_remembered_failure_not_an_empty_catalog() {
+        let (base, _) = spawn_proxy_catalog(|_| {
+            (
+                503,
+                r#"{"success":false,"error":"The OpenRouter model catalog is not available yet"}"#
+                    .to_string(),
+            )
+        })
+        .await;
+        const SCOPE: &str = "proxy-503-co";
+
+        let error = catalog_models(
+            &base,
+            Some(FAKE_KEY),
+            Some(SCOPE),
+            AuthStyle::Bearer,
+            CatalogShape::PlatformProxy,
+        )
+        .await
+        .expect_err("a 503 is a failure");
+        assert!(error.contains("503"), "{error}");
+        assert!(
+            catalog_cache_scoped(
+                &shaped_endpoint(&base, CatalogShape::PlatformProxy),
+                Some(SCOPE)
+            )
+            .lookup_failure(Instant::now())
+            .is_some(),
+            "an endpoint failure is memoized"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_key_on_the_managed_catalog_is_not_remembered() {
+        fn unauthorized(_: usize) -> (u16, String) {
+            (
+                401,
+                r#"{"success":false,"error":"Invalid API key"}"#.to_string(),
+            )
+        }
+        fn forbidden(_: usize) -> (u16, String) {
+            (
+                403,
+                r#"{"success":false,"error":"missing scope"}"#.to_string(),
+            )
+        }
+        let cases: [(u16, fn(usize) -> (u16, String)); 2] = [(401, unauthorized), (403, forbidden)];
+        for (status, respond) in cases {
+            let (base, _) = spawn_proxy_catalog(respond).await;
+            let scope = format!("proxy-{status}-co");
+
+            assert!(
+                catalog_models(
+                    &base,
+                    Some(FAKE_KEY),
+                    Some(&scope),
+                    AuthStyle::Bearer,
+                    CatalogShape::PlatformProxy,
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                catalog_cache_scoped(
+                    &shaped_endpoint(&base, CatalogShape::PlatformProxy),
+                    Some(&scope)
+                )
+                .lookup_failure(Instant::now())
+                .is_none(),
+                "a {status} is about the key, not the endpoint"
+            );
+        }
+    }
+
+    /// The shape is the caller's statement. An OpenAI-shaped body at the
+    /// managed endpoint is reported, not reinterpreted as a catalog.
+    #[tokio::test]
+    async fn an_openai_shaped_answer_is_not_read_as_the_managed_catalog() {
+        let (base, _) =
+            spawn_proxy_catalog(|_| (200, r#"{"data":[{"id":"chat-v1"}]}"#.to_string())).await;
+        let error = discover_models(
+            &base,
+            Some(FAKE_KEY),
+            AuthStyle::Bearer,
+            CatalogShape::PlatformProxy,
+        )
+        .await
+        .expect_err("not the envelope");
+        assert!(error.to_string().contains("envelope"), "{error}");
+    }
+
+    #[test]
+    fn one_url_read_in_two_shapes_is_two_cache_slots() {
+        const BASE: &str = "https://api.example/agent-integrations/openrouter/";
+        assert_eq!(shaped_endpoint(BASE, CatalogShape::OpenAi), cache_key(BASE));
+        assert_ne!(
+            shaped_endpoint(BASE, CatalogShape::OpenAi),
+            shaped_endpoint(BASE, CatalogShape::PlatformProxy)
+        );
     }
 }

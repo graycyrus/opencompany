@@ -27,6 +27,7 @@
 
 pub mod catalogue;
 pub mod dialect;
+pub mod platform_proxy;
 pub mod probe;
 pub mod resolve;
 pub mod store;
@@ -143,13 +144,53 @@ impl Default for HarnessScope {
     }
 }
 
-/// The platform's OpenAI-compatible endpoint — the subscription proxy an
-/// `openrouter` company with **no** key of its own resolves against.
+/// The platform backend's production origin.
+pub const PLATFORM_ORIGIN: &str = "https://api.tinyhumans.ai";
+
+/// The managed endpoint in production: the backend's **direct OpenRouter
+/// proxy** — what a managed route, and an `openrouter` company with **no** key of
+/// its own, resolves against when this host was given no endpoint of its own.
 ///
-/// The proxy fronts OpenRouter upstream and meters the spend against the
-/// tenant's subscription, so from the workload's point of view this and
-/// [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
-pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+/// It used to be the curated `/openai/v1` surface, which resolves tier names.
+/// The proxy takes bare OpenRouter slugs instead and publishes an enveloped,
+/// paginated catalog — see [`platform_proxy`] (issue #2303). It fronts
+/// OpenRouter upstream and meters the spend against the tenant's subscription,
+/// so from the workload's point of view this and [`OPENROUTER_BASE_URL`] serve
+/// the same catalogue; only who pays differs.
+///
+/// A deployment that injects an endpoint resolves through
+/// [`managed_base_url`] instead, which keeps that endpoint's origin.
+pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/agent-integrations/openrouter";
+
+/// The managed endpoint for this host: the injected endpoint's origin moved onto
+/// the proxy path, or [`PLATFORM_BASE_URL`] when nothing was injected.
+///
+/// The one place a proxied declaration's base URL comes from, so a managed
+/// route, the keyless `openrouter` default, the managed card's Test and the
+/// status card cannot name different endpoints. The injected origin is kept —
+/// see [`platform_proxy::base_for`] — which is what keeps a staging deployment
+/// on staging and the managed credential on the host it always reached.
+pub fn managed_base_url(env_default: Option<&EnvDefault>) -> String {
+    env_default.map_or_else(
+        || PLATFORM_BASE_URL.to_string(),
+        |env| platform_proxy::base_for(&env.base_url),
+    )
+}
+
+/// Which shape an endpoint's model catalog is published in.
+///
+/// **Chosen explicitly, never guessed from the URL.** A proxied declaration
+/// reads [`Self::PlatformProxy`] and everything else reads [`Self::OpenAi`] —
+/// see [`InferenceDecl::catalog_shape`]. A body in the other shape is then an
+/// error the caller reports, not a catalog it reinterprets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CatalogShape {
+    /// `GET {base}/models` answering `{ "data": [{ "id": … }] }` in one page.
+    OpenAi,
+    /// The platform proxy's `{success, data: {data, total, …}}` envelope,
+    /// paginated — see [`platform_proxy::parse_page`].
+    PlatformProxy,
+}
 
 /// The provider kind removed when OpenCompany stopped exposing its own model
 /// SKUs. A manifest or stored runtime blob still naming it aliases to
@@ -377,6 +418,77 @@ pub fn model_for_tier(
     }
 }
 
+/// A managed turn that was not sent, because no model was chosen for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedModelMissing {
+    /// What the turn carried instead of a model — normally a workload tier.
+    pub requested: String,
+}
+
+impl std::fmt::Display for ManagedModelMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Managed inference needs an explicitly chosen OpenRouter model id (for example \
+             `anthropic/claude-sonnet-5`), and none is set for `{}`, so nothing was sent. \
+             Choose a model for Managed in Settings → Inference, or route this workload to a \
+             provider that has one.",
+            self.requested
+        )
+    }
+}
+
+/// The model a **proxied** (managed) turn puts on the wire — only ever one that
+/// was **chosen explicitly** (issue #2303).
+///
+/// The managed endpoint is the backend's OpenRouter proxy, which takes bare
+/// OpenRouter slugs and rejects tier names. The abstract tiers are not a model
+/// vocabulary for it, and this deliberately does **not** consult
+/// [`DEFAULT_TIER_MODELS`] or a catalog to supply one: a model nobody chose
+/// would decide what the company runs on and pays for, silently. So:
+///
+/// * the operator's override for the turn's tier, when there is one, else
+/// * the turn's own model when it is already a real id (an explicit
+///   `OPENCOMPANY_INFERENCE_MODEL`, or an agent's pinned model), else
+/// * [`ManagedModelMissing`] — the turn fails closed, naming what to set.
+///
+/// A tier name is never a choice here, whether it arrived as the turn's model
+/// or as an override: the curated surface read `chat-v1 = "chat-v1"` as "let the
+/// platform resolve it", which this endpoint cannot do. `openrouter/<author>/
+/// <model>`, the curated surface's passthrough spelling of a real id, is
+/// translated to `<author>/<model>` rather than sent to be rejected;
+/// `openrouter/auto` has two segments, is a real OpenRouter slug, and is left
+/// alone.
+pub fn proxied_model(
+    abstract_model: &str,
+    overrides: &BTreeMap<String, String>,
+) -> std::result::Result<String, ManagedModelMissing> {
+    let chosen = overrides
+        .get(abstract_model)
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| abstract_model.trim());
+    if chosen.is_empty() || crate::company::types::INFERENCE_TIERS.contains(&chosen) {
+        return Err(ManagedModelMissing {
+            requested: abstract_model.trim().to_string(),
+        });
+    }
+    Ok(strip_passthrough_prefix(chosen))
+}
+
+/// `openrouter/<author>/<model>` → `<author>/<model>`; anything else verbatim.
+///
+/// Three non-empty segments exactly, the same rule the console's proxy check
+/// used for this form: `openrouter/auto` is a two-segment OpenRouter slug and is
+/// not a passthrough spelling.
+fn strip_passthrough_prefix(model: &str) -> String {
+    let parts: Vec<&str> = model.split('/').collect();
+    if parts.len() == 3 && parts[0] == "openrouter" && parts.iter().all(|p| !p.is_empty()) {
+        return format!("{}/{}", parts[1], parts[2]);
+    }
+    model.to_string()
+}
+
 /// Normalizes a provider kind: blank and the legacy `managed` both become
 /// [`DEFAULT_PROVIDER`]; anything else passes through for validation to judge.
 pub fn normalize_provider(provider: &str) -> &str {
@@ -562,12 +674,31 @@ impl InferenceDecl {
     /// `ConcreteTiers::all()` — which is exactly what the pre-discovery code
     /// did, and true of OpenRouter itself. Narrowing a tier only ever happens
     /// on evidence from a catalog that was actually read.
+    ///
+    /// **Not consulted for a proxied decl's turn.** The managed endpoint is the
+    /// OpenRouter proxy, which rejects tier names, and a managed turn takes its
+    /// model from [`proxied_model`] alone (issue #2303). The proxied arm below is
+    /// kept only for the callers that still describe a decl this way.
     pub fn vocabulary(&self) -> TierVocabulary {
         self.vocabulary.unwrap_or(if self.proxied {
             TierVocabulary::Tiers
         } else {
             TierVocabulary::Concrete(ConcreteTiers::all())
         })
+    }
+
+    /// The shape this decl's catalog is read in.
+    ///
+    /// Proxied means the platform's own endpoint, and the platform's managed
+    /// endpoint is the OpenRouter proxy — so the envelope is selected by the
+    /// resolution that already decided who pays and where the credential may go,
+    /// not by looking at the URL.
+    pub fn catalog_shape(&self) -> CatalogShape {
+        if self.proxied {
+            CatalogShape::PlatformProxy
+        } else {
+            CatalogShape::OpenAi
+        }
     }
 
     /// Whether [`vocabulary`](Self::vocabulary) is the endpoint's published
@@ -656,9 +787,7 @@ fn resolve_endpoint(
         // it never redirects the managed probe. The endpoint is always the
         // platform's, and the credential is the operator's own key when given,
         // else the injected managed one.
-        let base_url = env_default
-            .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+        let base_url = managed_base_url(env_default);
         let credential = if has_key {
             Credential::from_value(key)
         } else {
@@ -677,9 +806,7 @@ fn resolve_endpoint(
         if let Some(base_url) = base_url_override {
             return (base_url.to_string(), Credential::None, false);
         }
-        let base_url = env_default
-            .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+        let base_url = managed_base_url(env_default);
         let credential = env_default
             .map(|e| e.credential.clone())
             .unwrap_or(Credential::None);
@@ -1984,7 +2111,10 @@ mod tests {
             .unwrap();
         assert_eq!(decl.source, InferenceSource::Manifest);
         assert_eq!(decl.provider, "openrouter");
-        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert_eq!(
+            decl.base_url,
+            "https://env.example/agent-integrations/openrouter"
+        );
         assert!(decl.is_proxied());
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
@@ -2040,7 +2170,10 @@ mod tests {
             .unwrap();
         assert_eq!(decl.provider, DEFAULT_PROVIDER);
         assert!(decl.is_proxied());
-        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert_eq!(
+            decl.base_url,
+            "https://env.example/agent-integrations/openrouter"
+        );
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
         assert!(
             validate_inference(&inference(LEGACY_MANAGED)).is_empty(),
@@ -2146,7 +2279,10 @@ mod tests {
             .unwrap()
             .expect("still resolves with no key");
         assert!(decl.is_proxied());
-        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert_eq!(
+            decl.base_url,
+            "https://env.example/agent-integrations/openrouter"
+        );
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
 
@@ -2441,7 +2577,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(e.is_proxied(), "embedded is untouched by deep's key");
-        assert_eq!(e.base_url, "https://env.example/v1");
+        assert_eq!(
+            e.base_url, "https://env.example/agent-integrations/openrouter",
+            "a proxied decl reaches the managed proxy on the injected origin"
+        );
         assert_eq!(bearer(&e).await.as_deref(), Some("platform-key"));
     }
 
@@ -2734,7 +2873,9 @@ mod tests {
     fn a_discovered_vocabulary_overrides_the_payer_derived_guess() {
         let decl = decl_for_probe(
             "openrouter",
-            Some(PLATFORM_BASE_URL),
+            // The curated, tier-native surface, reached with a tenant's own key.
+            // Not `PLATFORM_BASE_URL`, which is the OpenRouter proxy since #2303.
+            Some("https://api.tinyhumans.ai/openai/v1"),
             Some("test-token"),
             None,
         );
@@ -2850,7 +2991,10 @@ mod tests {
             None,
             Some(&env),
         );
-        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert_eq!(
+            decl.base_url,
+            "https://env.example/agent-integrations/openrouter"
+        );
         assert!(decl.is_proxied());
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
@@ -2866,7 +3010,10 @@ mod tests {
             Some("th-key"),
             Some(&env),
         );
-        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert_eq!(
+            decl.base_url,
+            "https://env.example/agent-integrations/openrouter"
+        );
         assert!(decl.is_proxied());
         assert_eq!(bearer(&decl).await.as_deref(), Some("th-key"));
     }
@@ -2879,6 +3026,126 @@ mod tests {
         let decl = decl_for_probe("managed", Some("https://openrouter.ai/api/v1"), None, None);
         assert_eq!(decl.base_url, PLATFORM_BASE_URL);
         assert_eq!(bearer(&decl).await, None);
+    }
+
+    // ---- the managed endpoint is the OpenRouter proxy (issue #2303) --------
+
+    #[test]
+    fn the_managed_endpoint_is_the_proxy_on_the_platform_origin() {
+        assert_eq!(
+            PLATFORM_BASE_URL,
+            format!("{PLATFORM_ORIGIN}{}", platform_proxy::PATH)
+        );
+        assert_eq!(managed_base_url(None), PLATFORM_BASE_URL);
+        // Every deployment that injected the curated production URL lands on
+        // the production proxy without changing a variable.
+        let prod = EnvDefault {
+            base_url: "https://api.tinyhumans.ai/openai/v1".into(),
+            credential: Credential::from_value("th-not-a-real-key"),
+        };
+        assert_eq!(managed_base_url(Some(&prod)), PLATFORM_BASE_URL);
+    }
+
+    /// The credential property this change must not move: a managed decl
+    /// carries the managed credential only to the injected endpoint's own
+    /// origin, and a non-proxied decl never reads the managed shape.
+    #[tokio::test]
+    async fn the_managed_credential_reaches_only_the_injected_origin() {
+        let staging = EnvDefault {
+            base_url: "https://staging-api.tinyhumans.ai/openai/v1".into(),
+            credential: Credential::from_value("th-not-a-real-key"),
+        };
+        for decl in [
+            decl_for_probe(
+                "managed",
+                Some("https://openrouter.ai/api/v1"),
+                None,
+                Some(&staging),
+            ),
+            decl_for_probe("openrouter", None, None, Some(&staging)),
+        ] {
+            assert!(decl.is_proxied());
+            assert_eq!(
+                decl.base_url,
+                "https://staging-api.tinyhumans.ai/agent-integrations/openrouter"
+            );
+            assert_eq!(
+                url::Url::parse(&decl.base_url).unwrap().origin(),
+                url::Url::parse(&staging.base_url).unwrap().origin(),
+                "never another host than the one injected"
+            );
+            assert_eq!(bearer(&decl).await.as_deref(), Some("th-not-a-real-key"));
+            assert_eq!(decl.catalog_shape(), CatalogShape::PlatformProxy);
+        }
+
+        // A tenant endpoint with no key is direct and keyless, and reads the
+        // OpenAI shape — the managed envelope is never guessed from a URL.
+        let direct = decl_for_probe(
+            "openrouter",
+            Some("https://staging-api.tinyhumans.ai/agent-integrations/openrouter"),
+            None,
+            Some(&staging),
+        );
+        assert!(!direct.is_proxied());
+        assert_eq!(bearer(&direct).await, None);
+        assert_eq!(direct.catalog_shape(), CatalogShape::OpenAi);
+    }
+
+    #[test]
+    fn a_proxied_model_is_only_ever_one_chosen_explicitly() {
+        let none = BTreeMap::new();
+        for tier in crate::company::INFERENCE_TIERS {
+            assert_eq!(
+                proxied_model(tier, &none),
+                Err(ManagedModelMissing {
+                    requested: (*tier).to_string()
+                }),
+                "no default is substituted for {tier}"
+            );
+        }
+        assert!(proxied_model("  ", &none).is_err());
+
+        // The turn's own model, when it is already a real id.
+        assert_eq!(
+            proxied_model("anthropic/claude-sonnet-5", &none).as_deref(),
+            Ok("anthropic/claude-sonnet-5")
+        );
+
+        let mut mapped = BTreeMap::new();
+        mapped.insert("chat-v1".to_string(), " qwen/qwen3.8-max ".to_string());
+        mapped.insert(
+            "agentic-v1".to_string(),
+            "openrouter/anthropic/claude-opus-5".to_string(),
+        );
+        mapped.insert("vision-v1".to_string(), "openrouter/auto".to_string());
+        mapped.insert("reasoning-v1".to_string(), "reasoning-v1".to_string());
+        assert_eq!(
+            proxied_model("chat-v1", &mapped).as_deref(),
+            Ok("qwen/qwen3.8-max")
+        );
+        assert_eq!(
+            proxied_model("agentic-v1", &mapped).as_deref(),
+            Ok("anthropic/claude-opus-5"),
+            "the curated passthrough spelling becomes the bare slug"
+        );
+        assert_eq!(
+            proxied_model("vision-v1", &mapped).as_deref(),
+            Ok("openrouter/auto"),
+            "a two-segment OpenRouter slug is not a passthrough spelling"
+        );
+        assert!(
+            proxied_model("reasoning-v1", &mapped).is_err(),
+            "a mapping that only names a tier is not a choice"
+        );
+
+        let message = ManagedModelMissing {
+            requested: "agentic-v1".to_string(),
+        }
+        .to_string();
+        assert!(
+            message.contains("agentic-v1") && message.contains("Managed"),
+            "{message}"
+        );
     }
 
     /// The real providers must keep honouring the form's `base_url` and `key` —
@@ -3508,7 +3775,10 @@ mod tests {
         .unwrap()
         .expect("a managed route resolves");
         assert!(decl.is_proxied(), "the managed route rides the platform");
-        assert_eq!(decl.base_url, "https://platform.example/v1");
+        assert_eq!(
+            decl.base_url,
+            "https://platform.example/agent-integrations/openrouter"
+        );
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
 
@@ -3869,7 +4139,10 @@ mod tests {
         .await
         .unwrap()
         .expect("a managed route resolves again once it is switched back on");
-        assert_eq!(decl.base_url, "https://platform.example/v1");
+        assert_eq!(
+            decl.base_url,
+            "https://platform.example/agent-integrations/openrouter"
+        );
     }
 
     #[tokio::test]
