@@ -410,6 +410,13 @@ struct ManagedDto {
     /// told the first without the second. Switching it off leaves every step of
     /// its chain exactly where it was.
     enabled: bool,
+    /// The model Managed sends, when one has been chosen (issue #2303).
+    ///
+    /// Not a credential and not derived from one: the id the operator picked from
+    /// Managed's catalog, kept in `store::MANAGED_MODELS_KEY`. Absent means none
+    /// has been chosen, and a managed turn then refuses rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     /// What was last learnt about reaching it, if anything. Same rule as a
     /// provider row's: silent until something has actually been learnt.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1013,6 +1020,13 @@ async fn managed_state(
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await
             .map_err(ApiError)?,
+        // One model for every workload, the way the add flow writes it — so any
+        // entry is the chosen one.
+        model: store::load_managed_models(runtime.id(), secrets)
+            .await
+            .map_err(ApiError)?
+            .into_values()
+            .next(),
         health,
     })
 }
@@ -3533,6 +3547,72 @@ base_url = "https://byo.example/v1"
             zero["keyConfigured"], true,
             "removing MANAGED's key must not clear a credential another row reads"
         );
+    }
+
+    /// Managed takes its model the way an added provider does, keeps it when only
+    /// the model changes, and loses it with its key (issue #2303).
+    #[tokio::test]
+    async fn managed_takes_its_model_like_a_provider_and_loses_it_with_its_key() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+        const FAKE: &str = "th-not-a-real-key";
+        const MANAGED_KEY: &str = "/api/v1/company/inference/managed/key";
+
+        // A workload name is not a model, and is refused before anything lands.
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            MANAGED_KEY,
+            Some(json!({ "key": FAKE, "model": "chat-v1" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_ne!(
+            dto["managed"]["source"], "provider_key",
+            "a refused model must not leave its key behind: {dto}"
+        );
+
+        let (status, body, raw) = send(
+            &state,
+            "PUT",
+            MANAGED_KEY,
+            Some(json!({ "key": FAKE, "model": "openai/gpt-4o-mini" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(!raw.contains(FAKE), "the key must not come back: {raw}");
+        assert_eq!(body["status"]["managed"]["source"], "provider_key", "{raw}");
+        assert_eq!(
+            body["status"]["managed"]["model"], "openai/gpt-4o-mini",
+            "{raw}"
+        );
+
+        // The model alone moves, and the key stays where it is.
+        let (status, body, raw) = send(
+            &state,
+            "PUT",
+            MANAGED_KEY,
+            Some(json!({ "model": "openrouter/openai/gpt-4o" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(body["status"]["managed"]["model"], "openai/gpt-4o", "{raw}");
+        assert_eq!(body["status"]["managed"]["source"], "provider_key", "{raw}");
+
+        // Clearing the key clears the model with it — no dangling choice that
+        // reads as a Managed still set up.
+        let (status, body, raw) =
+            send(&state, "PUT", MANAGED_KEY, Some(json!({ "key": "" }))).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            body["status"]["managed"].get("model").is_none(),
+            "a cleared key must take its model with it: {raw}"
+        );
+
+        // An empty body says nothing, and is refused rather than read as a clear.
+        let (status, _, raw) = send(&state, "PUT", MANAGED_KEY, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
     }
 
     #[tokio::test]

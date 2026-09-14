@@ -430,7 +430,7 @@ impl std::fmt::Display for ManagedModelMissing {
         write!(
             f,
             "Managed inference needs an explicitly chosen OpenRouter model id (for example \
-             `anthropic/claude-sonnet-5`), and none is set for `{}`, so nothing was sent. \
+             `openai/gpt-4o-mini`), and none is set for `{}`, so nothing was sent. \
              Choose a model for Managed in Settings → Inference, or route this workload to a \
              provider that has one.",
             self.requested
@@ -474,6 +474,32 @@ pub fn proxied_model(
         });
     }
     Ok(strip_passthrough_prefix(chosen))
+}
+
+/// The model an operator may choose for Managed, normalised — or why not.
+///
+/// Shape-based, like the console's own check, and never catalog-membership-based:
+/// the picker offers the catalog, but a catalog read can fail or be stale, and
+/// the backend validates the slug on every request anyway. What is refused here
+/// is what can never work at the managed endpoint whatever its catalog says: an
+/// empty value, whitespace, and a workload name, which the proxy rejects.
+pub fn check_managed_model(raw: &str) -> std::result::Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Choose a model for Managed.".to_string());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "`{trimmed}` is not a model id — an OpenRouter id has no spaces, like `openai/gpt-4o-mini`."
+        ));
+    }
+    if crate::company::types::INFERENCE_TIERS.contains(&trimmed) {
+        return Err(format!(
+            "`{trimmed}` is a workload name, not a model. Managed sends a model id from its catalog, \
+             like `openai/gpt-4o-mini`."
+        ));
+    }
+    Ok(strip_passthrough_prefix(trimmed))
 }
 
 /// `openrouter/<author>/<model>` → `<author>/<model>`; anything else verbatim.
@@ -1704,10 +1730,19 @@ async fn resolve_legacy_scoped(
         // set a company key, watched Composio move onto their account, and left
         // every agent turn on the server's.
         let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
+        // Managed's chosen model when this resolved onto the platform — which is
+        // the managed path, the same one a `managed` route takes. A company key
+        // at the default slot goes direct to OpenRouter instead, and Managed's
+        // choice is not that account's to inherit.
+        let models = if proxied {
+            store::load_managed_models(company, secrets).await?
+        } else {
+            BTreeMap::new()
+        };
         return Ok(Some(InferenceDecl {
             provider: DEFAULT_PROVIDER.to_string(),
             base_url,
-            models: BTreeMap::new(),
+            models,
             source: InferenceSource::Default,
             credential,
             proxied,
@@ -1877,7 +1912,11 @@ async fn managed_decl(
     Ok(InferenceDecl {
         provider: normalize_provider(LEGACY_MANAGED).to_string(),
         base_url,
-        models: BTreeMap::new(),
+        // The model the operator chose for Managed, kept the way an added
+        // provider keeps its own (`store::MANAGED_MODELS_KEY`). A managed turn
+        // sends only a chosen model (`proxied_model`), so this map is what it
+        // sends — and an empty one is what makes it refuse, naming what to set.
+        models: store::load_managed_models(company, secrets).await?,
         source: InferenceSource::Runtime,
         credential,
         proxied,
@@ -3218,8 +3257,8 @@ mod tests {
 
         // The turn's own model, when it is already a real id.
         assert_eq!(
-            proxied_model("anthropic/claude-sonnet-5", &none).as_deref(),
-            Ok("anthropic/claude-sonnet-5")
+            proxied_model("openai/gpt-4o-mini", &none).as_deref(),
+            Ok("openai/gpt-4o-mini")
         );
 
         let mut mapped = BTreeMap::new();
@@ -3257,6 +3296,116 @@ mod tests {
             message.contains("agentic-v1") && message.contains("Managed"),
             "{message}"
         );
+    }
+
+    /// The model an operator chooses for Managed is what a managed turn sends,
+    /// on both managed paths: a route naming `managed`, and the default a company
+    /// that configured nothing lands on (issue #2303).
+    #[tokio::test]
+    async fn managed_resolves_with_the_model_chosen_for_it_on_both_managed_paths() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = managed_env();
+        let chosen: BTreeMap<String, String> = crate::company::INFERENCE_TIERS
+            .iter()
+            .map(|tier| ((*tier).to_string(), "openai/gpt-4o-mini".to_string()))
+            .collect();
+
+        // Nothing chosen yet: both paths resolve, carrying no model, which is
+        // what makes the turn refuse rather than guess.
+        let unset = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("the managed default resolves");
+        assert!(unset.is_proxied());
+        assert!(unset.models.is_empty());
+
+        store::save_managed_models(&company, &secrets, &chosen)
+            .await
+            .unwrap();
+
+        let default = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("the managed default resolves");
+        assert_eq!(default.models, chosen);
+        assert_eq!(
+            proxied_model("agentic-v1", &default.models).as_deref(),
+            Ok("openai/gpt-4o-mini")
+        );
+
+        route(&secrets, "agentic-v1", "managed").await;
+        let routed = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a managed route resolves");
+        assert!(routed.is_proxied());
+        assert_eq!(routed.models, chosen);
+
+        // Clearing the choice is an empty map, and reads back as nothing chosen.
+        store::save_managed_models(&company, &secrets, &BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(
+            store::load_managed_models(&company, &secrets)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A company key at the default slot goes direct to OpenRouter, and does not
+    /// inherit the model chosen for Managed.
+    #[tokio::test]
+    async fn a_direct_openrouter_default_does_not_inherit_the_managed_model() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        store_key(&company, &secrets, "sk-or-not-a-real-key")
+            .await
+            .unwrap();
+        let chosen = BTreeMap::from([("chat-v1".to_string(), "openai/gpt-4o-mini".to_string())]);
+        store::save_managed_models(&company, &secrets, &chosen)
+            .await
+            .unwrap();
+
+        let decl = resolve_effective(
+            &company,
+            &Inference::default(),
+            Some(&managed_env()),
+            &secrets,
+        )
+        .await
+        .unwrap()
+        .expect("resolves");
+        assert!(!decl.is_proxied(), "a tenant key goes direct");
+        assert!(decl.models.is_empty());
+    }
+
+    #[test]
+    fn a_managed_model_must_be_a_model_id() {
+        assert_eq!(
+            check_managed_model("  openai/gpt-4o-mini ").as_deref(),
+            Ok("openai/gpt-4o-mini")
+        );
+        assert_eq!(
+            check_managed_model("openrouter/openai/gpt-4o-mini").as_deref(),
+            Ok("openai/gpt-4o-mini"),
+            "the curated passthrough spelling is normalised"
+        );
+        assert_eq!(
+            check_managed_model("openrouter/auto").as_deref(),
+            Ok("openrouter/auto")
+        );
+        for refused in ["", "   ", "chat-v1", "agentic-v1", "openai/gpt 4o"] {
+            assert!(check_managed_model(refused).is_err(), "{refused:?}");
+        }
     }
 
     /// The real providers must keep honouring the form's `base_url` and `key` —

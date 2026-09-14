@@ -808,6 +808,68 @@ pub async fn set_managed_enabled(
         .await
 }
 
+// ---- the managed tier's model -----------------------------------------------
+
+/// The model Managed sends, as the same tier → model map an added provider keeps
+/// in [`Provider::models`].
+///
+/// **Its own slot, beside [`MANAGED_ENABLED_KEY`] and `provider/tinyhumans/key`,
+/// for the reason those are.** Managed has no provider record — it resolves from
+/// a chain rather than from a row, and a record for it in
+/// [`PROVIDER_INDEX_KEY`] would collide with entry zero's slug whenever the
+/// company's stored config is itself managed ([`put_provider`] refuses exactly
+/// that). So the one thing a record would have carried, its `models`, lives
+/// here, in the shape the record would have carried it (issue #2303).
+///
+/// The managed endpoint is the backend's OpenRouter proxy, which takes a bare
+/// OpenRouter slug and no tier name, so a managed turn sends only a model chosen
+/// explicitly — this slot is where that choice is kept.
+pub const MANAGED_MODELS_KEY: &str = "inference/managed/models";
+
+/// Managed's chosen models. Empty when none has been chosen.
+///
+/// A slot that is absent or holds the empty string a clear leaves behind reads
+/// as empty. A value that does not parse is an error rather than an empty map:
+/// reading it as "no model chosen" would make a turn refuse with advice to
+/// choose one while a choice is in fact stored.
+pub async fn load_managed_models(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<BTreeMap<String, String>> {
+    let Some(SecretValue(raw)) = secrets.get(company, MANAGED_MODELS_KEY).await? else {
+        return Ok(BTreeMap::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    serde_json::from_str(&raw).map_err(|e| {
+        OpenCompanyError::Store(format!("the managed model record could not be read: {e}"))
+    })
+}
+
+/// Stores Managed's chosen models, or clears them with an empty map.
+///
+/// The store has no delete, so a clear is a write of the empty string — the same
+/// rule every other slot here follows.
+pub async fn save_managed_models(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    models: &BTreeMap<String, String>,
+) -> Result<()> {
+    let raw = if models.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(models).map_err(|e| {
+            OpenCompanyError::Store(format!(
+                "the managed model record could not be written: {e}"
+            ))
+        })?
+    };
+    secrets
+        .set(company, MANAGED_MODELS_KEY, SecretValue(raw))
+        .await
+}
+
 // ---- the default provider ---------------------------------------------------
 
 /// The [`SecretStore`] key naming the company's default provider.
