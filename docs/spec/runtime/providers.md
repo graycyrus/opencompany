@@ -179,17 +179,46 @@ established is the defect above.
 A harness's own `models` entry is honoured **verbatim in every vocabulary**: the
 operator named a specific model, and rewriting it is not ours to do.
 
-### Naming a specific model on the proxied path
+### The managed endpoint (issue #2303)
 
-The platform endpoint does accept a concrete model, but under its own
-`openrouter/<author>/<slug>` namespace — an explicit prefix, so an arbitrary
-caller string can never reach an upstream URL — and only when passthrough is
-switched on there, which is **opt-in and off by default**. It prices such a
-request from OpenRouter's live catalog and caps upstream spend at that rate.
+Managed — a route naming `managed`, and a keyless `openrouter` company on the
+injected default — reaches the TinyHumans backend's **direct OpenRouter proxy**,
+not the curated `/openai/v1` surface. **None of the vocabulary above applies to
+it.**
 
-So a bare tier is the only value that always works proxied. An operator who
-wants a specific model through the proxy writes the `openrouter/…` form into
-`models` themselves, and it is forwarded untouched.
+| | |
+|---|---|
+| base URL | `inference::managed_base_url`: the **origin** of the injected `OPENCOMPANY_INFERENCE_URL` + `/agent-integrations/openrouter` (a URL already ending in that path is used as written); `https://api.tinyhumans.ai/agent-integrations/openrouter` when nothing is injected |
+| chat | `POST {base}/chat/completions` — OpenAI shape, passed through |
+| catalog | `GET {base}/models?limit=500&offset=N` — `{success, data: {data, total, …}}`, paged to `total` (`inference::platform_proxy`) |
+| model | a bare OpenRouter slug, **chosen explicitly** (`inference::proxied_model`) |
+
+Only the origin of the injected URL is kept, so
+`https://staging-api.tinyhumans.ai/openai/v1` becomes the staging proxy and the
+managed credential reaches exactly the host it reached before. `proxied` and the
+managed credential chain are unchanged.
+
+**A managed turn sends only a chosen model.** The proxy rejects tier names, and
+the turn path deliberately neither substitutes `DEFAULT_TIER_MODELS` nor reads
+the catalog to guess one: a model nobody chose would decide what the company
+runs on and pays for. It sends the operator's mapping for the turn's tier, else
+the turn's own model when that is already a real id (`OPENCOMPANY_INFERENCE_MODEL`,
+a pinned agent model), and otherwise **fails closed** before anything is sent,
+naming the workload. A mapping that only names a tier (`chat-v1 = "chat-v1"`) is
+not a choice; the curated `openrouter/<author>/<model>` spelling is translated to
+`<author>/<model>`. Where a routed Managed workload's model comes from is not
+settled yet — the route grammar has no `managed:<model>` form.
+
+The catalog is read in the proxy's shape because the decl is proxied
+(`InferenceDecl::catalog_shape`), never because of what the URL looks like. A
+`503` ("catalog is not available yet", before the backend's snapshot loads) is
+an endpoint failure, remembered for the failure TTL — never an empty catalog;
+`401`/`403` are not memoized. `GET …/inference/models` for a managed company
+lists that catalog with no `tierVocabulary` and no `tierDefaults`.
+
+`OPENCOMPANY_INFERENCE_URL` itself still names the curated surface for the two
+things that read it directly: the no-company setup brain (`HostedProvider`) and
+hosted embeddings.
 
 ---
 

@@ -100,8 +100,10 @@ host refuses an add that would store a row it knows cannot answer.
 "Direct vendor APIs need a model, gateways do not" is the right intuition and the
 wrong rule: a self-hosted LiteLLM publishing `agentic-v1` resolves tiers whoever
 runs it. Anthropic, OpenAI, Groq, Ollama and LM Studio all come out `Unknown`;
-the managed endpoint and tier-publishing gateways come out `Tiers`; OpenRouter
-comes out `Concrete`.
+tier-publishing gateways come out `Tiers`; OpenRouter comes out `Concrete`. The
+managed endpoint is no longer classified: since #2303 it is the OpenRouter proxy,
+its turns send only an explicitly chosen model, and its catalog reports no tier
+vocabulary.
 
 ## The one case where routing a new provider is not a guess
 

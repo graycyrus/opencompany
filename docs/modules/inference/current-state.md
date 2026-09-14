@@ -89,6 +89,12 @@ The second step is where the sophistication is. `model_for_tier` consults a
 
 An operator override always wins, in every vocabulary.
 
+**Managed is outside this table** (issue #2303). The managed endpoint is now the
+backend's OpenRouter proxy, which rejects tier names, so a proxied turn skips
+the vocabulary entirely and sends only an explicitly chosen model, failing closed
+without one — see
+[the managed endpoint](../../spec/runtime/providers.md#the-managed-endpoint-issue-2303).
+
 Two production incidents are recorded in the comments there, and both are the
 reason this is not simpler:
 
