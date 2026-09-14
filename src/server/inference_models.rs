@@ -1349,10 +1349,13 @@ mod tests {
     /// What the mock proxy saw: each request's query string and `Authorization`.
     type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
+    /// How the mock proxy answers a page: offset in, status and body out.
+    type Respond = fn(usize) -> (u16, String);
+
     /// A loopback stand-in for `GET /agent-integrations/openrouter/models`,
     /// answering by page offset. Returns the proxy **base** — what a managed
     /// decl carries — and the request log.
-    async fn spawn_proxy_catalog(respond: fn(usize) -> (u16, String)) -> (String, Seen) {
+    async fn spawn_proxy_catalog(respond: Respond) -> (String, Seen) {
         use axum::http::{HeaderMap, StatusCode, Uri};
 
         let seen: Seen = Arc::default();
@@ -1495,7 +1498,7 @@ mod tests {
                 r#"{"success":false,"error":"missing scope"}"#.to_string(),
             )
         }
-        let cases: [(u16, fn(usize) -> (u16, String)); 2] = [(401, unauthorized), (403, forbidden)];
+        let cases: [(u16, Respond); 2] = [(401, unauthorized), (403, forbidden)];
         for (status, respond) in cases {
             let (base, _) = spawn_proxy_catalog(respond).await;
             let scope = format!("proxy-{status}-co");
