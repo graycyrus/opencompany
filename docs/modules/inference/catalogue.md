@@ -16,7 +16,7 @@ neither, and it is listed as a defect for that reason.
 
 ## Cloud providers
 
-26 user-addable entries. `auth` is the header style: `bearer` sends
+27 user-addable entries. `tinyhumans` (issue #2303) is TinyHumans as an ordinary vendor: its URL is the only thing special about it, and its catalog comes back paged and enveloped (`CatalogShape::PagedEnvelope`, read off the row by `catalog_shape_for`). `auth` is the header style: `bearer` sends
 `Authorization: Bearer <key>`; `anthropic` sends `x-api-key: <key>` plus
 `anthropic-version: 2023-06-01`.
 
@@ -48,6 +48,7 @@ neither, and it is listed as a defect for that reason.
 | 24 | `vercel-ai-gateway` | Vercel AI Gateway | bearer | — | `https://ai-gateway.vercel.sh/v1` |
 | 25 | `sumopod` | SumoPod | bearer | `sk-...` | `https://ai.sumopod.com/v1` |
 | 26 | `modelscope` | ModelScope | bearer | `ms-...` | `https://api-inference.modelscope.cn/v1` |
+| 27 | `tinyhumans` | TinyHumans | bearer | `th-...` | `https://api.tinyhumans.ai/agent-integrations/openrouter` |
 
 The 27th Rust entry is `openhuman` (`https://api.openhuman.ai/v1`, auth style
 `openhuman_jwt`) — their managed first-party backend, always present, never
