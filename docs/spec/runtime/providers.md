@@ -207,12 +207,30 @@ closed** before anything is sent, naming the workload. A mapping that only names
 a tier (`chat-v1 = "chat-v1"`) is not a choice; the curated
 `openrouter/<author>/<model>` spelling is translated to `<author>/<model>`.
 
-**Where a company chooses its managed model is not settled yet.** A `managed`
-route and the managed default carry no model — the route grammar has no
-`managed:<model>` form — so until that choice exists they fail closed. The
-existing instance-wide `OPENCOMPANY_INFERENCE_MODEL` override reaches a managed
-turn when it is a real id, and test and fixture hosts use it for exactly that; it
-is a fallback, not the per-company answer.
+**A company chooses Managed's model the way it chooses any provider's.** On the
+Providers tab, connecting TinyHumans is three steps: paste the key, pick a model
+from Managed's own catalog — read with that key through
+`POST …/inference/managed/probe`, before anything is stored — and save. The
+choice is stored as the same one-model-for-every-tier map an added provider
+keeps in its record, in a slot of Managed's own, `inference/managed/models`
+(`store::MANAGED_MODELS_KEY`), because Managed has no provider record to keep it
+in. Both managed paths read it: a `managed` route (`managed_decl`) and the
+managed default a company that configured nothing lands on. The row's Change
+model reads the same catalog through `…/providers/tinyhumans/models`.
+
+- `PUT …/inference/managed/key` takes `{key?, model?}`; absent is unchanged.
+- Clearing the key clears the model chosen with it, so no choice is left behind
+  that reads as a Managed still set up.
+- A workload name is refused as a model before anything is written.
+- After a save the console runs the managed Test, which reads the catalog with
+  what is now stored and records the row's health.
+
+Verified live on 2026-09-14: the proxy's catalog lists 259 models, with no
+Anthropic models and no GPT-5 family. A tier name (`chat-v1`) and an id not in
+the catalog both answer `400`; `openai/gpt-4o-mini` answers `200`. A turn reads
+the reply as one JSON body and never asks for a stream, so the streamed form's
+last frame — `openhuman` with no `choices` — cannot reach the parser. The reply's
+extra `service_tier`, `openhuman` and `usage.cost` / `usage.is_byok` are ignored.
 
 The catalog is read in the proxy's shape because the decl is proxied
 (`InferenceDecl::catalog_shape`), never because of what the URL looks like. A
