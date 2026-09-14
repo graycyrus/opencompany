@@ -65,7 +65,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use super::{CatalogShape, catalogue, platform_proxy};
+use super::catalogue::{self, CatalogShape};
+use super::paged_catalog;
 
 /// What a failed probe means.
 ///
@@ -773,7 +774,7 @@ pub fn apply_auth(
 /// valid keys.
 ///
 /// `shape` is the caller's statement of which catalog shape the endpoint
-/// publishes. [`CatalogShape::PlatformProxy`] — the managed endpoint — is read
+/// publishes. [`CatalogShape::PagedEnvelope`] — a catalogue row such as TinyHumans — is read
 /// page by page through the same client and redirect guard, and its success
 /// bodies get a larger cap than an error's, because a page of model entries is
 /// the document being asked for rather than wording to classify.
@@ -797,7 +798,7 @@ pub async fn probe_models(
     // model in it. See `catalogue::catalog_query`.
     let url = match shape {
         CatalogShape::OpenAi => format!("{base}/models{}", catalogue::catalog_query(base)),
-        CatalogShape::PlatformProxy => format!("{base}{}", platform_proxy::page_path(0)),
+        CatalogShape::PagedEnvelope => format!("{base}{}", paged_catalog::page_path(0)),
     };
 
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
@@ -830,18 +831,18 @@ pub async fn probe_models(
         .build()
         .map_err(|e| ProbeFailure::from_raw(format!("could not build the probe client: {e}")))?;
 
-    if shape == CatalogShape::PlatformProxy {
-        let mut collector = platform_proxy::Collector::default();
+    if shape == CatalogShape::PagedEnvelope {
+        let mut collector = paged_catalog::Collector::default();
         loop {
-            let page_url = format!("{base}{}", platform_proxy::page_path(collector.offset()));
+            let page_url = format!("{base}{}", paged_catalog::page_path(collector.offset()));
             let body = probe_get(&client, &page_url, auth, credential, PROXY_PAGE_BODY_CAP).await?;
             // Redacted like every other probe failure text: it reaches a log.
-            let page = platform_proxy::parse_page(&body).map_err(|e| {
+            let page = paged_catalog::parse_page(&body).map_err(|e| {
                 ProbeFailure::from_raw(format!("{}: {e}", catalogue::redact_endpoint(&page_url)))
             })?;
             match collector.push(page) {
-                platform_proxy::NextPage::At(_) => {}
-                platform_proxy::NextPage::Done | platform_proxy::NextPage::Truncated { .. } => {
+                paged_catalog::NextPage::At(_) => {}
+                paged_catalog::NextPage::Done | paged_catalog::NextPage::Truncated { .. } => {
                     break;
                 }
             }
@@ -853,9 +854,9 @@ pub async fn probe_models(
     Ok(parse_model_ids(&body))
 }
 
-/// A success body of the managed endpoint's catalog, read in full up to here.
+/// A success body of a paged catalog, read in full up to here.
 ///
-/// A page of up to [`platform_proxy::PAGE_LIMIT`] entries, each carrying pricing
+/// A page of up to [`paged_catalog::PAGE_LIMIT`] entries, each carrying pricing
 /// and modality fields, runs to a few hundred KiB — past [`PROBE_BODY_CAP`],
 /// which is sized for error wording. Truncating one would fail the parse and
 /// report a healthy endpoint as broken. Still a cap, so a body that never ends

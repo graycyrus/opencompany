@@ -231,14 +231,6 @@ export interface ManagedState {
    * is what managed always was.
    */
   enabled?: boolean;
-  /**
-   * The model Managed sends, once one has been chosen (issue #2303).
-   *
-   * The managed endpoint takes a bare OpenRouter id and no workload name, so a
-   * managed turn sends only a chosen model. Absent means none has been chosen,
-   * and such a turn refuses rather than guessing.
-   */
-  model?: string;
   /** What was last learnt about reaching it, if anything. */
   health?: ProviderHealth;
 }
@@ -651,27 +643,9 @@ export function listProviderModels(
 export function setManagedKey(
   client: OpenCompanyClient,
   company: string | null,
-  /**
-   * `key` and `model` each optional, and absent means unchanged — so the model
-   * can move without re-sending a key that cannot be shown. `key: ""` clears the
-   * key and the model chosen with it; `model: ""` clears the model alone.
-   */
-  body: { key?: string; model?: string },
-): Promise<ProviderMutation> {
-  return client.put<ProviderMutation>(`${client.scopeFor(company)}/inference/managed/key`, body);
-}
-
-/**
- * Read Managed's catalog with a key that is **not stored yet** — the connect
- * dialog's model step, the same ask-before-writing `probeDraft` gives an added
- * provider. Nothing is written and no health is recorded.
- */
-export function probeManagedKey(
-  client: OpenCompanyClient,
-  company: string | null,
   key: string,
-): Promise<ProbeResult> {
-  return client.post<ProbeResult>(`${client.scopeFor(company)}/inference/managed/probe`, { key });
+): Promise<ProviderMutation> {
+  return client.put<ProviderMutation>(`${client.scopeFor(company)}/inference/managed/key`, { key });
 }
 
 /**

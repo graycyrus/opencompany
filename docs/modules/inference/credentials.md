@@ -172,10 +172,7 @@ Without it this model hands a TinyHumans key to OpenRouter — which is exactly
 the `link/finish` bug above, generalised. With it:
 
 - provider **is** TinyHumans/managed → the account key is the right credential
-  for that endpoint, so use it. Since #2303 that endpoint is the backend's
-  OpenRouter proxy, `/agent-integrations/openrouter`, on the **same origin** the
-  managed URL always named (`inference::managed_base_url`) — same `INFERENCE`
-  key scope, so the chain and this check are unchanged
+  for that endpoint, so use it
 - provider is **any other vendor** → the account key is meaningless to them, so
   never send it; require a vendor credential or fail closed
 

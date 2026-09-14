@@ -179,69 +179,17 @@ established is the defect above.
 A harness's own `models` entry is honoured **verbatim in every vocabulary**: the
 operator named a specific model, and rewriting it is not ours to do.
 
-### The managed endpoint (issue #2303)
+### Naming a specific model on the proxied path
 
-Managed — a route naming `managed`, and a keyless `openrouter` company on the
-injected default — reaches the TinyHumans backend's **direct OpenRouter proxy**,
-not the curated `/openai/v1` surface. **None of the vocabulary above applies to
-it.**
+The platform endpoint does accept a concrete model, but under its own
+`openrouter/<author>/<slug>` namespace — an explicit prefix, so an arbitrary
+caller string can never reach an upstream URL — and only when passthrough is
+switched on there, which is **opt-in and off by default**. It prices such a
+request from OpenRouter's live catalog and caps upstream spend at that rate.
 
-| | |
-|---|---|
-| base URL | `inference::managed_base_url`: the **origin** of the injected `OPENCOMPANY_INFERENCE_URL` + `/agent-integrations/openrouter` (a URL already ending in that path is used as written); `https://api.tinyhumans.ai/agent-integrations/openrouter` when nothing is injected |
-| chat | `POST {base}/chat/completions` — OpenAI shape, passed through |
-| catalog | `GET {base}/models?limit=500&offset=N` — `{success, data: {data, total, …}}`, paged to `total` (`inference::platform_proxy`) |
-| model | a bare OpenRouter slug, **chosen explicitly** (`inference::proxied_model`) |
-
-Only the origin of the injected URL is kept, so
-`https://staging-api.tinyhumans.ai/openai/v1` becomes the staging proxy and the
-managed credential reaches exactly the host it reached before. `proxied` and the
-managed credential chain are unchanged.
-
-**A managed turn sends only a chosen model.** The proxy rejects tier names, and
-the turn path deliberately neither substitutes `DEFAULT_TIER_MODELS` nor reads
-the catalog to guess one: a model nobody chose would decide what the company
-runs on and pays for. It sends the operator's mapping for the turn's tier, else
-the turn's own model when that is already a real id, and otherwise **fails
-closed** before anything is sent, naming the workload. A mapping that only names
-a tier (`chat-v1 = "chat-v1"`) is not a choice; the curated
-`openrouter/<author>/<model>` spelling is translated to `<author>/<model>`.
-
-**A company chooses Managed's model the way it chooses any provider's.** On the
-Providers tab, connecting TinyHumans is three steps: paste the key, pick a model
-from Managed's own catalog — read with that key through
-`POST …/inference/managed/probe`, before anything is stored — and save. The
-choice is stored as the same one-model-for-every-tier map an added provider
-keeps in its record, in a slot of Managed's own, `inference/managed/models`
-(`store::MANAGED_MODELS_KEY`), because Managed has no provider record to keep it
-in. Both managed paths read it: a `managed` route (`managed_decl`) and the
-managed default a company that configured nothing lands on. The row's Change
-model reads the same catalog through `…/providers/tinyhumans/models`.
-
-- `PUT …/inference/managed/key` takes `{key?, model?}`; absent is unchanged.
-- Clearing the key clears the model chosen with it, so no choice is left behind
-  that reads as a Managed still set up.
-- A workload name is refused as a model before anything is written.
-- After a save the console runs the managed Test, which reads the catalog with
-  what is now stored and records the row's health.
-
-Verified live on 2026-09-14: the proxy's catalog lists 259 models, with no
-Anthropic models and no GPT-5 family. A tier name (`chat-v1`) and an id not in
-the catalog both answer `400`; `openai/gpt-4o-mini` answers `200`. A turn reads
-the reply as one JSON body and never asks for a stream, so the streamed form's
-last frame — `openhuman` with no `choices` — cannot reach the parser. The reply's
-extra `service_tier`, `openhuman` and `usage.cost` / `usage.is_byok` are ignored.
-
-The catalog is read in the proxy's shape because the decl is proxied
-(`InferenceDecl::catalog_shape`), never because of what the URL looks like. A
-`503` ("catalog is not available yet", before the backend's snapshot loads) is
-an endpoint failure, remembered for the failure TTL — never an empty catalog;
-`401`/`403` are not memoized. `GET …/inference/models` for a managed company
-lists that catalog with no `tierVocabulary` and no `tierDefaults`.
-
-`OPENCOMPANY_INFERENCE_URL` itself still names the curated surface for the two
-things that read it directly: the no-company setup brain (`HostedProvider`) and
-hosted embeddings.
+So a bare tier is the only value that always works proxied. An operator who
+wants a specific model through the proxy writes the `openrouter/…` form into
+`models` themselves, and it is forwarded untouched.
 
 ---
 

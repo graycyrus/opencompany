@@ -1,31 +1,20 @@
-//! The managed endpoint: the TinyHumans backend's **direct OpenRouter proxy**.
+//! A **paged, enveloped** model catalog — the shape a catalogue row declares
+//! with [`CatalogShape::PagedEnvelope`](super::catalogue::CatalogShape).
 //!
-//! Managed inference used to address the curated `/openai/v1` surface, which
-//! resolves tier names (`chat-v1`, …) against the platform's own registry. It
-//! now addresses `/agent-integrations/openrouter` instead (issue #2303):
+//! Most OpenAI-compatible endpoints answer `GET {base}/models` with
+//! `{ "data": [...] }` in one page. The TinyHumans catalogue row's endpoint
+//! (`https://api.tinyhumans.ai/agent-integrations/openrouter`) answers with
+//! `{success, data: {object, data: [...], total, limit, offset}}` instead, a
+//! page at a time, and `503` before its catalog snapshot has loaded. That is the
+//! only thing about it that differs from any other provider, so it lives here,
+//! selected by the row's kind — never by who pays, and never by the URL.
 //!
-//! * `GET {base}/models` — the chat catalog, **enveloped and paginated**:
-//!   `{success, data: {object, data: [...], total, limit, offset}}`. Served from
-//!   a cached snapshot, and `503` before that snapshot has loaded.
-//! * `POST {base}/chat/completions` — OpenAI chat completions, passed through
-//!   unenveloped. `model` must be a **bare OpenRouter slug**; a tier name is
-//!   rejected.
-//!
-//! Both routes take the same `INFERENCE`-scoped key the curated surface took, so
-//! the managed credential chain is unchanged. What changes is the base URL
-//! ([`base_for`]), the catalog shape ([`parse_page`]), and the model a turn puts
-//! on the wire — only ever one chosen explicitly (`super::proxied_model`).
-//!
-//! Nothing here performs I/O. The two callers that fetch the catalog —
+//! Nothing here performs I/O. The two callers that read a catalog —
 //! `crate::server::inference_models::discover_models` and
 //! `super::probe::probe_models` — keep their own clients, redirect guards and
-//! error classification, and share only the URL and the parser, so the shape
-//! cannot drift between them.
+//! error classification, and share only the page URL and the parser.
 
 use std::collections::HashSet;
-
-/// The proxy's path on the platform backend, relative to its origin.
-pub const PATH: &str = "/agent-integrations/openrouter";
 
 /// The page size a catalog read asks for.
 ///
@@ -41,38 +30,6 @@ pub const PAGE_LIMIT: usize = 500;
 /// catalog of a few hundred. It exists so an endpoint reporting a `total` it
 /// never reaches cannot hold a read in a loop until the timeout.
 pub const MAX_PAGES: usize = 20;
-
-/// The managed proxy base for a managed endpoint URL.
-///
-/// **The origin is kept; the path is replaced.** An environment pointed with
-/// `OPENCOMPANY_INFERENCE_URL` at `https://staging-api.tinyhumans.ai/openai/v1`
-/// — the curated surface every existing deployment names — resolves to
-/// `https://staging-api.tinyhumans.ai/agent-integrations/openrouter`, so a
-/// staging or self-hosted backend still wins over production and no deployment
-/// has to change a variable.
-///
-/// A URL that **already ends in [`PATH`]** is taken as written, prefix and all:
-/// that is an operator naming the proxy explicitly, including behind a gateway
-/// that mounts the backend under a sub-path.
-///
-/// The origin never changes, and that is the credential property: the managed
-/// credential reaches exactly the origin it reached before this function
-/// existed, never another host. A value that does not parse as a URL is not
-/// rewritten into one — it keeps its text with [`PATH`] appended, so the
-/// endpoint guard refuses it and names it, rather than this silently
-/// substituting production.
-pub fn base_for(managed_url: &str) -> String {
-    let trimmed = managed_url.trim().trim_end_matches('/');
-    if trimmed.ends_with(PATH) {
-        return trimmed.to_string();
-    }
-    match url::Url::parse(trimmed) {
-        Ok(parsed) if parsed.has_host() => {
-            format!("{}{PATH}", parsed.origin().ascii_serialization())
-        }
-        _ => format!("{trimmed}{PATH}"),
-    }
-}
 
 /// The catalog URL for the page starting at `offset`, relative to the base.
 pub fn page_path(offset: usize) -> String {
@@ -234,75 +191,6 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- the base URL ------------------------------------------------------
-
-    #[test]
-    fn the_curated_platform_url_moves_to_the_proxy_on_the_same_origin() {
-        assert_eq!(
-            base_for("https://api.tinyhumans.ai/openai/v1"),
-            "https://api.tinyhumans.ai/agent-integrations/openrouter"
-        );
-        assert_eq!(
-            base_for("https://api.tinyhumans.ai/openai/v1/"),
-            "https://api.tinyhumans.ai/agent-integrations/openrouter"
-        );
-    }
-
-    /// The staging override is the case this rule exists for: an environment
-    /// variable nobody will edit keeps pointing its tenants at staging.
-    #[test]
-    fn a_staging_override_still_wins_over_production() {
-        assert_eq!(
-            base_for("https://staging-api.tinyhumans.ai/openai/v1"),
-            "https://staging-api.tinyhumans.ai/agent-integrations/openrouter"
-        );
-    }
-
-    #[test]
-    fn a_port_and_a_bare_origin_are_kept() {
-        assert_eq!(
-            base_for("http://127.0.0.1:8099/v1"),
-            "http://127.0.0.1:8099/agent-integrations/openrouter"
-        );
-        assert_eq!(
-            base_for("http://127.0.0.1:8099"),
-            "http://127.0.0.1:8099/agent-integrations/openrouter"
-        );
-    }
-
-    #[test]
-    fn a_url_that_already_names_the_proxy_is_taken_as_written() {
-        assert_eq!(
-            base_for("https://gateway.example/tinyhumans/agent-integrations/openrouter/"),
-            "https://gateway.example/tinyhumans/agent-integrations/openrouter"
-        );
-    }
-
-    /// The credential property, stated as one: whatever the managed URL was,
-    /// the derived base is on the same origin, so the managed credential never
-    /// reaches a host it did not reach before.
-    #[test]
-    fn derivation_never_changes_the_origin() {
-        for input in [
-            "https://api.tinyhumans.ai/openai/v1",
-            "https://staging-api.tinyhumans.ai/openai/v1",
-            "https://gateway.example/some/prefix/openai/v1",
-            "http://127.0.0.1:6969/v1",
-            "https://env.example",
-        ] {
-            let before = url::Url::parse(input).unwrap().origin();
-            let after = url::Url::parse(&base_for(input)).unwrap().origin();
-            assert_eq!(before, after, "{input}");
-        }
-    }
-
-    #[test]
-    fn an_unparsable_value_is_not_replaced_with_production() {
-        let derived = base_for("not a url");
-        assert!(!derived.contains("tinyhumans.ai"), "{derived}");
-        assert!(derived.ends_with(PATH), "{derived}");
-    }
 
     #[test]
     fn the_page_path_asks_for_the_maximum_page() {

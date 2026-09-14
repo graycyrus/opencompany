@@ -125,12 +125,11 @@ impl ModelSlug {
             return Self::OTHER;
         }
 
-        // This repo's own workload tiers. On an endpoint that resolves tiers
-        // itself the tier *is* what goes on the wire, so the tier is the most
-        // specific true answer available here, and substituting the model it
-        // resolves to by default would be a guess printed as a fact. (The
-        // managed endpoint no longer is one: since #2303 a managed turn sends an
-        // explicit OpenRouter slug, which classifies below like any other.)
+        // This repo's own workload tiers. On the subscription-proxied path the
+        // tier *is* what goes on the wire — the platform's registry resolves it
+        // upstream — so the tier is the most specific true answer available
+        // here, and substituting the model it resolves to by default would be
+        // a guess printed as a fact.
         //
         // Matched on the whole string, before the `author/` split, because a
         // tier has no author. The sentinels round-trip to themselves so that

@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::company::inference::catalogue::{self, AuthStyle};
-use crate::company::inference::platform_proxy::{self, NextPage};
-use crate::company::inference::{CatalogShape, TierVocabulary, probe};
+use crate::company::inference::catalogue::{self, AuthStyle, CatalogShape};
+use crate::company::inference::paged_catalog::{self, NextPage};
+use crate::company::inference::{TierVocabulary, probe};
 
 /// How long a successful catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
@@ -228,8 +228,8 @@ impl std::fmt::Display for DiscoveryError {
 ///
 /// ## `shape` is the caller's statement, not a guess
 ///
-/// [`CatalogShape::PlatformProxy`] reads the managed endpoint's enveloped,
-/// paginated catalog ([`platform_proxy`]) and every page goes through the same
+/// [`CatalogShape::PagedEnvelope`] reads a paged, enveloped catalog
+/// ([`paged_catalog`]) — the shape the TinyHumans catalogue row declares — and every page goes through the same
 /// client, and so the same redirect guard, as the OpenAI-shaped read.
 pub(crate) async fn discover_models(
     base_url: &str,
@@ -287,11 +287,11 @@ pub(crate) async fn discover_models(
             ))
         })?;
 
-    // The managed endpoint publishes its own shape, and none of the
+    // A paged catalog has its own shape, and none of the
     // OpenRouter-host rules below apply to it: it is not OpenRouter's host, and
-    // its catalog is already the platform account's.
-    if shape == CatalogShape::PlatformProxy {
-        return fetch_platform_proxy_catalog(&client, base, bearer, auth).await;
+    // its catalog is already scoped to the key that reads it.
+    if shape == CatalogShape::PagedEnvelope {
+        return fetch_paged_catalog(&client, base, bearer, auth).await;
     }
 
     // The account-scoped catalogue first, where the endpoint has one — see
@@ -346,22 +346,22 @@ async fn fetch_catalog(
     Ok(parse_models(payload))
 }
 
-/// Every page of the managed endpoint's catalog, in listing order.
+/// Every page of a paged catalog, in listing order.
 ///
-/// Paged by [`platform_proxy::Collector`] until the envelope's `total`. Each page
+/// Paged by [`paged_catalog::Collector`] until the envelope's `total`. Each page
 /// is one [`send_classified`] request, so a `401`/`403` on any page is still an
 /// answer about the credential, and a `503` — the backend's "catalog is not
 /// available yet", before its snapshot loads — is an endpoint failure that the
 /// memo in [`catalog_models`] remembers, never an empty catalog.
-async fn fetch_platform_proxy_catalog(
+async fn fetch_paged_catalog(
     client: &reqwest::Client,
     base: &str,
     bearer: Option<&str>,
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
-    let mut collector = platform_proxy::Collector::default();
+    let mut collector = paged_catalog::Collector::default();
     loop {
-        let url = format!("{base}{}", platform_proxy::page_path(collector.offset()));
+        let url = format!("{base}{}", paged_catalog::page_path(collector.offset()));
         // Redacted, the same as the OpenAI-shaped read: these messages are
         // cached, replayed and rendered in the console.
         let named = catalogue::redact_endpoint(&url);
@@ -374,7 +374,7 @@ async fn fetch_platform_proxy_catalog(
                     "reading the model catalog from {named} failed: {error}"
                 ))
             })?;
-        let page = platform_proxy::parse_page(&body).map_err(|error| {
+        let page = paged_catalog::parse_page(&body).map_err(|error| {
             DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {error}"))
         })?;
         match collector.push(page) {
@@ -385,7 +385,7 @@ async fn fetch_platform_proxy_catalog(
                     base = %catalogue::redact_endpoint(base),
                     read,
                     total,
-                    "the managed model catalog has more pages than a read follows; \
+                    "the model catalog has more pages than a read follows; \
                      the picker is missing the rest"
                 );
                 break;
@@ -543,7 +543,7 @@ fn cache_key(base_url: &str) -> String {
 fn shaped_endpoint(base_url: &str, shape: CatalogShape) -> String {
     match shape {
         CatalogShape::OpenAi => cache_key(base_url),
-        CatalogShape::PlatformProxy => format!("{}\u{2}platform-proxy", cache_key(base_url)),
+        CatalogShape::PagedEnvelope => format!("{}\u{2}paged-envelope", cache_key(base_url)),
     }
 }
 
@@ -729,11 +729,9 @@ pub(crate) async fn discovered_vocabulary(
     bearer: Option<&str>,
     scope: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Option<TierVocabulary> {
-    // OpenAI-shaped only. Vocabulary discovery is for the endpoints that still
-    // resolve tiers through it; a proxied (managed) decl sends an explicitly
-    // chosen model and its callers skip this entirely (issue #2303).
-    let models = catalog_models(base_url, bearer, scope, auth, CatalogShape::OpenAi)
+    let models = catalog_models(base_url, bearer, scope, auth, shape)
         .await
         .ok()?;
     Some(TierVocabulary::from_catalog_ids(
@@ -769,6 +767,7 @@ pub(crate) async fn turn_vocabulary(
     bearer: Option<&str>,
     scope: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Option<TierVocabulary> {
     // Owned, because the task has to be able to outlive this future — which is
     // the entire reason it is spawned. The bearer lives in process memory for
@@ -778,7 +777,7 @@ pub(crate) async fn turn_vocabulary(
     let bearer = bearer.map(str::to_string);
     let scope = scope.map(str::to_string);
     let read = tokio::spawn(async move {
-        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref(), auth).await
+        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref(), auth, shape).await
     });
     match tokio::time::timeout(TURN_CATALOG_BUDGET, read).await {
         Ok(Ok(vocabulary)) => vocabulary,
@@ -871,7 +870,14 @@ mod tests {
         });
 
         let started = Instant::now();
-        let vocabulary = turn_vocabulary(&endpoint, None, None, AuthStyle::Bearer).await;
+        let vocabulary = turn_vocabulary(
+            &endpoint,
+            None,
+            None,
+            AuthStyle::Bearer,
+            CatalogShape::OpenAi,
+        )
+        .await;
         let waited = started.elapsed();
 
         assert_eq!(
@@ -1082,7 +1088,14 @@ mod tests {
         const ENDPOINT: &str = "https://vocabulary.example/v1";
         catalog_cache(ENDPOINT).store(vec![model("agentic-v1"), model("chat-v1")], Instant::now());
         assert_eq!(
-            discovered_vocabulary(ENDPOINT, None, None, AuthStyle::Bearer).await,
+            discovered_vocabulary(
+                ENDPOINT,
+                None,
+                None,
+                AuthStyle::Bearer,
+                CatalogShape::OpenAi
+            )
+            .await,
             Some(TierVocabulary::Tiers)
         );
     }
@@ -1448,7 +1461,7 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        (format!("http://{addr}{}", platform_proxy::PATH), seen)
+        (format!("http://{addr}/agent-integrations/openrouter"), seen)
     }
 
     const FAKE_KEY: &str = "th-not-a-real-key";
@@ -1478,7 +1491,7 @@ mod tests {
             &base,
             Some(FAKE_KEY),
             AuthStyle::Bearer,
-            CatalogShape::PlatformProxy,
+            CatalogShape::PagedEnvelope,
         )
         .await
         .expect("a two-page catalog reads");
@@ -1522,14 +1535,14 @@ mod tests {
             Some(FAKE_KEY),
             Some(SCOPE),
             AuthStyle::Bearer,
-            CatalogShape::PlatformProxy,
+            CatalogShape::PagedEnvelope,
         )
         .await
         .expect_err("a 503 is a failure");
         assert!(error.contains("503"), "{error}");
         assert!(
             catalog_cache_scoped(
-                &shaped_endpoint(&base, CatalogShape::PlatformProxy),
+                &shaped_endpoint(&base, CatalogShape::PagedEnvelope),
                 Some(SCOPE)
             )
             .lookup_failure(Instant::now())
@@ -1563,14 +1576,14 @@ mod tests {
                     Some(FAKE_KEY),
                     Some(&scope),
                     AuthStyle::Bearer,
-                    CatalogShape::PlatformProxy,
+                    CatalogShape::PagedEnvelope,
                 )
                 .await
                 .is_err()
             );
             assert!(
                 catalog_cache_scoped(
-                    &shaped_endpoint(&base, CatalogShape::PlatformProxy),
+                    &shaped_endpoint(&base, CatalogShape::PagedEnvelope),
                     Some(&scope)
                 )
                 .lookup_failure(Instant::now())
@@ -1590,7 +1603,7 @@ mod tests {
             &base,
             Some(FAKE_KEY),
             AuthStyle::Bearer,
-            CatalogShape::PlatformProxy,
+            CatalogShape::PagedEnvelope,
         )
         .await
         .expect_err("not the envelope");
@@ -1618,7 +1631,7 @@ mod tests {
             None,
             None,
             AuthStyle::Bearer,
-            CatalogShape::PlatformProxy,
+            CatalogShape::PagedEnvelope,
         )
         .await
         .expect_err("a 503 is a failure");
@@ -1630,7 +1643,7 @@ mod tests {
         let (bad, _) =
             spawn_proxy_catalog(|_| (200, r#"{"data":[{"id":"chat-v1"}]}"#.to_string())).await;
         let bad = bad.replacen("http://", "http://alice:hunter2@", 1);
-        let invalid = discover_models(&bad, None, AuthStyle::Bearer, CatalogShape::PlatformProxy)
+        let invalid = discover_models(&bad, None, AuthStyle::Bearer, CatalogShape::PagedEnvelope)
             .await
             .expect_err("not the envelope")
             .to_string();
@@ -1647,7 +1660,7 @@ mod tests {
         assert_eq!(shaped_endpoint(BASE, CatalogShape::OpenAi), cache_key(BASE));
         assert_ne!(
             shaped_endpoint(BASE, CatalogShape::OpenAi),
-            shaped_endpoint(BASE, CatalogShape::PlatformProxy)
+            shaped_endpoint(BASE, CatalogShape::PagedEnvelope)
         );
     }
 }

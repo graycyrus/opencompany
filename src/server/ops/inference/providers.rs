@@ -57,7 +57,7 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::inference::{CatalogShape, TierVocabulary, catalogue, probe, resolve, store};
+use crate::company::inference::{TierVocabulary, catalogue, probe, resolve, store};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -110,13 +110,6 @@ pub(super) fn router() -> Router<AppState> {
         // would create a record whose slug collides with entry zero's whenever
         // the company's stored config is already managed.
         .merge(scoped("/inference/managed/key", put(set_managed_key)))
-        // The Managed connect dialog's model step: read Managed's catalog with the
-        // key the operator has just typed, before anything is stored — the same
-        // ask-before-writing an added provider gets from `/inference/probe`.
-        .merge(scoped(
-            "/inference/managed/probe",
-            post(probe_managed_draft),
-        ))
         // Managed is a provider like any other in these two respects: its
         // credential can be checked, and it can be excluded from routing.
         .merge(scoped(
@@ -421,7 +414,7 @@ async fn add_provider(
                 credential,
                 auth,
                 probe::default_policy(),
-                CatalogShape::OpenAi,
+                catalogue::catalog_shape_for(&plan.kind),
             )
             .await,
         )
@@ -1515,27 +1508,9 @@ async fn set_managed_enabled(
 async fn test_managed(
     company: crate::server::ops::ScopedCompany,
 ) -> Result<Json<ProbeResultDto>, ApiError> {
-    check_managed_chain(company.runtime.as_ref())
-        .await?
-        .map(Json)
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::InvalidRequest(
-                "Managed is not set up on this company, so there is nothing to check.".to_string(),
-            ))
-        })
-}
-
-/// The credential whichever step of the managed chain answers presents, or
-/// `None` when no step answers at all.
-///
-/// `Some(None)` is a step that answers and yields no value right now — a
-/// projected token whose file is empty — which is still checked, so it reports
-/// as the rejected credential it is rather than as "not set up".
-async fn managed_chain_bearer(
-    runtime: &CompanyRuntime,
-) -> Result<Option<Option<String>>, ApiError> {
     use crate::company::inference;
 
+    let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let platform = super::platform_default(&crate::app::config::ProcessEnv);
     let inference_key =
@@ -1547,44 +1522,30 @@ async fn managed_chain_bearer(
         .map_err(ApiError)?;
 
     // The same four-branch decision the row renders, resolved to a value here.
-    Ok(Some(
-        match inference::managed_source(
-            !inference_key.trim().is_empty(),
-            &company_account,
-            platform.as_ref(),
-        ) {
-            inference::ManagedSource::ProviderKey => Some(inference_key.trim().to_string()),
-            inference::ManagedSource::CompanyAccount => {
-                company_account.current().await.map_err(ApiError)?
-            }
-            inference::ManagedSource::Instance => match platform.as_ref() {
-                Some(env) => env.credential.current().await.map_err(ApiError)?,
-                None => None,
-            },
-            inference::ManagedSource::None => return Ok(None),
+    let bearer = match inference::managed_source(
+        !inference_key.trim().is_empty(),
+        &company_account,
+        platform.as_ref(),
+    ) {
+        inference::ManagedSource::ProviderKey => Some(inference_key.trim().to_string()),
+        inference::ManagedSource::CompanyAccount => {
+            company_account.current().await.map_err(ApiError)?
+        }
+        inference::ManagedSource::Instance => match platform.as_ref() {
+            Some(env) => env.credential.current().await.map_err(ApiError)?,
+            None => None,
         },
-    ))
-}
-
-/// Reads Managed's catalog with whatever its chain presents, records what that
-/// says about reaching it, and answers the verdict — or `None` when nothing in
-/// the chain answers.
-///
-/// **The catalog read is the check.** Managed has no separate endpoint to ask,
-/// and the list the model picker needs is the same request, so a successful read
-/// is what marks Managed's health `ok` — on the row's Test, and after a save.
-async fn check_managed_chain(runtime: &CompanyRuntime) -> Result<Option<ProbeResultDto>, ApiError> {
-    use crate::company::inference;
-
-    let Some(bearer) = managed_chain_bearer(runtime).await? else {
-        return Ok(None);
+        inference::ManagedSource::None => {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "Managed is not set up on this company, so there is nothing to check.".to_string(),
+            )));
+        }
     };
-    let platform = super::platform_default(&crate::app::config::ProcessEnv);
 
-    // The endpoint managed turns reach, through the one derivation every managed
-    // path uses (issue #2303), and its catalog in the shape that endpoint
-    // publishes.
-    let base_url = inference::managed_base_url(platform.as_ref());
+    let base_url = platform
+        .as_ref()
+        .map(|p| p.base_url.clone())
+        .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string());
     let subject = catalogue::endpoint_host(&base_url).unwrap_or_else(|| "the managed brain".into());
 
     match probe::probe_models(
@@ -1592,22 +1553,20 @@ async fn check_managed_chain(runtime: &CompanyRuntime) -> Result<Option<ProbeRes
         bearer.as_deref(),
         catalogue::AuthStyle::Bearer,
         probe::default_policy(),
-        CatalogShape::PlatformProxy,
+        catalogue::CatalogShape::OpenAi,
     )
     .await
     {
         Ok(models) => {
             record_health(runtime, inference::MANAGED_SLUG, "ok").await;
-            Ok(Some(ProbeResultDto {
+            Ok(Json(ProbeResultDto {
                 ok: true,
                 class: None,
                 message: None,
                 model_count: models.len(),
                 model_known: None,
                 models: catalogue_offer(&models),
-                // Always: the managed endpoint resolves no workload name, so it
-                // cannot serve one until a model is chosen for it (#2303).
-                needs_model: true,
+                needs_model: needs_an_explicit_model(&models),
             }))
         }
         Err(failure) => {
@@ -1618,7 +1577,7 @@ async fn check_managed_chain(runtime: &CompanyRuntime) -> Result<Option<ProbeRes
                 "managed inference test failed",
             );
             record_health(runtime, inference::MANAGED_SLUG, failure.class.as_str()).await;
-            Ok(Some(ProbeResultDto {
+            Ok(Json(ProbeResultDto {
                 ok: false,
                 class: Some(failure.class.as_str().to_string()),
                 message: Some(probe::describe(failure.class, &subject)),
@@ -1674,11 +1633,6 @@ async fn list_provider_models(
     Path(params): Path<ProviderPath>,
 ) -> Result<Json<ProviderCatalogDto>, ApiError> {
     let runtime = company.runtime.as_ref();
-    // Managed has no record to require, and its catalog is the one its model
-    // picker reads — so the same route answers for it, from its chain.
-    if params.slug.trim() == crate::company::inference::MANAGED_SLUG {
-        return managed_catalog(runtime).await;
-    }
     let secrets = runtime.secrets().as_ref();
     let provider = require_provider(runtime, &params.slug).await?;
     let key = store::load_provider_key(runtime.id(), secrets, &provider)
@@ -1692,7 +1646,7 @@ async fn list_provider_models(
         (!key.trim().is_empty()).then(|| key.trim()),
         Some(&scope),
         catalogue::auth_style_for(&provider.kind),
-        CatalogShape::OpenAi,
+        catalogue::catalog_shape_for(&provider.kind),
     )
     .await
     {
@@ -1723,16 +1677,8 @@ async fn list_provider_models(
 /// The managed key on the way in. Write-only, like every other credential body.
 #[derive(Debug, Deserialize)]
 struct SetManagedKey {
-    /// The key. `""` clears it — and the model chosen with it — and falls back
-    /// down the chain. Absent leaves the key where it is, so a model can be
-    /// changed without re-pasting a credential that cannot be shown.
-    #[serde(default)]
-    key: Option<String>,
-    /// The model every workload sends on Managed (issue #2303), stored the way an
-    /// added provider's is: one model for every tier. `""` clears it. Absent
-    /// leaves it where it is.
-    #[serde(default)]
-    model: Option<String>,
+    /// Send `""` to clear it and fall back down the chain.
+    key: String,
 }
 
 /// `PUT …/inference/managed/key` — paste a key for the managed tier.
@@ -1758,258 +1704,79 @@ async fn set_managed_key(
 ) -> Result<Json<ProviderMutation>, ApiError> {
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
+    let key = body.key.trim();
 
-    // Judged before anything is written, so a refused model never leaves a key
-    // half-applied beside it.
-    let model: Option<Option<String>> = match body.model.as_deref().map(str::trim) {
-        None => None,
-        Some("") => Some(None),
-        Some(raw) => Some(Some(
-            crate::company::inference::check_managed_model(raw)
-                .map_err(|message| ApiError(OpenCompanyError::InvalidRequest(message)))?,
-        )),
-    };
-    let key = body.key.as_deref().map(str::trim);
-    if key.is_none() && model.is_none() {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(
-            "Send a key, a model, or both.".to_string(),
-        )));
-    }
+    // **Asked before anything is written.** This read can fail, and asking it
+    // after the new key had landed meant a transient store error returned "that
+    // did not work" over a credential that was already live and already
+    // outranking the old one on the next turn — the console saying the account
+    // had not changed while it had.
+    let legacy_is_managed = store::legacy_slot_is_managed(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
 
-    if let Some(key) = key {
-        // **Asked before anything is written.** This read can fail, and asking it
-        // after the new key had landed meant a transient store error returned "that
-        // did not work" over a credential that was already live and already
-        // outranking the old one on the next turn — the console saying the account
-        // had not changed while it had.
-        let legacy_is_managed = store::legacy_slot_is_managed(runtime.id(), secrets)
-            .await
-            .map_err(ApiError)?;
+    secrets
+        .set(
+            runtime.id(),
+            &store::provider_key_key(crate::company::inference::MANAGED_SLUG),
+            crate::ports::types::SecretValue(key.to_string()),
+        )
+        .await
+        .map_err(ApiError)?;
 
-        secrets
+    // **Only when the legacy slot is managed's to clear.**
+    //
+    // `inference/key` is one address that two different rows can read through
+    // their own fallback: entry zero's, and managed's. Which one it belongs to
+    // depends on what entry zero's kind normalises to. Clearing it
+    // unconditionally while writing a *different* slug's slot destroyed the
+    // credential of whatever else was reading it — on this company, removing
+    // the managed key silently took OpenRouter's key with it, and the row went
+    // from "•••• configured" to showing a bare host.
+    //
+    // Found in a browser, not by a test. The test is below it now.
+    if legacy_is_managed
+        && let Err(err) = secrets
             .set(
                 runtime.id(),
-                &store::provider_key_key(crate::company::inference::MANAGED_SLUG),
-                crate::ports::types::SecretValue(key.to_string()),
+                crate::company::inference::KEY_KEY,
+                crate::ports::types::SecretValue(String::new()),
             )
             .await
-            .map_err(ApiError)?;
-
-        // **Only when the legacy slot is managed's to clear.**
-        //
-        // `inference/key` is one address that two different rows can read through
-        // their own fallback: entry zero's, and managed's. Which one it belongs to
-        // depends on what entry zero's kind normalises to. Clearing it
-        // unconditionally while writing a *different* slug's slot destroyed the
-        // credential of whatever else was reading it — on this company, removing
-        // the managed key silently took OpenRouter's key with it, and the row went
-        // from "•••• configured" to showing a bare host.
-        //
-        // Found in a browser, not by a test. The test is below it now.
-        if legacy_is_managed
-            && let Err(err) = secrets
-                .set(
-                    runtime.id(),
-                    crate::company::inference::KEY_KEY,
-                    crate::ports::types::SecretValue(String::new()),
-                )
-                .await
-        {
-            tracing::error!(
-                company = %runtime.id(),
-                error = %err,
-                "could not clear managed's legacy credential slot",
-            );
-            // **Reported, not just logged, and specifically on a clear.** The read
-            // chain falls back to `inference/key` when the new slot is empty, so a
-            // failure here leaves the old credential live and still billed while
-            // the console says "Cleared the managed key." A save is different: the
-            // new key is already in the slot that outranks this one, so the stale
-            // legacy value is unreachable and the write succeeded in the only sense
-            // the operator asked about.
-            if key.is_empty() {
-                return Err(ApiError(OpenCompanyError::Store(
-                    "The managed key could not be fully cleared — the older of its two \
+    {
+        tracing::error!(
+            company = %runtime.id(),
+            error = %err,
+            "could not clear managed's legacy credential slot",
+        );
+        // **Reported, not just logged, and specifically on a clear.** The read
+        // chain falls back to `inference/key` when the new slot is empty, so a
+        // failure here leaves the old credential live and still billed while
+        // the console says "Cleared the managed key." A save is different: the
+        // new key is already in the slot that outranks this one, so the stale
+        // legacy value is unreachable and the write succeeded in the only sense
+        // the operator asked about.
+        if key.is_empty() {
+            return Err(ApiError(OpenCompanyError::Store(
+                "The managed key could not be fully cleared — the older of its two \
                  storage slots still holds it, so turns may still be billed to it. \
                  Try again."
-                        .to_string(),
-                )));
-            }
-        }
-        crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
-        // **Clearing the key clears the model chosen with it.** A model left behind
-        // reads as a Managed that is set up, over a chain that may now answer with a
-        // different account — or with nothing.
-        if key.is_empty() {
-            store::save_managed_models(runtime.id(), secrets, &BTreeMap::new())
-                .await
-                .map_err(ApiError)?;
+                    .to_string(),
+            )));
         }
     }
+    crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 
-    let cleared = key.is_some_and(str::is_empty);
-    if !cleared && let Some(model) = &model {
-        // The same one-model-for-every-tier map `add_provider` writes, so a
-        // managed turn's `proxied_model` finds it exactly as a routed provider's
-        // `model_for_tier` finds that provider's.
-        store::save_managed_models(runtime.id(), secrets, &tier_overrides(model.as_deref()))
-            .await
-            .map_err(ApiError)?;
-    }
-
-    let chosen = store::load_managed_models(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?
-        .into_values()
-        .next();
-    let note = if cleared {
-        "Cleared the managed key and the model chosen with it.".to_string()
-    } else {
-        match (chosen, key.is_some()) {
-            (Some(model), true) => {
-                format!("Saved. Managed turns send `{model}` and are billed to that key.")
-            }
-            (Some(model), false) => format!("Saved. Managed turns send `{model}`."),
-            (None, true) => {
-                "Saved the key. Choose a model before Managed can run a turn.".to_string()
-            }
-            (None, false) => {
-                "Cleared Managed's model. Choose one before Managed can run a turn.".to_string()
-            }
-        }
-    };
-
-    // **No check here, on purpose.** The dialog has already read Managed's catalog
-    // with this key to offer a model (`probe_managed_draft`), and it runs the
-    // managed Test after saving, which reads it again with what is now stored and
-    // records the row's health. A check on this write would be a third request —
-    // and a network call made by every host test that sets a key.
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
-        note,
+        note: if key.is_empty() {
+            "Cleared the managed key.".to_string()
+        } else {
+            "Saved. Managed turns are billed to that key.".to_string()
+        },
         probe: None,
         affected_tiers: Vec::new(),
     }))
-}
-
-/// What the Managed connect dialog sends to read Managed's catalog before
-/// anything is stored.
-///
-/// **No `Serialize`.** It carries a credential, so it travels one way only.
-#[derive(Debug, Deserialize)]
-struct ProbeManagedDraft {
-    key: String,
-}
-
-/// `POST …/inference/managed/probe` — read Managed's catalog with a key that is
-/// **not stored yet**, so the dialog's model step has Managed's own list to offer.
-///
-/// Managed's twin of `probe_draft`, and admin-gated for the same reason: it is an
-/// authenticated request with a caller-supplied credential. The endpoint is not
-/// caller-supplied — it is `managed_base_url`, the platform's own — so the key
-/// can only ever reach the origin managed turns reach. Nothing is written, and
-/// no health is recorded: the key checked here is not the one the row holds.
-async fn probe_managed_draft(
-    company: AdminScopedCompany,
-    Json(body): Json<ProbeManagedDraft>,
-) -> Result<Json<ProbeResultDto>, ApiError> {
-    use crate::company::inference;
-
-    let key = body.key.trim();
-    if key.is_empty() {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(
-            "Paste a TinyHumans key to read Managed's models with.".to_string(),
-        )));
-    }
-    let platform = super::platform_default(&crate::app::config::ProcessEnv);
-    let base_url = inference::managed_base_url(platform.as_ref());
-    let subject = catalogue::endpoint_host(&base_url).unwrap_or_else(|| "the managed brain".into());
-    match probe::probe_models(
-        &base_url,
-        Some(key),
-        catalogue::AuthStyle::Bearer,
-        probe::default_policy(),
-        CatalogShape::PlatformProxy,
-    )
-    .await
-    {
-        Ok(models) => Ok(Json(ProbeResultDto {
-            ok: true,
-            class: None,
-            message: None,
-            model_count: models.len(),
-            model_known: None,
-            models: catalogue_offer(&models),
-            needs_model: true,
-        })),
-        Err(failure) => {
-            tracing::info!(
-                company = %company.runtime.id(),
-                class = failure.class.as_str(),
-                detail = %failure.raw,
-                "draft managed catalog read failed",
-            );
-            Ok(Json(ProbeResultDto {
-                ok: false,
-                class: Some(failure.class.as_str().to_string()),
-                message: Some(probe::describe(failure.class, &subject)),
-                model_count: 0,
-                model_known: None,
-                models: Vec::new(),
-                needs_model: true,
-            }))
-        }
-    }
-}
-
-/// Managed's own catalog, for `GET …/inference/providers/tinyhumans/models`.
-///
-/// So the model picker a provider row uses works for Managed unchanged: read
-/// with whatever the managed chain presents, from the managed endpoint, in the
-/// proxy's shape, cached per company under Managed's slug like any provider's.
-async fn managed_catalog(runtime: &CompanyRuntime) -> Result<Json<ProviderCatalogDto>, ApiError> {
-    use crate::company::inference;
-
-    let platform = super::platform_default(&crate::app::config::ProcessEnv);
-    let base_url = inference::managed_base_url(platform.as_ref());
-    let shown = catalogue::redact_endpoint(&base_url);
-    let Some(bearer) = managed_chain_bearer(runtime).await? else {
-        return Ok(Json(ProviderCatalogDto {
-            base_url: shown,
-            models: Vec::new(),
-            free_text_only: false,
-            error: Some(
-                "Managed is not set up on this company, so there is no model list to read. \
-                 Add a TinyHumans key first."
-                    .to_string(),
-            ),
-        }));
-    };
-    let scope = format!("{}\u{1}{}", runtime.id().as_ref(), inference::MANAGED_SLUG);
-    match crate::server::inference_models::catalog_models(
-        &base_url,
-        bearer.as_deref(),
-        Some(&scope),
-        catalogue::AuthStyle::Bearer,
-        CatalogShape::PlatformProxy,
-    )
-    .await
-    {
-        Ok(models) => Ok(Json(ProviderCatalogDto {
-            base_url: shown,
-            models: models.into_iter().map(|m| m.id).collect(),
-            free_text_only: false,
-            error: None,
-        })),
-        Err(error) => Ok(Json(ProviderCatalogDto {
-            error: Some(format!(
-                "Could not list models from {shown}: {error}. Enter a model id directly."
-            )),
-            base_url: shown,
-            models: Vec::new(),
-            free_text_only: false,
-        })),
-    }
 }
 
 // ---- testing a stored provider ----------------------------------------------
@@ -2043,7 +1810,7 @@ async fn test_provider(
         (!key.trim().is_empty()).then(|| key.trim()),
         catalogue::auth_style_for(&provider.kind),
         probe::default_policy(),
-        CatalogShape::OpenAi,
+        catalogue::catalog_shape_for(&provider.kind),
     )
     .await
     {
@@ -2128,7 +1895,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
         body.key.as_deref().filter(|k| !k.trim().is_empty()),
         auth,
         probe::default_policy(),
-        CatalogShape::OpenAi,
+        catalogue::catalog_shape_for(kind),
     )
     .await
     {

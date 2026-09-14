@@ -104,7 +104,6 @@ export function ProviderConnectDialog({
   error,
   offerAddAnyway,
   modelAsk,
-  initialModel,
   onCancel,
   onSubmit,
 }: {
@@ -130,12 +129,6 @@ export function ProviderConnectDialog({
    * that resolves `agentic-v1` itself, because there is nothing to ask.
    */
   modelAsk: ModelAsk | null;
-  /**
-   * The model already chosen, to seed the model step with — Managed's, when its
-   * key is being replaced, so replacing a key does not quietly ask the operator
-   * to choose again from nothing.
-   */
-  initialModel?: string;
   onCancel: () => void;
   onSubmit: (draft: ConnectDraft) => void;
 }) {
@@ -168,7 +161,7 @@ export function ProviderConnectDialog({
   // it and nothing here could display it — so an empty field in edit mode means
   // "leave it alone", which is what `submit` sends.
   const [key, setKey] = useState("");
-  const [model, setModel] = useState(() => initialModel ?? "");
+  const [model, setModel] = useState("");
 
   // The row being edited is not its own collision. Its slug is already taken —
   // by it — and `edit` is keyed on the stored slug rather than on this one, so
@@ -316,7 +309,7 @@ export function ProviderConnectDialog({
                 id="inference-connect-model"
                 value={model}
                 list={modelAsk.models.length > 0 ? "inference-connect-model-options" : undefined}
-                placeholder={managed ? "openai/gpt-4o-mini" : "claude-sonnet-5"}
+                placeholder="claude-sonnet-5"
                 autoComplete="off"
                 spellCheck={false}
                 className="font-mono text-xs"
@@ -335,13 +328,9 @@ export function ProviderConnectDialog({
                 </datalist>
               )}
               <p className="text-xs text-muted-foreground">
-                {managed
-                  ? modelAsk.models.length > 0
-                    ? `Managed sends the model you choose here for every workload. Its catalog lists ${modelAsk.models.length} — pick one, or type an OpenRouter id.`
-                    : "Managed's catalog could not be read, so the model id has to be typed — an OpenRouter id like openai/gpt-4o-mini."
-                  : modelAsk.models.length > 0
-                    ? `This endpoint does not resolve workload names like agentic-v1, so it needs a model id. It publishes ${modelAsk.models.length} — pick one, or type another. Every workload starts on it; change that under Routing.`
-                    : "This endpoint does not resolve workload names like agentic-v1 and publishes no catalogue, so the model id has to be typed. Every workload starts on it; change that under Routing."}
+                {modelAsk.models.length > 0
+                  ? `This endpoint does not resolve workload names like agentic-v1, so it needs a model id. It publishes ${modelAsk.models.length} — pick one, or type another. Every workload starts on it; change that under Routing.`
+                  : "This endpoint does not resolve workload names like agentic-v1 and publishes no catalogue, so the model id has to be typed. Every workload starts on it; change that under Routing."}
               </p>
             </div>
           )}

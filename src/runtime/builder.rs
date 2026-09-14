@@ -9047,7 +9047,6 @@ needs_reason = true
             .build()
             .await
             .unwrap();
-        choose_managed_model(&runtime).await;
 
         let delivery = runtime
             .workflow_harness_deps
@@ -9451,24 +9450,19 @@ needs_reason = true
     /// Spawns an in-process OpenAI-compatible stub that answers every
     /// chat-completion with `marker`, so a harness turn can run without a real
     /// inference backend. Mirrors the provider-test helper of the same name.
-    ///
-    /// Served on the managed proxy path as well as the root: this stub is
-    /// handed to the builder as the injected managed endpoint, and since #2303
-    /// a managed turn posts to `{origin}/agent-integrations/openrouter`.
     #[cfg(feature = "openhuman")]
     async fn spawn_stub(marker: &'static str) -> String {
         use axum::routing::post;
         use axum::{Json, Router};
 
-        let reply = move || async move {
-            Json(serde_json::json!({
-                "choices": [{ "message": { "role": "assistant", "content": marker } }],
-                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
-            }))
-        };
-        let app = Router::new().route("/chat/completions", post(reply)).route(
-            "/agent-integrations/openrouter/chat/completions",
-            post(reply),
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": marker } }],
+                    "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                }))
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -9476,28 +9470,6 @@ needs_reason = true
             let _ = axum::serve(listener, app).await;
         });
         format!("http://{addr}")
-    }
-
-    /// Chooses Managed's model the way an operator does (issue #2303): the
-    /// managed model slot, one model for every workload.
-    ///
-    /// These runtimes ride the managed default — the stub is handed over as the
-    /// injected endpoint and the manifests declare no `[inference]` — and a
-    /// managed turn sends only a chosen model, so without this every turn here
-    /// refuses before reaching the stub.
-    #[cfg(feature = "openhuman")]
-    async fn choose_managed_model(runtime: &crate::company::runtime::CompanyRuntime) {
-        let chosen = crate::company::INFERENCE_TIERS
-            .iter()
-            .map(|tier| ((*tier).to_string(), "stub/model".to_string()))
-            .collect();
-        crate::company::inference::store::save_managed_models(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            &chosen,
-        )
-        .await
-        .expect("choose Managed's model");
     }
 
     /// Issue #707: a desk reorder reaches a **resident** runtime, with no
@@ -9594,7 +9566,6 @@ needs_reason = true
             .build()
             .await
             .unwrap();
-        choose_managed_model(&runtime).await;
 
         let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
@@ -9722,7 +9693,6 @@ needs_reason = true
             .build()
             .await
             .unwrap();
-        choose_managed_model(&runtime).await;
 
         // The console creates a desk and puts `eng2` on it.
         let mut record = store.load(&id).await.unwrap().expect("record");
@@ -9882,7 +9852,6 @@ needs_reason = true
             .build()
             .await
             .unwrap();
-        choose_managed_model(&runtime).await;
 
         // A message addressed to the `eng` desk must be answered by the reordered
         // lead `eng2`, not the blueprint lead `eng1`.

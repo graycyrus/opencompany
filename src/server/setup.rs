@@ -1297,7 +1297,7 @@ async fn probe_inference<E: EnvSource + Sync>(
             &decl.base_url,
             bearer.as_deref(),
             auth,
-            crate::company::inference::CatalogShape::OpenAi,
+            crate::company::inference::catalogue::catalog_shape_for(&req.provider),
         )
         .await
         .ok()

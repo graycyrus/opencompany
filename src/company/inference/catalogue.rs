@@ -38,10 +38,25 @@
 //! of this table. The table stays presentation-free.
 //!
 //! And the 27th Rust entry, `openhuman` — their managed first-party backend — is
-//! not a row here. Our equivalent is the managed TinyHumans brain, which is
-//! already modelled with its own auth path ([`super::PLATFORM_BASE_URL`]) and
-//! must keep it. Porting `openhuman` as a row would give the managed brain a
-//! second, bearer-shaped identity.
+//! not a row here. The managed TinyHumans *chain* (the platform default a
+//! company rides with nothing configured, [`super::PLATFORM_BASE_URL`]) keeps
+//! its own auth path. TinyHumans as a **vendor** is a different thing, and it is
+//! an ordinary row below: its own URL, a key the operator pastes, a model picked
+//! from its catalog (issue #2303).
+
+/// The shape a provider's `GET {base}/models` catalog comes back in.
+///
+/// A property of the **kind**, read off its catalogue row the way [`AuthStyle`]
+/// is — never inferred from who pays or from what the URL looks like. See
+/// [`catalog_shape_for`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CatalogShape {
+    /// `{ "data": [{ "id": … }] }`, in one page — the OpenAI-compatible default.
+    OpenAi,
+    /// `{success, data: {data, total, limit, offset}}`, paged to `total` — see
+    /// [`super::paged_catalog`]. TinyHumans' catalog is served this way.
+    PagedEnvelope,
+}
 
 /// How a provider expects its credential presented.
 ///
@@ -85,13 +100,15 @@ pub struct CloudProvider {
     pub endpoint: &'static str,
     /// How the credential is presented.
     pub auth: AuthStyle,
+    /// The shape its model catalog comes back in.
+    pub catalog_shape: CatalogShape,
     /// What a key for this provider tends to look like, for the input's
     /// placeholder. `None` where the vendor has no recognisable prefix —
     /// inventing one would teach the operator a shape that is not real.
     pub key_placeholder: Option<&'static str>,
 }
 
-/// The 26 hosted providers the add-dialog offers.
+/// The 27 hosted providers the add-dialog offers.
 ///
 /// ## The endpoints are presets, not a pattern
 ///
@@ -113,6 +130,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "OpenAI",
         endpoint: "https://api.openai.com/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("sk-..."),
     },
     CloudProvider {
@@ -124,6 +142,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         // one people reach for first. `AuthStyle::Anthropic` also carries
         // `anthropic-version: 2023-06-01` — see `ANTHROPIC_VERSION`.
         auth: AuthStyle::Anthropic,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("sk-ant-..."),
     },
     CloudProvider {
@@ -131,6 +150,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "OpenRouter",
         endpoint: "https://openrouter.ai/api/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("sk-or-..."),
     },
     CloudProvider {
@@ -138,6 +158,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "OrcaRouter",
         endpoint: "https://api.orcarouter.ai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("sk-orca-..."),
     },
     CloudProvider {
@@ -145,6 +166,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "GMI",
         endpoint: "https://api.gmi-serving.com/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("eyJ...."),
     },
     CloudProvider {
@@ -152,6 +174,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Fireworks",
         endpoint: "https://api.fireworks.ai/inference/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("fw-..."),
     },
     CloudProvider {
@@ -159,6 +182,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Kimi (Moonshot)",
         endpoint: "https://api.moonshot.ai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("sk-..."),
     },
     CloudProvider {
@@ -166,6 +190,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Groq",
         endpoint: "https://api.groq.com/openai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("gsk_..."),
     },
     CloudProvider {
@@ -173,6 +198,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Mistral",
         endpoint: "https://api.mistral.ai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -188,6 +214,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         // `const` they cannot edit.
         endpoint: "https://api.deepseek.com",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("sk-..."),
     },
     CloudProvider {
@@ -202,6 +229,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         // shape as the MiniMax defect already fixed below.
         endpoint: "https://api.together.ai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -209,6 +237,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Google Gemini",
         endpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -216,6 +245,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Cerebras",
         endpoint: "https://api.cerebras.ai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -223,6 +253,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "xAI",
         endpoint: "https://api.x.ai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -230,6 +261,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Hugging Face",
         endpoint: "https://router.huggingface.co/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("hf_..."),
     },
     CloudProvider {
@@ -237,6 +269,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "NVIDIA",
         endpoint: "https://integrate.api.nvidia.com/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -244,6 +277,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Z.AI",
         endpoint: "https://api.z.ai/api/paas/v4",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -260,6 +294,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         // full OpenAI-compatible surface at `/v1`, so both paths resolve there.
         endpoint: "https://api.minimax.io/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -275,6 +310,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         // own endpoint; see `docs/modules/inference/provider-contracts.md`.
         endpoint: "https://api.stepfun.ai/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -282,6 +318,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Kilo Code",
         endpoint: "https://api.kilo.ai/api/gateway",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -289,6 +326,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "DeepInfra",
         endpoint: "https://api.deepinfra.com/v1/openai",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -296,6 +334,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Novita",
         endpoint: "https://api.novita.ai/v3/openai",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -303,6 +342,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Venice",
         endpoint: "https://api.venice.ai/api/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -310,6 +350,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "Vercel AI Gateway",
         endpoint: "https://ai-gateway.vercel.sh/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: None,
     },
     CloudProvider {
@@ -317,6 +358,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "SumoPod",
         endpoint: "https://ai.sumopod.com/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("sk-..."),
     },
     CloudProvider {
@@ -324,7 +366,19 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         label: "ModelScope",
         endpoint: "https://api-inference.modelscope.cn/v1",
         auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::OpenAi,
         key_placeholder: Some("ms-..."),
+    },
+    // TinyHumans as an ordinary vendor (issue #2303). Its URL is the only thing
+    // special about it: the backend's direct OpenRouter proxy, which takes bare
+    // OpenRouter model ids and publishes its catalog paged and enveloped.
+    CloudProvider {
+        slug: "tinyhumans",
+        label: "TinyHumans",
+        endpoint: "https://api.tinyhumans.ai/agent-integrations/openrouter",
+        auth: AuthStyle::Bearer,
+        catalog_shape: CatalogShape::PagedEnvelope,
+        key_placeholder: Some("th-..."),
     },
 ];
 
@@ -796,6 +850,15 @@ pub fn cli_login(option_slug: &str) -> Option<&'static CliLogin> {
 /// Anthropic is rejected, the rejection classifies as `auth`, and the connect
 /// flow deletes a key that was never wrong — on the one provider most people
 /// try first.
+/// The shape `kind`'s model catalog comes back in: its catalogue row's
+/// [`CloudProvider::catalog_shape`], and [`CatalogShape::OpenAi`] for every kind
+/// with no row — a local runtime, a custom endpoint, a legacy manifest kind.
+///
+pub fn catalog_shape_for(kind: &str) -> CatalogShape {
+    cloud_provider(kind.trim()).map_or(CatalogShape::OpenAi, |cloud| cloud.catalog_shape)
+}
+
+/// How a provider kind presents its credential.
 pub fn auth_style_for(kind: &str) -> AuthStyle {
     let kind = kind.trim();
     if let Some(cloud) = cloud_provider(kind) {
@@ -985,8 +1048,8 @@ pub fn is_reserved_slug(slug: &str) -> bool {
 
 /// Slugs this product owns that are **not** catalogue rows.
 ///
-/// Managed is deliberately not in the catalogue — it is a chain, not a vendor —
-/// but it does have a slug, and that slug is an address: `provider/tinyhumans/key`
+/// The managed chain is not a catalogue row — it is a chain, not a vendor — (the
+/// TinyHumans *vendor* row is, and reserves the same slug) but it does have a slug, and that slug is an address: `provider/tinyhumans/key`
 /// is where its credential lives, and `managed` is the word the route grammar
 /// uses. A custom provider named "TinyHumans" slugified straight into the first
 /// of those, so adding it stored a vendor key where managed reads, a managed
@@ -1075,7 +1138,7 @@ mod tests {
 
     #[test]
     fn the_catalogue_ships_the_counts_the_plan_names() {
-        assert_eq!(CLOUD_PROVIDERS.len(), 26, "cloud providers");
+        assert_eq!(CLOUD_PROVIDERS.len(), 27, "cloud providers");
         assert_eq!(LOCAL_RUNTIMES.len(), 3, "local runtimes");
         assert_eq!(CLI_LOGINS.len(), 2, "CLI logins");
     }
@@ -1266,8 +1329,47 @@ mod tests {
         assert!(is_reserved_slug("tinyhumans"));
         assert!(is_reserved_slug("managed"));
         // Reserved is about the name, not the shape: a company may still be
-        // *on* managed, and this only stops a second thing taking its address.
-        assert!(cloud_provider("tinyhumans").is_none());
+        // *on* managed, and this only stops a custom provider taking its address.
+        // TinyHumans is also a catalogue row now (issue #2303) — the vendor, added
+        // like any other — which reserves the same slug the same way.
+        assert!(cloud_provider("tinyhumans").is_some());
+    }
+
+    /// TinyHumans is an ordinary cloud row (issue #2303): its own URL, a bearer
+    /// key, and the one per-kind difference — a paged, enveloped catalog.
+    #[test]
+    fn tinyhumans_is_an_ordinary_cloud_row_with_its_own_url() {
+        let row = cloud_provider("tinyhumans").expect("a catalogue row");
+        assert_eq!(
+            row.endpoint,
+            "https://api.tinyhumans.ai/agent-integrations/openrouter"
+        );
+        assert_eq!(row.auth, AuthStyle::Bearer);
+        assert_eq!(row.catalog_shape, CatalogShape::PagedEnvelope);
+        assert_eq!(catalog_shape_for("tinyhumans"), CatalogShape::PagedEnvelope);
+        assert_eq!(
+            catalog_shape_for(" tinyhumans "),
+            CatalogShape::PagedEnvelope
+        );
+
+        // Every other row, and every kind with no row, keeps the default shape.
+        for provider in CLOUD_PROVIDERS.iter().filter(|p| p.slug != "tinyhumans") {
+            assert_eq!(
+                provider.catalog_shape,
+                CatalogShape::OpenAi,
+                "{}",
+                provider.slug
+            );
+        }
+        for kind in [
+            "ollama",
+            "custom",
+            "openai_compatible",
+            "openrouter",
+            "managed",
+        ] {
+            assert_eq!(catalog_shape_for(kind), CatalogShape::OpenAi, "{kind}");
+        }
     }
 
     #[test]

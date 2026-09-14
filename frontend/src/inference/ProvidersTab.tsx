@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 
-import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import type { ProbeResult } from "@/api/inference";
 import { TEST_RESULT_MS } from "./classify";
@@ -12,7 +11,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { AddProviderDialog } from "./AddProviderDialog";
-import { ManagedModelDialog } from "./ManagedModelDialog";
 import { ProviderConnectDialog } from "./ProviderConnectDialog";
 import type { ConnectDraft, ModelAsk } from "./ProviderConnectDialog";
 import { MANAGED_SLUG, NO_CREDENTIAL_RESOLVES, ProviderList } from "./ProviderList";
@@ -74,18 +72,10 @@ function fireAndForget(run: Promise<unknown>): void {
 }
 
 export function ProvidersTab({
-  client,
-  company,
   state,
   actions,
   canManage,
 }: {
-  /**
-   * What Managed's model picker reads its catalog through. Optional so the tab
-   * renders without it; Choose a model is only offered when it is supplied.
-   */
-  client?: OpenCompanyClient;
-  company?: string | null;
   state: InferenceState;
   actions: InferenceActions;
   canManage: boolean;
@@ -140,8 +130,6 @@ export function ProvidersTab({
    * reason its row is rendered outside the list.
    */
   const [confirmingManaged, setConfirmingManaged] = useState(false);
-  /** Whether Managed's model picker is open (issue #2303). */
-  const [choosingManagedModel, setChoosingManagedModel] = useState(false);
   // Cleared on unmount, so a result that resolves after the page is gone does
   // not set state on a component nobody is looking at.
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -229,24 +217,9 @@ export function ProvidersTab({
           key: draft.key,
         });
       } else if (draft.kind === MANAGED_OPTION_SLUG) {
-        // The same three steps an added provider takes (issue #2303): the key,
-        // then a model chosen from Managed's own catalog, then save. Managed has
-        // no provider record — it resolves from a chain — so both go to its own
-        // route rather than through `add`.
-        if (!modelAsk) {
-          const probe = await actions.probeManagedDraft(draft.key ?? "");
-          // The catalog read is the check. A key the platform refuses still gets
-          // the model step, with the reason beside it: the operator can fix the
-          // key, or type a model id and save anyway.
-          setModelAsk({ models: probe.models ?? [] });
-          if (!probe.ok) setError(probe.message ?? "Managed's model list could not be read.");
-          return;
-        }
-        await actions.saveManaged({ key: draft.key, model: draft.model });
-        // Read the catalog again with what is now stored. That is what records
-        // the row's health, so the row says whether the saved key works rather
-        // than leaving it unchecked.
-        fireAndForget(actions.testManagedChain());
+        // Managed has no provider record — it resolves from a chain — so its
+        // credential goes to its own route rather than through `add`.
+        await actions.saveManagedKey(draft.key ?? "");
       } else {
         // **Ask before writing, not after refusing.** An endpoint whose catalog
         // resolves no workload name cannot serve one until a model is named —
@@ -286,21 +259,6 @@ export function ProvidersTab({
       if (err instanceof ApiError && err.message.includes("rejected the credential")) {
         setProbeFailure("auth");
       }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /** Saves the model chosen in Managed's picker, then re-checks the chain. */
-  async function saveManagedModel(model: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      await actions.saveManaged({ model });
-      setChoosingManagedModel(false);
-      fireAndForget(actions.testManagedChain());
-    } catch (err) {
-      setError(err instanceof ApiError ? stripEnvelopePrefix(err.message) : "That did not work.");
     } finally {
       setBusy(false);
     }
@@ -391,14 +349,6 @@ export function ProvidersTab({
             // later step of the chain answers those workloads simply stop.
             // Clearing step 1 is not reversible from anything on this page.
             onManagedRemoveKey={() => setConfirmingManaged(true)}
-            onManagedChangeModel={
-              client
-                ? () => {
-                    setError(null);
-                    setChoosingManagedModel(true);
-                  }
-                : undefined
-            }
             testState={(slug) => tests[slug] ?? { kind: "idle" }}
           />
         </CardContent>
@@ -456,7 +406,6 @@ export function ProvidersTab({
         error={error}
         offerAddAnyway={probeFailure !== null}
         modelAsk={modelAsk}
-        initialModel={connecting === MANAGED_OPTION_SLUG ? state.status?.managed?.model : undefined}
         onCancel={closeConnect}
         onSubmit={(draft) => void submitConnect(draft)}
       />
@@ -499,25 +448,6 @@ export function ProvidersTab({
           );
         }}
       />
-
-      {/* Managed's model picker (issue #2303). Keyed per open so it seeds from
-          the current choice at mount rather than in an effect. */}
-      {client && (
-        <ManagedModelDialog
-          key={choosingManagedModel ? "managed-model:open" : "managed-model:closed"}
-          open={choosingManagedModel}
-          client={client}
-          company={company ?? null}
-          current={state.status?.managed?.model}
-          busy={busy}
-          error={choosingManagedModel ? error : null}
-          onCancel={() => {
-            setChoosingManagedModel(false);
-            setError(null);
-          }}
-          onSave={(model) => void saveManagedModel(model)}
-        />
-      )}
 
       {/* Managed's own confirmation. The same dialog, because it is the same
           act — the impact is computed from the routing map rather than from a

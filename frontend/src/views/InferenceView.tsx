@@ -79,13 +79,7 @@ export function InferenceView({ client, company }: Props) {
           aria-labelledby={pageTabIds("inference", tab).tab}
         >
           {tab === "connect" ? (
-            <ProvidersTab
-              client={client}
-              company={company}
-              state={inference}
-              actions={inference}
-              canManage={canManage}
-            />
+            <ProvidersTab state={inference} actions={inference} canManage={canManage} />
           ) : (
             <RoutingTab
               client={client}

@@ -1665,18 +1665,7 @@ pub async fn request_plan(
     // not proxied, and rewriting `chat-v1` to an OpenRouter slug for it is what
     // produced `Model 'anthropic/claude-sonnet-5' is not available` against an
     // endpoint that publishes `chat-v1` itself.
-    //
-    // **Except on the managed endpoint** (issue #2303). A proxied decl reaches
-    // the platform's OpenRouter proxy, which takes bare OpenRouter slugs and
-    // rejects tier names — so it neither passes the tier through nor substitutes
-    // a default for it. Only an explicitly chosen model goes out, and a turn with
-    // none fails here, before anything is sent or billed.
-    let model = if decl.is_proxied() {
-        inference::proxied_model(abstract_model, &decl.models)
-            .map_err(|missing| anyhow::anyhow!("{missing}"))?
-    } else {
-        inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary())
-    };
+    let model = inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary());
     let url = format!("{}/chat/completions", decl.base_url.trim_end_matches('/'));
     let bearer = decl
         .bearer()
@@ -2132,20 +2121,13 @@ impl TenantProvider {
         // one. Awaiting it inline let a caller's own timeout cancel the read
         // before it could memoize anything, so every later turn repeated it
         // (Codex review on #2045).
-        //
-        // Not for a proxied decl. The managed endpoint's turn model is only ever
-        // one chosen explicitly (`inference::proxied_model`), so its catalog has
-        // no question to answer here, and reading it would spend a request per
-        // hour per company on a vocabulary nothing consults (issue #2303).
-        if decl.is_proxied() {
-            return Ok(decl);
-        }
         let bearer = decl.bearer().await.ok().flatten();
         let vocabulary = crate::server::inference_models::turn_vocabulary(
             &decl.base_url,
             bearer.as_deref(),
             Some(&self.catalog_scope()),
             crate::company::inference::catalogue::auth_style_for(&decl.provider),
+            crate::company::inference::catalogue::catalog_shape_for(&decl.provider),
         )
         .await;
         Ok(decl.with_vocabulary(vocabulary))
@@ -4453,9 +4435,7 @@ mod tests {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
         let mut manifest = manifest_inference("openrouter");
-        // The curated, tier-native surface on a tenant's own key — not
-        // `PLATFORM_BASE_URL`, which names the OpenRouter proxy since #2303.
-        manifest.base_url = Some("https://api.tinyhumans.ai/openai/v1".into());
+        manifest.base_url = Some(crate::company::inference::PLATFORM_BASE_URL.into());
         inference::store_key(&company, &secrets, "test-token")
             .await
             .unwrap();
@@ -4564,8 +4544,7 @@ mod tests {
 
         let plan = request_plan(
             &decl,
-            // An explicit id: a proxied turn sends nothing else (#2303).
-            "openai/gpt-4o-mini",
+            "chat-v1",
             Vec::new(),
             inference::dialect::Sampling::Exact(0.2),
             None,
@@ -4588,112 +4567,12 @@ mod tests {
         );
     }
 
-    /// A keyless `openrouter` company on the injected managed default.
-    async fn managed_default_decl() -> InferenceDecl {
-        let env = crate::company::inference::EnvDefault {
-            base_url: "https://staging-api.tinyhumans.ai/openai/v1".into(),
-            credential: Credential::from_value("th-not-a-real-key"),
-        };
-        inference::resolve_effective(
-            &CompanyId::new("acme"),
-            &manifest_inference("openrouter"),
-            Some(&env),
-            &MemSecrets::default(),
-        )
-        .await
-        .unwrap()
-        .expect("keyless openrouter resolves via the env default")
-    }
-
-    async fn plan_for(decl: &InferenceDecl, model: &str) -> anyhow::Result<RequestPlan> {
-        request_plan(
-            decl,
-            model,
-            Vec::new(),
-            inference::dialect::Sampling::Exact(0.2),
-            None,
-            Vec::new(),
-            &ToolChoice::Auto,
-        )
-        .await
-    }
-
-    /// A managed turn goes to the OpenRouter proxy on the injected origin, with
-    /// the model it was given as a bare slug and the managed credential — the
-    /// whole wire shape issue #2303 moves onto.
-    #[tokio::test]
-    async fn a_managed_turn_posts_a_bare_slug_to_the_proxy_on_the_injected_origin() {
-        let decl = managed_default_decl().await;
-        assert!(decl.is_proxied());
-
-        let plan = plan_for(&decl, "openai/gpt-4o-mini")
-            .await
-            .expect("an explicit model is sent");
-        assert_eq!(
-            plan.url,
-            "https://staging-api.tinyhumans.ai/agent-integrations/openrouter/chat/completions"
-        );
-        assert_eq!(plan.model, "openai/gpt-4o-mini");
-        assert_eq!(plan.body["model"], "openai/gpt-4o-mini");
-        assert_eq!(plan.bearer.as_deref(), Some("th-not-a-real-key"));
-        // The reply is read as one JSON body. The proxy's streamed form ends in a
-        // frame carrying only `openhuman` and no `choices`; that frame cannot
-        // reach this parser, because a turn never asks for a stream.
-        assert!(
-            plan.body.get("stream").is_none(),
-            "a managed turn must not request a stream: {}",
-            plan.body
-        );
-    }
-
-    /// A managed turn with no chosen model fails closed **before** anything is
-    /// sent: the proxy rejects a tier name, and substituting a default would
-    /// choose what the company runs on without anyone choosing it.
-    #[tokio::test]
-    async fn a_managed_turn_with_only_a_tier_fails_closed_naming_what_to_set() {
-        let decl = managed_default_decl().await;
-        for tier in crate::company::INFERENCE_TIERS {
-            let error = plan_for(&decl, tier)
-                .await
-                .expect_err("a bare tier must never reach the managed endpoint");
-            let message = error.to_string();
-            assert!(message.contains(*tier), "names the workload: {message}");
-            assert!(
-                message.contains("Managed"),
-                "says what to configure: {message}"
-            );
-        }
-    }
-
-    /// An operator's own mapping is the chosen model on the managed path, and a
-    /// mapping that only names a tier is not a choice.
-    #[tokio::test]
-    async fn a_managed_turn_uses_the_operators_mapping_and_refuses_a_tier_mapping() {
-        let mut decl = managed_default_decl().await;
-        decl.models.insert(
-            "agentic-v1".to_string(),
-            "openrouter/anthropic/claude-opus-5".to_string(),
-        );
-        decl.models
-            .insert("chat-v1".to_string(), "chat-v1".to_string());
-
-        let plan = plan_for(&decl, "agentic-v1").await.expect("mapped");
-        assert_eq!(
-            plan.model, "anthropic/claude-opus-5",
-            "the curated passthrough spelling becomes the bare slug"
-        );
-        assert!(
-            plan_for(&decl, "chat-v1").await.is_err(),
-            "`chat-v1 = \"chat-v1\"` meant 'let the platform resolve it', which the proxy cannot"
-        );
-    }
-
-    /// The managed proxy's reply, as verified live on 2026-09-14: a top-level
-    /// `service_tier` and `openhuman` the curated surface did not send, and
-    /// `cost` and `is_byok` inside `usage`. The parser reads the fields it needs
-    /// and ignores the rest, so none of them is a reason for a turn to fail.
+    /// A reply carrying keys this parser does not read still parses — as the
+    /// TinyHumans catalogue row's endpoint answers, verified live on 2026-09-14:
+    /// a top-level `service_tier` and `openhuman`, and `cost` and `is_byok` inside
+    /// `usage`. The parser reads what it needs and ignores the rest.
     #[test]
-    fn a_proxy_reply_with_extra_top_level_and_usage_keys_parses() {
+    fn a_reply_with_extra_top_level_and_usage_keys_parses() {
         let payload = serde_json::json!({
             "id": "gen-not-a-real-id",
             "object": "chat.completion",

@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MANAGED_OPTION_SLUG, addOptions, offersManaged } from "@/inference/connect";
-import { NO_CREDENTIAL_RESOLVES, managedModelLine, managedRow } from "@/inference/ProviderList";
+import { NO_CREDENTIAL_RESOLVES, managedRow } from "@/inference/ProviderList";
 import {
   MANAGED_NOT_SET_UP,
   MANAGED_NOT_SET_UP_ELSEWHERE,
@@ -53,21 +53,6 @@ describe("what the managed row says", () => {
     // could never show it. The two dead-end states say it now, through the same
     // constant, so the row and the banner cannot drift apart.
     expect(managedRow("none")).toBe(NO_CREDENTIAL_RESOLVES);
-  });
-});
-
-describe("the model the managed row says it sends (#2303)", () => {
-  it("names the chosen model", () => {
-    expect(managedModelLine("openai/gpt-4o-mini")).toBe("Sends openai/gpt-4o-mini");
-    expect(managedModelLine("  openai/gpt-4o-mini ")).toBe("Sends openai/gpt-4o-mini");
-  });
-
-  it("says outright that Managed cannot run a turn with no model chosen", () => {
-    // The managed endpoint takes no workload name, so with no model a managed
-    // turn refuses — a row that looked set up would hide exactly that.
-    for (const unset of [undefined, "", "   "]) {
-      expect(managedModelLine(unset), String(unset)).toContain("cannot run a turn");
-    }
   });
 });
 

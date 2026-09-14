@@ -145,7 +145,7 @@ async fn resolved_endpoint(
         String,
         Option<String>,
         catalogue::AuthStyle,
-        inference::CatalogShape,
+        catalogue::CatalogShape,
     )>,
     ApiError,
 > {
@@ -167,7 +167,7 @@ async fn resolved_endpoint(
         decl.base_url.clone(),
         bearer,
         auth,
-        decl.catalog_shape(),
+        catalogue::catalog_shape_for(&decl.provider),
     )))
 }
 
@@ -211,19 +211,6 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
     )
     .await
     {
-        // The managed endpoint lists real OpenRouter ids and its turns send
-        // only one chosen explicitly, so there is no tier vocabulary to report
-        // and no tier → model defaults to offer: prefilling the shipped slugs
-        // would be choosing a model on the operator's behalf (issue #2303).
-        Ok(models) if shape == inference::CatalogShape::PlatformProxy => {
-            Ok(Json(ModelCatalogDto {
-                base_url: catalogue::redact_endpoint(&base_url),
-                models,
-                tier_vocabulary: None,
-                tier_defaults: BTreeMap::new(),
-                error: None,
-            }))
-        }
         Ok(models) => {
             let vocabulary = inference::TierVocabulary::from_catalog_ids(
                 models.iter().map(|model| model.id.as_str()),
@@ -410,13 +397,6 @@ struct ManagedDto {
     /// told the first without the second. Switching it off leaves every step of
     /// its chain exactly where it was.
     enabled: bool,
-    /// The model Managed sends, when one has been chosen (issue #2303).
-    ///
-    /// Not a credential and not derived from one: the id the operator picked from
-    /// Managed's catalog, kept in `store::MANAGED_MODELS_KEY`. Absent means none
-    /// has been chosen, and a managed turn then refuses rather than guessing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
     /// What was last learnt about reaching it, if anything. Same rule as a
     /// provider row's: silent until something has actually been learnt.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1011,22 +991,14 @@ async fn managed_state(
     Ok(ManagedDto {
         source: source.as_str().to_string(),
         configured: source.resolves(),
-        // The endpoint managed turns actually reach — the injected origin on
-        // the proxy path — rather than the raw injected URL, which after #2303
-        // names the curated surface managed no longer calls. Redacted (#2281):
-        // `managed_base_url` keeps only the origin, but the card is read by
-        // every console reader and must never be the place userinfo reappears.
-        base_url: catalogue::redact_endpoint(&inference::managed_base_url(platform)),
+        base_url: catalogue::redact_endpoint(
+            &platform
+                .map(|p| p.base_url.clone())
+                .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        ),
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await
             .map_err(ApiError)?,
-        // One model for every workload, the way the add flow writes it — so any
-        // entry is the chosen one.
-        model: store::load_managed_models(runtime.id(), secrets)
-            .await
-            .map_err(ApiError)?
-            .into_values()
-            .next(),
         health,
     })
 }
@@ -1376,12 +1348,7 @@ async fn test_config(company: ScopedCompany) -> Response {
             // TinyHumans config fail Test with `Model
             // 'anthropic/claude-sonnet-5' is not available` — an id neither the
             // operator nor the provider ever named.
-            let decl = if decl.is_proxied() {
-                // The managed endpoint sends only an explicitly chosen model
-                // (`inference::proxied_model`), so there is no vocabulary to
-                // discover for it and no catalog read to spend (issue #2303).
-                decl
-            } else {
+            let decl = {
                 let bearer = match decl.bearer().await {
                     Ok(bearer) => bearer,
                     Err(err) => return ApiError(err).into_response(),
@@ -1391,6 +1358,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                     bearer.as_deref(),
                     Some(runtime.id().as_ref()),
                     catalogue::auth_style_for(&decl.provider),
+                    catalogue::catalog_shape_for(&decl.provider),
                 )
                 .await;
                 decl.with_vocabulary(vocabulary)
@@ -2508,12 +2476,6 @@ base_url = "https://byo.example/v1"
     /// Where a staging deployment is pointed with `OPENCOMPANY_INFERENCE_URL`.
     const STAGING_URL: &str = "https://staging-api.tinyhumans.ai/openai/v1";
 
-    /// Where that deployment's managed turns actually go since #2303: the same
-    /// staging origin, on the OpenRouter proxy path. The card reports this, not
-    /// the raw injected URL, because this is the endpoint requests travel to.
-    const STAGING_PROXY_URL: &str =
-        "https://staging-api.tinyhumans.ai/agent-integrations/openrouter";
-
     /// The platform default a staging tenant is injected with.
     fn staging_platform() -> EnvDefault {
         EnvDefault {
@@ -2555,7 +2517,7 @@ base_url = "https://byo.example/v1"
         let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
-        assert_eq!(dto.base_url, STAGING_PROXY_URL);
+        assert_eq!(dto.base_url, STAGING_URL);
         assert_eq!(dto.provider, "managed");
         assert_eq!(
             dto.source, "managed",
@@ -2624,7 +2586,7 @@ base_url = "https://byo.example/v1"
         let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
-        assert_eq!(dto.base_url, STAGING_PROXY_URL);
+        assert_eq!(dto.base_url, STAGING_URL);
         assert_eq!(dto.source, "manifest");
         assert!(
             !dto.key_configured,
@@ -2657,7 +2619,7 @@ base_url = "https://byo.example/v1"
             !dto.key_configured,
             "the platform token is not a stored tenant key"
         );
-        assert_eq!(dto.base_url, STAGING_PROXY_URL);
+        assert_eq!(dto.base_url, STAGING_URL);
 
         // An admin sets one from the console — the write #634's screen performs.
         inference::store_key(runtime.id(), runtime.secrets().as_ref(), "sk-console-set")
@@ -2732,7 +2694,7 @@ base_url = "https://byo.example/v1"
         let dto = effective_status_with(&runtime, Some(&platform), false)
             .await
             .unwrap();
-        assert_eq!(dto.base_url, STAGING_PROXY_URL, "proxied");
+        assert_eq!(dto.base_url, STAGING_URL, "proxied");
         assert_eq!(dto.slug, "subscription");
         assert!(!dto.key_configured);
 
@@ -3549,70 +3511,52 @@ base_url = "https://byo.example/v1"
         );
     }
 
-    /// Managed takes its model the way an added provider does, keeps it when only
-    /// the model changes, and loses it with its key (issue #2303).
+    /// A company whose legacy config says `managed` already surfaces entry zero
+    /// as `tinyhumans`. Adding the TinyHumans catalogue provider there (issue
+    /// #2303) is refused as the duplicate it would be — by the same check any
+    /// catalogue provider gets, before a key is written or a probe is sent — and
+    /// the legacy row is left exactly as it was.
     #[tokio::test]
-    async fn managed_takes_its_model_like_a_provider_and_loses_it_with_its_key() {
+    async fn adding_tinyhumans_over_a_legacy_managed_config_is_refused_not_duplicated() {
         let home_dir = home();
         let state = state_with_company(home_dir.path()).await;
         const FAKE: &str = "th-not-a-real-key";
-        const MANAGED_KEY: &str = "/api/v1/company/inference/managed/key";
 
-        // A workload name is not a model, and is refused before anything lands.
         let (status, _, raw) = send(
             &state,
             "PUT",
-            MANAGED_KEY,
-            Some(json!({ "key": FAKE, "model": "chat-v1" })),
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "tinyhumans", "key": FAKE })),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
-        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
-        assert_ne!(
-            dto["managed"]["source"], "provider_key",
-            "a refused model must not leave its key behind: {dto}"
-        );
-
-        let (status, body, raw) = send(
-            &state,
-            "PUT",
-            MANAGED_KEY,
-            Some(json!({ "key": FAKE, "model": "openai/gpt-4o-mini" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{raw}");
-        assert!(!raw.contains(FAKE), "the key must not come back: {raw}");
-        assert_eq!(body["status"]["managed"]["source"], "provider_key", "{raw}");
-        assert_eq!(
-            body["status"]["managed"]["model"], "openai/gpt-4o-mini",
-            "{raw}"
-        );
-
-        // The model alone moves, and the key stays where it is.
-        let (status, body, raw) = send(
-            &state,
-            "PUT",
-            MANAGED_KEY,
-            Some(json!({ "model": "openrouter/openai/gpt-4o" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{raw}");
-        assert_eq!(body["status"]["managed"]["model"], "openai/gpt-4o", "{raw}");
-        assert_eq!(body["status"]["managed"]["source"], "provider_key", "{raw}");
-
-        // Clearing the key clears the model with it — no dangling choice that
-        // reads as a Managed still set up.
-        let (status, body, raw) =
-            send(&state, "PUT", MANAGED_KEY, Some(json!({ "key": "" }))).await;
-        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(raw.contains("already connected"), "{raw}");
         assert!(
-            body["status"]["managed"].get("model").is_none(),
-            "a cleared key must take its model with it: {raw}"
+            !raw.contains(FAKE),
+            "the refusal must not echo the key: {raw}"
         );
 
-        // An empty body says nothing, and is refused rather than read as a clear.
-        let (status, _, raw) = send(&state, "PUT", MANAGED_KEY, Some(json!({}))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let rows: Vec<&Value> = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["slug"] == "tinyhumans")
+            .collect();
+        assert_eq!(rows.len(), 1, "no second TinyHumans row: {raw}");
+        assert_eq!(
+            rows[0]["origin"], "entryZero",
+            "the legacy row stands: {raw}"
+        );
     }
 
     #[tokio::test]
