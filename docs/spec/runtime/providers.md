@@ -202,12 +202,17 @@ managed credential chain are unchanged.
 the turn path deliberately neither substitutes `DEFAULT_TIER_MODELS` nor reads
 the catalog to guess one: a model nobody chose would decide what the company
 runs on and pays for. It sends the operator's mapping for the turn's tier, else
-the turn's own model when that is already a real id (`OPENCOMPANY_INFERENCE_MODEL`,
-a pinned agent model), and otherwise **fails closed** before anything is sent,
-naming the workload. A mapping that only names a tier (`chat-v1 = "chat-v1"`) is
-not a choice; the curated `openrouter/<author>/<model>` spelling is translated to
-`<author>/<model>`. Where a routed Managed workload's model comes from is not
-settled yet — the route grammar has no `managed:<model>` form.
+the turn's own model when that is already a real id, and otherwise **fails
+closed** before anything is sent, naming the workload. A mapping that only names
+a tier (`chat-v1 = "chat-v1"`) is not a choice; the curated
+`openrouter/<author>/<model>` spelling is translated to `<author>/<model>`.
+
+**Where a company chooses its managed model is not settled yet.** A `managed`
+route and the managed default carry no model — the route grammar has no
+`managed:<model>` form — so until that choice exists they fail closed. The
+existing instance-wide `OPENCOMPANY_INFERENCE_MODEL` override reaches a managed
+turn when it is a real id, and test and fixture hosts use it for exactly that; it
+is a fallback, not the per-company answer.
 
 The catalog is read in the proxy's shape because the decl is proxied
 (`InferenceDecl::catalog_shape`), never because of what the URL looks like. A
