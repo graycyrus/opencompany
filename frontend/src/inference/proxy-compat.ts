@@ -14,14 +14,18 @@
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
 
 /**
- * Whether `value`, once trimmed, is one of the exact two shapes the
- * platform's subscription proxy accepts for a tier override: a bare tier
- * name (`model_for_tier` reads that as "not really an override — let the
- * platform resolve this tier itself"), or the proxy's own explicit
- * three-segment `openrouter/<author>/<model>` passthrough form. Everything
- * else — including a raw OpenRouter registry id (`<author>/<model>`), which
- * `model_for_tier` forwards to the proxy verbatim and the proxy rejects — is
- * incompatible.
+ * Whether `value`, once trimmed, is the one shape the platform's managed
+ * endpoint accepts as a model: a bare OpenRouter slug, `<author>/<model>`.
+ *
+ * **Issue #2303 inverted this rule.** The managed endpoint used to be the
+ * curated `/openai/v1` surface, which accepted a bare tier name or its own
+ * three-segment `openrouter/<author>/<model>` passthrough form and rejected a
+ * raw registry id. It is now the backend's direct OpenRouter proxy, which takes
+ * the raw registry id and rejects both of the old shapes — so those two are now
+ * the incompatible ones, and a managed turn sends only a model that was chosen
+ * (the host fails a turn closed rather than send a tier). The reasoning below
+ * is the history of the old rule and still explains why the check is a
+ * whitelist, shape-based and trimmed; its examples name the old shapes.
  *
  * Whitelisting the two accepted shapes, not blacklisting the one known-bad
  * one (issue #1838 follow-up, ninth instance): an earlier version asked "is
@@ -67,16 +71,17 @@ const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
  */
 export function isProxyCompatible(value: string): boolean {
   const trimmed = value.trim();
-  if ((TIERS as readonly string[]).includes(trimmed)) return true;
-  if (!trimmed.includes("/")) return false;
-  if (!trimmed.startsWith("openrouter/")) return false;
-  // Three segments, all of them present. Counting alone accepted
-  // `openrouter//model` and `openrouter/anthropic/` — three segments each, and
-  // neither one an author/model pair the proxy can route. They only arrive by
-  // hand, but this function exists to be the single place that decides, and a
-  // rule that admits its own counter-example is not one.
+  // A tier is a workload, not a model. The proxy rejects it, and the host no
+  // longer substitutes one for it.
+  if ((TIERS as readonly string[]).includes(trimmed)) return false;
+  if (/\s/.test(trimmed)) return false;
+  // Two segments, both present: `anthropic/claude-sonnet-5`, `openrouter/auto`,
+  // `meta-llama/llama-3-8b:free`. Counting is what excludes the curated
+  // surface's `openrouter/<author>/<model>` passthrough spelling, which has
+  // three, as well as `anthropic/` and `/claude` — neither an author/model pair
+  // the proxy can route.
   const parts = trimmed.split("/");
-  return parts.length === 3 && parts.every((part) => part.length > 0);
+  return parts.length === 2 && parts.every((part) => part.length > 0);
 }
 
 /**
@@ -105,7 +110,7 @@ export function stripProxyIncompatible<T extends string>(
 }
 
 /**
- * The slug the platform's own subscription proxy answers to.
+ * The slug the platform's managed endpoint (the OpenRouter proxy) answers to.
  *
  * Mirrors the host's `MANAGED_SLUG`. It is the one provider whose model field
  * the rules above apply to: every other provider is a vendor the operator has

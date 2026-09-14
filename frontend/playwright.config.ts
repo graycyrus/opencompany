@@ -219,11 +219,16 @@ const inferenceEnv: Record<string, string> = managesLiveLlm
       // is what makes it choose a live harness over the offline echo brain.
       OPENCOMPANY_INFERENCE_KEY: "live-brain-proxy",
       OPENCOMPANY_INFERENCE_URL: `http://${LIVE_LLM_BIND}/v1`,
+      // The host rides the managed default, and a managed turn sends only an
+      // explicitly chosen model (issue #2303). The proxy replaces it upstream.
+      OPENCOMPANY_INFERENCE_MODEL: "live-brain/model",
     }
   : managesFixtures
     ? {
         OPENCOMPANY_INFERENCE_KEY: "mock-brain",
         OPENCOMPANY_INFERENCE_URL: `http://${MOCK_BRAIN_BIND}/v1`,
+        // See above. The mock brain echoes whatever model it is sent.
+        OPENCOMPANY_INFERENCE_MODEL: "mock-brain/model",
       }
     : {};
 
