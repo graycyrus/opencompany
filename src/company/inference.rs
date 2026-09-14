@@ -3355,7 +3355,9 @@ mod tests {
 
         let decl = resolve_managed(&secrets).await;
         assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
-        assert_eq!(decl.base_url, managed_env().base_url);
+        // The managed endpoint on the injected origin (#2303): same host as
+        // `managed_env().base_url`, on the OpenRouter proxy path.
+        assert_eq!(decl.base_url, managed_base_url(Some(&managed_env())));
     }
 
     #[tokio::test]
@@ -3372,7 +3374,9 @@ mod tests {
         // **Assert the endpoint, not only the bearer.** Sending a `th_…` key to
         // openrouter.ai is the shipped bug this chain must not reproduce, and a
         // test that checked the bearer alone is exactly how it shipped.
-        assert_eq!(decl.base_url, managed_env().base_url);
+        // The managed endpoint on the injected origin (#2303): same host as
+        // `managed_env().base_url`, on the OpenRouter proxy path.
+        assert_eq!(decl.base_url, managed_base_url(Some(&managed_env())));
         assert!(
             !decl.base_url.contains("openrouter.ai"),
             "{}",
@@ -3385,7 +3389,9 @@ mod tests {
         let secrets = MemSecrets::default();
         let decl = resolve_managed(&secrets).await;
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
-        assert_eq!(decl.base_url, managed_env().base_url);
+        // The managed endpoint on the injected origin (#2303): same host as
+        // `managed_env().base_url`, on the OpenRouter proxy path.
+        assert_eq!(decl.base_url, managed_base_url(Some(&managed_env())));
     }
 
     #[tokio::test]
