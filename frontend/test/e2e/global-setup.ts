@@ -5,6 +5,7 @@ import {
   type FullConfig,
 } from "@playwright/test";
 
+import { LIVE_BRAIN, LIVE_LLM } from "./capabilities";
 import {
   EXPECTED_INSTANCE_ID,
   MANAGED_HOST_HOME,
@@ -108,6 +109,24 @@ export default async function globalSetup(config: FullConfig) {
       );
     }
     await context.storageState({ path: storageState });
+
+    // A host with a brain behind it rides the managed default, and a managed
+    // turn sends only a model chosen for Managed (issue #2303). Choose one the
+    // way an operator does — Managed's model, through the same route the
+    // Providers tab writes — so every spec's turns have something to send. The
+    // fixture behind these lanes answers whatever model it is given.
+    if (LIVE_BRAIN || LIVE_LLM) {
+      const chosen = await context.put("/api/v1/company/inference/managed/key", {
+        data: { model: LIVE_LLM ? "live-brain/model" : "mock-brain/model" },
+      });
+      if (!chosen.ok()) {
+        throw new Error(
+          `[e2e global-setup] choosing Managed's model failed: ${chosen.status()} ` +
+            `${await chosen.text()}\n` +
+            "Without it every managed turn refuses before reaching the brain fixture.",
+        );
+      }
+    }
   } finally {
     await context.dispose();
   }

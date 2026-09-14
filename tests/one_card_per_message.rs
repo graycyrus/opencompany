@@ -455,13 +455,25 @@ async fn spawn_host(model: String) -> Host {
                 credential: Credential::from_value("scripted"),
                 extra_headers: Vec::new(),
             },
-            // The company has no `[inference]`, so its turns ride the managed
-            // default — which sends only an explicitly chosen model (#2303).
-            Some("scripted/model".to_string()),
+            None,
         )
         .build()
         .await
         .expect("runtime builds");
+    // The company has no `[inference]`, so its turns ride the managed default,
+    // which sends only a model chosen for Managed (#2303) — chosen here the way
+    // an operator chooses one, in the managed model slot.
+    let chosen = opencompany::company::INFERENCE_TIERS
+        .iter()
+        .map(|tier| ((*tier).to_string(), "scripted/model".to_string()))
+        .collect();
+    opencompany::company::inference::store::save_managed_models(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &chosen,
+    )
+    .await
+    .expect("choose Managed's model");
 
     let state = AppState::new(AppConfig {
         bind: "127.0.0.1:0".parse().expect("bind"),

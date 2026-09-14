@@ -4565,7 +4565,7 @@ mod tests {
         let plan = request_plan(
             &decl,
             // An explicit id: a proxied turn sends nothing else (#2303).
-            "anthropic/claude-sonnet-5",
+            "openai/gpt-4o-mini",
             Vec::new(),
             inference::dialect::Sampling::Exact(0.2),
             None,
@@ -4626,16 +4626,24 @@ mod tests {
         let decl = managed_default_decl().await;
         assert!(decl.is_proxied());
 
-        let plan = plan_for(&decl, "anthropic/claude-sonnet-5")
+        let plan = plan_for(&decl, "openai/gpt-4o-mini")
             .await
             .expect("an explicit model is sent");
         assert_eq!(
             plan.url,
             "https://staging-api.tinyhumans.ai/agent-integrations/openrouter/chat/completions"
         );
-        assert_eq!(plan.model, "anthropic/claude-sonnet-5");
-        assert_eq!(plan.body["model"], "anthropic/claude-sonnet-5");
+        assert_eq!(plan.model, "openai/gpt-4o-mini");
+        assert_eq!(plan.body["model"], "openai/gpt-4o-mini");
         assert_eq!(plan.bearer.as_deref(), Some("th-not-a-real-key"));
+        // The reply is read as one JSON body. The proxy's streamed form ends in a
+        // frame carrying only `openhuman` and no `choices`; that frame cannot
+        // reach this parser, because a turn never asks for a stream.
+        assert!(
+            plan.body.get("stream").is_none(),
+            "a managed turn must not request a stream: {}",
+            plan.body
+        );
     }
 
     /// A managed turn with no chosen model fails closed **before** anything is
@@ -4678,6 +4686,43 @@ mod tests {
             plan_for(&decl, "chat-v1").await.is_err(),
             "`chat-v1 = \"chat-v1\"` meant 'let the platform resolve it', which the proxy cannot"
         );
+    }
+
+    /// The managed proxy's reply, as verified live on 2026-09-14: a top-level
+    /// `service_tier` and `openhuman` the curated surface did not send, and
+    /// `cost` and `is_byok` inside `usage`. The parser reads the fields it needs
+    /// and ignores the rest, so none of them is a reason for a turn to fail.
+    #[test]
+    fn a_proxy_reply_with_extra_top_level_and_usage_keys_parses() {
+        let payload = serde_json::json!({
+            "id": "gen-not-a-real-id",
+            "object": "chat.completion",
+            "model": "openai/gpt-4o-mini",
+            "service_tier": "default",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "pong" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 3,
+                "total_tokens": 15,
+                "cost": 0.0000036,
+                "is_byok": false
+            },
+            "openhuman": {
+                "billing": { "charged_amount_usd": 0.0000041 },
+                "usage": { "context_window": 128000 }
+            }
+        });
+        let resp =
+            model_response_from_payload(payload).expect("extra keys are not a parse failure");
+        assert_eq!(resp.text(), "pong");
+        assert!(resp.message.tool_calls.is_empty());
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 3);
     }
 
     /// The negative half of issue #376 (AC #1) — and the important one, per

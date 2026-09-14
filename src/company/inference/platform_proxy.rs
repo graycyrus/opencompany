@@ -316,10 +316,10 @@ mod tests {
     fn a_page_is_unwrapped_from_the_envelope() {
         let page = parse_page(
             r#"{"success":true,"data":{"object":"list","data":[
-                {"id":"anthropic/claude-sonnet-5","display_name":" Claude Sonnet 5 ","context_length":200000,
-                 "input_modalities":["text"],"supports_tools":true,"supports_thinking":true,
-                 "pricing":{"input_per_1m":3.0,"output_per_1m":15.0}},
-                {"id":"qwen/qwen3.8-max"}
+                {"id":"openai/gpt-4o-mini","display_name":" GPT-4o mini ","context_length":128000,
+                 "input_modalities":["text","image"],"supports_tools":true,"supports_thinking":false,
+                 "pricing":{"input_per_1m":0.15,"output_per_1m":0.6}},
+                {"id":"vendor/model-b"}
             ],"total":2,"limit":500,"offset":0}}"#,
         )
         .expect("a well-formed page parses");
@@ -329,12 +329,12 @@ mod tests {
         assert_eq!(
             page.entries[0],
             CatalogEntry {
-                id: "anthropic/claude-sonnet-5".into(),
-                name: Some("Claude Sonnet 5".into()),
-                context_length: Some(200_000),
+                id: "openai/gpt-4o-mini".into(),
+                name: Some("GPT-4o mini".into()),
+                context_length: Some(128_000),
             }
         );
-        assert_eq!(page.entries[1].id, "qwen/qwen3.8-max");
+        assert_eq!(page.entries[1].id, "vendor/model-b");
     }
 
     /// The other shape is not quietly read as an empty catalog.

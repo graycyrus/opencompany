@@ -9042,12 +9042,12 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                // A managed turn sends only an explicitly chosen model (#2303).
-                Some("stub/model".to_string()),
+                None,
             )
             .build()
             .await
             .unwrap();
+        choose_managed_model(&runtime).await;
 
         let delivery = runtime
             .workflow_harness_deps
@@ -9478,6 +9478,28 @@ needs_reason = true
         format!("http://{addr}")
     }
 
+    /// Chooses Managed's model the way an operator does (issue #2303): the
+    /// managed model slot, one model for every workload.
+    ///
+    /// These runtimes ride the managed default — the stub is handed over as the
+    /// injected endpoint and the manifests declare no `[inference]` — and a
+    /// managed turn sends only a chosen model, so without this every turn here
+    /// refuses before reaching the stub.
+    #[cfg(feature = "openhuman")]
+    async fn choose_managed_model(runtime: &crate::company::runtime::CompanyRuntime) {
+        let chosen = crate::company::INFERENCE_TIERS
+            .iter()
+            .map(|tier| ((*tier).to_string(), "stub/model".to_string()))
+            .collect();
+        crate::company::inference::store::save_managed_models(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            &chosen,
+        )
+        .await
+        .expect("choose Managed's model");
+    }
+
     /// Issue #707: a desk reorder reaches a **resident** runtime, with no
     /// rebuild and no restart.
     ///
@@ -9567,12 +9589,12 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                // A managed turn sends only an explicitly chosen model (#2303).
-                Some("stub/model".to_string()),
+                None,
             )
             .build()
             .await
             .unwrap();
+        choose_managed_model(&runtime).await;
 
         let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
@@ -9695,12 +9717,12 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                // A managed turn sends only an explicitly chosen model (#2303).
-                Some("stub/model".to_string()),
+                None,
             )
             .build()
             .await
             .unwrap();
+        choose_managed_model(&runtime).await;
 
         // The console creates a desk and puts `eng2` on it.
         let mut record = store.load(&id).await.unwrap().expect("record");
@@ -9855,12 +9877,12 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                // A managed turn sends only an explicitly chosen model (#2303).
-                Some("stub/model".to_string()),
+                None,
             )
             .build()
             .await
             .unwrap();
+        choose_managed_model(&runtime).await;
 
         // A message addressed to the `eng` desk must be answered by the reordered
         // lead `eng2`, not the blueprint lead `eng1`.

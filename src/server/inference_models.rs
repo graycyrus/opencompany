@@ -1459,15 +1459,15 @@ mod tests {
             0 => (
                 200,
                 r#"{"success":true,"data":{"object":"list","data":[
-                    {"id":"anthropic/claude-sonnet-5","display_name":"Claude Sonnet 5","context_length":200000},
-                    {"id":"openai/gpt-5.6-sol-pro"}
+                    {"id":"openai/gpt-4o-mini","display_name":"GPT-4o mini","context_length":128000},
+                    {"id":"vendor/model-b"}
                 ],"total":3,"limit":2,"offset":0}}"#
                     .to_string(),
             ),
             _ => (
                 200,
                 r#"{"success":true,"data":{"object":"list","data":[
-                    {"id":"qwen/qwen3.8-max"}
+                    {"id":"vendor/model-c"}
                 ],"total":3,"limit":2,"offset":2}}"#
                     .to_string(),
             ),
@@ -1486,14 +1486,10 @@ mod tests {
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![
-                "anthropic/claude-sonnet-5",
-                "openai/gpt-5.6-sol-pro",
-                "qwen/qwen3.8-max"
-            ]
+            vec!["openai/gpt-4o-mini", "vendor/model-b", "vendor/model-c"]
         );
-        assert_eq!(models[0].name.as_deref(), Some("Claude Sonnet 5"));
-        assert_eq!(models[0].context_length, Some(200_000));
+        assert_eq!(models[0].name.as_deref(), Some("GPT-4o mini"));
+        assert_eq!(models[0].context_length, Some(128_000));
 
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 2, "one request per page, stopping at total");
