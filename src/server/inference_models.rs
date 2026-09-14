@@ -365,15 +365,8 @@ async fn fetch_paged_catalog(
         // Redacted, the same as the OpenAI-shaped read: these messages are
         // cached, replayed and rendered in the console.
         let named = catalogue::redact_endpoint(&url);
-        let body = send_classified(client, &url, bearer, auth)
-            .await?
-            .text()
-            .await
-            .map_err(|error| {
-                DiscoveryError::endpoint(format!(
-                    "reading the model catalog from {named} failed: {error}"
-                ))
-            })?;
+        let body =
+            read_page_capped(send_classified(client, &url, bearer, auth).await?, &named).await?;
         let page = paged_catalog::parse_page(&body).map_err(|error| {
             DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {error}"))
         })?;
@@ -401,6 +394,39 @@ async fn fetch_paged_catalog(
             context_length: entry.context_length,
         })
         .collect())
+}
+
+/// The most one page of a paged catalog may be, in bytes.
+///
+/// A page of up to [`paged_catalog::PAGE_LIMIT`] entries, each carrying pricing
+/// and modality fields, runs to a few hundred KiB. The request timeout bounds
+/// time, not bytes, so without this a faulty backend or gateway could make every
+/// catalog read allocate without limit (CodeRabbit review on #2305).
+const PAGE_BODY_CAP: usize = 4 * 1024 * 1024;
+
+/// One page's body, read in chunks and refused once it passes
+/// [`PAGE_BODY_CAP`] — an endpoint failure, remembered like any other.
+async fn read_page_capped(
+    mut response: reqwest::Response,
+    named: &str,
+) -> Result<String, DiscoveryError> {
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        DiscoveryError::endpoint(format!(
+            "reading the model catalog from {named} failed: {error}"
+        ))
+    })? {
+        if body.len() + chunk.len() > PAGE_BODY_CAP {
+            return Err(DiscoveryError::endpoint(format!(
+                "a model catalog page from {named} is larger than {} MiB",
+                PAGE_BODY_CAP / (1024 * 1024)
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|error| {
+        DiscoveryError::endpoint(format!("model catalog from {named} was not UTF-8: {error}"))
+    })
 }
 
 /// Send one catalog request and classify a failure status.
@@ -1652,6 +1678,18 @@ mod tests {
             !invalid.contains("hunter2") && !invalid.contains("alice"),
             "the managed parse failure carried the endpoint's userinfo: {invalid}"
         );
+    }
+
+    /// A page larger than the cap is refused as an endpoint failure rather than
+    /// buffered whole (CodeRabbit review on #2305).
+    #[tokio::test]
+    async fn an_oversized_catalog_page_is_refused_not_buffered() {
+        let (base, _) = spawn_proxy_catalog(|_| (200, "x".repeat(PAGE_BODY_CAP + 1))).await;
+        let error = discover_models(&base, None, AuthStyle::Bearer, CatalogShape::PagedEnvelope)
+            .await
+            .expect_err("an oversized page is refused")
+            .to_string();
+        assert!(error.contains("larger than"), "{error}");
     }
 
     #[test]
