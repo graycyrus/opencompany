@@ -27,6 +27,13 @@ interface Props {
   error: string | null;
   /** Saves the pasted value. The page closes the dialog once the write lands. */
   onSubmit: (key: string) => void;
+  /**
+   * Where "Get an API key" points: the host-derived `account.manageKeysUrl`, so
+   * a host wired to staging (or `TINYHUMANS_WEB_URL`) sends the operator to that
+   * hub's dashboard rather than production's. Falls back to
+   * {@link TINYHUMANS_API_KEYS_URL} where the host names no hub site.
+   */
+  keysUrl?: string;
 }
 
 /**
@@ -52,7 +59,15 @@ interface Props {
  * returned, so the field opens empty every time and "set" is reported by a
  * flag rather than by a masked value we would have had to receive.
  */
-export function AccountKeyDialog({ open, onOpenChange, replacing, busy, error, onSubmit }: Props) {
+export function AccountKeyDialog({
+  open,
+  onOpenChange,
+  replacing,
+  busy,
+  error,
+  onSubmit,
+  keysUrl,
+}: Props) {
   const [key, setKey] = useState("");
 
   // Cleared whenever the dialog opens or closes. A credential left in component
@@ -92,7 +107,7 @@ export function AccountKeyDialog({ open, onOpenChange, replacing, busy, error, o
             <p className="text-xs text-muted-foreground">
               Don&apos;t have an API key?{" "}
               <a
-                href={TINYHUMANS_API_KEYS_URL}
+                href={keysUrl ?? TINYHUMANS_API_KEYS_URL}
                 target="_blank"
                 rel="noreferrer"
                 data-testid="account-key-get-link"

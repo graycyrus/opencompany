@@ -492,6 +492,7 @@ export function ApiKeyView({ client, company }: Props) {
           open={editing}
           onOpenChange={setEditing}
           replacing={removable}
+          keysUrl={account?.manageKeysUrl}
           busy={busy}
           error={keyError}
           onSubmit={(key) => void write(key, "save")}

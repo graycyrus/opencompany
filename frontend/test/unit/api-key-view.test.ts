@@ -334,6 +334,31 @@ describe("ApiKeyView's Connect to TinyHumans dialog", () => {
     expect(link.getAttribute("target")).toBe("_blank");
   });
 
+  // Codex, PR #2304: a host wired to staging (or `TINYHUMANS_WEB_URL`) must
+  // send the operator to that hub's key page, not production's — a key minted
+  // on the wrong hub is one the host then rejects. The host derives the URL
+  // (`account.manageKeysUrl`); the constant is only the fallback, covered above.
+  it("links to the connected hub's key page where the host names one", async () => {
+    const staging = "https://staging.tinyhumans.ai/dashboard?tab=api-keys";
+    await mount(
+      adminClient(async () =>
+        credential({
+          configured: false,
+          source: "none",
+          hubLink: true,
+          account: {
+            manageKeysUrl: staging,
+            topUpUrl: "https://staging.tinyhumans.ai/dashboard?tab=billing",
+          },
+        }),
+      ),
+    );
+    await press('[data-testid="account-add-key"]');
+
+    const link = document.querySelector('[data-testid="account-key-get-link"]') as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe(staging);
+  });
+
   it("writes the typed key to the company credential route and closes", async () => {
     const writes: { path: string; body: unknown }[] = [];
     await mount(recordingClient(writes));
