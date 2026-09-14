@@ -130,6 +130,16 @@ export function ProvidersTab({
    * reason its row is rendered outside the list.
    */
   const [confirmingManaged, setConfirmingManaged] = useState(false);
+  /**
+   * Whether the connect dialog was opened from the Managed row's key action.
+   *
+   * The Managed row and the TinyHumans catalogue row share the `tinyhumans`
+   * slug (issue #2303), so the option alone cannot say which one the operator
+   * meant. A key typed from the Managed row is step 1 of the managed chain and
+   * goes to its own route; a TinyHumans chosen from the add dialog is an
+   * ordinary provider and goes through `add`.
+   */
+  const [replacingManagedKey, setReplacingManagedKey] = useState(false);
   // Cleared on unmount, so a result that resolves after the page is gone does
   // not set state on a component nobody is looking at.
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -197,6 +207,7 @@ export function ProvidersTab({
 
   const closeConnect = () => {
     setConnecting(null);
+    setReplacingManagedKey(false);
     setEditing(null);
     setError(null);
     setProbeFailure(null);
@@ -216,6 +227,10 @@ export function ProvidersTab({
           baseUrl: draft.baseUrl,
           key: draft.key,
         });
+      } else if (replacingManagedKey && draft.kind === MANAGED_OPTION_SLUG) {
+        // From the Managed row: step 1 of the managed chain, which has its own
+        // route — not a TinyHumans provider row (Codex review on #2305).
+        await actions.saveManagedKey(draft.key ?? "");
       } else {
         // **Ask before writing, not after refusing.** An endpoint whose catalog
         // resolves no workload name cannot serve one until a model is named —
@@ -337,6 +352,7 @@ export function ProvidersTab({
             // adding a key and replacing one are one code path.
             onManagedReplaceKey={() => {
               setEditing(null);
+              setReplacingManagedKey(true);
               setConnecting(MANAGED_OPTION_SLUG);
             }}
             // Confirmed, like every other row's Remove key. It used to fire on
@@ -386,6 +402,9 @@ export function ProvidersTab({
         onChoose={(option) => {
           setAdding(false);
           setEditing(null);
+          // Chosen from the catalogue: an ordinary provider, even when it is
+          // TinyHumans.
+          setReplacingManagedKey(false);
           setConnecting(option);
         }}
       />
