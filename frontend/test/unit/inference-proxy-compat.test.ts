@@ -25,7 +25,7 @@ import {
 describe("the one shape the managed OpenRouter proxy accepts", () => {
   it("accepts a bare OpenRouter slug", () => {
     for (const slug of [
-      "anthropic/claude-sonnet-5",
+      "openai/gpt-4o-mini",
       "qwen/qwen3.8-max",
       "meta-llama/llama-3-8b:free",
       // Two segments, and a real OpenRouter slug — not a passthrough spelling.
@@ -44,7 +44,7 @@ describe("the one shape the managed OpenRouter proxy accepts", () => {
   });
 
   it("rejects the curated surface's three-segment passthrough spelling (#2303)", () => {
-    expect(isProxyCompatible("openrouter/anthropic/claude-sonnet-5")).toBe(false);
+    expect(isProxyCompatible("openrouter/openai/gpt-4o-mini")).toBe(false);
   });
 
   it("rejects a bare unnamespaced id typed out of direct-path habit (ninth instance)", () => {
@@ -68,7 +68,7 @@ describe("the one shape the managed OpenRouter proxy accepts", () => {
   it("trims before any shape check (seventh instance)", () => {
     // A pasted value keeps its whitespace until a later pass; untrimmed, a good
     // value was silently dropped.
-    expect(isProxyCompatible(" anthropic/claude-sonnet-5 ")).toBe(true);
+    expect(isProxyCompatible(" openai/gpt-4o-mini ")).toBe(true);
     expect(isProxyCompatible("  chat-v1  ")).toBe(false);
   });
 
@@ -84,21 +84,21 @@ describe("stripping a whole tier map", () => {
   it("is the one place a kept value is trimmed (seventh instance)", () => {
     // Remove Key sends its carried models straight to the wire with no trim
     // pass of its own, so a kept id has to come out of here normalized.
-    expect(stripProxyIncompatible({ "chat-v1": " anthropic/claude-sonnet-5 " })).toEqual({
-      "chat-v1": "anthropic/claude-sonnet-5",
+    expect(stripProxyIncompatible({ "chat-v1": " openai/gpt-4o-mini " })).toEqual({
+      "chat-v1": "openai/gpt-4o-mini",
     });
   });
 
   it("drops the incompatible entries and keeps the rest", () => {
     expect(
       stripProxyIncompatible({
-        "chat-v1": "anthropic/claude-sonnet-5",
+        "chat-v1": "openai/gpt-4o-mini",
         "reasoning-v1": "openrouter/anthropic/claude-opus-5",
         "agentic-v1": "agentic-v1",
         "vision-v1": "",
       }),
     ).toEqual({
-      "chat-v1": "anthropic/claude-sonnet-5",
+      "chat-v1": "openai/gpt-4o-mini",
     });
   });
 
@@ -113,9 +113,9 @@ describe("which provider the rule applies to", () => {
   it("applies to the platform's managed endpoint and to nothing else", () => {
     // A tenant's own OpenRouter account, a custom endpoint or a local runtime
     // takes whatever id the operator types, verbatim.
-    expect(overrideIsSendable(PROXIED_SLUG, "anthropic/claude-sonnet-5")).toBe(true);
+    expect(overrideIsSendable(PROXIED_SLUG, "openai/gpt-4o-mini")).toBe(true);
     expect(overrideIsSendable(PROXIED_SLUG, "chat-v1")).toBe(false);
-    expect(overrideIsSendable(PROXIED_SLUG, "openrouter/anthropic/claude-sonnet-5")).toBe(false);
+    expect(overrideIsSendable(PROXIED_SLUG, "openrouter/openai/gpt-4o-mini")).toBe(false);
     expect(overrideIsSendable("openrouter", "chat-v1")).toBe(true);
     expect(overrideIsSendable("acme", "gpt-4o")).toBe(true);
   });
@@ -130,6 +130,6 @@ describe("which provider the rule applies to", () => {
   it("judges a settled value, which is why a half-typed id is not the point (sixth instance)", () => {
     // Six of the nine instances are about stripping mid-keystroke. The
     // predicate is asked on save, so only the finished value is judged.
-    expect(overrideIsSendable(PROXIED_SLUG, "anthropic/claude-sonnet-5")).toBe(true);
+    expect(overrideIsSendable(PROXIED_SLUG, "openai/gpt-4o-mini")).toBe(true);
   });
 });

@@ -75,7 +75,7 @@ export function isProxyCompatible(value: string): boolean {
   // longer substitutes one for it.
   if ((TIERS as readonly string[]).includes(trimmed)) return false;
   if (/\s/.test(trimmed)) return false;
-  // Two segments, both present: `anthropic/claude-sonnet-5`, `openrouter/auto`,
+  // Two segments, both present: `openai/gpt-4o-mini`, `openrouter/auto`,
   // `meta-llama/llama-3-8b:free`. Counting is what excludes the curated
   // surface's `openrouter/<author>/<model>` passthrough spelling, which has
   // three, as well as `anthropic/` and `/claude` — neither an author/model pair

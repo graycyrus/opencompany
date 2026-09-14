@@ -61,6 +61,18 @@ export function managedRow(source: ManagedState["source"] | undefined): string {
  */
 export const NO_CREDENTIAL_RESOLVES = "No credential resolves — agents cannot think";
 
+/**
+ * The managed row's model line: the model Managed sends, or that none is chosen.
+ *
+ * Said on the row because it is what decides whether Managed can run a turn at
+ * all (issue #2303): the managed endpoint takes no workload name, so with no
+ * model chosen a turn refuses — and a row that looked set up would hide that.
+ */
+export function managedModelLine(model: string | undefined): string {
+  const chosen = model?.trim();
+  return chosen ? `Sends ${chosen}` : "No model chosen — Managed cannot run a turn yet";
+}
+
 /** The managed row's name. */
 export const MANAGED_LABEL = "Managed";
 
@@ -168,6 +180,7 @@ export function ProviderList({
   onManagedTest,
   onManagedReplaceKey,
   onManagedRemoveKey,
+  onManagedChangeModel,
   routingState,
   testState,
 }: {
@@ -202,6 +215,12 @@ export function ProviderList({
    * rather than going blank or claiming to be off.
    */
   onManagedRemoveKey: () => void;
+  /**
+   * Open Managed's model picker, to choose or change the model it sends.
+   * Optional so a list rendered without the editing surface stays valid; the
+   * action is only offered when it is supplied.
+   */
+  onManagedChangeModel?: () => void;
   /**
    * Whether any workload routes through a provider, and whether it can serve
    * them. Decided by `providerRoutingState` from the same routing table the
@@ -258,6 +277,12 @@ export function ProviderList({
             <span className="truncate text-xs text-muted-foreground">
               {managedRow(managed.source)}
             </span>
+            <span
+              className="truncate font-mono text-xs text-muted-foreground"
+              data-testid="inference-provider-managed-model"
+            >
+              {managedModelLine(managed.model)}
+            </span>
           </span>
 
           <Health slug={MANAGED_SLUG} health={managed.health} />
@@ -299,6 +324,14 @@ export function ProviderList({
             <DropdownMenuContent align="end">
               {/* No Test here. One affordance per action — the icon button on
                   the row is discoverable and its answer lands where it belongs. */}
+              {onManagedChangeModel && (
+                <DropdownMenuItem
+                  onClick={onManagedChangeModel}
+                  data-testid="inference-provider-managed-change-model"
+                >
+                  {managed.model ? "Change model" : "Choose a model"}
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={onManagedReplaceKey}>
                 {managed.source === "provider_key" ? "Replace key" : "Add a key"}
               </DropdownMenuItem>

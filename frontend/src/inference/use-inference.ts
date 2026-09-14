@@ -23,6 +23,7 @@ import {
   getInferenceStatus,
   getRoutes,
   probeDraft,
+  probeManagedKey,
   putRoutes,
   restartInference,
   setDefaultProvider,
@@ -68,6 +69,16 @@ export interface InferenceActions {
   setEnabled: (slug: string, enabled: boolean) => Promise<ProviderMutation>;
   makeDefault: (slug: string) => Promise<ProviderMutation>;
   saveManagedKey: (key: string) => Promise<ProviderMutation>;
+  /**
+   * Save Managed's key and/or its model — the connect dialog's last step, and
+   * the row's Change model. Absent fields are left as they are.
+   */
+  saveManaged: (input: { key?: string; model?: string }) => Promise<ProviderMutation>;
+  /**
+   * Read Managed's catalog with a key that is not stored yet, so the connect
+   * dialog can offer Managed's own models. Nothing is written.
+   */
+  probeManagedDraft: (key: string) => Promise<ProbeResult>;
   setManagedOn: (enabled: boolean) => Promise<ProviderMutation>;
   testManagedChain: () => Promise<ProbeResult>;
   /**
@@ -231,7 +242,9 @@ export function useInference(
     setEnabled: (slug, enabled) =>
       write(slug, () => setProviderEnabled(client, company, slug, enabled)),
     makeDefault: (slug) => write(slug, () => setDefaultProvider(client, company, slug)),
-    saveManagedKey: (key) => write(null, () => setManagedKey(client, company, key)),
+    saveManagedKey: (key) => write(null, () => setManagedKey(client, company, { key })),
+    saveManaged: (input) => write(null, () => setManagedKey(client, company, input)),
+    probeManagedDraft: (key) => probeManagedKey(client, company, key),
     setManagedOn: (enabled) => write(null, () => setManagedEnabled(client, company, enabled)),
     probeDraftEndpoint: (draft) => probeDraft(client, company, draft),
     testManagedChain: async () => {
