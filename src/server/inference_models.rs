@@ -807,6 +807,7 @@ mod tests {
             "http://169.254.169.254/latest/meta-data",
             Some("pw-not-a-real-key"),
             AuthStyle::Bearer,
+            CatalogShape::OpenAi,
         )
         .await
         .expect_err("a link-local endpoint must not be fetched");

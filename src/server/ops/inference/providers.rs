@@ -57,7 +57,7 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::inference::{TierVocabulary, catalogue, probe, resolve, store};
+use crate::company::inference::{CatalogShape, TierVocabulary, catalogue, probe, resolve, store};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -414,7 +414,7 @@ async fn add_provider(
                 credential,
                 auth,
                 probe::default_policy(),
-                inference::CatalogShape::OpenAi,
+                CatalogShape::OpenAi,
             )
             .await,
         )
@@ -1517,7 +1517,7 @@ async fn test_managed(
         bearer.as_deref(),
         catalogue::AuthStyle::Bearer,
         probe::default_policy(),
-        inference::CatalogShape::PlatformProxy,
+        CatalogShape::PlatformProxy,
     )
     .await
     {
@@ -1610,7 +1610,7 @@ async fn list_provider_models(
         (!key.trim().is_empty()).then(|| key.trim()),
         Some(&scope),
         catalogue::auth_style_for(&provider.kind),
-        inference::CatalogShape::OpenAi,
+        CatalogShape::OpenAi,
     )
     .await
     {
@@ -1770,7 +1770,7 @@ async fn test_provider(
         (!key.trim().is_empty()).then(|| key.trim()),
         catalogue::auth_style_for(&provider.kind),
         probe::default_policy(),
-        inference::CatalogShape::OpenAi,
+        CatalogShape::OpenAi,
     )
     .await
     {
@@ -1844,7 +1844,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
         body.key.as_deref().filter(|k| !k.trim().is_empty()),
         auth,
         probe::default_policy(),
-        inference::CatalogShape::OpenAi,
+        CatalogShape::OpenAi,
     )
     .await
     {
