@@ -57,13 +57,13 @@ describe("what the managed row says", () => {
 });
 
 describe("where managed is offered", () => {
-  it("is listed when nothing resolves, like anything else not connected", () => {
+  it("is offered once, as the ordinary TinyHumans cloud row (#2303)", () => {
+    // TinyHumans is a catalogue row now, added like any other provider. There is
+    // no second, managed-only entry for the same slug beside it.
     const options = addOptions([], managed("none"));
-    expect(options.cloud[0]).toMatchObject({
-      value: MANAGED_OPTION_SLUG,
-      // The endpoint host, like every other cloud row.
-      detail: "api.tinyhumans.ai",
-    });
+    const rows = options.cloud.filter((o) => o.value === MANAGED_OPTION_SLUG);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ label: "TinyHumans", detail: "api.tinyhumans.ai" });
   });
 
   it("is still listed while the SERVER is paying, and that is the trade-off", () => {

@@ -216,10 +216,6 @@ export function ProvidersTab({
           baseUrl: draft.baseUrl,
           key: draft.key,
         });
-      } else if (draft.kind === MANAGED_OPTION_SLUG) {
-        // Managed has no provider record — it resolves from a chain — so its
-        // credential goes to its own route rather than through `add`.
-        await actions.saveManagedKey(draft.key ?? "");
       } else {
         // **Ask before writing, not after refusing.** An endpoint whose catalog
         // resolves no workload name cannot serve one until a model is named —

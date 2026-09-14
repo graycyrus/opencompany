@@ -26,7 +26,7 @@ import {
  */
 describe("the provider catalogue the console renders from", () => {
   it("ships the three categories at the sizes the plan names", () => {
-    expect(CLOUD_PROVIDERS).toHaveLength(26);
+    expect(CLOUD_PROVIDERS).toHaveLength(27);
     expect(LOCAL_RUNTIMES).toHaveLength(3);
     expect(CLI_LOGINS).toHaveLength(2);
   });

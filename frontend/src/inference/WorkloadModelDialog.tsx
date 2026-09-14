@@ -214,7 +214,7 @@ export function WorkloadModelDialog({
               every other provider takes a typed id verbatim. */}
           {model.trim() && modelSlug && !overrideIsSendable(modelSlug, model) && (
             <p className="text-xs text-status-blocked-text" data-testid="inference-model-incompatible">
-              The managed endpoint takes an OpenRouter model id in its
+              TinyHumans takes an OpenRouter model id in its
               <code className="px-1 font-mono">author/model</code> form, not a tier name. This id
               would be rejected, so it will not be saved.
             </p>

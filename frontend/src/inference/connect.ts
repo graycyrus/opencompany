@@ -167,29 +167,20 @@ export function offersManaged(managed: ManagedState | undefined): boolean {
  */
 export function addOptions(
   providers: readonly Provider[],
-  managed?: ManagedState,
+  // Kept for the caller's signature. TinyHumans is an ordinary catalogue row now
+  // (issue #2303), offered like every other cloud provider, so there is no
+  // separate managed entry to decide on — and a second entry for the same slug
+  // would be two rows for one provider.
+  _managed?: ManagedState,
 ): AddOptions {
-  const managedEntry: AddOption[] = offersManaged(managed)
-    ? [
-        {
-          value: MANAGED_OPTION_SLUG,
-          label: "Managed (TinyHumans)",
-          // The endpoint host, like every other cloud row. The reason it is
-          // still offered belongs on the Connected row, not in this list.
-          detail: endpointHost(managed?.baseUrl),
-        },
-      ]
-    : [];
   return {
-    cloud: managedEntry.concat(
-      CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map((p) => ({
-        value: p.slug,
-        label: p.label,
-        // The host, not the whole URL: the path is noise at a glance and the
-        // host is the part an operator recognises.
-        detail: endpointHost(p.endpoint),
-      })),
-    ),
+    cloud: CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map((p) => ({
+      value: p.slug,
+      label: p.label,
+      // The host, not the whole URL: the path is noise at a glance and the
+      // host is the part an operator recognises.
+      detail: endpointHost(p.endpoint),
+    })),
     local: LOCAL_RUNTIMES.filter((r) => !isConnected(providers, r.slug)).map((r) => ({
       value: r.slug,
       label: r.label,

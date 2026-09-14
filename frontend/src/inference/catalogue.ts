@@ -50,7 +50,7 @@ export interface CloudProvider {
 }
 
 /**
- * The 26 hosted providers the add dialog offers.
+ * The 27 hosted providers the add dialog offers.
  *
  * The endpoints are presets rather than a pattern, and the paths are the reason:
  * `/openai/v1`, `/inference/v1`, `/v1beta/openai`, `/v1/openai`, `/v3/openai`,
@@ -232,6 +232,15 @@ export const CLOUD_PROVIDERS: readonly CloudProvider[] = [
     endpoint: "https://api-inference.modelscope.cn/v1",
     auth: "bearer",
     keyPlaceholder: "ms-...",
+  },
+  // TinyHumans as an ordinary vendor (issue #2303): its URL is the only thing
+  // special about it. Its catalog's paged shape is a host-side detail.
+  {
+    slug: "tinyhumans",
+    label: "TinyHumans",
+    endpoint: "https://api.tinyhumans.ai/agent-integrations/openrouter",
+    auth: "bearer",
+    keyPlaceholder: "th-...",
   },
 ];
 
