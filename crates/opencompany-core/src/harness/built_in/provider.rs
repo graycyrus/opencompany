@@ -2241,6 +2241,30 @@ impl TenantProvider {
         )
         .await
         .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?;
+        // Round-3 review (2026-09-15): the pin's own pre-check above runs
+        // only when `self.pin` is `Some`, and it already fails closed before
+        // `resolve_for_turn` is ever reached — so this can never
+        // double-refuse a pinned turn. A company default (or whatever the
+        // legacy configuration chain resolved) that names an authenticated
+        // provider with no key configured used to reach here with
+        // `Credential::None` and go out on the wire unauthenticated, rather
+        // than failing closed with the same structured `provider_no_key`
+        // failure a pinned agent already gets. Same rule as the pin check:
+        // a kind `auth_style_for` classifies keyless (Ollama, LM Studio, …)
+        // is unaffected.
+        if self.pin.is_none()
+            && inference::catalogue::auth_style_for(&decl.provider)
+                != inference::catalogue::AuthStyle::None
+            && !decl.key_configured()
+        {
+            let label = inference::catalogue::cloud_provider(&decl.provider)
+                .map(|p| p.label.to_string())
+                .or_else(|| {
+                    inference::catalogue::local_runtime(&decl.provider).map(|r| r.label.to_string())
+                })
+                .unwrap_or_else(|| decl.provider.clone());
+            anyhow::bail!(inference::copy::resolved_provider_has_no_key(&label));
+        }
         *self.slug.write().unwrap() = decl.telemetry_slug();
         // No vocabulary discovery any more (keys rework, issue #2306, slice
         // 2d): the model this turn sends is decided once, in

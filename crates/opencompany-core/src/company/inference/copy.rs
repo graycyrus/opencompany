@@ -89,6 +89,23 @@ pub fn provider_has_no_key(agent_name: &str, provider_label: &str) -> String {
     )
 }
 
+/// A provider that resolves for this turn with **no agent pin involved** —
+/// the company's explicit default, or whatever the legacy configuration
+/// chain falls back to — has no credential (keys rework #2306, round-3
+/// review, 2026-09-15). Distinct from [`provider_has_no_key`]: there is no
+/// agent to name here, only the provider, and no `with_agent_marker`
+/// trailer either — a pin is the one call site mid-resolution with an agent
+/// id in hand (see that function's doc); this one never has one.
+///
+/// "{Provider} is this company's configured provider, which has no key. Add
+/// one in Connections → API Keys → LLM, or choose a different provider."
+pub fn resolved_provider_has_no_key(provider_label: &str) -> String {
+    format!(
+        "{provider_label} is this company's configured provider, which has no \
+         key. Add one in {SETTINGS_PATH}, or choose a different provider."
+    )
+}
+
 /// An agent's own pair names a provider that is gone or switched off (F6:
 /// fails closed, never falls back to the company default on its own).
 ///

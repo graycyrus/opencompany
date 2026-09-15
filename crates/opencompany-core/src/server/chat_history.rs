@@ -2062,7 +2062,18 @@ fn strip_relay_note(event: &CompanyEvent) -> Option<String> {
         .split_once(crate::ports::types::RELAY_NOTE_MARKER)
         .map_or(text.as_str(), |(answer, _)| answer)
         .trim();
-    (!words.is_empty()).then(|| words.to_string())
+    // Round-3 review (2026-09-15): this feeds a referral chip's "question" /
+    // "answer" preview from an `AgentReply` matched on `chat_id` alone, with
+    // no `agent_id` filter — reachable for a `SYSTEM_AUTHOR` resolution
+    // failure notice, which can carry `copy::with_agent_marker`'s own hidden
+    // trailer. The trailer is kept in the stored text so a read-time
+    // `copy::classify` can recover `pairAgentId` elsewhere; it must still
+    // never reach a preview here.
+    let words = match crate::company::inference::copy::classify(words) {
+        Some(resolution) => resolution.message,
+        None => words.to_string(),
+    };
+    (!words.is_empty()).then_some(words)
 }
 
 /// Renders a deliberation turn for a person, leaving every other reply alone.
@@ -3024,6 +3035,45 @@ mod test {
         let plain =
             MessageView::project(at(14, agent_reply("studio")), &Viewer::Operator, &labels());
         assert!(plain.parent_id.is_none());
+    }
+
+    /// Round-3 review (2026-09-15): `spawn_chat_turn` now stores the bare X9
+    /// sentence WITH `copy::with_agent_marker`'s hidden trailer attached
+    /// (rather than the already-stripped `resolution.message`), specifically
+    /// so this projection's own re-classification can recover
+    /// `pairAgentId` for a pinned agent whose provider was removed. The
+    /// marker itself must never reach `text` or `cue_text`.
+    #[test]
+    fn a_marked_pair_failure_recovers_the_pair_agent_id_and_hides_the_marker() {
+        use crate::company::inference::copy;
+
+        let sentence = copy::pair_broken("Researcher", "acme", copy::ProviderGone::Removed);
+        let marked = copy::with_agent_marker(sentence.clone(), "researcher");
+        let event = CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "studio".to_string(),
+            agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+            text: marked,
+            steps: Vec::new(),
+        };
+
+        let view = MessageView::project(at(20, event), &Viewer::Operator, &labels());
+
+        assert!(view.resolution_user_facing);
+        assert_eq!(view.resolution_pair_agent_id.as_deref(), Some("researcher"));
+        assert_eq!(view.resolution_provider_slug.as_deref(), Some("acme"));
+        assert_eq!(view.text, sentence, "the displayed text must be the plain sentence");
+        assert_eq!(view.cue_text, sentence);
+        assert!(!view.text.contains('\u{0}'), "the marker must never reach text");
+        assert!(
+            !view.cue_text.contains('\u{0}'),
+            "the marker must never reach cue_text"
+        );
     }
 
     #[test]

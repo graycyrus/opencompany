@@ -399,7 +399,20 @@ fn body_of(agent_id: &str, event: &CompanyEvent) -> Option<(String, bool, String
             agent_id: author,
             text,
             ..
-        } => Some((author.clone(), author == agent_id, text.clone())),
+        } => Some((
+            author.clone(),
+            author == agent_id,
+            // Round-3 review (2026-09-15): a `SYSTEM_AUTHOR` resolution
+            // failure notice can carry `copy::with_agent_marker`'s hidden
+            // trailer — kept in the stored text so a read-time
+            // `copy::classify` elsewhere can recover `pairAgentId` — and this
+            // feeds another agent's own turn context, unfiltered by author.
+            // Strip it before it reaches that context.
+            match crate::company::inference::copy::classify(text) {
+                Some(resolution) => resolution.message,
+                None => text.clone(),
+            },
+        )),
         // `owns` also admits `DeskTaskCompleted`, a structural marker with no
         // conversational body. Not a turn; not delivered.
         _ => None,

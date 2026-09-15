@@ -1438,6 +1438,49 @@ mod tests {
         );
     }
 
+    /// Round-3 review (2026-09-15): before this fix,
+    /// `server::ops::inference::providers::add_provider` took `index_lock`
+    /// only for the first-provider precheck and dropped it before
+    /// `put_provider`'s unlocked load-modify-save of `inference/providers`,
+    /// so two concurrent adds could both read the same index and the later
+    /// save would discard the earlier one's row. This reproduces the fixed
+    /// path's critical section directly — a fresh read, a collision check and
+    /// the index write, all under one `index_lock` span — for two different
+    /// slugs added to the same company at once.
+    #[tokio::test]
+    async fn two_concurrent_locked_adds_never_lose_a_row() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let company = company();
+
+        let mut tasks = Vec::new();
+        for slug in ["alpha", "beta"] {
+            let secrets = secrets.clone();
+            let company = company.clone();
+            tasks.push(tokio::spawn(async move {
+                let _guard = index_lock(&company).await;
+                let fresh = list_providers(&company, secrets.as_ref()).await.unwrap();
+                check_slug(&fresh, slug).unwrap();
+                // The window a lost update needs: without the lock
+                // serialising this task against its sibling, both would read
+                // the same index — neither seeing the other's slug yet — and
+                // whichever `put_provider` finishes second would overwrite
+                // the first's row rather than merge with it.
+                tokio::task::yield_now().await;
+                put_provider(&company, secrets.as_ref(), draft(slug))
+                    .await
+                    .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let rows = list_providers(&company, secrets.as_ref()).await.unwrap();
+        let slugs: Vec<&str> = rows.iter().map(|p| p.slug.as_str()).collect();
+        assert!(slugs.contains(&"alpha"), "lost alpha's row: {slugs:?}");
+        assert!(slugs.contains(&"beta"), "lost beta's row: {slugs:?}");
+    }
+
     // ---- check_model_id (keys rework, issue #2306, slice 2c) ---------------
 
     #[test]

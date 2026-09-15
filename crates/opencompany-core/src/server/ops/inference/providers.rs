@@ -25,27 +25,34 @@
 //! ## The add flow's ordering, which is not arbitrary
 //!
 //! ```text
-//!   validate ──▶ slug ──▶ write key ──▶ flush record ──▶ PROBE ──┬─▶ ok
-//!                                                                 │
-//!                                                     auth ◀──────┴──▶ anything else
-//!                                                       │                  │
-//!                                        roll back record AND key    KEEP both,
-//!                                        reject                      amber advisory
+//!   validate ──▶ slug ──▶ PROBE ──┬─▶ ok / kept ──▶ write key ──▶ lock: recheck,
+//!                                 │                               write record,
+//!                        auth ◀───┘                                decide default
+//!                          │
+//!                      reject, nothing written
 //! ```
 //!
 //! 1. **Validate locally what can be validated locally.** A typed endpoint's
 //!    scheme and shape are knowable without a network, so they are rejected
 //!    before anything is written.
-//! 2. **Derive and check the slug before any write.** A collision found after
-//!    the credential has landed means a credential sitting in a slot nothing
-//!    owns.
-//! 3. **Credential first, then the record.** The probe reads the key by slug, so
-//!    it has to be there before the record it belongs to is flushed.
-//! 4. **Probe**, and classify rather than reduce to a boolean.
-//! 5. **Roll back both stores only on the destructive class**, and log a
-//!    rollback failure loudly rather than swallowing it. A silently failed
-//!    key-clear orphans a secret, which is an incident shape rather than
-//!    untidiness.
+//! 2. **Derive and check the slug before any write**, unlocked — a fail-fast
+//!    pre-check that saves a network round trip on the common case, not the
+//!    authoritative one.
+//! 3. **Probe before anything is written.** The raw key from the request is
+//!    enough to probe with, so nothing needs to be persisted first —
+//!    [`company::inference::store::index_lock`](crate::company::inference::store::index_lock)
+//!    must never be held across a network call, and a probe is one.
+//! 4. **Roll back nothing on the destructive class — refuse instead.** Since
+//!    nothing was written before the probe, a destructive failure is a plain
+//!    refusal with an empty stack to unwind, not a rollback.
+//! 5. **Credential, then — under one `index_lock` span — a fresh collision
+//!    check, the provider-index write and the X1 default decision.** One span
+//!    so a concurrent add, edit or delete can never land between this recheck
+//!    and this write and have its row discarded by an unlocked
+//!    load-modify-save. A failure past the credential write still rolls that
+//!    back and logs a rollback failure loudly rather than swallowing it — a
+//!    silently failed key-clear orphans a secret, which is an incident shape
+//!    rather than untidiness.
 
 use std::collections::BTreeMap;
 
@@ -494,7 +501,7 @@ async fn add_provider(
     let secrets = runtime.secrets().as_ref();
     let kind = body.kind.trim().to_string();
 
-    // Step 1 and 2: everything knowable without a network, before any write.
+    // Step 1: everything knowable without a network, before any write.
     let plan = plan_add(
         &kind,
         body.label.as_deref(),
@@ -513,51 +520,22 @@ async fn add_provider(
     } else {
         None
     };
-    let existing = store::list_providers(runtime.id(), secrets)
+
+    // Step 2: derive and check the slug before doing anything expensive.
+    // Unlocked, and not the authoritative check — it exists only to fail fast
+    // on the common case before a network probe. `index_lock` below re-runs
+    // it against a fresh read, right before the write it guards.
+    //
+    // The catalogue check applies to a *typed* name only. Adding the
+    // catalogue's own `groq` entry should take the slug `groq` — that is the
+    // same provider, not a collision.
+    let precheck = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
-    // Decision X1 (round-3a review P0, 2026-09-15): auto-default requires more
-    // than "no stored default" — every company that predates this rework has
-    // no stored default, so that test alone would silently move an existing
-    // company's traffic (entry zero, a manifest `[inference]` section, an env
-    // default, or the managed chain) onto whatever it "tried out" next, with
-    // no confirm. X1 means "the first provider this company has ever
-    // connected", so both must hold, read from the state as it stood before
-    // this add:
-    //   (a) there were zero provider rows;
-    //   (b) nothing else resolves for the company at all — `resolve_effective`
-    //       is the one seam that already answers exactly that question, for
-    //       the turn path and the boot path alike.
-    //
-    // Must run **before** this add's own row exists: asked afterwards, (b)
-    // would trivially see this very row resolving as sole positional primary
-    // and answer "nothing else" regardless of what was true before. Locked
-    // only for this read — released here, long before the write below and
-    // the network probe further down; re-validated under the lock again,
-    // narrowly, at the point that actually writes the default.
-    let first_provider_ever = if existing.is_empty() {
-        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
-        let (manifest, _harness_id) = super::manifest_inference(runtime).await?;
-        let platform = super::platform_default(&crate::app::config::ProcessEnv);
-        crate::company::inference::resolve_effective(
-            runtime.id(),
-            &manifest,
-            platform.as_ref(),
-            secrets,
-        )
-        .await
-        .map_err(ApiError)?
-        .is_none()
-    } else {
-        false
-    };
-    // The catalogue check applies to a *typed* name only. Adding the catalogue's
-    // own `groq` entry should take the slug `groq` — that is the same provider,
-    // not a collision.
     if plan.custom {
-        store::check_slug(&existing, &plan.slug)
+        store::check_slug(&precheck, &plan.slug)
             .map_err(|e| ApiError(OpenCompanyError::InvalidRequest(e.to_string())))?;
-    } else if existing.iter().any(|p| p.slug == plan.slug) {
+    } else if precheck.iter().any(|p| p.slug == plan.slug) {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "{} is already connected. Edit the existing row rather than adding a second one.",
             plan.label
@@ -571,13 +549,66 @@ async fn add_provider(
     // name here, so `providers.rs` cannot store one even if a caller tries.
     let model = store::check_model_id(body.model.as_deref().unwrap_or("")).map_err(ApiError)?;
 
+    // Step 3: probe — before anything is written, and only when there is
+    // something for the probe to learn.
+    //
+    // Nothing here needs a persisted record: the raw key from the request is
+    // enough to probe with, and `plan.base_url` is exactly what will be
+    // stored (`put_provider` round-trips it unchanged). This also means
+    // `index_lock` — taken below, around the write — never has to span a
+    // network call, which its own doc forbids.
+    //
+    // A kind that expects a credential and was given none has nothing to
+    // verify: the endpoint can only answer 401, which classifies as `auth`,
+    // which is the one destructive class — so a keyless add would reject
+    // itself over a key the operator has not typed yet. "Not checked" is the
+    // honest state for that row and is exactly what the health column already
+    // renders.
+    let key = body.key.map(|k| k.trim().to_string()).unwrap_or_default();
+    let auth = catalogue::auth_style_for(&plan.kind);
+    let credential = (!key.is_empty()).then_some(key.as_str());
+    let worth_probing = plan.probes && (auth == catalogue::AuthStyle::None || credential.is_some());
+    let shape = catalogue::catalog_shape_for(&plan.kind, &plan.base_url);
+    let outcome = if worth_probing {
+        Some(
+            probe::probe_models(&plan.base_url, credential, auth, probe::default_policy(), shape)
+                .await,
+        )
+    } else {
+        None
+    };
+
+    if let Some(Err(failure)) = &outcome {
+        // The raw text goes here and nowhere else.
+        tracing::info!(
+            company = %runtime.id(),
+            provider = %plan.slug,
+            class = failure.class.as_str(),
+            detail = %failure.raw,
+            "inference provider probe failed",
+        );
+        // Category-aware: a local runtime that is not running rolls back too.
+        // See `probe::rolls_back` for why the same class means the opposite
+        // thing for a cloud provider. Nothing has been written yet, so a
+        // destructive failure here is a plain refusal — there is no stack to
+        // unwind.
+        if probe::rolls_back(failure.class, catalogue::category_of(&plan.kind)) && !body.add_anyway
+        {
+            // The **refusal** wording, not `describe`'s: nothing was saved,
+            // and every one of `describe`'s sentences but the auth one opens
+            // by saying it was.
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                probe::describe_refusal(failure.class, &plan.label),
+            )));
+        }
+    }
+
     // Keys rework (#2306), slice 2a: `provider/tinyhumans/key` can already
     // hold the legacy Managed row's key with no index record behind it (set
     // through `PUT …/inference/managed/key`, or the account-key fan-out).
-    // Every rollback below clears that slot (`roll_back_add` →
-    // `store::delete_provider`, `clear_orphaned_key`), so a failed TinyHumans
-    // add would silently delete a key nothing here wrote. Read the old value
-    // now and put it back after any rollback.
+    // `clear_orphaned_key` below would otherwise delete a key nothing here
+    // wrote, so the old value is read now and put back if this add does not
+    // stick.
     let previous_key = if plan.slug == crate::company::inference::MANAGED_SLUG {
         secrets
             .get(runtime.id(), &store::provider_key_key(&plan.slug))
@@ -589,9 +620,9 @@ async fn add_provider(
         None
     };
 
-    // Step 3: the credential first. The probe resolves the key by slug, so it
-    // has to land before the record does.
-    let key = body.key.map(|k| k.trim().to_string()).unwrap_or_default();
+    // The credential, now that the probe is done with it — it read the raw
+    // value straight from the request, so nothing needed it in the store
+    // first.
     if !key.is_empty() {
         secrets
             .set(
@@ -603,68 +634,172 @@ async fn add_provider(
             .map_err(ApiError)?;
     }
 
-    // Step 4: flush the record.
-    //
-    // A failure here has to take the credential back out. The key is already at
-    // `provider/<slug>/key` and there is now no record owning it, which is the
-    // invisible half of the rollback invariant `roll_back_add` exists for: a
-    // record left behind is on screen and removable, an orphaned credential is
-    // neither, and the next add of that slug would silently present it.
-    let provider = match store::put_provider(
-        runtime.id(),
-        secrets,
-        store::ProviderDraft {
-            slug: plan.slug.clone(),
-            label: plan.label.clone(),
-            kind: plan.kind.clone(),
-            base_url: plan.base_url.clone(),
-            models: uniform_models(Some(&model)),
-            // New providers arrive on. Adding something and then having to
-            // switch it on is a second step for a decision already made.
-            enabled: true,
-        },
-    )
-    .await
-    {
-        Ok(provider) => provider,
-        Err(err) => {
+    // Step 4: under one `index_lock` span — a fresh collision check, the
+    // provider-index write and the X1 default decision (round-3 review,
+    // 2026-09-15). One span, because all three read-then-write
+    // `inference/providers` (and, for X1, `inference/default`): a concurrent
+    // add, edit or delete that also takes this lock (or the fan-out's
+    // `slot_guard`, held for this whole call when `plan.slug` is TinyHumans —
+    // lock order is `slot_guard` before `index_lock`) can no longer land
+    // between this recheck and this write and have its row discarded by an
+    // unlocked load-modify-save. Never held across the probe above, which is
+    // already done by the time this is taken.
+    let (provider, default_note) = {
+        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
+
+        // A fresh read: the pre-check above ran before the probe and may be
+        // stale by however long that took.
+        let fresh = store::list_providers(runtime.id(), secrets)
+            .await
+            .map_err(ApiError)?;
+        if plan.custom {
+            if let Err(e) = store::check_slug(&fresh, &plan.slug) {
+                if !key.is_empty() {
+                    clear_orphaned_key(runtime, &plan.slug).await;
+                }
+                restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
+                return Err(ApiError(OpenCompanyError::InvalidRequest(e.to_string())));
+            }
+        } else if fresh.iter().any(|p| p.slug == plan.slug) {
             if !key.is_empty() {
                 clear_orphaned_key(runtime, &plan.slug).await;
             }
             restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
-            return Err(ApiError(err));
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "{} is already connected. Edit the existing row rather than adding a second one.",
+                plan.label
+            ))));
         }
+
+        // Decision X1 (round-3a review P0, 2026-09-15): auto-default requires
+        // more than "no stored default" — every company that predates this
+        // rework has no stored default, so that test alone would silently
+        // move an existing company's traffic (entry zero, a manifest
+        // `[inference]` section, an env default, or the managed chain) onto
+        // whatever it "tried out" next, with no confirm. X1 means "the first
+        // provider this company has ever connected", so both must hold, read
+        // from the state as it stood before this add:
+        //   (a) there were zero provider rows;
+        //   (b) nothing else resolves for the company at all —
+        //       `resolve_effective` is the one seam that already answers
+        //       exactly that question, for the turn path and the boot path
+        //       alike.
+        //
+        // Asked under the same lock that is about to write this row: there is
+        // no window between this read and that write for a concurrent
+        // request to add a second row or set an explicit default and make
+        // this answer stale.
+        let first_provider_ever = if fresh.is_empty() {
+            let (manifest, _harness_id) = super::manifest_inference(runtime).await?;
+            let platform = super::platform_default(&crate::app::config::ProcessEnv);
+            crate::company::inference::resolve_effective(
+                runtime.id(),
+                &manifest,
+                platform.as_ref(),
+                secrets,
+            )
+            .await
+            .map_err(ApiError)?
+            .is_none()
+        } else {
+            false
+        };
+
+        // A failure here has to take the credential back out. The key is
+        // already at `provider/<slug>/key` and there is now no record owning
+        // it — a record left behind is on screen and removable, an orphaned
+        // credential is neither, and the next add of that slug would
+        // silently present it.
+        let provider = match store::put_provider(
+            runtime.id(),
+            secrets,
+            store::ProviderDraft {
+                slug: plan.slug.clone(),
+                label: plan.label.clone(),
+                kind: plan.kind.clone(),
+                base_url: plan.base_url.clone(),
+                models: uniform_models(Some(&model)),
+                // New providers arrive on. Adding something and then having to
+                // switch it on is a second step for a decision already made.
+                enabled: true,
+            },
+        )
+        .await
+        {
+            Ok(provider) => provider,
+            Err(err) => {
+                if !key.is_empty() {
+                    clear_orphaned_key(runtime, &plan.slug).await;
+                }
+                restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
+                return Err(ApiError(err));
+            }
+        };
+
+        // Keys rework (#2306): the last write of the request, so a failure
+        // here never half-applies the add — the row and the key are already
+        // valid and visible, and a retry would only answer "already
+        // connected".
+        //
+        // Two reasons this runs, matched independently rather than one flag:
+        // - `body.make_default` (2c): the operator explicitly ticked "Make
+        //   this the default", which is honoured whatever the default
+        //   already held.
+        // - Decision D-first-default / X1 (round-3a review P0, 2026-09-15):
+        //   the *first* provider a company has ever connected becomes its
+        //   default automatically, with no opt-out — gated on
+        //   `first_provider_ever` above, not merely on `load_default` reading
+        //   `Unset` (X1's second half, "adding never changes it", still holds
+        //   either way).
+        //
+        // `Some(true)` / `Some(false)` / `None` rather than baking the note
+        // text in here: the base note still depends on the probe outcome,
+        // decided below, outside this lock.
+        let default_note = if body.make_default {
+            let choice = store::ModelChoice {
+                provider: provider.slug.clone(),
+                model: model.clone(),
+            };
+            match store::set_default_choice(runtime.id(), secrets, &choice).await {
+                Ok(()) => Some(true),
+                Err(err) => {
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        provider = %provider.slug,
+                        error = %err,
+                        "added a provider but could not make it the default",
+                    );
+                    Some(false)
+                }
+            }
+        } else if first_provider_ever {
+            let choice = store::ModelChoice {
+                provider: provider.slug.clone(),
+                model: model.clone(),
+            };
+            match store::set_default_choice(runtime.id(), secrets, &choice).await {
+                Ok(()) => Some(true),
+                Err(err) => {
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        provider = %provider.slug,
+                        error = %err,
+                        "added a provider but could not make it the default",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        (provider, default_note)
     };
+
     // The credential just changed for this company, and the catalog cache key is
     // made of non-secret ids on purpose — so a rotation would otherwise keep
     // answering from the previous credential's read for the rest of its TTL.
     crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
-
-    // Step 5: probe — but only when there is something for the probe to learn.
-    //
-    // A kind that expects a credential and was given none has nothing to verify:
-    // the endpoint can only answer 401, which classifies as `auth`, which is the
-    // one destructive class — so a keyless add would reject itself over a key the
-    // operator has not typed yet. "Not checked" is the honest state for that row
-    // and is exactly what the health column already renders.
-    let auth = catalogue::auth_style_for(&plan.kind);
-    let credential = (!key.is_empty()).then_some(key.as_str());
-    let worth_probing = plan.probes && (auth == catalogue::AuthStyle::None || credential.is_some());
-    let shape = catalogue::catalog_shape_for(&plan.kind, &provider.base_url);
-    let outcome = if worth_probing {
-        Some(
-            probe::probe_models(
-                &provider.base_url,
-                credential,
-                auth,
-                probe::default_policy(),
-                shape,
-            )
-            .await,
-        )
-    } else {
-        None
-    };
 
     let (probe_dto, note) = match outcome {
         None => (None, format!("{} is connected.", provider.label)),
@@ -689,29 +824,6 @@ async fn add_provider(
             )
         }
         Some(Err(failure)) => {
-            // The raw text goes here and nowhere else.
-            tracing::info!(
-                company = %runtime.id(),
-                provider = %provider.slug,
-                class = failure.class.as_str(),
-                detail = %failure.raw,
-                "inference provider probe failed",
-            );
-            // Category-aware: a local runtime that is not running rolls back
-            // too. See `probe::rolls_back` for why the same class means the
-            // opposite thing for a cloud provider.
-            if probe::rolls_back(failure.class, catalogue::category_of(&plan.kind))
-                && !body.add_anyway
-            {
-                roll_back_add(runtime, &provider).await;
-                restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
-                // The **refusal** wording, not `describe`'s: nothing was saved,
-                // and every one of `describe`'s sentences but the auth one
-                // opens by saying it was.
-                return Err(ApiError(OpenCompanyError::InvalidRequest(
-                    probe::describe_refusal(failure.class, &provider.label),
-                )));
-            }
             record_health(runtime, &provider.slug, failure.class.as_str()).await;
             // Bug KR-L1-01: a catalog too large to read is not "the check did
             // not complete" — the connection and the credential are both
@@ -746,81 +858,13 @@ async fn add_provider(
         ),
     };
 
-    // Keys rework (#2306): the last write of the request, so a failure here
-    // never half-applies the add — the row and the key are already valid and
-    // visible, and a retry would only answer "already connected".
-    //
-    // Two reasons this runs, matched independently rather than one flag:
-    // - `body.make_default` (2c): the operator explicitly ticked "Make this
-    //   the default", which is honoured whatever the default already held.
-    // - Decision D-first-default / X1 (round-3a review P0, 2026-09-15): the
-    //   *first* provider a company has ever connected becomes its default
-    //   automatically, with no opt-out — gated on `first_provider_ever`
-    //   above, not merely on `load_default` reading `Unset` (X1's second
-    //   half, "adding never changes it", still holds either way).
-    let note = if body.make_default {
-        let choice = store::ModelChoice {
-            provider: provider.slug.clone(),
-            model: model.clone(),
-        };
-        match store::set_default_choice(runtime.id(), secrets, &choice).await {
-            Ok(()) => format!(
-                "{note} New work now goes through {} · {model}.",
-                provider.label
-            ),
-            Err(err) => {
-                tracing::warn!(
-                    company = %runtime.id(),
-                    provider = %provider.slug,
-                    error = %err,
-                    "added a provider but could not make it the default",
-                );
-                format!("{note} It could not be made the default. Use Set as default.")
-            }
-        }
-    } else if first_provider_ever {
-        // Re-validated under the lock right before the write: the snapshot
-        // above was taken before this add's own row was written and before
-        // its probe ran, both of which took real time a concurrent request
-        // could have used to add a second row or set an explicit default —
-        // either of which means this is no longer "the first provider ever".
-        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
-        let still_unset = matches!(
-            store::load_default(runtime.id(), secrets)
-                .await
-                .map_err(ApiError)?,
-            store::DefaultChoice::Unset
-        );
-        let still_only_row = store::list_providers(runtime.id(), secrets)
-            .await
-            .map_err(ApiError)?
-            .len()
-            == 1;
-        if still_unset && still_only_row {
-            let choice = store::ModelChoice {
-                provider: provider.slug.clone(),
-                model: model.clone(),
-            };
-            match store::set_default_choice(runtime.id(), secrets, &choice).await {
-                Ok(()) => format!(
-                    "{note} New work now goes through {} · {model}.",
-                    provider.label
-                ),
-                Err(err) => {
-                    tracing::warn!(
-                        company = %runtime.id(),
-                        provider = %provider.slug,
-                        error = %err,
-                        "added a provider but could not make it the default",
-                    );
-                    note
-                }
-            }
-        } else {
-            note
-        }
-    } else {
-        note
+    let note = match default_note {
+        Some(true) => format!(
+            "{note} New work now goes through {} · {model}.",
+            provider.label
+        ),
+        Some(false) => format!("{note} It could not be made the default. Use Set as default."),
+        None => note,
     };
 
     Ok(Json(ProviderMutation {
@@ -1135,32 +1179,13 @@ fn endpoint_refusal(typed: &str) -> String {
     "That endpoint must be an http or https address.".to_string()
 }
 
-/// Undoes an add whose probe rejected the credential.
-///
-/// Both stores, and a failure in either is **logged loudly** rather than
-/// swallowed: a record left behind is visible and the operator can remove it,
-/// but an orphaned credential is invisible, and re-adding that slug would
-/// silently reuse it.
-async fn roll_back_add(runtime: &CompanyRuntime, provider: &store::Provider) {
-    let secrets = runtime.secrets().as_ref();
-    // `delete_provider` clears the credential itself, and clears it *first*, so
-    // a failure leaves the row visible with its key rather than the reverse.
-    if let Err(err) = store::delete_provider(runtime.id(), secrets, &provider.slug).await {
-        tracing::error!(
-            company = %runtime.id(),
-            provider = %provider.slug,
-            error = %err,
-            "could not roll back a rejected provider; a credential may be orphaned at \
-             provider/<slug>/key and re-adding this slug would reuse it",
-        );
-    }
-}
-
 /// Clears a credential whose provider record was never written.
 ///
-/// The same loud-failure rule [`roll_back_add`] follows, for the same reason,
-/// and separate from it because there is no `Provider` to delete yet — the
-/// write that would have produced one is what failed.
+/// **Logged loudly** rather than swallowed, for the same reason a delete's own
+/// rollback would be: an orphaned credential is invisible, and re-adding that
+/// slug would silently reuse it. There is no `Provider` to delete here — the
+/// write that would have produced one is what failed — so this clears the
+/// slot directly rather than going through `delete_provider`.
 async fn clear_orphaned_key(runtime: &CompanyRuntime, slug: &str) {
     let secrets = runtime.secrets().as_ref();
     if let Err(err) = secrets
@@ -1183,12 +1208,13 @@ async fn clear_orphaned_key(runtime: &CompanyRuntime, slug: &str) {
 /// Puts back a key that an add replaced and then rolled back (keys rework,
 /// issue #2306, slice 2a). `None` does nothing.
 ///
-/// `provider/<slug>/key` is one slot; a TinyHumans add overwrites it before it
-/// knows whether the add will stick (`add_provider` writes the key before the
-/// record, so the probe can read it by slug). A rollback then clears that same
-/// slot (`roll_back_add` → `store::delete_provider`; `clear_orphaned_key`),
-/// taking the legacy Managed row's key with it even though nothing about that
-/// row was touched. This restores exactly what was there before the request.
+/// `provider/<slug>/key` is one slot; a TinyHumans add can overwrite it after
+/// the probe (which reads the raw key from the request, never the store) and
+/// before it knows whether the add will stick. A failure past that write —
+/// `clear_orphaned_key`, on a rejected index write or a fresh collision found
+/// on re-check — clears that same slot, taking the legacy Managed row's key
+/// with it even though nothing about that row was touched. This restores
+/// exactly what was there before the request.
 async fn restore_previous_key(runtime: &CompanyRuntime, slug: &str, previous: Option<&str>) {
     let Some(previous) = previous else {
         return;

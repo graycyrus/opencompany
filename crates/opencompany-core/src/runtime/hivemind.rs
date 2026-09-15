@@ -170,7 +170,16 @@ impl JournalSessionLog<'_> {
                 chat_id: Some(chat_id.clone()),
                 parent: parent.map(|seq| Sequence(seq.value())),
                 author: self.agent_author(agent_id),
-                content: text.clone(),
+                // Round-3 review (2026-09-15): a `SYSTEM_AUTHOR` resolution
+                // failure notice can carry `copy::with_agent_marker`'s hidden
+                // trailer — kept in the stored text so a read-time
+                // `copy::classify` elsewhere can recover `pairAgentId` — and
+                // this feeds another agent's own transcript, unfiltered by
+                // author. Strip it before it reaches that context.
+                content: match crate::company::inference::copy::classify(text) {
+                    Some(resolution) => resolution.message,
+                    None => text.clone(),
+                },
                 // Read from the row, never assumed. An empty list is
                 // desk-visible — what every row written before asides existed
                 // means, and what an ordinary turn means now — and a non-empty

@@ -1644,13 +1644,27 @@ fn project_event_for_viewer(
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
-            o["text"] = json!(text);
             // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
             // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
             // exactly this class of failure. Omitted (reads as absent/false)
             // for every ordinary reply and every other failure class, so the
             // legacy frame shape is unchanged for them.
-            if let Some(resolution) = crate::company::inference::copy::classify(text) {
+            //
+            // Round-3 review (2026-09-15): `text` itself may carry
+            // `copy::with_agent_marker`'s hidden trailer — `spawn_chat_turn`
+            // now stores it there so this re-classification can recover
+            // `pairAgentId` — so `o["text"]` is built from the classified,
+            // already-stripped `message` whenever classification succeeds,
+            // never from the raw stored field. The marker must never reach
+            // the wire.
+            let resolution = crate::company::inference::copy::classify(text);
+            o["text"] = json!(
+                resolution
+                    .as_ref()
+                    .map(|r| r.message.as_str())
+                    .unwrap_or(text.as_str())
+            );
+            if let Some(resolution) = &resolution {
                 o["userFacing"] = json!(true);
                 o["code"] = json!(resolution.code);
                 o["message"] = json!(resolution.message);
@@ -4098,8 +4112,20 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 // SSE builder re-classify this same text at read time — no
                 // new field on this event, so none of `AgentReply`'s ~30
                 // other construction sites need to change.
+                //
+                // Round-3 review (2026-09-15): stores `detail` itself, marker
+                // and all, rather than `resolution.message` — which
+                // `classify` already stripped it out of. `MessageView::project`
+                // and the SSE builder each run `classify` again against this
+                // stored text to build their own display copy from
+                // `resolution.message`, and that is the only way either can
+                // still recover `pairAgentId` for a pinned agent whose
+                // provider was removed or disabled: this is the one place in
+                // the whole path that had the agent's raw id in hand, and
+                // stripping the marker here erases it for good before either
+                // read-time classifier ever sees it.
                 let text = match crate::company::inference::copy::classify(&detail) {
-                    Some(resolution) => resolution.message,
+                    Some(_) => detail,
                     None => turn_failure_notice(&detail),
                 };
                 let notice = CompanyEvent::AgentReply {
@@ -14532,6 +14558,46 @@ mode = "full"
         assert_eq!(v["steps"][0]["status"], "ok");
         // A channel reply names no thread, so the legacy frame is unchanged.
         assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
+    }
+
+    /// Round-3 review (2026-09-15): `spawn_chat_turn` stores the bare X9
+    /// sentence with `copy::with_agent_marker`'s hidden trailer attached, so
+    /// this SSE projection's own re-classification can recover
+    /// `pairAgentId`. The marker must never reach the wire, in `text` or in
+    /// `message`.
+    #[test]
+    fn projects_a_marked_pair_failure_with_pair_agent_id_and_no_marker() {
+        use crate::company::inference::copy;
+
+        let sentence = copy::pair_broken("Researcher", "acme", copy::ProviderGone::Removed);
+        let marked = copy::with_agent_marker(sentence.clone(), "researcher");
+        let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "General".into(),
+            agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+            text: marked,
+            steps: Vec::new(),
+        }))
+        .expect("agent_reply is an attention signal");
+
+        assert_eq!(v["userFacing"], true);
+        assert_eq!(v["code"], "pair_provider_removed");
+        assert_eq!(v["pairAgentId"], "researcher");
+        assert_eq!(v["providerSlug"], "acme");
+        assert_eq!(
+            v["text"], sentence,
+            "the wire text must be the plain sentence"
+        );
+        assert_eq!(v["message"], sentence);
+        assert!(
+            !v["text"].as_str().unwrap().contains('\u{0}'),
+            "the marker must never reach the wire: {v}"
+        );
     }
 
     #[test]
