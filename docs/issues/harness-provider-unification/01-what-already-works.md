@@ -102,7 +102,7 @@ call sites... a predicate the two can state differently is what opened the
 gap in the first place." **Reuse `can_run_local_acp()`, or the harness list
 it already gates, for anything new — never re-derive it.**
 
-## 5. The agent-level picker UI already exists and already works
+## 5. The agent-level picker UI already exists and already works — including model pinning, not just harness binding
 
 `frontend/src/views/team/AgentDetailView.tsx` — the "Harness & Model editor"
 (explicitly commented as "issue #1245's harness-picker follow-up",
@@ -114,8 +114,51 @@ line ~313). It:
 - lets an operator pick any returned harness id, including a synthesized
   `detected: true` one;
 - saves via a single `PATCH` (`saveHarnessAndModel`, line ~670) setting
-  `edits.harness`, reusing `harnessEdit()`'s existing `""`-means-default
-  contract.
+  `edits.harness` **and, when applicable, `edits.model` in the same
+  request** (line ~683-684: `if (model !== undefined) edits.model = model;`)
+  — reusing `harnessEdit()`'s and `modelEdit()`'s existing `""`-means-default
+  contracts.
+
+**This already works, today, in the running app, model selection included —
+not just the harness toggle.** An earlier pass through this brief's own
+research (and a first correction attempt) assumed model pinning needed new
+UI, based on `local_agent.rs`'s backend steering mechanism alone, without
+checking whether the frontend already exposed it. It does, fully:
+
+- The `HarnessAndModel` component (`AgentDetailView.tsx:1806` onward) renders
+  a second `<Select>` for the model, shown only when the drafted harness is
+  `acp` (`draftKind === "acp"`, line ~1953), directly below the harness
+  picker in the same "Harness & model" editable section — not a separate
+  dialog, not a company-level setting.
+- The model list is **already live-refreshed**, not static: `ensureAcpModels`/
+  `cachedAcpModels` (line ~1878-1891) paint a cached list instantly, then
+  replace it with a fresh probe result the moment the editor opens on an ACP
+  harness or the drafted harness changes — the same live mechanism point 6
+  below found missing from the *harness* row's readiness badge already
+  exists for the *model* list within it.
+- Cross-harness validity is handled correctly: switching from `claude` to
+  `codex` clears a model pin that no longer applies (`acpModelStillValid`,
+  line ~1214, compared on the CLI's own `agent` id since two harness ids can
+  drive the same CLI), and switching away from `acp` entirely drops the pin
+  rather than silently sending a value the new harness kind would refuse
+  (`crossedPairBoundary`, line ~1222).
+- A pin the harness no longer advertises (a model retired, or a stale
+  company config) is still shown rather than silently dropped
+  (`unlistedModel`, line ~1893-1894) — the exact "stale detected-model list"
+  edge case worth checking for is already handled, not a gap.
+
+**Not to be confused with `DefaultModelDialog`** (`frontend/src/inference/
+DefaultModelDialog.tsx`, used by `ProvidersTab.tsx` on the company's
+LLM/Provider page). That is a genuinely different feature for a genuinely
+different scope: setting the **company-wide default** `{provider, model}`
+pair a teammate falls back to when it has no pin of its own, with its own
+replace-confirm semantics (its own doc comment: "there is no separate
+'clear the default' action... it always requires a model... a default is
+never a provider alone"). `HarnessAndModel`'s inline model `<Select>` is a
+**per-agent override**, a different mechanism with different semantics, and
+does not need to adopt that dialog's pattern — doing so would mean building
+new UI to replace something that already works correctly, the exact
+anti-pattern this whole brief exists to avoid.
 
 **This already works, today, in the running app.** It is not a mockup, not a
 half-built stub — it's the real, shipped mechanism for exactly what this

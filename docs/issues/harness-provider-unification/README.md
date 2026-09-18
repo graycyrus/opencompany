@@ -65,30 +65,67 @@ here** — there is no "Add" step, because nothing is added. What actually
 changes is entirely inside the agent editor, plus a link out to a detail
 view. This is the corrected flow:
 
-**Step 1 — an agent's Model tab, today, unchanged structurally, but the
-options row now carries live readiness:**
+**Step 0 — discoverability: the LLM/Provider page, so this doesn't only
+exist inside a specific agent's editor (Gap 1b, `02-the-real-gap-and-fix.md`):**
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Model & Providers                                        [+ Add]    │
+├──────────────────────────────────────────────────────────────────────┤
+│  Connected                                                            │
+│  ─────────────────────────────────────────────────────────────────   │
+│  OpenRouter          Cloud            ✓ connected              ›     │
+│  Managed (TinyHumans) Cloud            ✓ connected              ›     │
+│                                                                        │
+│  Local harnesses                                                      │
+│  ─────────────────────────────────────────────────────────────────   │
+│  claude (ACP)         ✓ ready          2 agents bound          ›     │
+│  codex (ACP)          ⚠ not installed  0 agents bound          ›     │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+"Connected" is the real, existing section heading (`ProvidersTab.tsx`'s
+`<Card>`/`<h3>` rendering `ProviderList`) — "Local harnesses" is a new
+sibling section in the same style, purely read-only: `[+ Add]` never opens
+anything for it, and its rows read "N agents bound," never "connected,"
+because nothing company-wide is. Clicking a row opens the *same* detail view
+Step 2 below shows — this is a second entry point into one destination, not
+a second feature.
+
+**Step 1 — an agent's Model tab, today, structurally close to what's already
+shipped, but the harness option now carries live readiness once expanded:**
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  ← research-agent          Model                                     │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Thinks with                                                          │
-│  ┌─────────────────────────────────────────────────────────────┐    │
-│  │ ○ OpenRouter → claude-opus-5                                 │    │
-│  │ ○ Managed (TinyHumans) → z-ai/glm-5.3-flash                  │    │
-│  │ ● claude — claude (ACP)              ✓ ready       [Manage]  │    │
-│  │ ○ codex — codex (ACP)              ⚠ not installed [Manage]  │    │
-│  └─────────────────────────────────────────────────────────────┘    │
-│                                                    [ Save ]           │
+│  Harness & model                                                      │
+│  claude (ACP) → claude-opus-5              ✓ ready         [Edit]    │
+└──────────────────────────────────────────────────────────────────────┘
+
+  ↓ pressing Edit opens the existing editor in place — a harness Select
+    (readiness now shown per option) and, only when the drafted harness is
+    `acp`, a model Select beneath it, live-fetched for that harness:
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  Harness   [ claude — claude (ACP)  ✓ ready              ▾ ]  [Manage]│
+│  Model     [ claude-opus-5                                ▾ ]        │
+│                                              [ Cancel ]   [ Save ]    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+This closed/open two-state shape (a summary row, an `[Edit]` pencil, a form
+that appears in place) is the real structure of `HarnessAndModel`
+(`AgentDetailView.tsx`) today — not a flat list of always-visible options.
 Readiness (`✓ ready` / `⚠ not installed` / `⏳ checking` / `⚠ not signed in`)
-comes from the same live probe the standalone page already runs — no new
-backend call shape, just a second frontend caller of the existing Tauri
-`oc_acp_harnesses`/`oc_acp_confirm_harness` commands. Selecting `claude` and
-pressing Save persists through the **existing** `PATCH` this editor already
-sends (`edits.harness = "claude"`) — nothing new to persist.
+on the harness `<Select>`'s options comes from the same live probe the
+standalone page already runs — no new backend call shape, just a second
+frontend caller of the existing Tauri `oc_acp_harnesses`/
+`oc_acp_confirm_harness` commands. The model `<Select>` and its live refresh
+already exist and need no new work at all — see `01-what-already-works.md`
+§5's expanded detail. Pressing Save persists through the **existing** `PATCH`
+this editor already sends — `edits.harness` and, when a model is pinned,
+`edits.model` — nothing new to persist.
 
 **Step 2 — pressing "Manage" opens the detail view (the old standalone
 External Harnesses page's content, now reached from here instead of a
@@ -106,15 +143,25 @@ top-level Settings entry):**
 │                                                                        │
 │  Bound teammates                                                      │
 │  ─────────────────────────────────────────────────────────────────   │
-│  research-agent          → runs its full turn through this harness   │
-│  support-triage          → runs its full turn through this harness   │
+│  research-agent    → runs its full turn through this harness [Edit]  │
+│  support-triage     → runs its full turn through this harness [Edit] │
+│                                                                        │
+│  To bind another teammate to this harness, open that teammate's       │
+│  Model tab.                                                           │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Step 3 — not installed, inline in the picker, no separate modal needed:**
+Reached from two places — Step 0's "Local harnesses" row, and Step 1's
+`[Manage]` link — the same live-computed content either way, never two
+sources of truth pretending to agree. Each `[Edit]` link is a shortcut back
+to that teammate's own Model tab (Step 1), not a new editing surface here.
+
+**Step 3 — not installed, shown inline wherever a harness row appears
+(the closed summary row, the open Select's option, or Step 0's "Local
+harnesses" row) — no separate modal needed:**
 
 ```
-│  ○ codex — codex (ACP)              ⚠ not installed [Install]        │
+│  codex (ACP)                          ⚠ not installed    [Install]   │
 ```
 
 Pressing `Install` runs the existing adapter-install flow in place; the row

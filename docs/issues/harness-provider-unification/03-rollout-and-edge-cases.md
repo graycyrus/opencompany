@@ -42,6 +42,14 @@ standalone page's whole design avoids (`docs/spec/runtime/
 external-harnesses-ui.md`, already read this session — "there is no state in
 between for a button to move it through").
 
+## A pinned model the harness no longer advertises — already handled
+
+Checked, holds: a stale-model edge case (an operator's pin outlives an
+adapter update, or the model list hasn't loaded yet) is already handled by
+`AgentDetailView.tsx`'s `unlistedModel` (line ~1893-1894) — a pin absent
+from the live-fetched list is still offered rather than silently dropped.
+No new work needed; see `01-what-already-works.md` §5 for the full citation.
+
 ## Multiple agents bound to the same harness
 
 Already correctly handled server-side — `agents_on()` (`lanes.rs:178`)
@@ -111,12 +119,18 @@ building new plumbing for this only if it doesn't already.
    of steps 1–3 — can land in the same PR or a separate one, in either
    order. Purely a removal plus two comment updates; no migration, no data
    to move, since nothing was ever persisted for this category.
-5. **Trace and, if needed, fix turn-time failure surfacing.** Do this last,
+5. **Add the LLM/Provider page's "Local harnesses" section** (Gap 1b).
+   Depends on step 2 existing (it opens the same detail view) and step 3
+   (its row count needs the same "N agents bound" read). Purely additive
+   read-only UI — no persistence, no new backend writes. Can land in the
+   same PR as steps 2–3 or as a small follow-up; the only firm ordering
+   constraint is landing after there's a detail view for its rows to open.
+6. **Trace and, if needed, fix turn-time failure surfacing.** Do this last,
    after confirming via step 1's live readiness whether operators are
    actually hitting the "bound but not ready" case in practice, since it's
    the one item in this brief without a confirmed current behavior to build
    on.
 
 No step requires a data migration — nothing this brief touches has ever
-been persisted differently before (Gap 1 adds a read-only UI layer over
+been persisted differently before (Gap 1/1b add read-only UI layers over
 existing data; Gap 2 removes a UI path that never wrote anything).

@@ -39,6 +39,35 @@ current route registration (search the settings router for
 this brief did not trace that specific route wiring and it needs confirming
 at implementation time, not assumed.
 
+**Gap 1b: folding the standalone page away loses a real, currently-findable
+entry point.** Today's standalone External Harnesses page sits in Settings —
+reachable directly, without first picking an agent. Folding it entirely into
+being "the thing you reach from an agent's Manage link" (as this brief
+originally scoped it) is a real discoverability regression: an operator
+asking "is Claude Code even usable here" has no way to find out without
+opening a specific agent's Model tab first.
+
+**Fix: the LLM/Provider page keeps a second, sibling read-only section**,
+alongside the existing "Connected" providers list (the real heading, verified
+in `frontend/src/inference/ProvidersTab.tsx` — it renders a `<Card>` with an
+`<h3>` reading "Connected", followed by `ProviderList`; the new section
+follows the same `<Card>`/`<h3>` convention, its own header reading "Local
+harnesses"). This is a **second entry point into the same detail view**
+Gap 1's "Manage" link already opens — not a new destination, not new
+persisted state. It's populated purely by reads already planned elsewhere in
+this brief: `GET {scope}/harnesses` for the detected/`acp` rows (already
+gated correctly by `can_run_local_acp`, point 4 in `01-what-already-works.md`),
+the same live readiness probe Gap 1 wires into the agent picker, and the same
+"N agents bound" read the "Bound teammates" list below already needs.
+
+Two things this section must NOT do, to stay consistent with Gap 2's
+conclusion: its rows are never "Add"-able (the page's `[+ Add]` button
+continues to only open Cloud/Local-runtime forms, since CLI logins have no
+add flow — Gap 2 below), and its status column must read "N agents bound,"
+never "connected" — nothing is connected company-wide, some number of agents
+individually picked it, and the wording has to say that plainly rather than
+borrow language that implies a persisted, shared connection.
+
 **New read needed, not yet built:** the detail view's "Bound teammates" list
 (shown in the README's Step 2 mockup) needs "which agents currently have
 `harness == this id`" for the *whole company*, not just the one agent whose
