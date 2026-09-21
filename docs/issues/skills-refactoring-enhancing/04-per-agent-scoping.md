@@ -88,6 +88,65 @@ invent a richer language.
   error, so retiring a skill does not brick a manifest — but the console shows it.
 - **No skill scoped to anyone** is legal (the skill is enabled and simply unused).
 
+## How an allowlist is resolved
+
+The flow the sections above describe, end to end. Boxes marked "proposed" do not
+exist; `resolve` and `materialize` do.
+
+```text
+ ┌───────────────────────────────────┐   ┌────────────────────────────────────┐
+ │ [[agent]] skills = [..]           │   │ AgentOverride::skills              │
+ │ manifest field  (proposed)        │   │ PATCH …/team/{id} (proposed)       │
+ └─────────────────┬─────────────────┘   │ beats the manifest line            │
+                   │                     └──────────────────┬─────────────────┘
+                   │                                        │
+                   ┤────────────────────────────────────────┘
+                   ▼
+ ┌───────────────────────────────────┐   ┌────────────────────────────────────┐
+ │ agent's allowlist                 │   │ effective set (company-wide)       │
+ │ Option<Vec<slug or prefix*>>      │   │ resolve(): globals < bundle <      │
+ └─────────────────┬─────────────────┘   │ deltas; [globals].disable wins     │
+                   │                     └──────────────────┬─────────────────┘
+                   └──────────────────┬─────────────────────┘
+                                      │
+                                      ▼
+             ┌─────────────────────────────────────────────────┐
+             │ INTERSECT  (scope only ever narrows)            │
+             │ absent  -> ALL enabled skills (back-compat)     │
+             │ []      -> none                                 │
+             │ list    -> list  ∩  effective set               │
+             └────────────────────────┬────────────────────────┘
+                                      │
+                                      ▼
+             ┌─────────────────────────────────────────────────┐
+             │ materialize(intersection ONLY)                  │
+             │ an unlisted skill is never written to           │
+             │ <agent>/skill-catalog/                          │
+             └────────────────────────┬────────────────────────┘
+                                      │
+                                      ▼
+             ┌─────────────────────────────────────────────────┐
+             │ catalogue + list/describe/read tools            │
+             │ derived from the materialized tree, so they     │
+             │ cannot disagree with what is on disk            │
+             └─────────────────────────────────────────────────┘
+
+ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+ ┆ NOTE: hiding a skill from the catalogue is NOT enough. Claude's SDK        ┆
+ ┆ leaves an unlisted skill's files readable through Read/Bash. Here an       ┆
+ ┆ unlisted skill is never written for that agent, so read_skill_resource     ┆
+ ┆ has nothing to open.                                                       ┆
+ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+```
+
+- `resolve` `company/skill_effective.rs:132`; `[globals].disable` delta `:92`.
+- Same three-state contract as `tools`: `Agent::tools` `company/types.rs:773`,
+  `AgentOverride` `ports/types.rs:3611`.
+- `materialize` `harness/built_in/skills.rs:70`, called per agent from
+  `build.rs:1083`; catalogue `:169`; read tools `:148`.
+- Upstream `skill_allowlist` `vendor/openhuman/.../run_workflow.rs:215`, `:246` is
+  the run-side twin and is not passed by OpenCompany today.
+
 ## Changes by layer
 
 1. `company/skill_effective.rs` — add `resolve_for_agent(agent, …)` (or a

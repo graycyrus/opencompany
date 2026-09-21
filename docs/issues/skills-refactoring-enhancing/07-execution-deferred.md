@@ -71,14 +71,31 @@ All from the checked-out `vendor/openhuman` submodule (commit `e9c23dcd7`;
 3. **A harness-supplied egress policy.** The harness passes an explicit allow-list;
    the `["*"]` fallback must never apply to a skill run. Default deny, declared per
    skill or per agent.
-4. **A real approval gate.** `permission_level() == None` is acceptable only inside
-   an already-autonomous parent. A run started from a human-facing turn, or by a
-   skill the agent merely read, must cross `ApprovalGate` like any effect that
-   crosses the trust boundary (`docs/spec/company-brain/approvals.md`).
-5. **Consequence classification.** Register `run_skill` (or whatever the tool is
-   named) in `policy/consequence.rs` with an `EffectGroup` and `Reach` that reflect
-   what the skill's own steps can do — the way `mcp_call_reach` classifies MCP calls
-   (`policy/consequence.rs:1942`).
+4. **A real approval gate on the run's own steps.** Two facts, both read from source
+   on 2026-09-21, bound how big this gap is:
+   - OpenCompany's policy layer is **already fail-closed by tool name.** Upstream's
+     tool is named `run_workflow` (`vendor/openhuman/.../run_workflow.rs:41`), and
+     that name is declared `Reach::Consequence` in `policy/consequence.rs:447`
+     ("performs whatever that workflow performs, which this layer cannot see. It
+     parks, and it stays a per-call decision"). A tool with a name nobody declared,
+     and no read-only prefix, defaults to `Reach::Consequence`, `Standing::PerCall`
+     and is never `Grantable` (`consequence.rs:2534-2562`). So *starting* a run
+     parks under today's policy.
+   - What is **not shown** is whether the spawned run's own tool calls cross
+     `ApprovalGate`. Upstream justifies `permission_level() == None` because "the
+     parent is already inside an autonomous context"
+     (`run_workflow.rs:309-315`), and the run builds its own agent from a loaded
+     config (`run_machinery.rs:210-`), not from the harness. Whether that agent is
+     subject to OpenCompany's grant chain is **unverified** and must be established
+     before wiring, not assumed.
+5. **Consequence classification, explicitly.** Do not rely on the fail-closed
+   default. Rename at the boundary as issue #845 did for the read tools
+   (`harness/built_in/skills/naming.rs`) — upstream's `run_workflow` collides with
+   OpenCompany's own company-workflow tool of the same name — and declare the new
+   name in `policy/consequence.rs` with an `EffectGroup` and `Reach` that reflect
+   what the skill's own steps can do, the way `mcp_call_reach` classifies MCP calls
+   (`policy/consequence.rs:1942`). A coverage test already fails when a registered
+   tool is undeclared.
 6. **Per-agent scope applies.** `RunWorkflowTool::skill_allowlist` (`:215`) is the
    run-side twin of the read-side scoping in [`04`](04-per-agent-scoping.md); wire
    both from the same agent field so what an agent may read and what it may run
@@ -88,6 +105,70 @@ All from the checked-out `vendor/openhuman` submodule (commit `e9c23dcd7`;
    necessary and not sufficient for executable content; both ecosystems' worst
    incidents came from executable or install-time instructions
    ([`02`](02-industry-comparison.md)).
+
+## The future execution path
+
+Solid boxes exist today; dashed boxes are gaps. Numbers match "Requirements before
+execution ships" above. None of this is wired, and nothing in this brief wires it.
+
+```text
+ an agent asks to run a skill  (not possible today)
+                              │
+                              ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ RunWorkflowTool (upstream, run_workflow.rs:215)          │
+ │ skill_allowlist exists but is never passed               │  GAP 6
+ └────────────────────────────┬─────────────────────────────┘  wire from the
+                              │                                agent field (04)
+                              ▼
+ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+ ┆ Config::load_or_init()  (run_machinery.rs:98, :210)      ┆  GAP 1
+ ┆ reads a GLOBAL config, not the harness's                 ┆  injected config
+ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┬─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+                              │
+                              ▼
+ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+ ┆ metering: none on the run path                           ┆  GAP 2
+ ┆ budget_usd_daily cannot bind a skill run                 ┆  usage sink
+ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┬─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+                              │
+                              ▼
+ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+ ┆ egress: allowed_domains = ["*"] when the list is         ┆  GAP 3
+ ┆ empty  (run_machinery.rs:226-227)                        ┆  harness egress
+ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┬─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘  policy, deny
+                              │
+                              ▼
+ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+ ┆ upstream permission_level() == None  (:309-315)          ┆
+ ┆ name "run_workflow" already parks (consequence.rs:447)   ┆  GAP 4 + 5
+ ┆ run_skill would default to parks (consequence.rs:2534)   ┆  declare run_
+ ┆ the spawned run's OWN steps: gate not shown              ┆  skill; gate
+ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┬─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘  inner steps
+                              │
+                              ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ ApprovalGate  (ports/approvals.rs:13)                    │
+ └────────────────────────────┬─────────────────────────────┘
+                              │
+                              ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ spawned run                                              │
+ │ GAP 7 per-lineage budgets · GAP 8 scan covers scripts    │
+ └──────────────────────────────────────────────────────────┘
+
+ ==============================================================================
+ GATE: no skill tier model is designed before every gap above is closed
+ ==============================================================================
+```
+
+- `RunWorkflowTool`: tool name `run_workflow.rs:41`, `skill_allowlist` `:215`,
+  `permission_level()` `:309-315`.
+- Config and egress: `Config::load_or_init()` `run_machinery.rs:98`, `:210`; the
+  `["*"]` fallback `:226-227`.
+- Policy: `run_workflow` is `Reach::Consequence` at `policy/consequence.rs:447`; an
+  undeclared non-read tool defaults to the same at `:2534-2562`.
+- Not wired: `harness/built_in/skills.rs:22-25`.
 
 ## Grant semantics to copy when it does ship
 

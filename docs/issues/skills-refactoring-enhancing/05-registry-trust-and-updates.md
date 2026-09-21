@@ -12,6 +12,72 @@ malicious skill first (verified); Hermes's own scanner has open bypass reports
 server-authoritative and pins a snapshot (`server/ops/skills.rs:286-306`), which is
 a strong start — and does no inspection of what it pins.
 
+## 5.0 The trust pipeline at a glance
+
+Every text entry point goes through one pipeline. The right-hand loop is the drift
+check sending an operator's `update` back through the scan. Every box is proposed.
+
+```text
+ UNTRUSTED TEXT ENTRY POINTS
+ ┌────────────────┐  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+ │ registry       │  │ description +  │  │ bundled files  │  │ custom /       │
+ │ SKILL.md body  │  │ category       │  │ (resources)    │  │ upload         │
+ └────────┬───────┘  └────────┬───────┘  └────────┬───────┘  └────────┬───────┘
+          │                   │                   │                   │
+          └───────────────────┴─────────┬─────────┴───────────────────┘
+                                        ▼
+            ┌───────────────────────────────────────────────────────┐
+            │ [NEW] SCAN  (one function, every entry point)         │
+            │ size caps · Unicode-tag / bidi / zero-width strip     │◄─────┐
+            │ instruction-shaped text · exfil shapes · secrets      │      │
+            │ symlink / nested-archive containment                  │      │
+            └───────────────────────────┬───────────────────────────┘      │
+                                        │                                  │
+                                        ▼                                  │
+            ┌───────────────────────────────────────────────────────┐      │
+            │ VERDICT     block vs warn: OPEN DECISION (not picked) │      │
+            │ block : nothing is written                            │      │
+            │ warn  : proceeds, operator sees the findings          │      │
+            │ pass  : proceeds                                      │      │
+            └───────────────────────────┬───────────────────────────┘      │
+                                        │                                  │
+                                        ▼                                  │
+            ┌───────────────────────────────────────────────────────┐      │
+            │ SANITISE what reaches the prompt                      │      │
+            │ quoted data · code points stripped · length caps      │      │
+            └───────────────────────────┬───────────────────────────┘      │
+                                        │                                  │
+                                        ▼                                  │
+            ┌───────────────────────────────────────────────────────┐      │
+            │ TRUST TIER: builtin | company | registry | custom     │      │
+            │ PIN: sha256 digest + version + installer + time       │      │
+            └───────────────────────────┬───────────────────────────┘      │
+                                        │                                  │
+                                        ▼                                  │
+            ┌───────────────────────────────────────────────────────┐      │
+            │ INSTALL: SkillStateStore.set  +  audit event          │      │
+            │ (digest and actor, never the body)                    │      │
+            └───────────────────────────┬───────────────────────────┘      │
+                                        │ later                            │
+                                        ▼                                  │
+            ┌───────────────────────────────────────────────────────┐      │
+            │ DRIFT CHECK  (on GET …/skills, per registry install)  │      │
+            │ pinned digest + version  vs  live registry entry      │      │
+            │ locally edited copy  -> modified; update refuses      ├──────┘
+            │ library changed      -> updateAvailable               │
+            └───────────────────────────────────────────────────────┘
+ right-hand loop: operator runs update -> the new document is scanned again
+```
+
+- Entry points map to the table in §5.1: `install` `server/ops/skills.rs:307`,
+  `create_custom` `:439`, loaders `company/skill_file.rs:156` and `:199`.
+- Prompt-bound surfaces: catalogue `harness/built_in/skills.rs:169-193` and the
+  files `read_skill_resource` returns (`:148-161`).
+- The block-versus-warn behaviour is an OPEN DECISION ([`08`](08-rollout.md)); this
+  diagram deliberately does not pick.
+- Drift compares against the stored `version` (`company/skill_file.rs:25`, "nothing
+  compares or orders it yet") and the pinned digest.
+
 ## 5.1 Where content enters, and what is checked today
 
 | Entry | Code | Checked today |
@@ -25,7 +91,10 @@ The last row is the sharpest edge. It exists so hosted tenants (no
 `skills_root`, `docs/spec/runtime/globals.md:26`) can still install. It means that
 on exactly those hosts an admin's request body *is* the skill. That is acceptable
 for an admin, but it must go through the same scan as everything else, and it
-must be labelled `custom`, not `registry`, in provenance.
+must be labelled `custom`, not `registry`, in provenance. **Today it is not:**
+the fallback persists `source: SkillSource::Registry` (`server/ops/skills.rs:347`),
+the same value a real library install gets, so a client-authored document is
+indistinguishable from a library one in `SkillStateStore`.
 
 ## 5.2 Scan on install **and** on create/upload
 

@@ -78,6 +78,66 @@ Every write is admin-only "since a skill's content becomes part of every agent's
 effective prompt, company-wide" (`server/ops/skills.rs` module header). Reads are
 open to any member.
 
+## One install, end to end
+
+One `POST …/skills/{slug}/install`, including the three ways the registry lookup
+can go other than "found".
+
+```text
+ Browser          Router            Registry            Store          Pool
+    │                │                  │                 │              │
+    │ POST …/install │                  │                 │              │
+    │───────────────►│                  │                 │              │
+    │  AdminScopedCompany; slug must match [a-z0-9][a-z0-9-]*            │
+    │                │                  │                 │              │
+    │                │ ↻ take write_lock(company)         │              │
+    │                │                  │                 │              │
+    │                │ lookup slug      │                 │              │
+    │                │─────────────────►│                 │              │
+  alt ─ registry lookup outcome ──────────────────────────────────────────────
+    │ [A] found: snapshot the LIBRARY document; request body IGNORED     │
+    │                │                  │                 │              │
+    │ [B] slug missing, registry NOT empty                │              │
+    │ 404 not in registry               │                 │              │
+    │◄───────────────│                  │                 │              │
+    │                │                  │                 │              │
+    │ [C] registry EMPTY (no skills_root): CLIENT metadata is used,      │
+    │     persisted with source=Registry (see 05 §5.1)    │              │
+    │                │                  │                 │              │
+    │ [D] configured registry fails to load: hard 500, no downgrade      │
+    │ 500            │                  │                 │              │
+    │◄───────────────│                  │                 │              │
+  end alt ────────────────────────────────────────────────────────────────────
+    │                │                  │                 │              │
+    │                │ check_skill_doc_size(≤256 KiB)     │              │
+    │                │                  │                 │              │
+    │                │ set(state{Registry,snapshot})      │              │
+    │                │───────────────────────────────────►│              │
+    │                │                  │                 │              │
+    │ 200 InstalledSkill                │                 │              │
+    │◄───────────────│                  │                 │              │
+    │                │ (lock released)  │                 │              │
+    │                │                  │                 │              │
+  later ─ next agent cycle ───────────────────────────────────────────────────
+    │                │                  │                 │              │
+    │                │                  │                 │ list() deltas│
+    │                │                  │                 │◄─────────────│
+    │ ensure() (mod.rs:3151): deltas changed -> rebuild the roster       │
+    │                │                  │                 │              │
+    │ materialize() per agent (build.rs:1083); the agent then sees       │
+    │ the skill in its catalogue and read tools           │              │
+    │                │                  │                 │              │
+```
+
+- Handler `install` `server/ops/skills.rs:307`; slug check `:313`; lock `:319`;
+  registry load `:321` (a load error is case [D], the `500`); the not-found `404`
+  `:324-326`; the empty-registry fallback `:329-341`; size check `:343`; store
+  write `:350`.
+- The fallback persists `source: SkillSource::Registry` (`:347`), the same value a
+  real library install gets — see [`05`](05-registry-trust-and-updates.md) §5.1.
+- Refresh: `HarnessPool::ensure` `harness/built_in/mod.rs:3151`; `materialize`
+  `harness/built_in/skills.rs:70`, called from `build.rs:1083`.
+
 ## Materialization: what an agent actually gets
 
 `EffectiveSkills::materialize` (`harness/built_in/skills.rs:70`) is called once

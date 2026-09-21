@@ -70,6 +70,171 @@ teammate or an MCP server, not a mid-cycle agent effect.
 blocks or warns; a manifest field vs an overlay side-table for scoping; whether
 Discover ever shows popularity; hosted-mode registry fallback.
 
+## The whole flow, today
+
+Every skill takes the same path from a source to an agent's prompt. Note the last
+box: nothing here can *run* a skill.
+
+```text
+ SOURCES
+ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
+ │ _globals/  │ │ company    │ │ shared     │ │ console    │
+ │ skills/    │ │ bundle     │ │ registry   │ │ authored   │
+ │ (embedded) │ │ skills/    │ │ library    │ │ custom     │
+ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+       │ read-only    │ read-only    │ install      │ create
+       │              │              │              │
+       │              │              └──────┬───────┘
+       │              │                     ▼
+       │              │     ┌───────────────────────────────┐
+       │              │     │ ADMIN ROUTES                  │
+       │              │     │ install/create/toggle/        │
+       │              │     │ uninstall                     │
+       │              │     │ AdminScopedCompany            │
+       │              │     │ per-company write_lock        │
+       │              │     └───────────────┬───────────────┘
+       │              │                     │
+       │              │                     ▼
+       │              │     ┌───────────────────────────────┐
+       │              │     │ SkillStateStore               │
+       │              │     │ deltas keyed (company, slug)  │
+       │              │     └───────────────┬───────────────┘
+       │              │                     │
+       ▼              ▼                     ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ skill_effective::resolve                                 │
+ │ fold: globals < bundle < deltas ; [globals].disable wins │
+ └───────────┬────────────────┬───────────────┬─────────────┘
+             ▼                ▼               ▼
+      GET …/skills     GraphQL                │ HarnessPool::ensure
+      (console list)   Company.skills         │ each cycle, on delta change
+                                              ▼
+                             ┌─────────────────────────────────┐
+                             │ per-agent materialize           │
+                             │ skill-catalog/, rebuilt per call│
+                             │ ALL enabled skills -> EVERY     │
+                             │ agent (no scoping today)        │
+                             └────────────────┬────────────────┘
+                                              │
+                                              ▼
+                             ┌─────────────────────────────────┐
+                             │ prompt catalogue (read-only)    │
+                             │ + list_skills / describe_skill /│
+                             │   read_skill_resource tools     │
+                             └────────────────┬────────────────┘
+                                              │
+                                              ▼
+                                         agent turn
+                                              │ any real action
+                                              ▼
+                        ┌──────────────────────────────────────────┐
+                        │ [tools].allow ∩ desk.tools ∩ agent.tools │
+                        └─────────────────────┬────────────────────┘
+                                              │
+                                              ▼
+                                     ┌────────────────┐
+                                     │ ApprovalGate   │
+                                     └────────────────┘
+
+ Not wired (which is why a skill stays passive text):
+ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+ ┆ run_workflow  --  NOT WIRED (no skill can execute)       ┆
+ ┆ orchestrator-only upstream; seam missing (see 07)        ┆
+ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+```
+
+- Routes and lock: `server/ops/skills.rs:101-108` (router), `:87` (`write_lock`),
+  install `:307`, create `:439`, toggle `:404`, uninstall `:377`.
+- Deltas and fold: `SkillStateStore` `ports/skills_state.rs:47`; `resolve`
+  `company/skill_effective.rs:132`; `[globals].disable` delta `:92`.
+- Consumers: `list_skills` `server/ops/skills.rs:265`, GraphQL
+  `server/graphql/skills.rs`, `HarnessPool::ensure` `harness/built_in/mod.rs:3151`.
+- Agent surface: `materialize` `harness/built_in/skills.rs:70` (called from
+  `build.rs:1083`), catalogue `:169`, read tools `:148`, classified
+  `Reach::Nothing` at `policy/consequence.rs:667-669`.
+- Any real action uses the normal grant chain (`docs/spec/runtime/tools.md`) and
+  `ApprovalGate` (`ports/approvals.rs:13`). `run_workflow` is not wired:
+  `skills.rs:22-25`.
+
+## The whole flow, target
+
+The same spine with the additions marked `[NEW]`. Unmarked boxes are unchanged from
+today. Nothing marked `[NEW]` exists yet.
+
+```text
+ SOURCES: _globals · bundle · registry · custom · upload [NEW]
+                           │ install / create / upload
+                           ▼
+    ┌────────────────────────────────────────────┐
+    │ [NEW] SCAN + SANITISE GATE                 │
+ ┌─►│ body, description, category, files         │
+ │  │ size caps · Unicode-tag strip              │
+ │  │ verdict pass/warn/block: OPEN DECISION     │
+ │  └──────────────────────┬─────────────────────┘
+ │                         │ pass / warn only
+ │                         ▼
+ │  ┌────────────────────────────────────────────┐   ┌─────────────────────────┐
+ │  │ ADMIN ROUTES  AdminScopedCompany           │   │ [NEW] AUDIT EVENT       │
+ │  │ per-company write_lock                     ├──►│ install / update / scope│
+ │  │ install · create · toggle · uninstall      │   │ scan verdict; digest,   │
+ │  │ [NEW] upload · scope · update              │   │ actor. NO body ->       │
+ │  └──────────────────────┬─────────────────────┘   │ journal                 │
+ │                         │                         └─────────────────────────┘
+ │                         ▼
+ │  ┌────────────────────────────────────────────┐   ┌─────────────────────────┐
+ │  │ SkillStateStore (deltas per slug)          │   │ [NEW] DRIFT CHECK       │
+ │  │ [NEW] trust tier + pinned digest           ├──►│ on GET …/skills:        │
+ │  │ [NEW] version, installer, time             │   │ digest+version vs       │
+ └──┤ [NEW] per-agent allowlist                  │   │ live registry ->        │
+    │       (absent = ALL agents)                │   │ updateAvailable or      │
+    └──────────────────────┬─────────────────────┘   │ modified (skips edits)  │
+                           │                         └─────────────────────────┘
+                           ▼
+    ┌────────────────────────────────────────────┐
+    │ skill_effective::resolve                   │
+    │ fold + [globals].disable (unchanged)       │
+    └──────────────────────┬─────────────────────┘
+                           │ GET …/skills [NEW: tier·scope·update]
+                           ▼
+    ┌────────────────────────────────────────────┐
+    │ per-agent materialize                      │
+    │ [NEW] apply allowlist FIRST: write only    │
+    │ the intersection to skill-catalog/         │
+    │ (no allowlist = every enabled skill)       │
+    └──────────────────────┬─────────────────────┘
+                           │
+                           ▼
+    ┌────────────────────────────────────────────┐
+    │ catalogue + list/describe/read tools       │
+    │ derived ONLY from what was materialized    │
+    └──────────────────────┬─────────────────────┘
+                           │
+                           ▼
+                      agent turn
+                           │ any real action
+                           ▼
+    ┌────────────────────────────────────────────┐
+    │ [tools].allow ∩ desk.tools ∩ agent.tools   │
+    │ then ApprovalGate  (unchanged)             │
+    └────────────────────────────────────────────┘
+
+    ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
+    ┆ [deferred] run_workflow  --  NOT WIRED     ┆
+    ┆ stays gated behind the upstream seam (07)  ┆
+    └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+```
+
+- Gate, sanitise and verdict: [`05`](05-registry-trust-and-updates.md) §5.2-5.3; how
+  strict the verdict is remains an OPEN DECISION in [`08`](08-rollout.md).
+- Trust tier, pinned digest, provenance: `05` §5.4; drift and `update`: §5.5;
+  audit event (no body) to the journal: §5.6.
+- Scope: [`04`](04-per-agent-scoping.md). Absent allowlist means all agents, so no
+  existing company changes behaviour; it is applied before `materialize`
+  (`build.rs:1083`).
+- The left-hand loop is the operator running `update`, which re-enters the gate.
+- The dashed box stays dashed: execution is gated behind the upstream seam
+  ([`07`](07-execution-deferred.md)).
+
 ## What this looks like when it ships
 
 Illustrative only — not a component spec and not pixel-accurate.
