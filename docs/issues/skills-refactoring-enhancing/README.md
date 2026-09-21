@@ -1,0 +1,171 @@
+# Skills: scoping, scanning, threat model and authoring parity — design + rollout plan
+
+Tracking issue: #2427. MCP context: #2373 (tiered tool-call permissions).
+
+This is an **implementation brief**, not a permanent architecture doc — it lives
+under `docs/issues/` rather than `docs/modules/` on purpose. It describes work
+not yet done. Once the work lands, fold the relevant parts into the new
+`docs/modules/skills.md` (see [`03-prerequisites.md`](03-prerequisites.md)) and
+delete this directory.
+
+Research date: 2026-09-21. Every `file:line` below was re-read against the tree
+at `upstream/main` `acaefbc63` (2026-09-21). Line numbers drift; treat them as a
+pointer to a symbol, not a promise.
+
+**Who this is for:** an engineer or a fresh session with no prior context. Read
+in order. [`01-current-state.md`](01-current-state.md) says what exists;
+[`08-rollout.md`](08-rollout.md) says what to build first.
+
+## The problem, briefly
+
+Skills are `SKILL.md` documents an operator installs so agents can read them.
+They are the one subsystem of comparable size to MCP with no owning doc, no
+threat-model coverage, and none of the operator controls the rest of the
+industry now treats as baseline:
+
+1. a skill reaches **every agent**, company-wide — no per-agent or per-desk scope;
+2. a registry install is snapshotted but **never scanned**, and skill
+   descriptions and the catalogue reach the prompt verbatim;
+3. skills are **absent from the threat model** (zero mentions in
+   `agent-isolation.md`, `grants.md`, `approvals.md`, `tools.md`);
+4. the stored `version` is **never compared**, so an install silently goes stale;
+5. "skill" means two unrelated things (`SKILL.md` bundles vs `[place].skills`);
+6. there is **no owning doc**;
+7. authoring is thinner than the baseline (no upload, no bundled files, no
+   AI-assisted create).
+
+Details and citations: [`01-current-state.md`](01-current-state.md).
+
+## The verdict: the MCP tier model does not transfer
+
+#2373 replaces a flat allowlist with per-tool risk tiers because MCP tools are
+live actions that need calibrated approval friction. A skill today confers **no
+capability**: agents get three read tools (`list_skills`, `describe_skill`,
+`read_skill_resource`), all classified `EffectGroup::Other, Reach::Nothing`
+(`policy/consequence.rs:667-669`), and skill *execution* is deliberately not
+wired (`harness/built_in/skills.rs:22-25`). If a skill's text persuades an agent
+to call a tool, that call already crosses the normal
+`[tools].allow ∩ desk.tools ∩ agent.tools` chain and `ApprovalGate`.
+
+So there is nothing to tier. **Do not design a skill permission-tier model
+before execution exists** ([`07-execution-deferred.md`](07-execution-deferred.md)).
+The work that *is* worth doing is scoping, scanning, drift, docs and authoring.
+
+Installing a skill is correctly **not** an `ApprovalGate` checkpoint: it is an
+admin configuration action (`AdminScopedCompany`), the same category as adding a
+teammate or an MCP server, not a mid-cycle agent effect.
+
+## Decided vs open
+
+**Decided (in this brief):**
+
+- Keep skills read-only; keep execution deferred and gated on the seam in `07`.
+- Per-agent scoping is **enforced at materialization**, not only hidden from the
+  catalogue (`04`).
+- Scan and sanitize on **install and on create/upload**, including description
+  and catalogue text (`05`).
+- Skills get a threat-model section and an owning doc first (`03`).
+
+**Open (a human decides — see `08-rollout.md`):** scan strictness and whether it
+blocks or warns; a manifest field vs an overlay side-table for scoping; whether
+Discover ever shows popularity; hosted-mode registry fallback.
+
+## What this looks like when it ships
+
+Illustrative only — not a component spec and not pixel-accurate.
+
+**The Skills page** (today's `SkillsView.tsx` shape, with the new pieces marked):
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  Connections › Skills                                                  │
+│  Skills are reference material your agents read — not buttons they     │
+│  press.                                                                │
+├────────────────────────────────────────────────────────────────────────┤
+│  [ Installed ]  Registry     [Search…]  [Filter ▾] [Sort: edited ▾]    │  ← Filter/Sort new
+│                                                          [ + Add ▾ ]   │
+│  ──────────────────────────────────────────────────────────────────    │
+│  Company · 2                                                           │
+│   ▣ brand-voice     Company    all agents               edited 3d  ⋮   │  ← source, scope, date new
+│   ▣ weekly-report   Custom     @copywriter @editor      edited 5d  ⋮   │
+│  Registry · 1                                                          │
+│   ▣ meeting-brief   Registry   v1.2 · update available  all agents ⋮   │  ← drift signal new
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**The Add menu** (`06-authoring-ux.md`):
+
+```
+                                                          [ + Add ▾ ]
+                                         ┌──────────────────────────────┐
+                                         │ ⬆  Upload skill              │
+                                         │ ✎  Create a skill            │
+                                         │ ✦  Draft with a teammate     │
+                                         └──────────────────────────────┘
+```
+
+**Upload, with a scan verdict** (`05-registry-trust-and-updates.md`). The scan
+runs on save; a blocked result never reaches `SkillStateStore`:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Upload skill                                             ✕  │
+├──────────────────────────────────────────────────────────────┤
+│  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐  │
+│  │   Drop .md, .zip or .skill here — several at once     │  │
+│  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘  │
+│  • .md needs name + description in YAML frontmatter          │
+│  • .zip / .skill must contain SKILL.md                       │
+│                                                              │
+│  Security scan          ✓ passed   ⚠ 1 warning   ✕ blocked   │
+│    ⚠ description contains an instruction to ignore prior     │
+│      instructions (line 3)                                   │
+│                                        [ Cancel ]  [ Save ]  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Create a skill, with bundled files** (`06-authoring-ux.md`):
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Create a skill                                           ✕  │
+├──────────────────────────────────────────────────────────────┤
+│  Skill name    weekly-status-report                          │
+│  Description   Generate weekly status reports from recent    │
+│                work. Use when asked for updates.             │
+│                (say what it does AND when to use it)         │
+│  ┌────────────────────────────────────────────  + Add file ┐ │
+│  │ 1  Summarize my recent work in three sections: wins,    │ │
+│  │    blockers, and next steps…                            │ │
+│  └─────────────────────────────────────────────────────────┘ │
+│  [ Draft ]                              [ Cancel ]  [ Create ]│
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Per-agent scope** on a skill's detail panel (`04-per-agent-scoping.md`):
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  meeting-brief  · Registry · v1.2                            │
+├──────────────────────────────────────────────────────────────┤
+│  Available to                                                │
+│   ( ) All agents                                             │
+│   (•) Selected agents                                        │
+│        [x] copywriter   [x] editor   [ ] strategist          │
+│  Agents that are not selected cannot list, describe or read  │
+│  this skill's files.                                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+## Files
+
+| File | Holds |
+| --- | --- |
+| [`01-current-state.md`](01-current-state.md) | How skills work today, route by route, and the seven gaps, with `file:line` |
+| [`02-industry-comparison.md`](02-industry-comparison.md) | Claude, Codex, Gemini CLI, Cursor, OpenClaw, Hermes, OpenHands, Goose — with verified/inferred tags and sources |
+| [`03-prerequisites.md`](03-prerequisites.md) | Owning doc, threat-model section, naming signpost, spec-conformant validation |
+| [`04-per-agent-scoping.md`](04-per-agent-scoping.md) | Allowlist model, OpenHuman wiring, enforcement point, migration |
+| [`05-registry-trust-and-updates.md`](05-registry-trust-and-updates.md) | Scan on install/save, trust tiers, pinning, drift check, provenance |
+| [`06-authoring-ux.md`](06-authoring-ux.md) | Upload, bundled files, AI-assisted create, list UX, placement |
+| [`07-execution-deferred.md`](07-execution-deferred.md) | What the `run_workflow` seam must provide before execution ships |
+| [`08-rollout.md`](08-rollout.md) | Phases by blast radius, acceptance, tests, open decisions |
