@@ -25,8 +25,8 @@ read-only banner and "Agents can read this" (`frontend/src/lib/skills.ts:45`,
 | "Create with Claude" | none | 6.4 |
 | Description hint: what it does **and** when to use it | one-line field, no guidance | 6.5 |
 | Filter, Sort, last-edited | search only | 6.6 |
-| Source label ("from Anthropic") | `source` stored, not shown | 6.6 |
-| Row ⋮ menu | switch only | 6.6 |
+| Source label ("from Anthropic") | shown as a plain lowercase word on each card (`SkillsView.tsx:424`); no tier, version or "from" | 6.6 |
+| Row ⋮ menu | an Enable switch (`:415`) and, for non-company skills, an Uninstall icon button (`:431-437`); no menu | 6.6 |
 | Skills / Connectors / Plugins as siblings | Skills under Connections | 6.7 |
 
 ## 6.2 Upload
@@ -152,3 +152,58 @@ decision — the scan verdict of the library copy.
   and dark, with screenshots. `scripts/ci/assert-design-tokens.sh` rejects raw hex.
 - Host: multipart size limits, malicious archive fixtures (traversal, symlink,
   bomb), and that a `block` upload leaves `SkillStateStore` untouched.
+
+## 6.10 The authoring flow, screen to screen
+
+The Add menu in detail. `today` is `SkillsView.tsx` now (one "Add skill" button,
+`:261`, opening the dialog at `:503`); `NEW Pn` is the phase in
+[`08`](08-rollout.md).
+
+```text
+[+ Add ▾]   (today: one "Add skill" button, no menu)       NEW P4
+│
+├─ Upload skill                                            NEW P4
+│    ▼
+│  dialog: drop .md / .zip / .skill  (several at once)
+│    ▼   per file: validate (03 §3.4)
+│    │      └─ fail ─► inline error, file dropped
+│    ▼   SCAN as a dry run ─► verdict shown in dialog      NEW P1
+│    ├─ pass  ─► [Save] enabled
+│    ├─ warn  ─► findings listed ─► [Save] enabled?        OPEN DECISION
+│    └─ block ─► [Save] disabled; nothing is written
+│    ▼   [Save] ─► host re-runs SCAN before it writes
+│    ▼   SkillStateStore.set ─► card appears
+│
+├─ Create a skill                                          today
+│    ▼   form: name · category · description · body
+│    │   description hint: what it does AND when           NEW P4
+│    │   counter vs the 1024 cap (the cap itself: P0b)     NEW P4
+│    ├─ + Add file ─► resource attached to the form        NEW, 06 §6.3
+│    ▼   [Create] ─► validate ─► SCAN                      SCAN NEW P1
+│    ▼   pass / warn / block exactly as above ─► card
+│
+└─ Draft with a teammate                                   NEW P4
+     shown only when GET …/inference says
+     designsProfiles is true (else the button is hidden)
+     ▼   conversation: console keeps the transcript,
+     │   the host stores nothing
+     ▼   POST …/skills/draft ─► {reply, text?}
+     ▼   draft text is SCANNED before it is shown          NEW P1
+     ▼   operator takes it ─► Create form, pre-filled
+     ▼   [Create] ─► same path as "Create a skill"
+```
+
+- Upload: §6.2. Validation is [`03`](03-prerequisites.md) §3.4; the scan is
+  [`05`](05-registry-trust-and-updates.md) §5.2. Warn versus block is OPEN DECISION 1
+  in `08`.
+- **A gap this diagram exposes.** The verdict is shown before Save, which needs a
+  scan that reports without persisting (for example a `dryRun` flag on the upload
+  route). §6.2 only says a `block` returns the report and writes nothing. Decide the
+  dry-run shape with P4; Save must still re-run the scan on the host, since the
+  client's earlier verdict is not trusted.
+- Create: today's form has name, category, description and body. Description
+  guidance and the counter are §6.5; the 1024 cap itself lands in P0b.
+- Add file: §6.3 — deferred until the bundled-files storage decision.
+- Draft: §6.4 — the route contract is `POST …/team/draft`'s (`docs/spec/runtime/api-team-drafting.md`),
+  and the draft is scanned before it is shown so the assistant cannot hand over a
+  document the save path would refuse.

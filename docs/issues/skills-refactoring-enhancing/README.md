@@ -269,8 +269,9 @@ Illustrative only — not a component spec and not pixel-accurate.
                                          └──────────────────────────────┘
 ```
 
-**Upload, with a scan verdict** (`05-registry-trust-and-updates.md`). The scan
-runs on save; a blocked result never reaches `SkillStateStore`:
+**Upload, with a scan verdict** (`05-registry-trust-and-updates.md`). The host
+scans before it writes; the dialog shows the verdict (a dry run on pick, re-run on
+Save), and a blocked result never reaches `SkillStateStore`:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -321,6 +322,64 @@ runs on save; a blocked result never reaches `SkillStateStore`:
 │  this skill's files.                                         │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+## The UI flow, screen to screen
+
+The mockups above are single screens; this is how an operator moves between them.
+`today` is what `frontend/src/views/SkillsView.tsx` does now; `NEW Pn` is the phase
+in [`08-rollout.md`](08-rollout.md) where the piece lands. The list is cards today,
+not rows.
+
+```text
+CONNECTIONS > SKILLS   #/connections/skills                today
+│
+├─ tabs: Installed (cards) | Registry                      today (:86)
+├─ Filter / Sort / last edited                             NEW P4
+│
+├─ Registry tab ─► browse library ─► [Install]             today
+│      └─► SCAN ─► card appears                            SCAN NEW P1
+│
+├─ [Add skill] today  →  [+ Add ▾] menu                    menu NEW P4
+│    ├─ Upload skill ─► pick .md/.zip/.skill ─► SCAN       NEW P4
+│    │     ├─ pass  ─► [Save] ─► card appears
+│    │     ├─ warn  ─► findings shown ─► Save allowed?     OPEN DECISION
+│    │     └─ block ─► stays in dialog, Save disabled;
+│    │              nothing reaches SkillStateStore
+│    ├─ Create a skill ─► name/category/description/body   today
+│    │     ├─ [Create] ─► SCAN ─► card appears             SCAN NEW P1
+│    │     └─ + Add file                                   NEW P4, 06 §6.3
+│    └─ Draft with a teammate ─► teammate drafts           NEW P4
+│          ─► reviewed in the Create form ─► [Create]
+│
+├─ card controls
+│    ├─ Enable switch                                      today (:415)
+│    ├─ Uninstall (trash): Registry/Custom only            today (:431)
+│    └─ ⋮ menu: Edit(custom) | Enable/Disable |            NEW P2-P4
+│         Scope… | Update | Uninstall
+│
+├─ card click ─► Detail panel                              NEW P2
+│      └─ Available to: All | Selected agents ─► [Save]
+│
+└─ "update available" badge ─► review vs pinned            NEW P3
+       ├─ [Update] ─► SCAN ─► card refreshed
+       └─ [Keep]  ─► pinned copy stays
+   (an install edited locally is "modified": the
+    check skips it and Update refuses)
+```
+
+- Registry install → scan: [`05`](05-registry-trust-and-updates.md) §5.2 (scan,
+  P1); the install route exists (`server/ops/skills.rs:307`).
+- Upload and its verdict: [`06`](06-authoring-ux.md) §6.2. Warn versus block is
+  OPEN DECISION 1 in `08`. Showing the verdict before Save needs a no-write scan
+  on the host; §6.2 does not specify one yet (see 06 §6.10).
+- Create and Add file: `06` §6.3 — first slice is `SKILL.md` only, so Add file
+  waits on that decision. Draft with a teammate: `06` §6.4, shown only when
+  `designsProfiles` is true.
+- Card controls: switch `SkillsView.tsx:415`; Uninstall `:431-437`, hidden for
+  company skills (`server/ops/skills.rs:391-401`). The menu is `06` §6.6 and has no
+  "Details" entry: a card click opens the Detail panel, where scope lives.
+- Detail panel and scope: [`04`](04-per-agent-scoping.md) (console picker), P2.
+  Update badge, review, `modified` skip: `05` §5.5, P3.
 
 ## Files
 
