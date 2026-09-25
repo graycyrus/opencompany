@@ -13,11 +13,13 @@ import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  MASCOT_KINDS,
   MAX_AVATAR_MB,
   TINY_FLAVOURS,
   avatarRef,
   blobNodeId,
   hashedFlavour,
+  mascotSrc,
   staticAvatarSrc,
   tinySrc,
 } from "@/lib/avatar";
@@ -42,6 +44,23 @@ describe("the tiny flavours", () => {
   });
 });
 
+describe("the mascot kinds", () => {
+  it("are the same list the host validates against", () => {
+    const rust = readFileSync(resolve(repoRoot, "crates/opencompany-core/src/company/avatar.rs"), "utf8");
+    const block = /pub const MASCOT_KINDS: \[&str; \d+\] = \[([^\]]*)\]/s.exec(rust);
+    expect(block, "MASCOT_KINDS is no longer declared the way this test reads it").not.toBeNull();
+    const hostKinds = Array.from(block![1].matchAll(/"([a-z]+)"/g), (m) => m[1]);
+    expect([...hostKinds].sort()).toEqual([...MASCOT_KINDS].sort());
+  });
+
+  it("each have a file behind them", () => {
+    for (const kind of MASCOT_KINDS) {
+      const rel = mascotSrc(kind).replace(/^\//, "");
+      expect(existsSync(resolve(repoRoot, "frontend/public", rel)), kind).toBe(true);
+    }
+  });
+});
+
 describe("the upload ceiling", () => {
   it("is the same number the host enforces", () => {
     // The picker prints this before anybody picks a file; the host is what
@@ -59,7 +78,7 @@ describe("staticAvatarSrc", () => {
     expect(staticAvatarSrc("tiny:teal")).toBe("/avatars/blob-teal.webp");
   });
 
-  it("draws nothing for anything that is not one of the two forms", () => {
+  it("draws nothing for anything that is not one of the three forms", () => {
     // The rule the closed grammar exists for: this value ends up in an `src=`
     // on every surface that draws a face, so an unrecognised one — which can
     // only be version skew, since the host stores nothing else — must resolve to
@@ -74,6 +93,14 @@ describe("staticAvatarSrc", () => {
     ]) {
       expect(staticAvatarSrc(hostile), hostile).toBeNull();
     }
+  });
+
+  it("resolves nothing for a mascot — it's a valid form, just not a static image", () => {
+    // Not hostile input (unlike the table above): `mascot:animated` is a
+    // legitimate, host-accepted reference. It deliberately draws nothing here
+    // so every mass-render surface keeps falling back to the tone tile; only
+    // the hero surfaces that explicitly mount `MascotAvatar` render it live.
+    expect(staticAvatarSrc("mascot:animated")).toBeNull();
   });
 
   it("does not resolve an upload synchronously — that one needs the client", () => {

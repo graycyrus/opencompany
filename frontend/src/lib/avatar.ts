@@ -37,6 +37,21 @@ export const TINY_FLAVOURS = [
 
 export type TinyFlavour = (typeof TINY_FLAVOURS)[number];
 
+/**
+ * The animated mascots shipped in `public/avatars/mascot-<kind>.riv`.
+ *
+ * **Must stay in step with `MASCOT_KINDS` in `src/company/avatar.rs`**, the
+ * same reason `TINY_FLAVOURS` must. A list of one on purpose even though v1
+ * ships a single kind — the same closed shape as the tiny flavours, so a
+ * second colorway or character later is an addition to this list, not a
+ * grammar change. See `docs/spec/runtime/avatars.md` for why this form is
+ * curated (a `.riv` file is a programmable, document-like format, not a
+ * raster image) rather than user-uploadable like `blob:`.
+ */
+export const MASCOT_KINDS = ["animated"] as const;
+
+export type MascotKind = (typeof MASCOT_KINDS)[number];
+
 /** The image types an uploaded avatar may be — the `accept` a file input wants. */
 export const AVATAR_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
 
@@ -85,6 +100,24 @@ export function tinySrc(flavour: string): string {
   return `/avatars/blob-${flavour}.webp`;
 }
 
+/**
+ * Where an animated mascot's `.riv` file lives on disk.
+ *
+ * Not consulted by {@link staticAvatarSrc} — a `.riv` needs a canvas and a
+ * runtime, not an `<img src=…>`, so `MascotAvatar` is the only reader of
+ * this. It exists here (rather than only inside that component) so the
+ * frontend/Rust cross-check test can assert every shipped kind has a file
+ * behind it, the same way it already does for {@link tinySrc}.
+ */
+export function mascotSrc(kind: string): string {
+  return `/avatars/mascot-${kind}.riv`;
+}
+
+/** Whether an avatar reference names an animated mascot. */
+export function isMascotRef(ref: string): boolean {
+  return ref.trim().startsWith("mascot:");
+}
+
 /** The workspace node id a `blob:` reference names, or `null` for any other form. */
 export function blobNodeId(ref: string): string | null {
   const trimmed = ref.trim();
@@ -103,10 +136,18 @@ export function blobNodeId(ref: string): string | null {
 export function staticAvatarSrc(ref: string): string | null {
   const trimmed = ref.trim();
   if (trimmed.startsWith("tiny:")) return tinySrc(trimmed.slice("tiny:".length));
-  // An unrecognised reference is drawn as nothing rather than as itself. The
-  // host refuses to store anything but the two forms, so this can only be
-  // version skew — and putting an unknown string into a `src=` is the one thing
-  // the closed grammar exists to prevent.
+  // `mascot:` is a legitimate, host-accepted form — deliberately not resolved
+  // here. A `.riv` needs a canvas and a runtime, not a static `src=`, so every
+  // mass-render surface (facepiles, the org chart, thread rows...) keeps
+  // drawing the tone tile underneath exactly as it does for an unresolved
+  // reference, and only the hero surfaces that explicitly opt in mount a live
+  // `MascotAvatar` instead of reading this function at all. See
+  // `docs/issue/mascot-profile-avatar/rendering-strategy.md`.
+  //
+  // Anything else is drawn as nothing rather than as itself. The host
+  // refuses to store anything but the three forms, so an unrecognised string
+  // here can only be version skew — and putting an unknown one into a `src=`
+  // is the one thing the closed grammar exists to prevent.
   return null;
 }
 
