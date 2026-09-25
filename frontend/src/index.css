@@ -63,6 +63,15 @@
     --brand-800: oklch(0.369 0.1496 285.32); /* #3C2A89 */
     --brand-900: oklch(0.2957 0.1142 286.51); /* #2B1E62 */
 
+    /* Signature — the graph's and the charts' own violet, held apart from
+       `--brand-*` on purpose (issue #2493). Both start equal to
+       `--brand-500`/`--brand-400`, but an operator's accent-preset choice
+       (future work) overrides `--brand-*` and must never reach here: the
+       knowledge graph's "AI agents" colour and chart slot 1 are identity, not
+       interaction, and stay this one violet regardless of preset. */
+    --signature-500: oklch(0.5649 0.2236 285.51); /* #7153F0 */
+    --signature-400: oklch(0.6614 0.1769 289.73); /* #937BF6 */
+
     /*
      * Surfaces — the six-rung ladder, stated per theme.
      *
@@ -317,11 +326,13 @@
      */
     --highlight: oklch(0.9 0.16 100 / 55%);
 
-    /* Charts. Brand leads slot 1, then the sequence walks the hue circle
-       so neighbouring series never collide. Ordered by how often a series
-       count occurs: the two-series case gets indigo/cyan, which are also
-       the pair that survives the most common colour-vision deficiencies. */
-    --chart-1: var(--brand-500);
+    /* Charts. Slot 1 is the product's signature violet — fixed, not the
+       operator's brand accent (issue #2493) — then the sequence walks the
+       hue circle so neighbouring series never collide. Ordered by how often
+       a series count occurs: the two-series case gets indigo/cyan, which are
+       also the pair that survives the most common colour-vision
+       deficiencies. */
+    --chart-1: var(--signature-500);
     --chart-2: var(--cyan-mark);
     --chart-3: var(--green-mark);
     --chart-4: var(--amber-mark);
@@ -463,7 +474,7 @@
 
     /* Brand-500 is too dense to read as ink on near-black; 400 is the
        working accent in dark mode. Filled brand buttons keep 500 with
-       white text, which measures 4.70:1 in both themes. */
+       white text, which measures 5.00:1 in both themes. */
     --primary: var(--brand-400);
     --primary-foreground: var(--surface-dark-bg);
     --secondary: var(--surface-dark-active);
@@ -529,7 +540,7 @@
     --status-failed-text: var(--red-bright);
     --status-failed-soft: color-mix(in oklab, var(--red-bright) 16%, transparent);
 
-    --chart-1: var(--brand-400);
+    --chart-1: var(--signature-400);
     --chart-2: var(--cyan-bright);
     --chart-3: var(--green-bright);
     --chart-4: var(--amber-bright);
@@ -808,7 +819,7 @@
  * ========================================================================== */
 
 :root {
-    --kg-accent: var(--brand-500);
+    --kg-accent: var(--signature-500);
     --kg-ok: var(--status-done);
     --kg-warn: var(--status-blocked);
     /* The two brain hues stay deliberately outside the status vocabulary:
@@ -829,7 +840,7 @@
 }
 
 .dark {
-    --kg-accent: var(--brand-400);
+    --kg-accent: var(--signature-400);
     --kg-ok: var(--status-done);
     --kg-warn: var(--status-blocked);
     --kg-brain-1: var(--pink-bright);
