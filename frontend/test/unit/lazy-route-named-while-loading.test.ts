@@ -65,6 +65,23 @@ const WIDGET_SUSPENSE: Record<string, string> = {
     "its fallback paints nothing. The page underneath is unchanged and keeps",
     "its own `h1`; a heading here would be a second one on the page.",
   ].join(" "),
+  "components/agent-profile-sheet.tsx:LazyMascotAvatar": [
+    "The live mascot avatar inside the agent profile sheet — a slide-over",
+    "panel, not a route. `AgentProfileSheet` already renders",
+    "`<SheetTitle data-testid=\"agent-profile-name\">` for the agent's name",
+    "before this boundary mounts, so the sheet keeps its name for the whole",
+    "time the Rive chunk is in flight.",
+  ].join(" "),
+  "components/avatar-picker.tsx:LazyMascotAvatar": [
+    "Two boundaries in the avatar picker (the current-selection preview and",
+    "the mascot swatch in the flavour grid,",
+    "`docs/issue/mascot-profile-avatar/rendering-strategy.md`'s \"12th tile\") —",
+    "same key, since both suspend the same component. Both mount only inside",
+    "`AvatarDialog` in `AgentDetailView.tsx`, which renders",
+    "`<DialogTitle>Icon</DialogTitle>` above the picker and outside this",
+    "boundary, and that dialog only opens from an agent's own page, which",
+    "already has its own `h1`.",
+  ].join(" "),
 };
 
 /** Every `.tsx` under `src`, as paths relative to it. */
