@@ -10,24 +10,27 @@ when somebody **chooses**.
 
 ## The grammar
 
-A chosen face is stored as one short string in exactly one of two forms:
+A chosen face is stored as one short string in exactly one of three forms:
 
 | Form | Means |
 |---|---|
 | `tiny:<flavour>` | one of the eleven shipped mascots — a flavour of tiny |
 | `blob:<nodeId>` | a custom image somebody uploaded, held as a binary workspace node |
+| `mascot:<kind>` | one of the shipped animated mascots — a curated Rive character, never uploaded |
 
-Absent is a **third state and the default**: *nobody has chosen*. It is
-deliberately distinct from either stored form, because "put the default face
-back" has to be expressible and neither `tiny:` nor an empty string can express
-it. Every read skips the key rather than defaulting it, and every write treats
-`null` — and a blanked input, which is the same intent typed — as the reset.
+Absent is a **fourth state and the default**: *nobody has chosen*. It is
+deliberately distinct from every stored form, because "put the default face
+back" has to be expressible and none of the stored forms nor an empty string
+can express it. Every read skips the key rather than defaulting it, and every
+write treats `null` — and a blanked input, which is the same intent typed — as
+the reset.
 
 The flavour list lives in `src/company/avatar.rs` (`TINY_FLAVOURS`) and is
 mirrored in `frontend/src/lib/avatar.ts`. They are kept in step by
 `frontend/test/unit/avatar-reference.test.ts`, which reads the Rust source: a
 flavour one side accepts and the other has no file for renders as a broken image
-on every surface at once, and nothing else in the build would notice.
+on every surface at once, and nothing else in the build would notice. The
+animated mascot kinds (`MASCOT_KINDS`) are kept in step the same way.
 
 ### Why the grammar is closed
 
@@ -40,8 +43,20 @@ behalf of whoever wrote it. `javascript:` is script injection.
 reports who looked at the roster and when. Either outlives the account that set
 it.
 
-Both accepted forms name something **this host already holds**, so rendering one
-reaches nothing the viewer's session did not already reach.
+Every accepted form names something **this host already holds**, so rendering
+one reaches nothing the viewer's session did not already reach.
+
+### Why `mascot:` is curated, not uploaded
+
+A `.riv` file (the format behind the animated mascots) is a programmable,
+document-like format with its own runtime, not a raster image `sniff_image` can
+validate by signature and dimensions — the same class of thing SVG is refused
+for below. Accepting one as an arbitrary `blob:`-style upload would reopen
+exactly that risk inside a file format nobody sniffs the internals of. So
+`mascot:<kind>` is validated the same way `tiny:<flavour>` is: a closed,
+compile-time list (`MASCOT_KINDS`) naming a `.riv` file shipped with the
+console under `frontend/public/avatars/`, never something a member's own bytes
+could become.
 
 The same reasoning is why a `blob:` reference is validated against its
 *referent*, not just its shape (`avatar::resolve`): any member can type a node
