@@ -236,7 +236,13 @@ function useResolved(vars: string[]) {
     const next: Record<string, string> = {};
     for (const v of vars) next[v] = style.getPropertyValue(v).trim();
     setValues(next);
-    // Re-read when the theme class flips, so dark values are shown in dark.
+    // Re-read when the theme class flips, so dark values are shown in dark —
+    // and, since issue #2493, when the accent preset changes: the Brand ramp
+    // swatches above read `--brand-*` off `document.documentElement`, which is
+    // exactly what `AccentPresetPicker` (also on this page) changes by setting
+    // `data-accent-preset`. Without watching that attribute too, picking a
+    // preset here repaints the swatch fills but leaves the printed values
+    // showing the previous preset's ramp.
     const observer = new MutationObserver(() => {
       const s = getComputedStyle(document.documentElement);
       const n: Record<string, string> = {};
@@ -245,7 +251,7 @@ function useResolved(vars: string[]) {
     });
     observer.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["class"],
+      attributeFilter: ["class", "data-accent-preset"],
     });
     return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps

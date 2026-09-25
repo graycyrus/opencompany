@@ -66,9 +66,9 @@
     /* Signature — the graph's and the charts' own violet, held apart from
        `--brand-*` on purpose (issue #2493). Both start equal to
        `--brand-500`/`--brand-400`, but an operator's accent-preset choice
-       (future work) overrides `--brand-*` and must never reach here: the
-       knowledge graph's "AI agents" colour and chart slot 1 are identity, not
-       interaction, and stay this one violet regardless of preset. */
+       overrides `--brand-*` and must never reach here: the knowledge graph's
+       "AI agents" colour and chart slot 1 are identity, not interaction, and
+       stay this one violet regardless of preset. */
     --signature-500: oklch(0.5649 0.2236 285.51); /* #7153F0 */
     --signature-400: oklch(0.6614 0.1769 289.73); /* #937BF6 */
 

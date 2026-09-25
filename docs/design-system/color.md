@@ -350,7 +350,7 @@ renamed — they name a slot, not a colour. A desk keyed `amber` resolves to
 
 Slot 1 is the product's signature violet (`--signature-500`/`--signature-400`,
 `index.css`) — fixed, and independent of `--brand-*` since issue #2493, so an
-operator's accent preset (future work) never recolours a chart. The sequence
+operator's chosen accent preset never recolours a chart. The sequence
 then walks the hue circle so neighbouring series never collide. The ordering
 is chosen so the *two-series* case — by far the most common — gets violet and
 cyan, the pair that survives the most common colour-vision deficiencies.
@@ -377,7 +377,7 @@ with status hues would imply a health they do not carry.
 `--kg-accent` (the "AI agents" mark) points at `--signature-500`/
 `--signature-400`, not `--brand-*`, since issue #2493 — it identifies the
 company's own teammates, not an interactive element, so it holds the one
-signature violet regardless of an operator's accent preset (future work).
+signature violet regardless of an operator's chosen accent preset.
 
 ---
 
