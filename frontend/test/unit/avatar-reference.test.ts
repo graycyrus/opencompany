@@ -19,6 +19,7 @@ import {
   avatarRef,
   blobNodeId,
   hashedFlavour,
+  isMascotRef,
   mascotSrc,
   staticAvatarSrc,
   tinySrc,
@@ -107,6 +108,32 @@ describe("staticAvatarSrc", () => {
     expect(staticAvatarSrc("blob:01J8Z5Q9YQ")).toBeNull();
     expect(blobNodeId("blob:01J8Z5Q9YQ")).toBe("01J8Z5Q9YQ");
     expect(blobNodeId("tiny:teal")).toBeNull();
+  });
+});
+
+describe("isMascotRef", () => {
+  it("recognises a mascot reference regardless of surrounding whitespace", () => {
+    expect(isMascotRef("mascot:animated")).toBe(true);
+    expect(isMascotRef("  mascot:animated  ")).toBe(true);
+  });
+
+  it("does not match the other two forms, or nonsense", () => {
+    for (const other of ["tiny:teal", "blob:01J8Z5Q9YQ", "", "mascotx:animated", "MASCOT:animated"]) {
+      expect(isMascotRef(other), other).toBe(false);
+    }
+  });
+
+  // `isMascotRef` only decides whether to mount the live canvas at all — it
+  // does not validate `kind` against `MASCOT_KINDS`, the same way
+  // `staticAvatarSrc`'s `tiny:` branch does not validate its flavour against
+  // `TINY_FLAVOURS` either. Both defer that to the host's `AvatarRef::parse`
+  // (`crates/opencompany-core/src/company/avatar.rs`), the actual
+  // persistence boundary — an unrecognised kind can never be written in the
+  // first place. `MascotAvatar` also never reads `kind` out of the stored
+  // reference (v1 hardcodes the one shipped `.riv`), so an unvalidated kind
+  // here has no path to a broken render even before the host's own check.
+  it("matches any kind suffix — validation is the host's job, same as tiny:", () => {
+    expect(isMascotRef("mascot:not-a-real-kind")).toBe(true);
   });
 });
 
