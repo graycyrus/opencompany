@@ -10,11 +10,27 @@ part of this plan and should not be shipped.
 
 Everything below was read from the binary's embedded string table (the
 format stores object names as UTF-8) and cross-checked against a screenshot
-of the file open in the Rive editor's Data panel. No runtime has actually
-played the file yet — see [`open-questions.md`](open-questions.md) for what
-that leaves unconfirmed.
+of the file open in the Rive editor's Data panel. No runtime had actually
+played the file yet at the time this was written.
 
-## Object graph
+**Runtime introspection later corrected the object graph below on two
+points** — see `open-questions.md` §3 for the full account:
+
+- The file's one real, top-level-loadable artboard is literally named
+  `Artboard`, not `MascotProfileAnimations`. `MascotProfileAnimations` is
+  one of *three* state machines declared directly on `Artboard`
+  (`rive.stateMachineNames`), not the artboard itself. There is no separate
+  `Mascot`/`Mascot Instance` nested artboard with its own binding scope —
+  `Mascot Instance` is a node inside `Artboard`, and everything below
+  (all three state machines, all animations) lives at that one top level.
+- The Number input selects between **nine** costume animations, not four:
+  `cap`, `headband`, `headphone`, `face mask`, `cardboard mask`, and four
+  numbered `glass` variants (`rive.animationNames`), each with its own
+  `copy` (reverse/exit) clip. The "hard budget: 4 states" section below is
+  wrong — `glass1`-`glass4` is a subset of the costume set, not the whole
+  of it.
+
+## Object graph (as originally read from the string table — see correction above)
 
 ```
 Artboard: MascotProfileAnimations
@@ -51,13 +67,13 @@ table. In the React runtime (`@rive-app/react-canvas`) these are set via a
 not the older `useStateMachineInput` hook, which only reaches inputs
 declared directly on the state machine rather than a bound ViewModel.
 
-## The hard budget: 4 states
+## The hard budget: 4 states (superseded — see the correction above)
 
-The Number input selects between exactly four states (`glass1`–`glass4`).
-Nothing about the current design leaves room for a fifth without going back
-into the Rive editor and authoring one. Any state-mapping plan (see
-[`state-mapping.md`](state-mapping.md)) has to fit inside idle + 3 spares,
-or extending the file itself becomes part of the work.
+This section originally claimed the Number input selects between exactly
+four states (`glass1`–`glass4`). Runtime introspection found nine costume
+animations total (`open-questions.md` §1), so the real budget is larger than
+this section assumed — `glass1`-`glass4` is only the `glass` subset. Kept for
+history; do not use this section's "4" for capacity planning.
 
 ## Where the asset lives once this ships
 

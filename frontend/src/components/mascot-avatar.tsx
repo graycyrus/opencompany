@@ -34,16 +34,15 @@ export type MascotState = "idle" | "hover" | "replying";
 /**
  * The Number-input value (`mascotAnimationNumber`) for each named state.
  *
- * State Machine 1 has a hard 4-slot budget (`glass1`-`glass4`); idle is the
- * file's own default. The mapping below is the plan's original guess
- * (index order, unconfirmed) — this component's own ViewModel write/read
- * round-trips correctly (the getter reads back whatever value the setter
- * wrote), but the rendered artboard does not visibly change when the value
- * changes, in this app's runtime, so nobody has actually watched `glass2`
- * play *through this wiring*. See
- * `docs/issue/mascot-profile-avatar/open-questions.md` §3 for what was
- * actually confirmed (the write path works; the visual doesn't follow it)
- * and why — do not treat "hover" as shipped until that's resolved.
+ * Confirmed live (canvas-pixel sampling, not just a round-tripped getter):
+ * `1` renders the mascot in its cap; `2` swaps it to headphones. The
+ * artboard has a wider costume set than `idle`/`hover`/`replying` need
+ * (cap, headband, headphone, face mask, cardboard mask, and four numbered
+ * "glass" variants — 9 items total, per `rive.animationNames`), so this
+ * mapping is a deliberate v1 subset, not the file's full range. See
+ * `docs/issue/mascot-profile-avatar/open-questions.md` §3 for how the
+ * write path was confirmed to actually drive the visible artboard, and why
+ * it didn't for a while.
  */
 const STATE_NUMBERS: Record<MascotState, number> = {
   idle: 1,
@@ -102,15 +101,32 @@ export function MascotAvatar({ state = "idle", className, "data-testid": testId 
   const reducedMotion = usePrefersReducedMotion();
   const { rive, RiveComponent } = useRive({
     src: mascotSrc("animated"),
-    // The file has one artboard, literally named "Artboard" — passing that
-    // name explicitly once broke ("Invalid artboard name or no default
-    // artboard"), so this deliberately omits it and lets the runtime use its
-    // default. `MascotProfileAnimations`, despite its name, is one of three
-    // *state machines* on that artboard, not the artboard itself — an easy
-    // mistake from the file's embedded string table alone, corrected only by
-    // loading it. `State Machine 1` is the one actually bound to the `Mascot`
-    // ViewModel (confirmed against the Rive editor's own Data panel).
-    stateMachine: "State Machine 1",
+    // The file has one *loadable* artboard, literally named "Artboard" —
+    // `useRive({ artboard: "Mascot" })` throws "Invalid artboard name or no
+    // default artboard", so `Mascot Instance` (seen in the object graph) is
+    // a node inside `Artboard`, not a separately loadable artboard; there is
+    // no nested artboard to route around. This omits `artboard` and lets the
+    // runtime use its default.
+    //
+    // `Artboard` carries three state machines (`rive.stateMachineNames`):
+    // `MascotProfileAnimations`, `animtionStatemachin`, and `State Machine
+    // 1`. The Rive editor's Data panel shows `mascotAnimationNumber` bound
+    // under `State Machine 1`, which is what an earlier pass loaded here —
+    // the ViewModel write round-tripped through its own getter, but the
+    // rendered artboard never moved (canvas-pixel sampling, byte-identical
+    // across states). `MascotProfileAnimations` is the one that actually
+    // drives the costume swap: loading *this* one instead, with the same
+    // ViewModel writes below unchanged, visibly swaps the mascot's cap for
+    // headphones on hover (confirmed both by pixel sampling and a
+    // screenshot). Both machines can apparently read the same bound
+    // ViewModel instance; only one of them acts on it. See
+    // `docs/issue/mascot-profile-avatar/open-questions.md` §3.
+    //
+    // `autoBind: true` lets the runtime perform its own default
+    // ViewModel-instance binding at load time, ahead of this component's own
+    // manual `useViewModel`/`useViewModelInstance` calls below.
+    stateMachine: "MascotProfileAnimations",
+    autoBind: true,
     autoplay: !reducedMotion,
   });
 

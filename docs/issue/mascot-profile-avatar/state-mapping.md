@@ -68,14 +68,16 @@ keyed by `userId`, tracking who's looking at the console right now via
 document-input idleness, with no concept of an agent or a running turn. Not
 a candidate signal source for any mascot state.
 
-## The state budget, mapped to the 4 Number-input slots
+## The state budget, mapped to the Number-input slots
 
 Idle is the file's own default (`mascotAnimationNumber = 1`, confirmed from
-the editor). That leaves 3 spare slots (`glass2`–`glass4`) for hover,
-(eventually) replying, and one truly spare slot — comfortably inside the
-budget from [`rive-parameters.md`](rive-parameters.md), with room left over
-even after v1.5 adds replying. **Which of `glass2`–`glass4` actually looks
-right for hover is an open, empirical question** — see
-[`open-questions.md`](open-questions.md). Nothing here should hardcode an
-index-to-meaning mapping before someone has actually watched each state
-play.
+the editor and, later, live in the runtime — it renders the mascot's cap).
+The "4 slots, `glass1`-`glass4`" framing this section originally used was a
+static-analysis guess later found wrong: the artboard actually has nine
+costume animations (`open-questions.md` §1), of which `glass1`-`glass4` are
+only one family. **`mascotAnimationNumber = 2` is confirmed live to render
+headphones, not a `glass2` variant** — `STATE_NUMBERS` in
+`mascot-avatar.tsx` maps `hover` to `2` on that confirmation, not a guess.
+`3` (`replying`) is wired but its visual is unconfirmed; slots beyond that
+are unused by v1. See `open-questions.md` §1 and §4 for what's actually
+been watched play versus what's still assumed.
