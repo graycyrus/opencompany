@@ -7,7 +7,7 @@
 // two pickers would be two places for the accepted formats, the size ceiling
 // and the reset affordance to drift apart.
 
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ImagePlus, Loader2, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 
@@ -15,14 +15,22 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   AVATAR_ACCEPT,
+  MASCOT_KINDS,
   MAX_AVATAR_MB,
   TINY_FLAVOURS,
   avatarRef,
+  isMascotRef,
   uploadAvatar,
 } from "@/lib/avatar";
 import { cn } from "@/lib/utils";
+
+/** See `agent-profile-sheet.tsx` for why this is lazy-loaded rather than a static import. */
+const LazyMascotAvatar = lazy(() =>
+  import("@/components/mascot-avatar").then((m) => ({ default: m.MascotAvatar })),
+);
 
 interface Props {
   client: OpenCompanyClient;
@@ -108,13 +116,19 @@ export function AvatarPicker({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-4">
-        <TeammateAvatar
-          name={name}
-          tone={tone}
-          avatar={current}
-          className="size-14 rounded-xl text-base"
-          data-testid="avatar-preview"
-        />
+        {isMascotRef(current) ? (
+          <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
+            <LazyMascotAvatar className="size-14" data-testid="avatar-preview" />
+          </Suspense>
+        ) : (
+          <TeammateAvatar
+            name={name}
+            tone={tone}
+            avatar={current}
+            className="size-14 rounded-xl text-base"
+            data-testid="avatar-preview"
+          />
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <input
             ref={fileRef}
@@ -195,6 +209,30 @@ export function AvatarPicker({
                 avatar={ref}
                 className="size-9 rounded-md text-xs"
               />
+            </button>
+          );
+        })}
+        {MASCOT_KINDS.map((kind) => {
+          const ref = `mascot:${kind}`;
+          const selected = current === ref;
+          return (
+            <button
+              key={ref}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              aria-label={`Animated mascot (${kind})`}
+              disabled={disabled || uploading}
+              onClick={() => onChange(ref)}
+              data-testid={`avatar-mascot-${kind}`}
+              className={cn(
+                "rounded-lg p-0.5 ring-2 transition-colors disabled:opacity-50",
+                selected ? "ring-primary" : "ring-transparent hover:ring-border",
+              )}
+            >
+              <Suspense fallback={<Skeleton className="size-9 rounded-md" />}>
+                <LazyMascotAvatar className="size-9" />
+              </Suspense>
             </button>
           );
         })}

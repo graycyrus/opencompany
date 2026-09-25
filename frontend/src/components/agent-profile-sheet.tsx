@@ -1,5 +1,7 @@
 import {
   createContext,
+  lazy,
+  Suspense,
   useContext,
   useEffect,
   useMemo,
@@ -22,7 +24,54 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { agentHref, agentProfile } from "@/lib/agent-profile";
+import { isMascotRef } from "@/lib/avatar";
 import { cn } from "@/lib/utils";
+
+/**
+ * The Rive runtime + the mascot asset are ~1.8 MB combined and load only for
+ * the rare teammate wearing `mascot:animated` — code-split the same way this
+ * codebase already isolates `recharts`/`@xyflow/react`/`react-joyride`, so
+ * every other profile sheet pays nothing for it.
+ */
+const LazyMascotAvatar = lazy(() =>
+  import("@/components/mascot-avatar").then((m) => ({ default: m.MascotAvatar })),
+);
+
+/**
+ * The profile sheet's header face: the live mascot for a teammate who chose
+ * it, the ordinary static tile for everyone else.
+ *
+ * `TeammateAvatar` already falls back to the tone tile while an image loads,
+ * so the `Suspense` fallback here matches that same tile-shaped `Skeleton`
+ * rather than a generic spinner — the header must not jump size while the
+ * mascot's chunk is in flight.
+ */
+function AgentAvatar({
+  name,
+  tone,
+  avatar,
+}: {
+  name: string;
+  tone: string;
+  avatar: string;
+}) {
+  if (isMascotRef(avatar)) {
+    return (
+      <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
+        <LazyMascotAvatar className="size-12" data-testid="agent-profile-avatar" />
+      </Suspense>
+    );
+  }
+  return (
+    <TeammateAvatar
+      name={name}
+      tone={tone}
+      avatar={avatar}
+      className="size-12 rounded-xl text-sm"
+      data-testid="agent-profile-avatar"
+    />
+  );
+}
 
 /** What a click on a teammate's face can do, from anywhere under the provider. */
 interface AgentProfileApi {
@@ -227,13 +276,7 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
     <>
       <SheetHeader className="gap-3 pr-10">
         <div className="flex items-start gap-3">
-          <TeammateAvatar
-            name={profile.display}
-            tone={profile.tone}
-            avatar={profile.avatar}
-            className="size-12 rounded-xl text-sm"
-            data-testid="agent-profile-avatar"
-          />
+          <AgentAvatar name={profile.display} tone={profile.tone} avatar={profile.avatar} />
           <div className="min-w-0 flex-1">
             <SheetTitle className="truncate text-lg" data-testid="agent-profile-name">
               {profile.display}
