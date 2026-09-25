@@ -1259,3 +1259,170 @@
         }
     }
 }
+
+/* ============================================================================
+ * ACCENT PRESETS (issue #2493)
+ *
+ * An operator's chosen interaction hue, independent of light/dark mode. Full
+ * design in `docs/issues/accent-theme-presets/architecture.md`; this section
+ * is its §2–3 in code.
+ *
+ * ## What a preset overrides, and why only this
+ *
+ * Each block below re-declares the ten `--brand-{50..900}` primitives and
+ * nothing else. Every semantic token built on the ramp — `--primary`,
+ * `--ring`, `--sidebar-primary(-foreground)`, `--sidebar-accent(-foreground)`,
+ * `--shadow-brand`, `--glow-brand-card`, the `bg-brand-*` utilities — is
+ * therefore re-derived in both themes for free, because the *choice of step*
+ * (500 in light, 400 in dark, 700/300 for active-nav ink) already lives one
+ * layer up, in `:root` and `.dark`, and is never repeated here.
+ *
+ * `--signature-500`/`--signature-400` are deliberately absent from every
+ * block: chart slot 1 and the knowledge graph's "AI agents" colour are
+ * identity, not interaction, and Phase 1 of this issue moved them off
+ * `--brand-*` for exactly this reason (see the primitives block near the top
+ * of this file). A preset here can never reach them.
+ *
+ * ## Selector shape, and why it must stay this way
+ *
+ * `[data-accent-preset="…"]`, not `:root[data-accent-preset="…"]`. The bare
+ * attribute selector matches *any* element, which is what lets a picker
+ * swatch carry its own `data-accent-preset` and render its own colour
+ * (`accent-preset-picker.tsx`) — `:root[…]` would only ever match `<html>`.
+ * Its specificity, (0,1,0), ties with both `:root` and `.dark`, so it wins on
+ * **source order** alone: this section must stay the last thing in the file.
+ * `accent-presets-shape.test.ts` pins that.
+ *
+ * ## The specificity trap (roadblocks.md R2)
+ *
+ * `.dark` and `[data-accent-preset="x"]` are the same specificity, so on
+ * `<html class="dark" data-accent-preset="x">` the preset block wins the tie
+ * by sitting later in the file — including over `.dark`'s own
+ * `--primary-foreground`. A preset block may therefore set ONLY the ten ramp
+ * primitives unqualified. A preset that also needs a `-foreground` override
+ * (none of the seven below do; white already clears 4.5:1 on every one's 500)
+ * must split it into a `:not(.dark)` / `.dark` qualified pair, never bare —
+ * `accent-presets-shape.test.ts` enforces both rules.
+ *
+ * ## Where the numbers come from
+ *
+ * Generated, not eyeballed: each ramp holds the brand ramp's own lightness
+ * cadence and hue-drift shape (the rule already stated where `--brand-*` is
+ * declared), retargeted to a new hue and chroma at the 500 step, then
+ * verified — gamut and all five contrast pairs from
+ * `docs/design-system/color.md`'s table — before being written here.
+ * `accent-presets-contrast.test.ts` re-verifies the same five pairs on every
+ * CI run, so a hand-edit here cannot silently regress one.
+ * ========================================================================== */
+
+[data-accent-preset="violet"] {
+    /* Deliberately identical to :root's own ramp — the current default, named
+       so it stays choosable if a future brand decision ever moves the default
+       away from violet (open-questions.md Q1). Also load-bearing for a second
+       reason: the "Default" preset has no block of its own (selecting it
+       means "remove the attribute", not "apply one named default"), so
+       accent-preset-picker.tsx paints ITS swatch with this block too. Keeping
+       the two identical is what makes that correct;
+       accent-presets-shape.test.ts pins the equality. */
+    --brand-50: oklch(0.9522 0.0230 295.71); /* #f0ecfd */
+    --brand-100: oklch(0.9124 0.0427 295.48); /* #e4ddfc */
+    --brand-200: oklch(0.8410 0.0794 294.74); /* #cec1fa */
+    --brand-300: oklch(0.7488 0.1287 292.75); /* #b09df8 */
+    --brand-400: oklch(0.6614 0.1769 289.73); /* #937bf6 */
+    --brand-500: oklch(0.5649 0.2236 285.51); /* #7153f0 */
+    --brand-600: oklch(0.5141 0.2088 284.97); /* #6247d7 */
+    --brand-700: oklch(0.4453 0.1828 284.88); /* #5038b2 */
+    --brand-800: oklch(0.3690 0.1496 285.32); /* #3c2a89 */
+    --brand-900: oklch(0.2957 0.1142 286.51); /* #2b1e62 */
+}
+
+/* white/500 4.97 · 500/canvas 4.65 · 400/dark-canvas 6.04 · 700/100 6.07 · 300/dark-active 7.08 */
+[data-accent-preset="indigo"] {
+    --brand-50: oklch(0.9439 0.0237 278.20); /* #e8ebfd */
+    --brand-100: oklch(0.9045 0.0439 277.97); /* #d8ddfd */
+    --brand-200: oklch(0.8337 0.0817 277.23); /* #bbc4fe */
+    --brand-300: oklch(0.7423 0.1324 275.24); /* #94a4fe */
+    --brand-400: oklch(0.6557 0.1820 272.22); /* #6c84fe */
+    --brand-500: oklch(0.5600 0.2300 268.00); /* #3d60f8 */
+    --brand-600: oklch(0.5096 0.2148 267.46); /* #3253de */
+    --brand-700: oklch(0.4414 0.1880 267.37); /* #2743b8 */
+    --brand-800: oklch(0.3658 0.1539 267.81); /* #1d328e */
+    --brand-900: oklch(0.2931 0.1175 269.00); /* #162365 */
+}
+
+/* white/500 4.92 · 500/canvas 4.61 · 400/dark-canvas 5.98 · 700/100 5.79 · 300/dark-active 6.88 */
+[data-accent-preset="blue"] {
+    --brand-50: oklch(0.9271 0.0175 265.20); /* #e1e7f3 */
+    --brand-100: oklch(0.8883 0.0325 264.97); /* #d0daf0 */
+    --brand-200: oklch(0.8188 0.0604 264.23); /* #b0c4ec */
+    --brand-300: oklch(0.7290 0.0978 262.24); /* #86a8e5 */
+    --brand-400: oklch(0.6440 0.1345 259.22); /* #5a8dde */
+    --brand-500: oklch(0.5500 0.1700 255.00); /* #1570d1 */
+    --brand-600: oklch(0.5005 0.1587 254.46); /* #0662bb */
+    --brand-700: oklch(0.4336 0.1390 254.37); /* #014f9a */
+    --brand-800: oklch(0.3593 0.1137 254.81); /* #043c76 */
+    --brand-900: oklch(0.2879 0.0868 256.00); /* #072a55 */
+}
+
+/* white/500 4.84 · 500/canvas 4.54 · 400/dark-canvas 5.89 · 700/100 5.46 · 300/dark-active 6.69 */
+[data-accent-preset="teal"] {
+    --brand-50: oklch(0.9102 0.0087 205.20); /* #dbe3e4 */
+    --brand-100: oklch(0.8722 0.0162 204.97); /* #c9d8da */
+    --brand-200: oklch(0.8039 0.0302 204.23); /* #a9c5c8 */
+    --brand-300: oklch(0.7158 0.0489 202.24); /* #7fadb0 */
+    --brand-400: oklch(0.6322 0.0672 199.22); /* #559699 */
+    --brand-500: oklch(0.5400 0.0850 195.00); /* #1c7e7e */
+    --brand-600: oklch(0.4914 0.0794 194.46); /* #126f6e */
+    --brand-700: oklch(0.4257 0.0695 194.37); /* #0b5a5a */
+    --brand-800: oklch(0.3527 0.0569 194.81); /* #084444 */
+    --brand-900: oklch(0.2827 0.0434 196.00); /* #073030 */
+}
+
+/* white/500 4.83 · 500/canvas 4.52 · 400/dark-canvas 5.99 · 700/100 5.45 · 300/dark-active 6.74 */
+[data-accent-preset="green"] {
+    --brand-50: oklch(0.9102 0.0123 155.20); /* #dbe4de */
+    --brand-100: oklch(0.8722 0.0229 154.97); /* #cadace */
+    --brand-200: oklch(0.8039 0.0426 154.23); /* #abc8b3 */
+    --brand-300: oklch(0.7158 0.0691 152.24); /* #83b08e */
+    --brand-400: oklch(0.6322 0.0949 149.22); /* #5f9a6a */
+    --brand-500: oklch(0.5400 0.1200 145.00); /* #3b8040 */
+    --brand-600: oklch(0.4914 0.1121 144.46); /* #327135 */
+    --brand-700: oklch(0.4257 0.0981 144.37); /* #275c29 */
+    --brand-800: oklch(0.3527 0.0803 144.81); /* #1c461f */
+    --brand-900: oklch(0.2827 0.0613 146.00); /* #123116 */
+}
+
+/* white/500 4.86 · 500/canvas 4.55 · 400/dark-canvas 6.13 · 700/100 6.03 · 300/dark-active 7.08.
+   Reads as a deep amber/rust rather than a bright one: R11 measured white text
+   on a bright amber-500 at 3.19:1, so clearing 4.5 costs saturation at this
+   lightness. The alternative — a dark foreground override — was rejected here
+   per §2's preference for a darker 500 over a dark foreground. */
+[data-accent-preset="amber"] {
+    --brand-50: oklch(0.9439 0.0134 65.20); /* #f3ebe3 */
+    --brand-100: oklch(0.9045 0.0248 64.97); /* #ecddcf */
+    --brand-200: oklch(0.8337 0.0462 64.23); /* #dec3aa */
+    --brand-300: oklch(0.7423 0.0748 62.24); /* #cea17b */
+    --brand-400: oklch(0.6557 0.1028 59.22); /* #bf814d */
+    --brand-500: oklch(0.5600 0.1300 55.00); /* #ad5c15 */
+    --brand-600: oklch(0.5096 0.1214 54.46); /* #994f0d */
+    --brand-700: oklch(0.4414 0.1063 54.37); /* #7e4007 */
+    --brand-800: oklch(0.3658 0.0870 54.81); /* #603005 */
+    --brand-900: oklch(0.2931 0.0664 56.00); /* #442204 */
+}
+
+/* white/500 4.92 · 500/canvas 4.61 · 400/dark-canvas 6.17 · 700/100 6.33 · 300/dark-active 7.24.
+   Chroma held back from the search optimum at this hue: the 50 step alone
+   left sRGB gamut above ~C 0.19, so 500's chroma is capped at 0.185 to keep
+   every step in the same gamut the rest of this file requires. */
+[data-accent-preset="rose"] {
+    --brand-50: oklch(0.9608 0.0190 25.20); /* #ffeeec */
+    --brand-100: oklch(0.9206 0.0353 24.97); /* #fcdcd9 */
+    --brand-200: oklch(0.8486 0.0657 24.23); /* #f6bdb8 */
+    --brand-300: oklch(0.7556 0.1065 22.24); /* #ec9491 */
+    --brand-400: oklch(0.6674 0.1464 19.22); /* #e06b70 */
+    --brand-500: oklch(0.5700 0.1850 15.00); /* #cd3753 */
+    --brand-600: oklch(0.5187 0.1728 14.46); /* #b62d48 */
+    --brand-700: oklch(0.4493 0.1512 14.37); /* #96223a */
+    --brand-800: oklch(0.3723 0.1238 14.81); /* #73192b */
+    --brand-900: oklch(0.2984 0.0945 16.00); /* #53121d */
+}
