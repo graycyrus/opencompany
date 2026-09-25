@@ -55,11 +55,24 @@ function AgentAvatar({
   tone: string;
   avatar: string;
 }) {
+  // Only the mascot branch needs this — a static tile has no state to track,
+  // and hooks cannot sit behind the early return below, so it is declared
+  // unconditionally like `AvatarTile`'s own hook in `teammate-avatar.tsx`.
+  const [hovering, setHovering] = useState(false);
   if (isMascotRef(avatar)) {
     return (
-      <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
-        <LazyMascotAvatar className="size-12" data-testid="agent-profile-avatar" />
-      </Suspense>
+      <span
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
+      >
+        <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
+          <LazyMascotAvatar
+            state={hovering ? "hover" : "idle"}
+            className="size-12"
+            data-testid="agent-profile-avatar"
+          />
+        </Suspense>
+      </span>
     );
   }
   return (

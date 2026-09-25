@@ -35,9 +35,15 @@ export type MascotState = "idle" | "hover" | "replying";
  * The Number-input value (`mascotAnimationNumber`) for each named state.
  *
  * State Machine 1 has a hard 4-slot budget (`glass1`-`glass4`); idle is the
- * file's own default. Confirmed empirically by loading the file and watching
- * each state play (`docs/issue/mascot-profile-avatar/open-questions.md` §1) —
- * do not renumber without watching the states again.
+ * file's own default. The mapping below is the plan's original guess
+ * (index order, unconfirmed) — this component's own ViewModel write/read
+ * round-trips correctly (the getter reads back whatever value the setter
+ * wrote), but the rendered artboard does not visibly change when the value
+ * changes, in this app's runtime, so nobody has actually watched `glass2`
+ * play *through this wiring*. See
+ * `docs/issue/mascot-profile-avatar/open-questions.md` §3 for what was
+ * actually confirmed (the write path works; the visual doesn't follow it)
+ * and why — do not treat "hover" as shipped until that's resolved.
  */
 const STATE_NUMBERS: Record<MascotState, number> = {
   idle: 1,
@@ -96,7 +102,14 @@ export function MascotAvatar({ state = "idle", className, "data-testid": testId 
   const reducedMotion = usePrefersReducedMotion();
   const { rive, RiveComponent } = useRive({
     src: mascotSrc("animated"),
-    artboard: "MascotProfileAnimations",
+    // The file has one artboard, literally named "Artboard" — passing that
+    // name explicitly once broke ("Invalid artboard name or no default
+    // artboard"), so this deliberately omits it and lets the runtime use its
+    // default. `MascotProfileAnimations`, despite its name, is one of three
+    // *state machines* on that artboard, not the artboard itself — an easy
+    // mistake from the file's embedded string table alone, corrected only by
+    // loading it. `State Machine 1` is the one actually bound to the `Mascot`
+    // ViewModel (confirmed against the Rive editor's own Data panel).
     stateMachine: "State Machine 1",
     autoplay: !reducedMotion,
   });

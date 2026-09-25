@@ -73,6 +73,7 @@ export function AvatarPicker({
   disabled,
 }: Props) {
   const [uploading, setUploading] = useState(false);
+  const [previewHovering, setPreviewHovering] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   // False once the picker has left the tree. An upload outlives a dialog that
   // was dismissed while it was in flight, and the picker must not then hand the
@@ -117,9 +118,18 @@ export function AvatarPicker({
     <div className="space-y-3">
       <div className="flex items-center gap-4">
         {isMascotRef(current) ? (
-          <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
-            <LazyMascotAvatar className="size-14" data-testid="avatar-preview" />
-          </Suspense>
+          <span
+            onMouseEnter={() => setPreviewHovering(true)}
+            onMouseLeave={() => setPreviewHovering(false)}
+          >
+            <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
+              <LazyMascotAvatar
+                state={previewHovering ? "hover" : "idle"}
+                className="size-14"
+                data-testid="avatar-preview"
+              />
+            </Suspense>
+          </span>
         ) : (
           <TeammateAvatar
             name={name}
