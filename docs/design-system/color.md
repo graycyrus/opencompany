@@ -57,6 +57,50 @@ is too dense to read as ink on near-black.
 
 ---
 
+## Accent presets (issue #2493)
+
+Since issue #2493, `--brand-*` is an operator's choice rather than a fixed
+ramp: Settings → Appearance offers a curated set of presets, each overriding
+the ten primitives above and nothing else. Every semantic token built on the
+ramp (`--primary`, `--ring`, `--sidebar-primary`, …) is re-derived for both
+themes automatically — see
+[`../issues/accent-theme-presets/architecture.md`](../issues/accent-theme-presets/architecture.md)
+§2 for why only the ramp, never a semantic token, is what a preset may touch.
+
+**What never follows a preset:** status colours, identity tones, chart slots
+2–5, and — since Phase 1 of #2493 — chart slot 1 and the knowledge graph's
+"AI agents" mark, both pinned to a new fixed primitive,
+`--signature-500`/`--signature-400`, so a chart or a shared graph reads the
+same on every operator's screen regardless of their personal accent. See
+"Charts" and "The knowledge graph" below.
+
+Every preset is measured against the same five pairs the default ramp meets,
+enforced by `frontend/test/unit/accent-presets-contrast.test.ts` rather than
+by eye:
+
+| Preset | white / 500 | 500 / light canvas | 400 / dark canvas | 700 / 100 | 300 / dark active rung |
+| --- | --- | --- | --- | --- | --- |
+| Violet (default) | 5.00 | 4.68 | 6.08 | 6.29 | 7.10 |
+| Indigo | 4.97 | 4.65 | 6.04 | 6.07 | 7.08 |
+| Blue | 4.92 | 4.61 | 5.98 | 5.79 | 6.88 |
+| Teal | 4.84 | 4.54 | 5.89 | 5.46 | 6.69 |
+| Green | 4.83 | 4.52 | 5.99 | 5.45 | 6.74 |
+| Amber | 4.86 | 4.55 | 6.13 | 6.03 | 7.08 |
+| Rose | 4.92 | 4.61 | 6.17 | 6.33 | 7.24 |
+
+All seven clear 4.5:1. None is asserted against `--accent` or `--chrome` — the
+default ramp already misses both (4.20:1, 4.22:1; a pre-existing gap this
+feature does not widen, tracked separately from issue #2493).
+
+**Authoring a new preset:** tune in oklch, hold the brand ramp's own lightness
+cadence and hue-drift shape (stated where `--brand-*` is declared in
+`index.css`) rather than inventing a new one, and let the contrast test — not
+review — decide whether it ships. Prefer a darker 500 over a `-foreground`
+override when white text fails; none of the seven above needed one. An id, once
+shipped, is never renamed (an operator's stored choice names it).
+
+---
+
 ## Neutrals
 
 Cool-tinted at ~286°, chroma 0.001–0.03. See
