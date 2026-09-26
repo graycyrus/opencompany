@@ -90,6 +90,19 @@ const WIDGET_SUSPENSE: Record<string, string> = {
     "next to this boundary — not gated behind it — so the page keeps its name",
     "for the whole time the Rive chunk is in flight.",
   ].join(" "),
+  "components/teammate-avatar.tsx:LazyMascotAvatar": [
+    "`TeammateAvatar` itself is never lazy — only the live mascot it can now",
+    "render is. Every one of its ~40 call sites (message rows, the org chart,",
+    "facepiles, the members pane, the channel rail, mention pickers…) is a",
+    "small tile nested inside a view that is already fully mounted by the time",
+    "this boundary can even exist: `TeammateAvatar` is imported eagerly, so",
+    "reaching it means the containing route's own chunk already landed and its",
+    "own heading is already on screen, unconditionally, in the same paint —",
+    "this boundary never gates it. The fallback is `null` on purpose (issue:",
+    "\"should be visible everywhere\" — the tile's own tone tile with initials,",
+    "drawn outside this boundary, is what shows while the Rive chunk is in",
+    "flight, exactly the same role `RouteLoading` plays for an actual route).",
+  ].join(" "),
 };
 
 /** Every `.tsx` under `src`, as paths relative to it. */
