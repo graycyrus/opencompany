@@ -18,65 +18,63 @@ import {
   useViewModelInstanceNumber,
 } from "@rive-app/react-canvas";
 
-import { hexToRgb, MASCOT_COLORWAYS, mascotSrc, type MascotColorway } from "@/lib/avatar";
+import {
+  hexToRgb,
+  mascotCostumeNumber,
+  mascotHandColorHex,
+  mascotSkinColorHex,
+  mascotSrc,
+  type MascotCostume,
+  type MascotHandColor,
+  type MascotMode,
+  type MascotSkinColor,
+} from "@/lib/avatar";
 import { cn } from "@/lib/utils";
-
-/**
- * The mascot's own default colorway (`handColor`/`skinColor` in the Rive
- * file's ViewModel) — `MASCOT_COLORWAYS[0]` (`"amber"`), matched to the
- * file's shipped default so a teammate with no chosen colorway renders
- * exactly as v1 always has.
- */
-const DEFAULT_COLORWAY = MASCOT_COLORWAYS[0];
 
 export type MascotState = "idle" | "hover" | "replying";
 
 /**
- * The Number-input value (`mascotAnimationNumber`) for each named state, used
- * when no explicit `costume` is chosen.
- *
- * Confirmed live (canvas-pixel sampling, not just a round-tripped getter):
- * `1` renders the mascot in its cap; `2` swaps it to headphones. `replying`
- * (`3`) is wired the same way but its visual is unconfirmed as a *meaningful*
- * "replying" cue — it is simply the third costume in file order. See
- * `docs/issue/mascot-profile-avatar/open-questions.md` §1 for what has
- * actually been watched play.
+ * The `mascotAnimationNumber` for `hover`/`replying`, kept exactly as the
+ * mechanism already built it (confirmed live: `2` swaps the mascot to
+ * headphones) rather than reinvented for a chosen costume. A teammate's
+ * `idle` baseline is its chosen costume ({@link mascotCostumeNumber}); the
+ * reactive states stay these two fixed numbers regardless of that choice —
+ * see the module docs on {@link MascotAvatar} for why.
  */
-const STATE_NUMBERS: Record<MascotState, number> = {
-  idle: 1,
+const REACTIVE_NUMBERS: Record<"hover" | "replying", number> = {
   hover: 2,
   replying: 3,
 };
 
 interface Props {
   /**
-   * Which of the file's states to play. Defaults to idle. Ignored once
-   * {@link Props.costume} is set — a chosen costume is a fixed look, not an
-   * idle/hover pair, so it overrides the state-driven swap entirely (see the
-   * note at {@link Props.costume}).
+   * Whether the canvas plays at all. Defaults to `"animated"`, the file's own
+   * default and what every `mascot:animated` wearer already rendered.
+   * `"static"` freezes on the chosen costume's resting frame: no autoplay, and
+   * {@link Props.state} is ignored entirely — a static mascot does not react
+   * to hover or "replying", so callers should not wire those handlers up for
+   * it either (this only guards the canvas itself).
+   */
+  mode?: MascotMode | string;
+  /**
+   * Which of the file's states to play. Defaults to idle. Ignored in
+   * `"static"` mode. In `"animated"` mode, `hover`/`replying` are the fixed
+   * {@link REACTIVE_NUMBERS} already built — they do not swap to a different
+   * costume than the one chosen; only `idle` lands on it.
    */
   state?: MascotState;
   /**
-   * The chosen colorway name (`MASCOT_COLORWAYS` in `lib/avatar.ts`), or
-   * `undefined` for the file's own default (`"amber"`). An unrecognised name
-   * — stale client code against a host that has since widened the list, or
-   * vice versa — falls back to the default rather than crashing the Rive
-   * ViewModel write.
+   * The chosen costume id (`MASCOT_COSTUMES` in `lib/avatar.ts`), or
+   * `undefined` for the file's own default (`"cap"`). Applies in both display
+   * modes: the resting frame in `"static"`, the `idle` baseline in
+   * `"animated"`. An unrecognised id falls back to the default rather than
+   * crashing the Rive ViewModel write.
    */
-  colorway?: MascotColorway | string;
-  /**
-   * The chosen costume number (`1..=MASCOT_COSTUME_COUNT`), or `undefined`
-   * for the state-driven `idle`/`hover`/`replying` swap {@link STATE_NUMBERS}
-   * already gives every mascot.
-   *
-   * Deliberately **overrides** the state swap rather than combining with it:
-   * the two mechanisms share the same `mascotAnimationNumber` slot, and a
-   * teammate whose operator picked "Sunglasses" should wear sunglasses on
-   * hover too, not have that choice silently overridden back to "Headphones"
-   * the moment a pointer passes over it. An agent with no chosen costume is
-   * unaffected — it keeps the original idle/hover/replying feel.
-   */
-  costume?: number;
+  costume?: MascotCostume | string;
+  /** The chosen skin (body) color id, or `undefined` for the file's own default. */
+  skinColor?: MascotSkinColor | string;
+  /** The chosen hand/accent color id, or `undefined` for the file's own default. */
+  handColor?: MascotHandColor | string;
   className?: string;
   "data-testid"?: string;
 }
@@ -122,13 +120,16 @@ function usePrefersReducedMotion(): boolean {
  * code-split boundary.
  */
 export function MascotAvatar({
+  mode = "animated",
   state = "idle",
-  colorway,
   costume,
+  skinColor,
+  handColor,
   className,
   "data-testid": testId,
 }: Props) {
   const reducedMotion = usePrefersReducedMotion();
+  const isStatic = mode === "static";
   const { rive, RiveComponent } = useRive({
     src: mascotSrc("animated"),
     // The file has one *loadable* artboard, literally named "Artboard" —
@@ -157,7 +158,11 @@ export function MascotAvatar({
     // manual `useViewModel`/`useViewModelInstance` calls below.
     stateMachine: "MascotProfileAnimations",
     autoBind: true,
-    autoplay: !reducedMotion,
+    // A static mascot never animates — no reactivity to hold still against,
+    // so there is nothing to autoplay. This is also the cheap half of
+    // "static": the canvas paints its one frame and the Rive runtime never
+    // ticks it again.
+    autoplay: !isStatic && !reducedMotion,
   });
 
   const viewModel = useViewModel(rive, { useDefault: true });
@@ -170,26 +175,32 @@ export function MascotAvatar({
   const { setRgb: setHandColor } = useViewModelInstanceColor("handColor", vmi);
   const { setRgb: setSkinColor } = useViewModelInstanceColor("skinColor", vmi);
 
-  // The chosen colorway, or the file's own default when unset or unrecognised.
-  // Set whenever it changes — not just once — so a picker preview updates
-  // live as an operator tries different swatches before saving.
+  // The chosen colors, or the file's own defaults when unset or
+  // unrecognised. Set whenever either changes — not just once — so a picker
+  // preview updates live as an operator tries different swatches before
+  // saving. Applies identically in both display modes.
   useEffect(() => {
     if (!vmi) return;
-    const match = MASCOT_COLORWAYS.find((c) => c.name === colorway) ?? DEFAULT_COLORWAY;
-    setHandColor(...hexToRgb(match.hand));
-    setSkinColor(...hexToRgb(match.skin));
+    setHandColor(...hexToRgb(mascotHandColorHex(handColor)));
+    setSkinColor(...hexToRgb(mascotSkinColorHex(skinColor)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vmi, colorway]);
+  }, [vmi, handColor, skinColor]);
 
-  // The chosen costume overrides the idle/hover/replying swap entirely (see
-  // the `costume` prop doc); otherwise the original state-driven number.
+  // The costume baseline, and — in animated mode only — the hover/replying
+  // swap already built. A static mascot ignores `state` entirely: it freezes
+  // on the chosen costume and never re-fires this effect for a state change,
+  // because reduced-motion and static both resolve to the same baseline
+  // number regardless of what `state` says.
   useEffect(() => {
     if (!vmi) return;
+    const baseline = mascotCostumeNumber(costume);
     const number =
-      costume ?? (reducedMotion ? STATE_NUMBERS.idle : STATE_NUMBERS[state]);
+      isStatic || reducedMotion || state === "idle"
+        ? baseline
+        : REACTIVE_NUMBERS[state];
     setAnimationNumber(number);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vmi, state, reducedMotion, costume]);
+  }, [vmi, isStatic, state, reducedMotion, costume]);
 
   return (
     <div
