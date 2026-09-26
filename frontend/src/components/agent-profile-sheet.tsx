@@ -73,16 +73,25 @@ function AgentAvatar({
     // `MascotAvatar` then ignores — see that component's own module docs.
     if ((mascotMode ?? "animated") === "static") {
       return (
-        <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
-          <LazyMascotAvatar
-            mode="static"
-            costume={mascotCostume}
-            skinColor={mascotSkinColor}
-            handColor={mascotHandColor}
-            className="size-12"
-            data-testid="agent-profile-avatar"
-          />
-        </Suspense>
+        // The `Skeleton` sits behind, not just in the `Suspense` fallback:
+        // `MascotAvatar` stays transparent past the chunk load, through its
+        // own `.riv` fetch (~1.7 MB, a further second or two), so a fallback
+        // that only covers the chunk would still hand off to a blank header
+        // for that whole gap — which is exactly what read as broken (issue
+        // found live 2026-09-26, "no loading indicator").
+        <div className="relative size-12">
+          <Skeleton className="absolute inset-0 rounded-xl" />
+          <Suspense fallback={null}>
+            <LazyMascotAvatar
+              mode="static"
+              costume={mascotCostume}
+              skinColor={mascotSkinColor}
+              handColor={mascotHandColor}
+              className="absolute inset-0"
+              data-testid="agent-profile-avatar"
+            />
+          </Suspense>
+        </div>
       );
     }
     return (
@@ -90,17 +99,20 @@ function AgentAvatar({
         onMouseEnter={() => setHovering(true)}
         onMouseLeave={() => setHovering(false)}
       >
-        <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
-          <LazyMascotAvatar
-            mode="animated"
-            state={hovering ? "hover" : "idle"}
-            costume={mascotCostume}
-            skinColor={mascotSkinColor}
-            handColor={mascotHandColor}
-            className="size-12"
-            data-testid="agent-profile-avatar"
-          />
-        </Suspense>
+        <div className="relative size-12">
+          <Skeleton className="absolute inset-0 rounded-xl" />
+          <Suspense fallback={null}>
+            <LazyMascotAvatar
+              mode="animated"
+              state={hovering ? "hover" : "idle"}
+              costume={mascotCostume}
+              skinColor={mascotSkinColor}
+              handColor={mascotHandColor}
+              className="absolute inset-0"
+              data-testid="agent-profile-avatar"
+            />
+          </Suspense>
+        </div>
       </span>
     );
   }

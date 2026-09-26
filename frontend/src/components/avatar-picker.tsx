@@ -166,32 +166,43 @@ export function AvatarPicker({
       <div className="flex items-center gap-4">
         {isMascotRef(current) ? (
           isStaticPreview ? (
-            <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
-              <LazyMascotAvatar
-                mode="static"
-                costume={mascotCostume}
-                skinColor={mascotSkinColor}
-                handColor={mascotHandColor}
-                className="size-14"
-                data-testid="avatar-preview"
-              />
-            </Suspense>
+            // The `Skeleton` sits behind, not just in the `Suspense` fallback:
+            // `MascotAvatar` stays transparent past the chunk load, through
+            // its own `.riv` fetch (~1.7 MB, a further second or two) — the
+            // operator-noticed "preview canvas takes 1-3s to paint with no
+            // loading indicator" gap this closes.
+            <div className="relative size-14">
+              <Skeleton className="absolute inset-0 rounded-xl" />
+              <Suspense fallback={null}>
+                <LazyMascotAvatar
+                  mode="static"
+                  costume={mascotCostume}
+                  skinColor={mascotSkinColor}
+                  handColor={mascotHandColor}
+                  className="absolute inset-0"
+                  data-testid="avatar-preview"
+                />
+              </Suspense>
+            </div>
           ) : (
             <span
               onMouseEnter={() => setPreviewHovering(true)}
               onMouseLeave={() => setPreviewHovering(false)}
             >
-              <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
-                <LazyMascotAvatar
-                  mode="animated"
-                  state={previewHovering ? "hover" : "idle"}
-                  costume={mascotCostume}
-                  skinColor={mascotSkinColor}
-                  handColor={mascotHandColor}
-                  className="size-14"
-                  data-testid="avatar-preview"
-                />
-              </Suspense>
+              <div className="relative size-14">
+                <Skeleton className="absolute inset-0 rounded-xl" />
+                <Suspense fallback={null}>
+                  <LazyMascotAvatar
+                    mode="animated"
+                    state={previewHovering ? "hover" : "idle"}
+                    costume={mascotCostume}
+                    skinColor={mascotSkinColor}
+                    handColor={mascotHandColor}
+                    className="absolute inset-0"
+                    data-testid="avatar-preview"
+                  />
+                </Suspense>
+              </div>
             </span>
           )
         ) : (
@@ -306,16 +317,21 @@ export function AvatarPicker({
             >
               {/* The grid tile is a picker swatch, not a hero — it never wires
                   hover, so it is always the cheap static render regardless of
-                  the teammate's own chosen mode. */}
-              <Suspense fallback={<Skeleton className="size-9 rounded-md" />}>
-                <LazyMascotAvatar
-                  mode="static"
-                  costume={mascotCostume}
-                  skinColor={mascotSkinColor}
-                  handColor={mascotHandColor}
-                  className="size-9"
-                />
-              </Suspense>
+                  the teammate's own chosen mode. The `Skeleton` sits behind,
+                  not just in the `Suspense` fallback, for the same reason the
+                  preview above does. */}
+              <div className="relative size-9 rounded-md">
+                <Skeleton className="absolute inset-0 rounded-md" />
+                <Suspense fallback={null}>
+                  <LazyMascotAvatar
+                    mode="static"
+                    costume={mascotCostume}
+                    skinColor={mascotSkinColor}
+                    handColor={mascotHandColor}
+                    className="absolute inset-0"
+                  />
+                </Suspense>
+              </div>
             </button>
           );
         })}

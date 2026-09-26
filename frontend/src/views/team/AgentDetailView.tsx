@@ -1403,31 +1403,41 @@ function IdentityAvatar({
     // fed a state `MascotAvatar` then ignores — see its own module docs.
     if ((mascotMode ?? "animated") === "static") {
       return (
-        <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
-          <LazyMascotAvatar
-            mode="static"
-            costume={mascotCostume}
-            skinColor={mascotSkinColor}
-            handColor={mascotHandColor}
-            className="size-14"
-            data-testid="agent-avatar"
-          />
-        </Suspense>
+        // The `Skeleton` sits behind, not just in the `Suspense` fallback: see
+        // `agent-profile-sheet.tsx`'s matching `AgentAvatar` for why — the
+        // same gap, the same fix, found live against this exact header
+        // (2026-09-26).
+        <div className="relative size-14">
+          <Skeleton className="absolute inset-0 rounded-xl" />
+          <Suspense fallback={null}>
+            <LazyMascotAvatar
+              mode="static"
+              costume={mascotCostume}
+              skinColor={mascotSkinColor}
+              handColor={mascotHandColor}
+              className="absolute inset-0"
+              data-testid="agent-avatar"
+            />
+          </Suspense>
+        </div>
       );
     }
     return (
       <span onMouseEnter={() => setHovering(true)} onMouseLeave={() => setHovering(false)}>
-        <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
-          <LazyMascotAvatar
-            mode="animated"
-            state={hovering ? "hover" : "idle"}
-            costume={mascotCostume}
-            skinColor={mascotSkinColor}
-            handColor={mascotHandColor}
-            className="size-14"
-            data-testid="agent-avatar"
-          />
-        </Suspense>
+        <div className="relative size-14">
+          <Skeleton className="absolute inset-0 rounded-xl" />
+          <Suspense fallback={null}>
+            <LazyMascotAvatar
+              mode="animated"
+              state={hovering ? "hover" : "idle"}
+              costume={mascotCostume}
+              skinColor={mascotSkinColor}
+              handColor={mascotHandColor}
+              className="absolute inset-0"
+              data-testid="agent-avatar"
+            />
+          </Suspense>
+        </div>
       </span>
     );
   }
