@@ -10,18 +10,54 @@ avatar picker), and was driven live in a browser against
 previously unconfirmed (see §3). What follows is what was actually observed,
 not what was assumed.
 
-## 1. Which number is which state, visually — resolved for the states this component uses
+## 1. Which number is which state, visually — resolved, all nine costumes screenshotted
 
-Confirmed by canvas-pixel sampling and a screenshot, not just a round-tripped
-getter: `mascotAnimationNumber = 1` renders the mascot wearing its cap
-(idle); `= 2` swaps it to headphones (hover). `replying = 3` is wired the
-same way but its visual has not been screenshotted — the artboard has nine
-costume animations total (`cap`, `headband`, `headphone`, `face mask`,
-`cardboard mask`, and four numbered `glass` variants, per
-`rive.animationNames`), so `STATE_NUMBERS` in `mascot-avatar.tsx` is a
-deliberate v1 subset of three, not the file's full range. Whether `3` is a
-sensible "replying" visual, and what `4`-`9`+ look like, is unconfirmed and
-not blocking — nothing in this PR calls those numbers.
+**Update, 2026-09-26 (the mode/costume/color slice):** the "what do `4`-`9`+
+look like" question below was closed by actually cycling
+`mascotAnimationNumber` 1–13 against a running instance of the file
+(`@rive-app/canvas`, driven from a standalone harness page, no jsdom/mocking)
+and screenshotting each landing frame, cross-checked a second time by reading
+the state machine's `StateChange` event data for the transition clip name
+each number plays. Two things the pre-runtime string-table read got wrong,
+now corrected in `crates/opencompany-core/src/company/mascot.rs`
+(`MASCOT_COSTUMES`):
+
+- **`face mask` never rendered.** No number 1–13 produced anything resembling
+  a face-covering mask. What the string table missed entirely: a tenth,
+  unlisted costume — a keffiyeh-style headdress, internally named `habibi` in
+  the animation clip names (`rive.animationNames` includes `habibi`,
+  `habibi copy`, but no plan or doc before this one named it) — which does
+  render, at `mascotAnimationNumber = 6`.
+- **Number `4` is not a stable costume.** It transitions via the same `"cap
+  dance"` clip name number `1` does, but settles on a visibly different
+  resting frame (a shorter, plainer beanie vs. `1`'s low-pulled ribbed one
+  with the mascot's eyes showing through) depending on which number the
+  state machine was previously on — confirmed by isolating the transition
+  (jumping directly from a fresh page load's default straight to `4`, and
+  separately via the sequential 1→2→3→4 path) and getting different resting
+  frames both times. Not addressable as a costume a picker can promise a
+  consistent look for, so `MASCOT_COSTUMES` excludes it.
+
+The confirmed, stable mapping (`mascotAnimationNumber` → costume, `id` in
+`MASCOT_COSTUMES`): `1` cap, `2` headphones, `3` headband, `5` glass1 (round
+goggles), `6` habibi (keffiyeh), `7` cardboard_mask, `8` glass2 (round
+glasses), `9` glass3 (cat-eye sunglasses), `10` glass4 (rectangle
+sunglasses) — nine total. `11` was caught mid-gesture (a wave) rather than at
+rest even after a long settle wait; `12`/`13` echoed `10`'s own resting
+frame rather than introducing a new one; `14` renders the artboard shrunk/off
+-model — evidence there is no addressable tenth costume among the higher
+numbers either the string table nor the sequential walk found.
+
+Superseded by the above but kept for history: `mascotAnimationNumber = 1`
+renders the mascot wearing its cap (idle); `= 2` swaps it to headphones
+(hover) — both still true, just no longer the *only* two confirmed numbers.
+`replying = 3` (headband) is wired the same way `hover` is, but whether it
+reads as a *meaningful* "replying" cue rather than an arbitrary third number
+remains unconfirmed and is unchanged by this update — animated mode keeps
+`hover`/`replying` as these two fixed numbers regardless of a teammate's
+chosen costume (see `mascot-avatar.tsx`'s module docs for why), so this
+question is about their own visual, not about what a chosen costume does to
+them.
 
 ## 2. What the "copy" clips actually do — still unconfirmed, no longer blocked
 
