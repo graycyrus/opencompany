@@ -570,52 +570,30 @@ export function AgentDetailView({
   }
 
   /**
-   * Saves the chosen mascot colorway, the same one-click-is-the-save pattern
-   * as {@link saveAvatar} and for the same reason: a swatch is a visual
-   * choice, not a form field waiting on a submit button.
+   * Saves one mascot appearance field — mode, costume, skin color or hand
+   * color — the same one-click-is-the-save pattern as {@link saveAvatar} and
+   * for the same reason: a toggle or a swatch is a visual choice, not a form
+   * field waiting on a submit button.
    *
-   * A separate `PATCH` from `saveAvatar` rather than bundled into it — the
-   * picker lets an operator try colorway and costume swatches independently of
-   * (and, for the mascot tile itself, before) changing `avatar`, so each is
-   * its own save rather than a combined one that would send fields the
-   * operator never touched.
+   * A separate `PATCH` per field from `saveAvatar` rather than bundled into
+   * it — the picker lets an operator try each independently of (and, for the
+   * mascot tile itself, before) changing `avatar`, so each is its own save
+   * rather than a combined one that would send fields the operator never
+   * touched. `noun` is only for the error toast.
    */
-  async function saveMascotColorway(colorway: string | undefined) {
+  async function saveMascotField(
+    field: "mascotMode" | "mascotCostume" | "mascotSkinColor" | "mascotHandColor",
+    noun: string,
+    value: string | undefined,
+  ) {
     if (!agent) return;
     setAvatarSaving(true);
     try {
-      const updated = await client.updateAgent(
-        agentId,
-        { mascotColorway: colorway ?? null },
-        company,
-      );
+      const updated = await client.updateAgent(agentId, { [field]: value ?? null }, company);
       if (displayedAgentIdRef.current !== agentId) return;
       setAgent(updated);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Couldn't change this agent's colorway.",
-      );
-    } finally {
-      setAvatarSaving(false);
-    }
-  }
-
-  /** Saves the chosen mascot costume. Same shape as {@link saveMascotColorway}. */
-  async function saveMascotCostume(costume: number | undefined) {
-    if (!agent) return;
-    setAvatarSaving(true);
-    try {
-      const updated = await client.updateAgent(
-        agentId,
-        { mascotCostume: costume ?? null },
-        company,
-      );
-      if (displayedAgentIdRef.current !== agentId) return;
-      setAgent(updated);
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Couldn't change this agent's costume.",
-      );
+      toast.error(error instanceof Error ? error.message : `Couldn't change this agent's ${noun}.`);
     } finally {
       setAvatarSaving(false);
     }
@@ -1338,8 +1316,14 @@ export function AgentDetailView({
           setAvatarOpen(false);
           void saveAvatar(avatar);
         }}
-        onPickMascotColorway={(colorway) => void saveMascotColorway(colorway)}
-        onPickMascotCostume={(costume) => void saveMascotCostume(costume)}
+        onPickMascotMode={(mode) => void saveMascotField("mascotMode", "animation mode", mode)}
+        onPickMascotCostume={(costume) => void saveMascotField("mascotCostume", "costume", costume)}
+        onPickMascotSkinColor={(color) =>
+          void saveMascotField("mascotSkinColor", "skin color", color)
+        }
+        onPickMascotHandColor={(color) =>
+          void saveMascotField("mascotHandColor", "hand color", color)
+        }
       />
       {/* Round-2 review, P2-5: confirms before Save actually clears an
           existing pin back to the company default — see `saveHarnessAndModel`'s
@@ -1398,26 +1382,48 @@ function IdentityAvatar({
   name,
   tone,
   avatar,
-  mascotColorway,
+  mascotMode,
   mascotCostume,
+  mascotSkinColor,
+  mascotHandColor,
 }: {
   name: string;
   tone: string;
   avatar: string;
-  mascotColorway?: string;
-  mascotCostume?: number;
+  mascotMode?: string;
+  mascotCostume?: string;
+  mascotSkinColor?: string;
+  mascotHandColor?: string;
 }) {
   // Only the mascot branch needs this — a static tile has no state to track,
   // and hooks cannot sit behind the early return below.
   const [hovering, setHovering] = useState(false);
   if (isMascotRef(avatar)) {
+    // Static means static: the hover handlers are never attached, not merely
+    // fed a state `MascotAvatar` then ignores — see its own module docs.
+    if ((mascotMode ?? "animated") === "static") {
+      return (
+        <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
+          <LazyMascotAvatar
+            mode="static"
+            costume={mascotCostume}
+            skinColor={mascotSkinColor}
+            handColor={mascotHandColor}
+            className="size-14"
+            data-testid="agent-avatar"
+          />
+        </Suspense>
+      );
+    }
     return (
       <span onMouseEnter={() => setHovering(true)} onMouseLeave={() => setHovering(false)}>
         <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
           <LazyMascotAvatar
+            mode="animated"
             state={hovering ? "hover" : "idle"}
-            colorway={mascotColorway}
             costume={mascotCostume}
+            skinColor={mascotSkinColor}
+            handColor={mascotHandColor}
             className="size-14"
             data-testid="agent-avatar"
           />
@@ -1491,8 +1497,10 @@ function Identity({
               name={display}
               tone={tone}
               avatar={avatar}
-              mascotColorway={agent.mascotColorway}
+              mascotMode={agent.mascotMode}
               mascotCostume={agent.mascotCostume}
+              mascotSkinColor={agent.mascotSkinColor}
+              mascotHandColor={agent.mascotHandColor}
             />
           </button>
         ) : (
@@ -1500,8 +1508,10 @@ function Identity({
             name={display}
             tone={tone}
             avatar={avatar}
-            mascotColorway={agent.mascotColorway}
+            mascotMode={agent.mascotMode}
             mascotCostume={agent.mascotCostume}
+            mascotSkinColor={agent.mascotSkinColor}
+            mascotHandColor={agent.mascotHandColor}
           />
         )}
         <div className="min-w-0 flex-1 space-y-2">
@@ -2494,8 +2504,10 @@ function AvatarDialog({
   busy,
   onOpenChange,
   onPick,
-  onPickMascotColorway,
+  onPickMascotMode,
   onPickMascotCostume,
+  onPickMascotSkinColor,
+  onPickMascotHandColor,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -2504,8 +2516,10 @@ function AvatarDialog({
   busy: boolean;
   onOpenChange: (open: boolean) => void;
   onPick: (avatar: string | undefined) => void;
-  onPickMascotColorway: (colorway: string | undefined) => void;
-  onPickMascotCostume: (costume: number | undefined) => void;
+  onPickMascotMode: (mode: string | undefined) => void;
+  onPickMascotCostume: (costume: string | undefined) => void;
+  onPickMascotSkinColor: (color: string | undefined) => void;
+  onPickMascotHandColor: (color: string | undefined) => void;
 }) {
   const name = agent?.name?.trim() || agent?.role || "this agent";
   return (
@@ -2528,10 +2542,14 @@ function AvatarDialog({
             tone={toneFor(agent.id || name)}
             disabled={busy}
             onChange={onPick}
-            mascotColorway={agent.mascotColorway}
+            mascotMode={agent.mascotMode}
             mascotCostume={agent.mascotCostume}
-            onChangeMascotColorway={onPickMascotColorway}
+            mascotSkinColor={agent.mascotSkinColor}
+            mascotHandColor={agent.mascotHandColor}
+            onChangeMascotMode={onPickMascotMode}
             onChangeMascotCostume={onPickMascotCostume}
+            onChangeMascotSkinColor={onPickMascotSkinColor}
+            onChangeMascotHandColor={onPickMascotHandColor}
           />
         )}
       </DialogContent>
