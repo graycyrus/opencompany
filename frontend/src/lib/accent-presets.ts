@@ -28,6 +28,9 @@
 
 import { useSyncExternalStore } from "react";
 
+import { accentRampStepToOklch, ACCENT_STEPS, generateCustomRamp, normalizeHue } from "@/lib/accent-ramp";
+import { evaluateAccentRamp } from "@/lib/accent-contrast";
+
 /** One curated accent preset. Colours live in `index.css`, never here. */
 export interface AccentPreset {
   /**
@@ -82,8 +85,55 @@ export const ACCENT_PRESETS: readonly AccentPreset[] = [
  *  never collide. */
 export const ACCENT_PRESET_STORAGE_KEY = "oc.appearance.accentPreset";
 
+/**
+ * The id that means "generate the ramp from a single operator-chosen hue"
+ * (issue #2493 follow-on, `theme-system-decision.md`'s constrained
+ * "Customize" tab). Deliberately never added to `ACCENT_PRESETS`:
+ * `accent-presets-registry.test.ts` requires every non-default entry there to
+ * have exactly one `[data-accent-preset="…"]` block in `index.css`, and this
+ * id has none on purpose — its ramp is generated client-side
+ * (`@/lib/accent-ramp`) and applied as inline custom properties, never
+ * authored as CSS. `isKnownPreset` special-cases it instead.
+ */
+export const CUSTOM_ACCENT_PRESET_ID = "custom";
+
+/** `oc.appearance.customHue` — the second key `theme-system-decision.md` calls
+ *  for, read only when `oc.appearance.accentPreset` is `"custom"`. */
+export const CUSTOM_HUE_STORAGE_KEY = "oc.appearance.customHue";
+
+/** The hue the "Custom" tile opens to before an operator has ever chosen one —
+ *  violet's own hue (index.css `:root`'s `--brand-500`), so the very first
+ *  Custom selection previews as indistinguishable from the shipped default. */
+export const DEFAULT_CUSTOM_HUE = 285.51;
+
 function isKnownPreset(id: string): boolean {
-  return ACCENT_PRESETS.some((p) => p.id === id);
+  return id === CUSTOM_ACCENT_PRESET_ID || ACCENT_PRESETS.some((p) => p.id === id);
+}
+
+/** The stored custom hue, or `DEFAULT_CUSTOM_HUE` when nothing valid is
+ *  stored — same never-throws contract as `readStoredAccentPreset`. */
+export function readStoredCustomHue(): number {
+  try {
+    const stored = window.localStorage.getItem(CUSTOM_HUE_STORAGE_KEY);
+    if (stored === null) return DEFAULT_CUSTOM_HUE;
+    const parsed = Number.parseFloat(stored);
+    return Number.isFinite(parsed) ? normalizeHue(parsed) : DEFAULT_CUSTOM_HUE;
+  } catch {
+    return DEFAULT_CUSTOM_HUE;
+  }
+}
+
+/** The ten `--brand-*` custom-property names, computed once. */
+const CUSTOM_BRAND_PROPERTIES = ACCENT_STEPS.map((step) => `--brand-${step}`);
+
+/** Removes every inline `--brand-*` override this module may have set. A
+ *  curated preset's CSS block cannot out-rank an inline style
+ *  (`roadblocks.md` R2's specificity trap is about selectors, not inline —
+ *  inline always wins), so switching away from `"custom"` without clearing
+ *  these first would pin the previous custom ramp underneath whatever
+ *  preset id gets set next. */
+function clearInlineAccentRamp(root: HTMLElement): void {
+  for (const property of CUSTOM_BRAND_PROPERTIES) root.style.removeProperty(property);
 }
 
 /** The stored preset id, or the default when nothing valid is stored.
@@ -112,14 +162,40 @@ export function readStoredAccentPreset(): string {
  * on the element where the *reference* is declared, not where it is read, so
  * the attribute has to sit on the same element as the semantic layer itself
  * (`roadblocks.md` R4).
+ *
+ * `id === CUSTOM_ACCENT_PRESET_ID` is the one branch that can refuse: the
+ * generated ramp (`@/lib/accent-ramp`) is only applied — as inline
+ * `--brand-*` custom properties, since it is user-generated data rather than
+ * an authored CSS block — when `evaluateAccentRamp` (`@/lib/accent-contrast`)
+ * says it clears every gamut and contrast bar the curated presets already
+ * do. A refused hue leaves `<html>` completely untouched (not even the
+ * dataset attribute changes), so the last good state — custom or curated —
+ * keeps rendering; it never reverts to the default ramp just because a drag
+ * passed through a bad hue. Returns whether the hue was applied, so the
+ * picker can tell the operator when it was not.
  */
-export function applyAccentPreset(id: string): void {
+export function applyAccentPreset(id: string, customHue?: number): boolean {
   const root = document.documentElement;
+
+  if (id === CUSTOM_ACCENT_PRESET_ID) {
+    const hue = normalizeHue(customHue ?? readStoredCustomHue());
+    const ramp = generateCustomRamp(hue);
+    if (!evaluateAccentRamp(ramp).ok) return false;
+    clearInlineAccentRamp(root); // no-op unless a previous custom ramp was applied
+    for (const step of ACCENT_STEPS) {
+      root.style.setProperty(`--brand-${step}`, accentRampStepToOklch(ramp[step]));
+    }
+    root.dataset.accentPreset = CUSTOM_ACCENT_PRESET_ID;
+    return true;
+  }
+
+  clearInlineAccentRamp(root); // switching off "custom" must drop its inline override
   if (id === DEFAULT_ACCENT_PRESET || !isKnownPreset(id)) {
     delete root.dataset.accentPreset;
   } else {
     root.dataset.accentPreset = id;
   }
+  return true;
 }
 
 /** Reads storage and applies it — the one call `main.tsx` makes, synchronously
@@ -129,9 +205,15 @@ export function applyAccentPreset(id: string): void {
  *  not work in this SPA and copying it here would silently do nothing. No
  *  static `public/` file either: those are served `immutable` for a year
  *  (`roadblocks.md` R3). This function lives in the hashed app bundle instead,
- *  which is what makes it reach a returning browser at all. */
+ *  which is what makes it reach a returning browser at all.
+ *
+ *  Reads `oc.appearance.customHue` too, but only when the stored preset id is
+ *  `"custom"` — same "custom" pre-mount path the curated ids already had, so
+ *  a stored custom hue paints on the very first frame with zero flash, same
+ *  as any other preset. */
 export function applyStoredAccentPreset(): void {
-  applyAccentPreset(readStoredAccentPreset());
+  const id = readStoredAccentPreset();
+  applyAccentPreset(id, id === CUSTOM_ACCENT_PRESET_ID ? readStoredCustomHue() : undefined);
 }
 
 let listeners: Array<() => void> = [];
@@ -167,8 +249,28 @@ function getServerSnapshot(): string {
  * including ones in other tabs, via the `storage` event listener armed below.
  * A `localStorage` write failing (storage disabled, quota) still applies the
  * choice for this tab; it just will not survive a reload.
+ *
+ * For `CUSTOM_ACCENT_PRESET_ID`, `customHue` is the hue to try; a refused hue
+ * (`applyAccentPreset` returns `false`) writes nothing to storage and leaves
+ * whatever was showing alone — the picker's slider can be dragged through a
+ * bad hue without persisting it or losing the last good one. Returns whether
+ * the hue (or preset) was applied, so a caller can show the refusal.
  */
-export function setAccentPreset(id: string): void {
+export function setAccentPreset(id: string, customHue?: number): boolean {
+  if (id === CUSTOM_ACCENT_PRESET_ID) {
+    const hue = normalizeHue(customHue ?? readStoredCustomHue());
+    const applied = applyAccentPreset(CUSTOM_ACCENT_PRESET_ID, hue);
+    if (!applied) return false;
+    try {
+      window.localStorage.setItem(ACCENT_PRESET_STORAGE_KEY, CUSTOM_ACCENT_PRESET_ID);
+      window.localStorage.setItem(CUSTOM_HUE_STORAGE_KEY, String(hue));
+    } catch {
+      // Storage refused; the choice still holds for this tab.
+    }
+    emit();
+    return true;
+  }
+
   try {
     if (id === DEFAULT_ACCENT_PRESET) {
       window.localStorage.removeItem(ACCENT_PRESET_STORAGE_KEY);
@@ -180,15 +282,18 @@ export function setAccentPreset(id: string): void {
   }
   applyAccentPreset(id);
   emit();
+  return true;
 }
 
 if (typeof window !== "undefined") {
   // Cross-tab sync, the same shape `next-themes` uses for its own key: a
   // `storage` event only fires in tabs that did NOT make the write, and only
   // for the one key it names — a `"theme"` change must never re-apply an
-  // accent preset, and vice versa.
+  // accent preset, and vice versa. Both accent keys are watched: a hue-only
+  // change (the preset id stays `"custom"`) only touches
+  // `CUSTOM_HUE_STORAGE_KEY`, and would otherwise never re-apply here.
   window.addEventListener("storage", (event) => {
-    if (event.key !== ACCENT_PRESET_STORAGE_KEY) return;
+    if (event.key !== ACCENT_PRESET_STORAGE_KEY && event.key !== CUSTOM_HUE_STORAGE_KEY) return;
     applyStoredAccentPreset();
     emit();
   });
@@ -202,4 +307,14 @@ if (typeof window !== "undefined") {
  *  the same pattern) avoids. */
 export function useAccentPreset(): string {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+
+/** Same reactivity contract as `useAccentPreset`, for the stored custom hue —
+ *  the Custom tile's slider reads this to seed its position, including after
+ *  a cross-tab `storage` event re-applies a hue chosen elsewhere. Reads
+ *  storage rather than the DOM (unlike `getSnapshot`): the hue is meaningful
+ *  even while `"custom"` is not the active preset, and the ramp on `<html>`
+ *  carries no independent record of the hue it was generated from. */
+export function useCustomHue(): number {
+  return useSyncExternalStore(subscribe, readStoredCustomHue, () => DEFAULT_CUSTOM_HUE);
 }

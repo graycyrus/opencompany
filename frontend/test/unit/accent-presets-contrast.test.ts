@@ -4,19 +4,22 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { ACCENT_CONTRAST_BAR, evaluateAccentRamp } from "@/lib/accent-contrast";
+import { ACCENT_STEPS, generateCustomRamp, type AccentRamp } from "@/lib/accent-ramp";
+
 /**
- * The contrast gate (issue #2493, test-plan U4). Every accent preset — and
- * the default ramp in `:root` — must clear the same five pairs
+ * The contrast gate (issue #2493, test-plan U4). Every curated accent preset —
+ * and the default ramp in `:root` — must clear the same five pairs
  * `docs/design-system/color.md`'s "Accent presets" table documents, at 4.5:1.
  * This is the gate, not a reviewer's eye: a preset that cannot pass belongs in
  * `open-questions.md`, not in `index.css`.
  *
- * Colour math: Björn Ottosson's published oklch → oklab → linear sRGB
- * matrices, and the WCAG 2.1 relative-luminance formula
- * `docs/design-system/color.md:11-17` already uses — reimplemented here
- * rather than imported, because production code (`accent-presets.ts`)
- * deliberately carries no colour math or colour literals at all
- * (`architecture.md` §5, §11).
+ * The colour math and the five pairs live in one place now,
+ * `@/lib/accent-contrast`'s `evaluateAccentRamp` — imported here rather than
+ * reimplemented, per `docs/issues/accent-theme-presets/theme-system-decision.md`'s
+ * requirement that the test and the live "Customize" picker share a single
+ * implementation, so a hue the picker refuses is refused for the same reason
+ * this test would have failed it.
  *
  * Deliberately NOT asserted: `--brand-500` on `--accent` or `--chrome`. The
  * default ramp already misses both (4.20:1, 4.22:1) — a pre-existing gap this
@@ -24,74 +27,20 @@ import { describe, expect, it } from "vitest";
  * `docs/design-system/color.md`'s "Accent presets" section.
  */
 
-function oklchToLinearSrgb(L: number, C: number, Hdeg: number): [number, number, number] {
-  const h = (Hdeg * Math.PI) / 180;
-  const a = C * Math.cos(h);
-  const b = C * Math.sin(h);
-
-  const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
-  const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
-  const s_ = L - 0.0894841775 * a - 1.291485548 * b;
-
-  const l = l_ ** 3;
-  const m = m_ ** 3;
-  const s = s_ ** 3;
-
-  const r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
-  const g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
-  const b2 = -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s;
-  return [r, g, b2];
-}
-
-function linearToSrgb(c: number): number {
-  const cl = Math.min(1, Math.max(0, c));
-  return cl <= 0.0031308 ? 12.92 * cl : 1.055 * cl ** (1 / 2.4) - 0.055;
-}
-
-interface Resolved {
-  hex: string;
-  inGamut: boolean;
-}
-
-function oklchToHex(L: number, C: number, H: number): Resolved {
-  const [r, g, b] = oklchToLinearSrgb(L, C, H);
-  const inGamut = [r, g, b].every((v) => v >= -1e-4 && v <= 1 + 1e-4);
-  const hex =
-    "#" +
-    [r, g, b]
-      .map((v) => Math.max(0, Math.min(255, Math.round(linearToSrgb(v) * 255))))
-      .map((v) => v.toString(16).padStart(2, "0"))
-      .join("");
-  return { hex, inGamut };
-}
-
-function lin(c: number): number {
-  const v = c / 255;
-  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-}
-function luminance(hex: string): number {
-  const [r, g, b] = (hex.match(/\w\w/g) as string[]).map((x) => lin(parseInt(x, 16)));
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-function contrastRatio(a: string, b: string): number {
-  const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
-  return (x + 0.05) / (y + 0.05);
-}
-
 const indexCss = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), "../../src/index.css"),
   "utf8",
 );
 
 /** `--brand-<step>: oklch(L C H); …` -> { L, C, H }, for the given block body. */
-function ramp(body: string): Record<number, { L: number; C: number; H: number }> {
+function ramp(body: string): AccentRamp {
   const out: Record<number, { L: number; C: number; H: number }> = {};
-  for (const step of [50, 100, 200, 300, 400, 500, 600, 700, 800, 900]) {
+  for (const step of ACCENT_STEPS) {
     const m = new RegExp(`--brand-${step}:\\s*oklch\\(([\\d.]+)\\s+([\\d.]+)\\s+([\\d.]+)\\)`).exec(body);
     if (!m) throw new Error(`--brand-${step} not found in block`);
     out[step] = { L: Number(m[1]), C: Number(m[2]), H: Number(m[3]) };
   }
-  return out;
+  return out as AccentRamp;
 }
 
 function blockBody(marker: string): string {
@@ -109,12 +58,6 @@ function blockBody(marker: string): string {
   throw new Error(`unterminated block: ${marker}`);
 }
 
-const DARK_ACTIVE_RUNG_HEX = "#1e1e28"; // --surface-dark-active, index.css
-const LIGHT_CANVAS_HEX = "#f7f7fc"; // --surface-light-bg
-const DARK_CANVAS_HEX = "#08090b"; // --surface-dark-bg
-const WHITE_HEX = "#ffffff";
-const BAR = 4.5;
-
 const rampsToCheck: Array<{ name: string; body: string }> = [
   { name: "default (:root)", body: blockBody(":root {") },
   ...["violet", "indigo", "blue", "teal", "green", "amber", "rose", "graphite"].map((id) => ({
@@ -124,36 +67,120 @@ const rampsToCheck: Array<{ name: string; body: string }> = [
 ];
 
 describe.each(rampsToCheck)("accent preset contrast: $name", ({ body }) => {
-  const steps = ramp(body);
-  const hex = (step: number) => {
-    const { L, C, H } = steps[step];
-    const resolved = oklchToHex(L, C, H);
-    return resolved;
-  };
+  const evaluation = evaluateAccentRamp(ramp(body));
 
   it("keeps every ramp step in sRGB gamut", () => {
-    for (const step of [50, 100, 200, 300, 400, 500, 600, 700, 800, 900]) {
-      expect(hex(step).inGamut, `step ${step} is out of sRGB gamut`).toBe(true);
-    }
+    expect(evaluation.inGamut).toBe(true);
   });
 
   it("clears 4.5:1 white text on 500", () => {
-    expect(contrastRatio(WHITE_HEX, hex(500).hex)).toBeGreaterThanOrEqual(BAR);
+    expect(evaluation.ratios.whiteOn500).toBeGreaterThanOrEqual(ACCENT_CONTRAST_BAR);
   });
 
   it("clears 4.5:1 for 500 on the light canvas", () => {
-    expect(contrastRatio(hex(500).hex, LIGHT_CANVAS_HEX)).toBeGreaterThanOrEqual(BAR);
+    expect(evaluation.ratios.c500OnLightCanvas).toBeGreaterThanOrEqual(ACCENT_CONTRAST_BAR);
   });
 
   it("clears 4.5:1 for 400 on the dark canvas", () => {
-    expect(contrastRatio(hex(400).hex, DARK_CANVAS_HEX)).toBeGreaterThanOrEqual(BAR);
+    expect(evaluation.ratios.c400OnDarkCanvas).toBeGreaterThanOrEqual(ACCENT_CONTRAST_BAR);
   });
 
   it("clears 4.5:1 for 700 on 100 (the active nav row)", () => {
-    expect(contrastRatio(hex(700).hex, hex(100).hex)).toBeGreaterThanOrEqual(BAR);
+    expect(evaluation.ratios.c700On100).toBeGreaterThanOrEqual(ACCENT_CONTRAST_BAR);
   });
 
   it("clears 4.5:1 for 300 on the dark active rung", () => {
-    expect(contrastRatio(hex(300).hex, DARK_ACTIVE_RUNG_HEX)).toBeGreaterThanOrEqual(BAR);
+    expect(evaluation.ratios.c300OnDarkActiveRung).toBeGreaterThanOrEqual(ACCENT_CONTRAST_BAR);
+  });
+});
+
+/**
+ * The "Customize" hue ramp (`@/lib/accent-ramp`'s `generateCustomRamp`), fuzzed
+ * across the hue circle rather than checked at the 9 fixed presets above —
+ * `theme-system-decision.md`'s explicit ask, since a custom hue is exactly
+ * the input this gate did not used to see.
+ */
+describe("custom hue ramp", () => {
+  const CURATED_ANCHORS: Array<{ name: string; hue: number }> = [
+    { name: "rose", hue: 15.0 },
+    { name: "amber", hue: 55.0 },
+    { name: "green", hue: 145.0 },
+    { name: "teal", hue: 195.0 },
+    { name: "blue", hue: 255.0 },
+    { name: "indigo", hue: 268.0 },
+    { name: "violet", hue: 285.51 },
+  ];
+
+  describe.each(CURATED_ANCHORS)("reproduces the curated $name ramp at its own hue", ({ name, hue }) => {
+    const curated = ramp(blockBody(`[data-accent-preset="${name}"] {`));
+    const generated = generateCustomRamp(hue);
+
+    it("matches every step's L, C and H within rounding tolerance", () => {
+      for (const step of ACCENT_STEPS) {
+        expect(generated[step].L, `step ${step} L`).toBeCloseTo(curated[step].L, 3);
+        expect(generated[step].C, `step ${step} C`).toBeCloseTo(curated[step].C, 3);
+        expect(generated[step].H, `step ${step} H`).toBeCloseTo(curated[step].H, 1);
+      }
+    });
+
+    it("still clears every gamut and contrast bar the curated preset does", () => {
+      expect(evaluateAccentRamp(generated).ok).toBe(true);
+    });
+  });
+
+  // `violet` is also `:root`'s own ramp, so its exact hue is the one every
+  // fresh "Custom" tile opens to (`DEFAULT_CUSTOM_HUE`, `accent-presets.ts`) —
+  // pinned here too, redundantly with the anchor check above, because a
+  // regression here is exactly what would put a visible flash into the very
+  // first time an operator opens the slider.
+  it("previews as violet at hue 285.51, violet's own hue", () => {
+    const violet = ramp(blockBody('[data-accent-preset="violet"] {'));
+    const generated = generateCustomRamp(285.51);
+    expect(generated[500].L).toBeCloseTo(violet[500].L, 3);
+    expect(generated[500].C).toBeCloseTo(violet[500].C, 3);
+  });
+
+  it("refuses a hue from the yellow/yellow-green band (90°) — the true sRGB gamut boundary there dips well below what a straight interpolation between amber (55°) and green (145°) assumes", () => {
+    const evaluation = evaluateAccentRamp(generateCustomRamp(90));
+    expect(evaluation.ok).toBe(false);
+  });
+
+  it("accepts a hue close to a curated anchor (rose-adjacent, 10°)", () => {
+    const evaluation = evaluateAccentRamp(generateCustomRamp(10));
+    expect(evaluation.ok).toBe(true);
+  });
+
+  it("accepts hues right at the 0°/360° wrap, with no discontinuity", () => {
+    const at0 = evaluateAccentRamp(generateCustomRamp(0));
+    const at360 = evaluateAccentRamp(generateCustomRamp(360));
+    const at359 = evaluateAccentRamp(generateCustomRamp(359.9));
+    expect(at0.ok).toBe(true);
+    expect(at360.ok).toBe(true);
+    // 0 and 360 are the same hue; the ramp must be identical, not just both "ok".
+    const ramp0 = generateCustomRamp(0);
+    const ramp360 = generateCustomRamp(360);
+    for (const step of ACCENT_STEPS) {
+      expect(ramp360[step].L).toBeCloseTo(ramp0[step].L, 9);
+      expect(ramp360[step].C).toBeCloseTo(ramp0[step].C, 9);
+      expect(ramp360[step].H).toBeCloseTo(ramp0[step].H, 9);
+    }
+    expect(at359.ok).toBe(true);
+  });
+
+  it("sweeps the full hue circle without throwing, and is neither vacuously all-pass nor all-fail", () => {
+    let passCount = 0;
+    let failCount = 0;
+    for (let hue = 0; hue < 360; hue += 1) {
+      const evaluation = evaluateAccentRamp(generateCustomRamp(hue));
+      if (evaluation.ok) passCount += 1;
+      else failCount += 1;
+    }
+    expect(passCount + failCount).toBe(360);
+    // A constrained customize control is expected to refuse a real portion of
+    // the wheel (the decision doc's whole point — interpolation is not a
+    // gamut solver) but must not refuse everything, and the violet/rose/blue
+    // neighbourhood the brand already lives in must stay usable.
+    expect(passCount).toBeGreaterThan(100);
+    expect(failCount).toBeGreaterThan(50);
   });
 });
