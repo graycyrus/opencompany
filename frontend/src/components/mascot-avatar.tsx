@@ -158,11 +158,17 @@ export function MascotAvatar({
     // manual `useViewModel`/`useViewModelInstance` calls below.
     stateMachine: "MascotProfileAnimations",
     autoBind: true,
-    // A static mascot never animates — no reactivity to hold still against,
-    // so there is nothing to autoplay. This is also the cheap half of
-    // "static": the canvas paints its one frame and the Rive runtime never
-    // ticks it again.
-    autoplay: !isStatic && !reducedMotion,
+    // `autoplay: false` does not mean "paint one frame and stop" — it means
+    // the Rive runtime never starts its render loop at all, so the canvas
+    // never paints *anything*, including the ViewModel-driven costume/color
+    // writes below (confirmed live: a static mascot rendered fully
+    // transparent, not a frozen cap). A static mascot's costume never
+    // transitions (the number this component writes for it never changes),
+    // so keeping the loop running costs nothing extra to look at — "static"
+    // is enforced by never changing `state`/the animation number and never
+    // wiring hover up (see this component's own module docs), not by
+    // stopping the runtime.
+    autoplay: !reducedMotion,
   });
 
   const viewModel = useViewModel(rive, { useDefault: true });
