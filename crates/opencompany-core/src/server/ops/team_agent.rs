@@ -240,17 +240,25 @@ pub(super) struct AgentDetailDto {
     /// console draws the mascot it hashes from the id.
     #[serde(skip_serializing_if = "Option::is_none")]
     avatar: Option<String>,
-    /// The mascot colorway this teammate wears, when somebody has chosen one
-    /// (`docs/spec/runtime/avatars.md`). Only meaningful when `avatar` is
-    /// `"mascot:animated"`. Absent means the `.riv` file's own default
-    /// colorway, not "no mascot".
+    /// Whether this teammate's `mascot:animated` canvas plays, when somebody
+    /// has chosen a mode (`docs/spec/runtime/avatars.md`). Only meaningful
+    /// when `avatar` is `"mascot:animated"`. Absent means the file's own
+    /// default mode (`"animated"`), not "no mascot".
     #[serde(skip_serializing_if = "Option::is_none")]
-    mascot_colorway: Option<String>,
+    mascot_mode: Option<String>,
     /// The mascot costume this teammate wears, when somebody has chosen one.
-    /// Only meaningful when `avatar` is `"mascot:animated"`. Absent means the
-    /// file's own default costume.
+    /// Applies whichever mode is in force. Absent means the file's own
+    /// default costume.
     #[serde(skip_serializing_if = "Option::is_none")]
-    mascot_costume: Option<u8>,
+    mascot_costume: Option<String>,
+    /// The mascot's skin (body) color, when somebody has chosen one. Absent
+    /// means the file's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mascot_skin_color: Option<String>,
+    /// The mascot's hand/accent color, when somebody has chosen one. Absent
+    /// means the file's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mascot_hand_color: Option<String>,
     /// The cap in force, its spend, and its attribution — the same fields and
     /// the same absent-means-uncapped contract as `GET …/team`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -609,31 +617,40 @@ pub(super) struct EditAgent {
     /// that reach the record name something this host already holds.
     #[serde(default, deserialize_with = "double_option")]
     avatar: Option<Option<String>>,
-    /// The mascot colorway this teammate wears. Same double-option contract as
-    /// `avatar`:
+    /// Whether this teammate's `mascot:animated` canvas plays. Same
+    /// double-option contract as `avatar`:
     ///
     /// | body | parses as | means |
     /// |---|---|---|
-    /// | `{}` | `None` | leave the colorway alone |
-    /// | `{"mascotColorway": null}` | `Some(None)` | reset to the file's own default colorway |
-    /// | `{"mascotColorway": "teal"}` | `Some(Some(…))` | wear that colorway |
+    /// | `{}` | `None` | leave the mode alone |
+    /// | `{"mascotMode": null}` | `Some(None)` | reset to the file's own default mode (`"animated"`) |
+    /// | `{"mascotMode": "static"}` | `Some(Some(…))` | wear that mode |
     ///
     /// Meaningful only alongside a `mascot:` `avatar`, but not refused when
     /// sent without one — the same "store the choice, apply it once the right
     /// avatar is worn" latitude a picker UI needs when it lets an operator
-    /// preview a colorway before committing the mascot itself. Validated by
-    /// [`crate::company::avatar::validate_mascot_colorway`] against the
-    /// curated, closed list — never a raw color. Open to any member, matching
-    /// `avatar`: picking a colleague's colorway is not a privilege boundary.
+    /// preview a mode before committing the mascot itself. Validated by
+    /// [`crate::company::mascot::parse_mode`] against the closed list. Open
+    /// to any member, matching `avatar`: picking a colleague's display mode
+    /// is not a privilege boundary.
     #[serde(default, deserialize_with = "double_option")]
-    mascot_colorway: Option<Option<String>>,
-    /// The mascot costume this teammate wears. Same double-option contract and
-    /// member-open gate as `mascot_colorway`; `null` resets to the file's own
-    /// default costume, a number sets it. Validated by
-    /// [`crate::company::avatar::validate_mascot_costume`] against
-    /// [`crate::company::avatar::MASCOT_COSTUME_COUNT`].
+    mascot_mode: Option<Option<String>>,
+    /// The mascot costume this teammate wears. Same double-option contract
+    /// and member-open gate as `mascot_mode`; `null` resets to the file's own
+    /// default costume, an id sets it. Applies whichever mode is in force.
+    /// Validated by [`crate::company::mascot::parse_costume`].
     #[serde(default, deserialize_with = "double_option")]
-    mascot_costume: Option<Option<u8>>,
+    mascot_costume: Option<Option<String>>,
+    /// The mascot's skin (body) color. Same double-option contract and
+    /// member-open gate as `mascot_mode`. Validated by
+    /// [`crate::company::mascot::parse_skin_color`].
+    #[serde(default, deserialize_with = "double_option")]
+    mascot_skin_color: Option<Option<String>>,
+    /// The mascot's hand/accent color. Same double-option contract and
+    /// member-open gate as `mascot_mode`. Validated by
+    /// [`crate::company::mascot::parse_hand_color`].
+    #[serde(default, deserialize_with = "double_option")]
+    mascot_hand_color: Option<Option<String>>,
     /// The teammate's own model override (issue #1245's per-agent follow-up).
     /// A double option for the same reason as `description`: absent leaves it
     /// alone, `null` clears it back to the harness's own default, and a
@@ -801,27 +818,45 @@ async fn edit_agent(
         }
     };
 
-    // The mascot colorway/costume need no I/O to validate — both are closed,
-    // in-memory lists — so unlike `avatar` they are checked here rather than
-    // resolved, and the checked values are what gets written under the lock
-    // below. Same double-option unwrap shape as `resolved_avatar`.
-    let resolved_mascot_colorway: Option<Option<String>> = match &body.mascot_colorway {
+    // The mascot mode/costume/colors need no I/O to validate — all four are
+    // closed, in-memory lists — so unlike `avatar` they are checked here
+    // rather than resolved, and the checked values are what gets written
+    // under the lock below. Same double-option unwrap shape as
+    // `resolved_avatar`.
+    let resolved_mascot_mode: Option<Option<String>> = match &body.mascot_mode {
         None => None,
         Some(None) => Some(None),
-        Some(Some(name)) => {
-            let trimmed = name.trim();
-            crate::company::avatar::validate_mascot_colorway(trimmed)
+        Some(Some(value)) => {
+            let parsed = crate::company::mascot::parse_mode(value)
                 .map_err(|e| ApiError(e).into_response())?;
-            Some(Some(trimmed.to_string()))
+            Some(Some(parsed.to_string()))
         }
     };
-    let resolved_mascot_costume: Option<Option<u8>> = match body.mascot_costume {
+    let resolved_mascot_costume: Option<Option<String>> = match &body.mascot_costume {
         None => None,
         Some(None) => Some(None),
-        Some(Some(number)) => {
-            crate::company::avatar::validate_mascot_costume(number)
+        Some(Some(value)) => {
+            let parsed = crate::company::mascot::parse_costume(value)
                 .map_err(|e| ApiError(e).into_response())?;
-            Some(Some(number))
+            Some(Some(parsed.to_string()))
+        }
+    };
+    let resolved_mascot_skin_color: Option<Option<String>> = match &body.mascot_skin_color {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(value)) => {
+            let parsed = crate::company::mascot::parse_skin_color(value)
+                .map_err(|e| ApiError(e).into_response())?;
+            Some(Some(parsed.to_string()))
+        }
+    };
+    let resolved_mascot_hand_color: Option<Option<String>> = match &body.mascot_hand_color {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(value)) => {
+            let parsed = crate::company::mascot::parse_hand_color(value)
+                .map_err(|e| ApiError(e).into_response())?;
+            Some(Some(parsed.to_string()))
         }
     };
 
@@ -1210,27 +1245,47 @@ async fn edit_agent(
         }
     }
 
-    // The chosen mascot colorway/costume, written the same field-wise way as
-    // `avatar` — each validated above, with no I/O to get ahead of the write
-    // lock for.
-    if let Some(colorway) = resolved_mascot_colorway {
-        match colorway {
-            Some(name) => record.upsert_agent_override(AgentOverride {
+    // The chosen mascot mode/costume/colors, written the same field-wise way
+    // as `avatar` — each validated above, with no I/O to get ahead of the
+    // write lock for.
+    if let Some(mode) = resolved_mascot_mode {
+        match mode {
+            Some(value) => record.upsert_agent_override(AgentOverride {
                 agent_id: agent_id.clone(),
-                mascot_colorway: Some(name),
+                mascot_mode: Some(value),
                 ..Default::default()
             }),
-            None => record.clear_agent_mascot_colorway(&agent_id),
+            None => record.clear_agent_mascot_mode(&agent_id),
         }
     }
     if let Some(costume) = resolved_mascot_costume {
         match costume {
-            Some(number) => record.upsert_agent_override(AgentOverride {
+            Some(value) => record.upsert_agent_override(AgentOverride {
                 agent_id: agent_id.clone(),
-                mascot_costume: Some(number),
+                mascot_costume: Some(value),
                 ..Default::default()
             }),
             None => record.clear_agent_mascot_costume(&agent_id),
+        }
+    }
+    if let Some(skin_color) = resolved_mascot_skin_color {
+        match skin_color {
+            Some(value) => record.upsert_agent_override(AgentOverride {
+                agent_id: agent_id.clone(),
+                mascot_skin_color: Some(value),
+                ..Default::default()
+            }),
+            None => record.clear_agent_mascot_skin_color(&agent_id),
+        }
+    }
+    if let Some(hand_color) = resolved_mascot_hand_color {
+        match hand_color {
+            Some(value) => record.upsert_agent_override(AgentOverride {
+                agent_id: agent_id.clone(),
+                mascot_hand_color: Some(value),
+                ..Default::default()
+            }),
+            None => record.clear_agent_mascot_hand_color(&agent_id),
         }
     }
 
@@ -1467,8 +1522,10 @@ async fn detail(
         budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.map(|entry| entry.at_millis),
         avatar: record.effective_avatar(agent_id),
-        mascot_colorway: record.effective_mascot_colorway(agent_id),
+        mascot_mode: record.effective_mascot_mode(agent_id),
         mascot_costume: record.effective_mascot_costume(agent_id),
+        mascot_skin_color: record.effective_mascot_skin_color(agent_id),
+        mascot_hand_color: record.effective_mascot_hand_color(agent_id),
     }))
 }
 
