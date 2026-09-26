@@ -7,9 +7,10 @@
 // can only be watched in a real browser (see
 // `docs/issue/mascot-profile-avatar/open-questions.md` §3 for how that was
 // verified). What a unit test *can* pin, and this one does: which
-// `mascotAnimationNumber` value each `state` prop writes, that
-// `prefers-reduced-motion` overrides `hover`/`replying` back to idle, and
-// that the colors are set once the ViewModel instance is bound.
+// `mascotAnimationNumber` value each `mode`/`state`/`costume` combination
+// writes, that `prefers-reduced-motion` and `mode="static"` both hold the
+// costume baseline regardless of `state`, and that the colors are set once
+// the ViewModel instance is bound.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -79,78 +80,82 @@ afterEach(async () => {
   container.remove();
 });
 
-function render(state: "idle" | "hover" | "replying") {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function render(props: Record<string, any>) {
   act(() => {
-    root.render(createElement(MascotAvatar, { state }));
+    root.render(createElement(MascotAvatar, props));
   });
 }
 
 describe("MascotAvatar", () => {
-  it("writes 1 for idle, 2 for hover, 3 for replying", () => {
-    render("idle");
+  it("writes 1 (cap) for idle, 2 for hover, 3 for replying — the file's own default costume", () => {
+    render({ state: "idle" });
     expect(rive.setNumber).toHaveBeenLastCalledWith(1);
-    render("hover");
+    render({ state: "hover" });
     expect(rive.setNumber).toHaveBeenLastCalledWith(2);
-    render("replying");
+    render({ state: "replying" });
     expect(rive.setNumber).toHaveBeenLastCalledWith(3);
   });
 
-  it("defaults to idle when no state prop is given", () => {
-    act(() => {
-      root.render(createElement(MascotAvatar, {}));
-    });
+  it("defaults to animated mode, idle state, cap costume when no props are given", () => {
+    render({});
     expect(rive.setNumber).toHaveBeenLastCalledWith(1);
   });
 
-  it("holds idle under prefers-reduced-motion, regardless of the requested state", () => {
+  it("holds the costume baseline under prefers-reduced-motion, regardless of the requested state", () => {
     reduced = true;
-    render("hover");
+    render({ state: "hover" });
     expect(rive.setNumber).toHaveBeenLastCalledWith(1);
   });
 
-  it("sets the mascot's default colorway once bound", () => {
-    render("idle");
+  it("sets the mascot's default skin/hand colors once bound", () => {
+    render({ state: "idle" });
     expect(rive.setHandRgb).toHaveBeenCalledWith(0xb4, 0x90, 0x0b);
     expect(rive.setSkinRgb).toHaveBeenCalledWith(0xf7, 0xd1, 0x45);
   });
 
   it("renders hidden from assistive tech — the mascot is decorative, the teammate's name carries the meaning", () => {
-    render("idle");
+    render({ state: "idle" });
     const wrapper = container.querySelector("[aria-hidden]");
     expect(wrapper).not.toBeNull();
   });
 
-  it("an explicit costume overrides the state-driven number, including on hover", () => {
-    act(() => {
-      root.render(createElement(MascotAvatar, { state: "idle", costume: 7 }));
-    });
-    expect(rive.setNumber).toHaveBeenLastCalledWith(7);
-    act(() => {
-      root.render(createElement(MascotAvatar, { state: "hover", costume: 7 }));
-    });
-    // Still 7, not 2 — a chosen costume is a fixed look, not an idle/hover pair.
-    expect(rive.setNumber).toHaveBeenLastCalledWith(7);
+  it("a chosen costume becomes the idle baseline, by its mascotAnimationNumber", () => {
+    render({ state: "idle", costume: "glass2" });
+    expect(rive.setNumber).toHaveBeenLastCalledWith(8);
   });
 
-  it("with no costume chosen, hover still swaps the number as before", () => {
-    render("idle");
+  it("an unrecognised costume falls back to the default (cap, 1)", () => {
+    render({ state: "idle", costume: "not-a-real-costume" });
     expect(rive.setNumber).toHaveBeenLastCalledWith(1);
-    render("hover");
+  });
+
+  it("in animated mode, hover/replying stay the fixed reactive numbers even with a costume chosen — a chosen costume is the idle baseline, not a hover override", () => {
+    render({ state: "idle", costume: "glass2" });
+    expect(rive.setNumber).toHaveBeenLastCalledWith(8);
+    render({ state: "hover", costume: "glass2" });
     expect(rive.setNumber).toHaveBeenLastCalledWith(2);
+    render({ state: "idle", costume: "glass2" });
+    expect(rive.setNumber).toHaveBeenLastCalledWith(8);
   });
 
-  it("writes a chosen colorway's rgb pair", () => {
-    act(() => {
-      root.render(createElement(MascotAvatar, { state: "idle", colorway: "teal" }));
-    });
-    expect(rive.setHandRgb).toHaveBeenLastCalledWith(0x0b, 0x6e, 0x69);
-    expect(rive.setSkinRgb).toHaveBeenLastCalledWith(0x4d, 0xc9, 0xbf);
+  it("static mode ignores state entirely and holds the costume baseline", () => {
+    render({ mode: "static", state: "idle", costume: "glass2" });
+    expect(rive.setNumber).toHaveBeenLastCalledWith(8);
+    render({ mode: "static", state: "hover", costume: "glass2" });
+    expect(rive.setNumber).toHaveBeenLastCalledWith(8);
+    render({ mode: "static", state: "replying", costume: "glass2" });
+    expect(rive.setNumber).toHaveBeenLastCalledWith(8);
   });
 
-  it("falls back to the default colorway for an unrecognised name", () => {
-    act(() => {
-      root.render(createElement(MascotAvatar, { state: "idle", colorway: "nonexistent" }));
-    });
+  it("writes a chosen skin/hand color pair", () => {
+    render({ state: "idle", skinColor: "mint", handColor: "teal" });
+    expect(rive.setSkinRgb).toHaveBeenLastCalledWith(0xa8, 0xe6, 0xc1);
+    expect(rive.setHandRgb).toHaveBeenLastCalledWith(0x2f, 0x8f, 0x86);
+  });
+
+  it("falls back to the default colors for an unrecognised id", () => {
+    render({ state: "idle", skinColor: "nonexistent", handColor: "nonexistent" });
     expect(rive.setHandRgb).toHaveBeenLastCalledWith(0xb4, 0x90, 0x0b);
     expect(rive.setSkinRgb).toHaveBeenLastCalledWith(0xf7, 0xd1, 0x45);
   });

@@ -13,10 +13,11 @@ import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  MASCOT_COLORWAYS,
-  MASCOT_COSTUME_COUNT,
-  MASCOT_COSTUME_NAMES,
+  MASCOT_COSTUMES,
+  MASCOT_HAND_COLORS,
   MASCOT_KINDS,
+  MASCOT_MODES,
+  MASCOT_SKIN_COLORS,
   MAX_AVATAR_MB,
   TINY_FLAVOURS,
   avatarRef,
@@ -65,30 +66,97 @@ describe("the mascot kinds", () => {
   });
 });
 
-describe("the mascot colorways", () => {
-  it("are the same names the host validates against", () => {
-    const rust = readFileSync(resolve(repoRoot, "crates/opencompany-core/src/company/avatar.rs"), "utf8");
-    const block = /pub const MASCOT_COLORWAYS: \[.*?\] = \[([\s\S]*?)\n\];/.exec(rust);
-    expect(block, "MASCOT_COLORWAYS is no longer declared the way this test reads it").not.toBeNull();
-    const hostNames = Array.from(block![1].matchAll(/\("([a-z]+)"/g), (m) => m[1]);
-    expect([...hostNames].sort()).toEqual([...MASCOT_COLORWAYS.map((c) => c.name)].sort());
+const mascotRustSource = () =>
+  readFileSync(resolve(repoRoot, "crates/opencompany-core/src/company/mascot.rs"), "utf8");
+
+describe("the mascot display modes", () => {
+  it("are the same list the host validates against", () => {
+    const rust = mascotRustSource();
+    const block = /pub const MASCOT_MODES: \[&str; \d+\] = \[([^\]]*)\]/s.exec(rust);
+    expect(block, "MASCOT_MODES is no longer declared the way this test reads it").not.toBeNull();
+    const hostModes = Array.from(block![1].matchAll(/"([a-z]+)"/g), (m) => m[1]);
+    expect([...hostModes].sort()).toEqual([...MASCOT_MODES].sort());
   });
 
-  it("amber is first and matches the .riv file's own shipped default", () => {
-    expect(MASCOT_COLORWAYS[0]).toEqual({ name: "amber", hand: "#B4900B", skin: "#F7D145" });
+  it("animated is the file's own default, first in the list", () => {
+    expect(MASCOT_MODES[0]).toBe("animated");
   });
 });
 
-describe("the mascot costume count", () => {
-  it("matches the host's MASCOT_COSTUME_COUNT", () => {
-    const rust = readFileSync(resolve(repoRoot, "crates/opencompany-core/src/company/avatar.rs"), "utf8");
-    const match = /pub const MASCOT_COSTUME_COUNT: u8 = (\d+);/.exec(rust);
-    expect(match, "MASCOT_COSTUME_COUNT is no longer declared the way this test reads it").not.toBeNull();
-    expect(Number(match![1])).toBe(MASCOT_COSTUME_COUNT);
+describe("the mascot costumes", () => {
+  it("are the same ids and numbers the host validates against", () => {
+    const rust = mascotRustSource();
+    const idsBlock = /pub const MASCOT_COSTUMES: \[&str; \d+\] = \[([\s\S]*?)\n\];/.exec(rust);
+    expect(idsBlock, "MASCOT_COSTUMES is no longer declared the way this test reads it").not.toBeNull();
+    const hostIds = Array.from(idsBlock![1].matchAll(/"([a-z0-9_]+)"/g), (m) => m[1]);
+    expect([...hostIds].sort()).toEqual([...MASCOT_COSTUMES.map((c) => c.id)].sort());
+
+    const numbersBlock = /pub const MASCOT_COSTUME_NUMBERS: \[u8; \d+\] = \[([^\]]*)\]/s.exec(rust);
+    expect(
+      numbersBlock,
+      "MASCOT_COSTUME_NUMBERS is no longer declared the way this test reads it",
+    ).not.toBeNull();
+    const hostNumbers = Array.from(numbersBlock![1].matchAll(/(\d+)/g), (m) => Number(m[1]));
+    // Paired 1:1 with MASCOT_COSTUMES by position on both sides — not just the
+    // same set, the same costume gets the same number, or a picker choice
+    // would render a different costume than the one it named.
+    expect(hostIds.map((id, i) => [id, hostNumbers[i]])).toEqual(
+      MASCOT_COSTUMES.map((c) => [c.id, c.number]),
+    );
   });
 
-  it("has exactly one name per costume number", () => {
-    expect(MASCOT_COSTUME_NAMES.length).toBe(MASCOT_COSTUME_COUNT);
+  it("cap is the file's own default, first in the list", () => {
+    expect(MASCOT_COSTUMES[0]).toMatchObject({ id: "cap", number: 1 });
+  });
+
+  it("each have a file behind them (the one shipped .riv, shared by every costume)", () => {
+    for (const { id } of MASCOT_COSTUMES) {
+      expect(existsSync(resolve(repoRoot, "frontend/public/avatars/mascot-animated.riv")), id).toBe(
+        true,
+      );
+    }
+  });
+});
+
+describe("the mascot colors", () => {
+  it("skin colors are the same ids and hexes the host validates against", () => {
+    const rust = mascotRustSource();
+    const idsBlock = /pub const MASCOT_SKIN_COLORS: \[&str; \d+\] = \[([^\]]*)\]/s.exec(rust);
+    expect(idsBlock, "MASCOT_SKIN_COLORS is no longer declared the way this test reads it").not.toBeNull();
+    const hostIds = Array.from(idsBlock![1].matchAll(/"([a-z]+)"/g), (m) => m[1]);
+    expect([...hostIds].sort()).toEqual([...MASCOT_SKIN_COLORS.map((c) => c.id)].sort());
+
+    // rustfmt wraps this one onto two lines (the array itself pushes the
+    // declaration past its line-length limit), so `=` and `[` are separated
+    // by a newline and indentation rather than the single space the shorter
+    // consts above get — hence `=\s*\[` instead of ` = \[`.
+    const hexBlock = /pub const MASCOT_SKIN_COLOR_HEXES: \[&str; \d+\] =\s*\[([^\]]*)\]/s.exec(rust);
+    expect(hexBlock, "MASCOT_SKIN_COLOR_HEXES is no longer declared the way this test reads it").not.toBeNull();
+    const hostHexes = Array.from(hexBlock![1].matchAll(/"([0-9a-f]{6})"/g), (m) => m[1]);
+    expect(hostIds.map((id, i) => [id, hostHexes[i]])).toEqual(
+      MASCOT_SKIN_COLORS.map((c) => [c.id, c.hex.replace("#", "").toLowerCase()]),
+    );
+  });
+
+  it("hand colors are the same ids and hexes the host validates against", () => {
+    const rust = mascotRustSource();
+    const idsBlock = /pub const MASCOT_HAND_COLORS: \[&str; \d+\] = \[([^\]]*)\]/s.exec(rust);
+    expect(idsBlock, "MASCOT_HAND_COLORS is no longer declared the way this test reads it").not.toBeNull();
+    const hostIds = Array.from(idsBlock![1].matchAll(/"([a-z]+)"/g), (m) => m[1]);
+    expect([...hostIds].sort()).toEqual([...MASCOT_HAND_COLORS.map((c) => c.id)].sort());
+
+    // Same rustfmt line-wrap as MASCOT_SKIN_COLOR_HEXES above.
+    const hexBlock = /pub const MASCOT_HAND_COLOR_HEXES: \[&str; \d+\] =\s*\[([^\]]*)\]/s.exec(rust);
+    expect(hexBlock, "MASCOT_HAND_COLOR_HEXES is no longer declared the way this test reads it").not.toBeNull();
+    const hostHexes = Array.from(hexBlock![1].matchAll(/"([0-9a-f]{6})"/g), (m) => m[1]);
+    expect(hostIds.map((id, i) => [id, hostHexes[i]])).toEqual(
+      MASCOT_HAND_COLORS.map((c) => [c.id, c.hex.replace("#", "").toLowerCase()]),
+    );
+  });
+
+  it("both defaults are first and match the .riv file's own shipped colors", () => {
+    expect(MASCOT_SKIN_COLORS[0]).toEqual({ id: "default", hex: "#F7D145" });
+    expect(MASCOT_HAND_COLORS[0]).toEqual({ id: "default", hex: "#B4900B" });
   });
 });
 

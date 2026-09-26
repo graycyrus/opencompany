@@ -56,7 +56,7 @@ use crate::error::OpenCompanyError;
 /// the file's own default when nobody has overridden the mode, matching what
 /// every existing `mascot:animated` wearer already saw before this override
 /// existed.
-pub const MASCOT_MODES: [&str; 2] = ["static", "animated"];
+pub const MASCOT_MODES: [&str; 2] = ["animated", "static"];
 
 /// The nine costumes a `mascot:animated` wearer may land on, by id.
 ///

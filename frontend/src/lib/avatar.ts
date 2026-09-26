@@ -64,7 +64,7 @@ export type MascotKind = (typeof MASCOT_KINDS)[number];
  * file's own default, so a teammate with no chosen mode renders exactly as
  * every `mascot:animated` wearer already did before this override existed.
  */
-export const MASCOT_MODES = ["static", "animated"] as const;
+export const MASCOT_MODES = ["animated", "static"] as const;
 
 export type MascotMode = (typeof MASCOT_MODES)[number];
 
