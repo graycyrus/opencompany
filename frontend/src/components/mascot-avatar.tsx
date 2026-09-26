@@ -1,6 +1,7 @@
-// The animated Rive mascot: an alternate teammate face, live at exactly two
-// hero surfaces (the agent profile sheet, the avatar picker). See
-// `docs/issue/mascot-profile-avatar/` for the deep-dive this was planned from.
+// The animated Rive mascot: an alternate teammate face, live at exactly the
+// hero surfaces that mount it (the agent profile sheet, the agent detail
+// page's header, the avatar picker). See `docs/issue/mascot-profile-avatar/`
+// for the deep-dive this was planned from.
 //
 // Deliberately its own component rather than a `TeammateAvatar` variant: a
 // `mascot:` reference resolves to no static image (`staticAvatarSrc` in
@@ -17,32 +18,29 @@ import {
   useViewModelInstanceNumber,
 } from "@rive-app/react-canvas";
 
-import { mascotSrc } from "@/lib/avatar";
+import { hexToRgb, MASCOT_COLORWAYS, mascotSrc, type MascotColorway } from "@/lib/avatar";
 import { cn } from "@/lib/utils";
 
 /**
  * The mascot's own default colorway (`handColor`/`skinColor` in the Rive
- * file's ViewModel). v1 ships this for every teammate — see
- * `docs/issue/mascot-profile-avatar/state-mapping.md` for why per-tone
- * variation is a deliberate v1.5+ cut rather than something guessed at here.
+ * file's ViewModel) — `MASCOT_COLORWAYS[0]` (`"amber"`), matched to the
+ * file's shipped default so a teammate with no chosen colorway renders
+ * exactly as v1 always has.
  */
-const HAND_COLOR: [number, number, number] = [0xb4, 0x90, 0x0b];
-const SKIN_COLOR: [number, number, number] = [0xf7, 0xd1, 0x45];
+const DEFAULT_COLORWAY = MASCOT_COLORWAYS[0];
 
 export type MascotState = "idle" | "hover" | "replying";
 
 /**
- * The Number-input value (`mascotAnimationNumber`) for each named state.
+ * The Number-input value (`mascotAnimationNumber`) for each named state, used
+ * when no explicit `costume` is chosen.
  *
  * Confirmed live (canvas-pixel sampling, not just a round-tripped getter):
- * `1` renders the mascot in its cap; `2` swaps it to headphones. The
- * artboard has a wider costume set than `idle`/`hover`/`replying` need
- * (cap, headband, headphone, face mask, cardboard mask, and four numbered
- * "glass" variants — 9 items total, per `rive.animationNames`), so this
- * mapping is a deliberate v1 subset, not the file's full range. See
- * `docs/issue/mascot-profile-avatar/open-questions.md` §3 for how the
- * write path was confirmed to actually drive the visible artboard, and why
- * it didn't for a while.
+ * `1` renders the mascot in its cap; `2` swaps it to headphones. `replying`
+ * (`3`) is wired the same way but its visual is unconfirmed as a *meaningful*
+ * "replying" cue — it is simply the third costume in file order. See
+ * `docs/issue/mascot-profile-avatar/open-questions.md` §1 for what has
+ * actually been watched play.
  */
 const STATE_NUMBERS: Record<MascotState, number> = {
   idle: 1,
@@ -51,8 +49,34 @@ const STATE_NUMBERS: Record<MascotState, number> = {
 };
 
 interface Props {
-  /** Which of the file's states to play. Defaults to idle. */
+  /**
+   * Which of the file's states to play. Defaults to idle. Ignored once
+   * {@link Props.costume} is set — a chosen costume is a fixed look, not an
+   * idle/hover pair, so it overrides the state-driven swap entirely (see the
+   * note at {@link Props.costume}).
+   */
   state?: MascotState;
+  /**
+   * The chosen colorway name (`MASCOT_COLORWAYS` in `lib/avatar.ts`), or
+   * `undefined` for the file's own default (`"amber"`). An unrecognised name
+   * — stale client code against a host that has since widened the list, or
+   * vice versa — falls back to the default rather than crashing the Rive
+   * ViewModel write.
+   */
+  colorway?: MascotColorway | string;
+  /**
+   * The chosen costume number (`1..=MASCOT_COSTUME_COUNT`), or `undefined`
+   * for the state-driven `idle`/`hover`/`replying` swap {@link STATE_NUMBERS}
+   * already gives every mascot.
+   *
+   * Deliberately **overrides** the state swap rather than combining with it:
+   * the two mechanisms share the same `mascotAnimationNumber` slot, and a
+   * teammate whose operator picked "Sunglasses" should wear sunglasses on
+   * hover too, not have that choice silently overridden back to "Headphones"
+   * the moment a pointer passes over it. An agent with no chosen costume is
+   * unaffected — it keeps the original idle/hover/replying feel.
+   */
+  costume?: number;
   className?: string;
   "data-testid"?: string;
 }
@@ -97,7 +121,13 @@ function usePrefersReducedMotion(): boolean {
  * than importing `@rive-app/react-canvas` directly — this file is the
  * code-split boundary.
  */
-export function MascotAvatar({ state = "idle", className, "data-testid": testId }: Props) {
+export function MascotAvatar({
+  state = "idle",
+  colorway,
+  costume,
+  className,
+  "data-testid": testId,
+}: Props) {
   const reducedMotion = usePrefersReducedMotion();
   const { rive, RiveComponent } = useRive({
     src: mascotSrc("animated"),
@@ -140,21 +170,26 @@ export function MascotAvatar({ state = "idle", className, "data-testid": testId 
   const { setRgb: setHandColor } = useViewModelInstanceColor("handColor", vmi);
   const { setRgb: setSkinColor } = useViewModelInstanceColor("skinColor", vmi);
 
-  // Colors are set once the instance is bound — the file's own defaults
-  // already match these, but v1 sets them explicitly so a future default
-  // change in the .riv asset doesn't silently change what ships.
+  // The chosen colorway, or the file's own default when unset or unrecognised.
+  // Set whenever it changes — not just once — so a picker preview updates
+  // live as an operator tries different swatches before saving.
   useEffect(() => {
     if (!vmi) return;
-    setHandColor(...HAND_COLOR);
-    setSkinColor(...SKIN_COLOR);
+    const match = MASCOT_COLORWAYS.find((c) => c.name === colorway) ?? DEFAULT_COLORWAY;
+    setHandColor(...hexToRgb(match.hand));
+    setSkinColor(...hexToRgb(match.skin));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vmi]);
+  }, [vmi, colorway]);
 
+  // The chosen costume overrides the idle/hover/replying swap entirely (see
+  // the `costume` prop doc); otherwise the original state-driven number.
   useEffect(() => {
     if (!vmi) return;
-    setAnimationNumber(reducedMotion ? STATE_NUMBERS.idle : STATE_NUMBERS[state]);
+    const number =
+      costume ?? (reducedMotion ? STATE_NUMBERS.idle : STATE_NUMBERS[state]);
+    setAnimationNumber(number);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vmi, state, reducedMotion]);
+  }, [vmi, state, reducedMotion, costume]);
 
   return (
     <div

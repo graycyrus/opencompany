@@ -13,6 +13,9 @@ import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  MASCOT_COLORWAYS,
+  MASCOT_COSTUME_COUNT,
+  MASCOT_COSTUME_NAMES,
   MASCOT_KINDS,
   MAX_AVATAR_MB,
   TINY_FLAVOURS,
@@ -59,6 +62,33 @@ describe("the mascot kinds", () => {
       const rel = mascotSrc(kind).replace(/^\//, "");
       expect(existsSync(resolve(repoRoot, "frontend/public", rel)), kind).toBe(true);
     }
+  });
+});
+
+describe("the mascot colorways", () => {
+  it("are the same names the host validates against", () => {
+    const rust = readFileSync(resolve(repoRoot, "crates/opencompany-core/src/company/avatar.rs"), "utf8");
+    const block = /pub const MASCOT_COLORWAYS: \[.*?\] = \[([\s\S]*?)\n\];/.exec(rust);
+    expect(block, "MASCOT_COLORWAYS is no longer declared the way this test reads it").not.toBeNull();
+    const hostNames = Array.from(block![1].matchAll(/\("([a-z]+)"/g), (m) => m[1]);
+    expect([...hostNames].sort()).toEqual([...MASCOT_COLORWAYS.map((c) => c.name)].sort());
+  });
+
+  it("amber is first and matches the .riv file's own shipped default", () => {
+    expect(MASCOT_COLORWAYS[0]).toEqual({ name: "amber", hand: "#B4900B", skin: "#F7D145" });
+  });
+});
+
+describe("the mascot costume count", () => {
+  it("matches the host's MASCOT_COSTUME_COUNT", () => {
+    const rust = readFileSync(resolve(repoRoot, "crates/opencompany-core/src/company/avatar.rs"), "utf8");
+    const match = /pub const MASCOT_COSTUME_COUNT: u8 = (\d+);/.exec(rust);
+    expect(match, "MASCOT_COSTUME_COUNT is no longer declared the way this test reads it").not.toBeNull();
+    expect(Number(match![1])).toBe(MASCOT_COSTUME_COUNT);
+  });
+
+  it("has exactly one name per costume number", () => {
+    expect(MASCOT_COSTUME_NAMES.length).toBe(MASCOT_COSTUME_COUNT);
   });
 });
 

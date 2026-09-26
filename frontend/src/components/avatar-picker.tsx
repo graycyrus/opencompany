@@ -18,6 +18,9 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   AVATAR_ACCEPT,
+  MASCOT_COLORWAYS,
+  MASCOT_COSTUME_COUNT,
+  MASCOT_COSTUME_NAMES,
   MASCOT_KINDS,
   MAX_AVATAR_MB,
   TINY_FLAVOURS,
@@ -50,6 +53,28 @@ interface Props {
   tone?: string;
   /** `undefined` means "back to the default", never "no face". */
   onChange: (avatar: string | undefined) => void;
+  /**
+   * The mascot colorway in force, or `undefined` for the file's own default.
+   * Only read while `value` is a `mascot:` reference.
+   */
+  mascotColorway?: string;
+  /**
+   * The mascot costume in force, or `undefined` for the file's own default.
+   * Only read while `value` is a `mascot:` reference.
+   */
+  mascotCostume?: number;
+  /**
+   * Sets the mascot colorway; `undefined` resets to the file's own default.
+   *
+   * Omitting this (alongside {@link Props.onChangeMascotCostume}) hides the
+   * colorway/costume section entirely — the create-teammate dialog and the
+   * "you" profile picker have nowhere yet to persist either choice, so they
+   * pass neither and this picker falls back to offering only the mascot tile
+   * itself, exactly as before this section existed.
+   */
+  onChangeMascotColorway?: (colorway: string | undefined) => void;
+  /** Sets the mascot costume; `undefined` resets to the file's own default. */
+  onChangeMascotCostume?: (costume: number | undefined) => void;
   /** Whether the picker is inert — a save in flight, or a teammate nobody may edit. */
   disabled?: boolean;
 }
@@ -70,6 +95,10 @@ export function AvatarPicker({
   name,
   tone,
   onChange,
+  mascotColorway,
+  mascotCostume,
+  onChangeMascotColorway,
+  onChangeMascotCostume,
   disabled,
 }: Props) {
   const [uploading, setUploading] = useState(false);
@@ -125,6 +154,8 @@ export function AvatarPicker({
             <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
               <LazyMascotAvatar
                 state={previewHovering ? "hover" : "idle"}
+                colorway={mascotColorway}
+                costume={mascotCostume}
                 className="size-14"
                 data-testid="avatar-preview"
               />
@@ -241,12 +272,99 @@ export function AvatarPicker({
               )}
             >
               <Suspense fallback={<Skeleton className="size-9 rounded-md" />}>
-                <LazyMascotAvatar className="size-9" />
+                <LazyMascotAvatar
+                  colorway={mascotColorway}
+                  costume={mascotCostume}
+                  className="size-9"
+                />
               </Suspense>
             </button>
           );
         })}
       </div>
+      {isMascotRef(current) && (onChangeMascotColorway || onChangeMascotCostume) && (
+        <div className="space-y-3 rounded-lg border p-3" data-testid="avatar-mascot-appearance">
+          {onChangeMascotColorway && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Colorway</p>
+              <div
+                className="flex flex-wrap gap-2"
+                role="radiogroup"
+                aria-label="Mascot colorway"
+                data-testid="avatar-mascot-colorways"
+              >
+                {MASCOT_COLORWAYS.map(({ name: colorwayName, hand, skin }) => {
+                  const selected = (mascotColorway ?? MASCOT_COLORWAYS[0].name) === colorwayName;
+                  return (
+                    <button
+                      key={colorwayName}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      aria-label={colorwayName}
+                      title={colorwayName}
+                      disabled={disabled}
+                      onClick={() => onChangeMascotColorway(colorwayName)}
+                      data-testid={`avatar-mascot-colorway-${colorwayName}`}
+                      className={cn(
+                        "size-7 rounded-full ring-2 ring-offset-2 ring-offset-background transition-colors disabled:opacity-50",
+                        selected ? "ring-primary" : "ring-transparent hover:ring-border",
+                      )}
+                      style={{
+                        background: `linear-gradient(135deg, ${skin} 50%, ${hand} 50%)`,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {onChangeMascotCostume && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Costume</p>
+              <div
+                className="flex flex-wrap gap-1.5"
+                role="radiogroup"
+                aria-label="Mascot costume"
+                data-testid="avatar-mascot-costumes"
+              >
+                {MASCOT_COSTUME_NAMES.map((costumeName, i) => {
+                  const number = i + 1;
+                  const selected = (mascotCostume ?? 1) === number;
+                  return (
+                    <button
+                      key={number}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      disabled={disabled}
+                      onClick={() => onChangeMascotCostume(number)}
+                      data-testid={`avatar-mascot-costume-${number}`}
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-xs transition-colors disabled:opacity-50",
+                        selected
+                          ? "border-primary bg-primary/10 text-foreground"
+                          : "border-border text-muted-foreground hover:border-primary/50",
+                      )}
+                    >
+                      {costumeName}
+                    </button>
+                  );
+                })}
+              </div>
+              {/* Guards MASCOT_COSTUME_NAMES against silently drifting out of
+                  step with MASCOT_COSTUME_COUNT — a length mismatch would
+                  otherwise just render fewer/more buttons with nobody the wiser. */}
+              {MASCOT_COSTUME_NAMES.length !== MASCOT_COSTUME_COUNT && (
+                <p className="text-xs text-destructive">
+                  Costume names ({MASCOT_COSTUME_NAMES.length}) don&apos;t match the costume
+                  count ({MASCOT_COSTUME_COUNT}).
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

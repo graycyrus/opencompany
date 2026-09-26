@@ -82,6 +82,14 @@ const WIDGET_SUSPENSE: Record<string, string> = {
     "boundary, and that dialog only opens from an agent's own page, which",
     "already has its own `h1`.",
   ].join(" "),
+  "views/team/AgentDetailView.tsx:LazyMascotAvatar": [
+    "The live mascot avatar in the agent detail page's own header",
+    "(`IdentityAvatar`, inside `Identity`) — a widget on an already-named",
+    "page, not a route boundary. The page's `h1` (`data-testid=\"agent-name\"`)",
+    "is rendered by the same `Identity` component, in the same paint, right",
+    "next to this boundary — not gated behind it — so the page keeps its name",
+    "for the whole time the Rive chunk is in flight.",
+  ].join(" "),
 };
 
 /** Every `.tsx` under `src`, as paths relative to it. */

@@ -98,11 +98,20 @@ if [ -n "$hits" ]; then
 fi
 
 # ---- 4. raw hex ----------------------------------------------------------
-# connections.ts is the one allowed file: eleven third-party provider brand
+# connections.ts is one allowed file: eleven third-party provider brand
 # colours, which identify someone else and are correct as literals. The field
 # itself documents why.
+#
+# avatar.ts's `MASCOT_COLORWAYS` is the other: these hex pairs are not CSS or
+# a Tailwind class — they never reach `style=`/`className` at all — they are
+# `[r,g,b]` values written straight into the mascot's Rive canvas ViewModel
+# (`mascot-avatar.tsx`'s `setHandColor`/`setSkinColor`, via `hexToRgb`), the
+# same non-theming, identifies-a-specific-thing category as a brand colour.
+# Theming them through `index.css` would need a canvas read of a CSS custom
+# property at draw time, which nothing in this component does or should.
 hits=$(grep -rn '#[0-9a-fA-F]\{6\}' "$SRC" "${INCLUDES[@]}" 2>/dev/null \
   | grep -v '^frontend/src/lib/connections.ts:' \
+  | grep -v '^frontend/src/lib/avatar.ts:' \
   | strip_comments || true)
 if [ -n "$hits" ]; then
   report "raw hex colour" \

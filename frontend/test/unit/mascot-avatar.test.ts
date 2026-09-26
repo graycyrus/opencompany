@@ -119,4 +119,39 @@ describe("MascotAvatar", () => {
     const wrapper = container.querySelector("[aria-hidden]");
     expect(wrapper).not.toBeNull();
   });
+
+  it("an explicit costume overrides the state-driven number, including on hover", () => {
+    act(() => {
+      root.render(createElement(MascotAvatar, { state: "idle", costume: 7 }));
+    });
+    expect(rive.setNumber).toHaveBeenLastCalledWith(7);
+    act(() => {
+      root.render(createElement(MascotAvatar, { state: "hover", costume: 7 }));
+    });
+    // Still 7, not 2 — a chosen costume is a fixed look, not an idle/hover pair.
+    expect(rive.setNumber).toHaveBeenLastCalledWith(7);
+  });
+
+  it("with no costume chosen, hover still swaps the number as before", () => {
+    render("idle");
+    expect(rive.setNumber).toHaveBeenLastCalledWith(1);
+    render("hover");
+    expect(rive.setNumber).toHaveBeenLastCalledWith(2);
+  });
+
+  it("writes a chosen colorway's rgb pair", () => {
+    act(() => {
+      root.render(createElement(MascotAvatar, { state: "idle", colorway: "teal" }));
+    });
+    expect(rive.setHandRgb).toHaveBeenLastCalledWith(0x0b, 0x6e, 0x69);
+    expect(rive.setSkinRgb).toHaveBeenLastCalledWith(0x4d, 0xc9, 0xbf);
+  });
+
+  it("falls back to the default colorway for an unrecognised name", () => {
+    act(() => {
+      root.render(createElement(MascotAvatar, { state: "idle", colorway: "nonexistent" }));
+    });
+    expect(rive.setHandRgb).toHaveBeenLastCalledWith(0xb4, 0x90, 0x0b);
+    expect(rive.setSkinRgb).toHaveBeenLastCalledWith(0xf7, 0xd1, 0x45);
+  });
 });

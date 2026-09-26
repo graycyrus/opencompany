@@ -1741,6 +1741,19 @@ export interface AgentDetailDto {
    * same field and the same contract as `TeamMemberDto.avatar`.
    */
   avatar?: string;
+  /**
+   * The mascot colorway this teammate wears, when somebody has chosen one —
+   * one of `MASCOT_COLORWAYS` in `lib/avatar.ts`. Only meaningful when
+   * `avatar` is `"mascot:animated"`. Absent means the file's own default
+   * colorway, not "no mascot".
+   */
+  mascotColorway?: string;
+  /**
+   * The mascot costume this teammate wears, when somebody has chosen one — a
+   * number `1..=MASCOT_COSTUME_COUNT`. Only meaningful when `avatar` is
+   * `"mascot:animated"`. Absent means the file's own default costume.
+   */
+  mascotCostume?: number;
   /** The cap in force and its attribution; same absent-means-uncapped contract as `TeamMemberDto`. */
   budgetUsdDaily?: number;
   spentTodayUsd?: number;
@@ -1819,6 +1832,21 @@ export interface EditAgentInput {
    * sets it. See `lib/avatar.ts`.
    */
   avatar?: string | null;
+  /**
+   * The mascot colorway this teammate wears, three-state exactly like
+   * `avatar`: `undefined` leaves it alone, `null` resets it to the file's own
+   * default colorway, and a name from `MASCOT_COLORWAYS` (`lib/avatar.ts`)
+   * sets it. Meaningful only alongside a `mascot:` `avatar`, but the host
+   * accepts it regardless — the picker sends it before committing the mascot
+   * itself.
+   */
+  mascotColorway?: string | null;
+  /**
+   * The mascot costume this teammate wears, three-state exactly like
+   * `mascotColorway`: `undefined` leaves it, `null` resets it to the file's
+   * own default costume, a number `1..=MASCOT_COSTUME_COUNT` sets it.
+   */
+  mascotCostume?: number | null;
   /**
    * The teammate's own model — an ACP model hint (issue #1245), or the model
    * half of its `{provider, model}` pair on a built-in harness (keys rework,

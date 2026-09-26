@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ChevronRight,
   Cpu,
@@ -91,8 +91,18 @@ import type { DefaultChoice, Provider } from "@/inference/types";
 import { FieldCopilot } from "@/views/team/FieldCopilot";
 import { consoleHref } from "@/lib/console-paths";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { avatarRef } from "@/lib/avatar";
+import { avatarRef, isMascotRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
+
+/**
+ * The Rive runtime + the mascot asset are ~1.8 MB combined and load only for
+ * the rare teammate wearing `mascot:animated` — code-split the same way
+ * `agent-profile-sheet.tsx` and `avatar-picker.tsx` already do, so no other
+ * agent's page pays anything for it.
+ */
+const LazyMascotAvatar = lazy(() =>
+  import("@/components/mascot-avatar").then((m) => ({ default: m.MascotAvatar })),
+);
 import { usd } from "@/lib/money";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
@@ -553,6 +563,58 @@ export function AgentDetailView({
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Couldn't change this agent's icon.",
+      );
+    } finally {
+      setAvatarSaving(false);
+    }
+  }
+
+  /**
+   * Saves the chosen mascot colorway, the same one-click-is-the-save pattern
+   * as {@link saveAvatar} and for the same reason: a swatch is a visual
+   * choice, not a form field waiting on a submit button.
+   *
+   * A separate `PATCH` from `saveAvatar` rather than bundled into it — the
+   * picker lets an operator try colorway and costume swatches independently of
+   * (and, for the mascot tile itself, before) changing `avatar`, so each is
+   * its own save rather than a combined one that would send fields the
+   * operator never touched.
+   */
+  async function saveMascotColorway(colorway: string | undefined) {
+    if (!agent) return;
+    setAvatarSaving(true);
+    try {
+      const updated = await client.updateAgent(
+        agentId,
+        { mascotColorway: colorway ?? null },
+        company,
+      );
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't change this agent's colorway.",
+      );
+    } finally {
+      setAvatarSaving(false);
+    }
+  }
+
+  /** Saves the chosen mascot costume. Same shape as {@link saveMascotColorway}. */
+  async function saveMascotCostume(costume: number | undefined) {
+    if (!agent) return;
+    setAvatarSaving(true);
+    try {
+      const updated = await client.updateAgent(
+        agentId,
+        { mascotCostume: costume ?? null },
+        company,
+      );
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't change this agent's costume.",
       );
     } finally {
       setAvatarSaving(false);
@@ -1276,6 +1338,8 @@ export function AgentDetailView({
           setAvatarOpen(false);
           void saveAvatar(avatar);
         }}
+        onPickMascotColorway={(colorway) => void saveMascotColorway(colorway)}
+        onPickMascotCostume={(costume) => void saveMascotCostume(costume)}
       />
       {/* Round-2 review, P2-5: confirms before Save actually clears an
           existing pin back to the company default — see `saveHarnessAndModel`'s
@@ -1316,6 +1380,59 @@ export function AgentDetailView({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * The 56px face at the top of the page an agent *is* — the live mascot for a
+ * teammate who chose `mascot:animated`, the ordinary static tile for everyone
+ * else. Mirrors `agent-profile-sheet.tsx`'s `AgentAvatar`: same reasoning
+ * (issue found live 2026-09-26 — an operator picked the mascot in the Icon
+ * dialog, then found this header — the first, most obvious place to look
+ * after picking an icon — still showing plain initials, because only the
+ * profile-sheet hero had been wired to `MascotAvatar`), same `Suspense`
+ * fallback shaped like the tile underneath so the header does not jump size
+ * while the mascot's chunk loads.
+ */
+function IdentityAvatar({
+  name,
+  tone,
+  avatar,
+  mascotColorway,
+  mascotCostume,
+}: {
+  name: string;
+  tone: string;
+  avatar: string;
+  mascotColorway?: string;
+  mascotCostume?: number;
+}) {
+  // Only the mascot branch needs this — a static tile has no state to track,
+  // and hooks cannot sit behind the early return below.
+  const [hovering, setHovering] = useState(false);
+  if (isMascotRef(avatar)) {
+    return (
+      <span onMouseEnter={() => setHovering(true)} onMouseLeave={() => setHovering(false)}>
+        <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
+          <LazyMascotAvatar
+            state={hovering ? "hover" : "idle"}
+            colorway={mascotColorway}
+            costume={mascotCostume}
+            className="size-14"
+            data-testid="agent-avatar"
+          />
+        </Suspense>
+      </span>
+    );
+  }
+  return (
+    <TeammateAvatar
+      name={name}
+      tone={tone}
+      avatar={avatar}
+      className="size-14 rounded-xl text-base"
+      data-testid="agent-avatar"
+    />
   );
 }
 
@@ -1370,21 +1487,21 @@ function Identity({
             className="rounded-xl ring-2 ring-transparent transition-colors hover:ring-primary focus-visible:ring-primary focus-visible:outline-none disabled:cursor-wait"
             data-testid="agent-avatar-pick"
           >
-            <TeammateAvatar
+            <IdentityAvatar
               name={display}
               tone={tone}
               avatar={avatar}
-              className="size-14 rounded-xl text-base"
-              data-testid="agent-avatar"
+              mascotColorway={agent.mascotColorway}
+              mascotCostume={agent.mascotCostume}
             />
           </button>
         ) : (
-          <TeammateAvatar
+          <IdentityAvatar
             name={display}
             tone={tone}
             avatar={avatar}
-            className="size-14 rounded-xl text-base"
-            data-testid="agent-avatar"
+            mascotColorway={agent.mascotColorway}
+            mascotCostume={agent.mascotCostume}
           />
         )}
         <div className="min-w-0 flex-1 space-y-2">
@@ -2377,6 +2494,8 @@ function AvatarDialog({
   busy,
   onOpenChange,
   onPick,
+  onPickMascotColorway,
+  onPickMascotCostume,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -2385,6 +2504,8 @@ function AvatarDialog({
   busy: boolean;
   onOpenChange: (open: boolean) => void;
   onPick: (avatar: string | undefined) => void;
+  onPickMascotColorway: (colorway: string | undefined) => void;
+  onPickMascotCostume: (costume: number | undefined) => void;
 }) {
   const name = agent?.name?.trim() || agent?.role || "this agent";
   return (
@@ -2407,6 +2528,10 @@ function AvatarDialog({
             tone={toneFor(agent.id || name)}
             disabled={busy}
             onChange={onPick}
+            mascotColorway={agent.mascotColorway}
+            mascotCostume={agent.mascotCostume}
+            onChangeMascotColorway={onPickMascotColorway}
+            onChangeMascotCostume={onPickMascotCostume}
           />
         )}
       </DialogContent>

@@ -50,10 +50,14 @@ function AgentAvatar({
   name,
   tone,
   avatar,
+  mascotColorway,
+  mascotCostume,
 }: {
   name: string;
   tone: string;
   avatar: string;
+  mascotColorway?: string;
+  mascotCostume?: number;
 }) {
   // Only the mascot branch needs this — a static tile has no state to track,
   // and hooks cannot sit behind the early return below, so it is declared
@@ -68,6 +72,8 @@ function AgentAvatar({
         <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
           <LazyMascotAvatar
             state={hovering ? "hover" : "idle"}
+            colorway={mascotColorway}
+            costume={mascotCostume}
             className="size-12"
             data-testid="agent-profile-avatar"
           />
@@ -289,7 +295,13 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
     <>
       <SheetHeader className="gap-3 pr-10">
         <div className="flex items-start gap-3">
-          <AgentAvatar name={profile.display} tone={profile.tone} avatar={profile.avatar} />
+          <AgentAvatar
+            name={profile.display}
+            tone={profile.tone}
+            avatar={profile.avatar}
+            mascotColorway={agent.mascotColorway}
+            mascotCostume={agent.mascotCostume}
+          />
           <div className="min-w-0 flex-1">
             <SheetTitle className="truncate text-lg" data-testid="agent-profile-name">
               {profile.display}

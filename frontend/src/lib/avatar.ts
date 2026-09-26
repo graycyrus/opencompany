@@ -52,6 +52,73 @@ export const MASCOT_KINDS = ["animated"] as const;
 
 export type MascotKind = (typeof MASCOT_KINDS)[number];
 
+/**
+ * A curated hand/skin color pair for the animated mascot, by name — the
+ * `[handColor, skinColor]` hex pair `MascotAvatar` writes into the `.riv`
+ * file's ViewModel.
+ *
+ * **Must stay in step with `MASCOT_COLORWAYS` in `src/company/avatar.rs`**,
+ * the same contract {@link MASCOT_KINDS} and {@link TINY_FLAVOURS} already
+ * keep. Deliberately a short, curated list rather than a color picker — the
+ * same "no arbitrary values" posture the rest of this grammar takes. Each
+ * pair was picked and looked at rendered on the actual character; `"amber"`
+ * is first and is the `.riv` file's own shipped default, so a teammate with
+ * no chosen colorway renders exactly as it did before this list existed.
+ */
+export const MASCOT_COLORWAYS = [
+  { name: "amber", hand: "#B4900B", skin: "#F7D145" },
+  { name: "teal", hand: "#0B6E69", skin: "#4DC9BF" },
+  { name: "rose", hand: "#B42A5C", skin: "#F29EBB" },
+  { name: "violet", hand: "#5B2E8A", skin: "#B08CDE" },
+  { name: "slate", hand: "#3F4B5C", skin: "#94A3B8" },
+  { name: "ember", hand: "#B23A0B", skin: "#F2884D" },
+] as const;
+
+export type MascotColorway = (typeof MASCOT_COLORWAYS)[number]["name"];
+
+/**
+ * How many of the mascot's costume looks are pickable — valid costume numbers
+ * are `1..=MASCOT_COSTUME_COUNT`.
+ *
+ * **Must stay in step with `MASCOT_COSTUME_COUNT` in `src/company/avatar.rs`.**
+ * The `.riv` file's `mascotAnimationNumber` Number input drives which costume
+ * shows; confirmed live (screenshot by screenshot, driving the raw number
+ * through a running instance) that `1`-`9` render nine distinct looks and `10`
+ * renders identically to `9` — the input clamps rather than erroring or
+ * wrapping past the file's real range.
+ */
+export const MASCOT_COSTUME_COUNT = 9;
+
+/**
+ * Human-readable names for each costume number, `1`-indexed to match
+ * `mascotAnimationNumber` (`names[0]` is costume `1`).
+ *
+ * Named from what was actually seen on screen, not the `.riv` file's own
+ * internal clip names — those are a typo'd, not-UI-ready internal set
+ * (`cap`/`hadband`/`hadphone`/`habibi`/`face mask`/`cardboard
+ * mask`/`glass1`-`glass4`, per `rive.animationNames`; see
+ * `docs/issue/mascot-profile-avatar/open-questions.md` §1). "Hug" (costume 4)
+ * is the one case where the visual difference from costume 1 is a pose and
+ * blush rather than a different hat — both wear the same knit cap.
+ */
+/** `"#RRGGBB"` → `[r, g, b]`, for `useViewModelInstanceColor`'s `setRgb`. */
+export function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.replace("#", ""), 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+export const MASCOT_COSTUME_NAMES: readonly string[] = [
+  "Beanie",
+  "Headphones",
+  "Bandana",
+  "Hug",
+  "Goggles",
+  "Headwrap",
+  "Cardboard Box",
+  "Round Glasses",
+  "Sunglasses",
+];
+
 /** The image types an uploaded avatar may be — the `accept` a file input wants. */
 export const AVATAR_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
 
