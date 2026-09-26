@@ -197,7 +197,13 @@ function CustomHueControl() {
           aria-hidden="true"
         />
       </div>
-      <Slider.Root min={0} max={360} step={1} value={hue} onValueChange={handleValueChange}>
+      {/* `max={359}`, not `360`: `normalizeHue` wraps 360 to 0
+          (`accent-ramp.ts`'s `hue % 360`), so a slider that could reach 360
+          would render an equivalent colour but then snap the controlled
+          thumb back to the start on the very next render — a picker-state
+          jump, not a colour bug. 359 is the last value the thumb can sit at
+          before that wrap would occur. */}
+      <Slider.Root min={0} max={359} step={1} value={hue} onValueChange={handleValueChange}>
         <Slider.Control className="flex w-full items-center py-2">
           <Slider.Track className="relative h-1.5 w-full rounded-full bg-muted">
             <Slider.Indicator className="absolute h-full rounded-full bg-brand-500 dark:bg-brand-400" />

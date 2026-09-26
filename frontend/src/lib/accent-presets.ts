@@ -216,6 +216,29 @@ export function applyStoredAccentPreset(): void {
   applyAccentPreset(id, id === CUSTOM_ACCENT_PRESET_ID ? readStoredCustomHue() : undefined);
 }
 
+/**
+ * In-memory fallback for the custom hue, updated immediately after a
+ * successful `applyAccentPreset` call for `"custom"` — regardless of whether
+ * the `localStorage` write that follows it succeeds. Without this, a failed
+ * write (private browsing, quota) leaves `readStoredCustomHue()` returning
+ * whatever was there before: the ramp on `<html>` is correct (the write
+ * failure never reaches `applyAccentPreset`), but `useCustomHue()` — and so
+ * the picker's own swatch and slider position — would keep reporting the
+ * stale hue instead of the one actually applied. `null` means "nothing
+ * applied in this tab yet"; `getCustomHueSnapshot` falls back to storage in
+ * that case, same as before this existed.
+ */
+let customHueSnapshot: number | null = null;
+
+/** The hue `useCustomHue` should currently report: the in-memory snapshot the
+ *  moment one exists, else whatever storage holds. Read by `useCustomHue`
+ *  and by `CustomSwatch`/`CustomHueControl` indirectly through it — never by
+ *  `applyAccentPreset` or `setAccentPreset` themselves, which already carry
+ *  the hue as a parameter. */
+function getCustomHueSnapshot(): number {
+  return customHueSnapshot ?? readStoredCustomHue();
+}
+
 let listeners: Array<() => void> = [];
 
 function emit(): void {
@@ -261,11 +284,15 @@ export function setAccentPreset(id: string, customHue?: number): boolean {
     const hue = normalizeHue(customHue ?? readStoredCustomHue());
     const applied = applyAccentPreset(CUSTOM_ACCENT_PRESET_ID, hue);
     if (!applied) return false;
+    // Update the in-memory fallback before the storage write, which can
+    // still throw below — the ramp is already on `<html>`, so `useCustomHue`
+    // must report this hue regardless of whether the write lands.
+    customHueSnapshot = hue;
     try {
       window.localStorage.setItem(ACCENT_PRESET_STORAGE_KEY, CUSTOM_ACCENT_PRESET_ID);
       window.localStorage.setItem(CUSTOM_HUE_STORAGE_KEY, String(hue));
     } catch {
-      // Storage refused; the choice still holds for this tab.
+      // Storage refused; the choice still holds for this tab via customHueSnapshot.
     }
     emit();
     return true;
@@ -294,6 +321,11 @@ if (typeof window !== "undefined") {
   // `CUSTOM_HUE_STORAGE_KEY`, and would otherwise never re-apply here.
   window.addEventListener("storage", (event) => {
     if (event.key !== ACCENT_PRESET_STORAGE_KEY && event.key !== CUSTOM_HUE_STORAGE_KEY) return;
+    // A `storage` event only fires for a write that *succeeded* (in another
+    // tab), so it is always fresher than any snapshot this tab is holding
+    // only because its own write failed — drop the snapshot rather than let
+    // it shadow the value `applyStoredAccentPreset` is about to read.
+    if (event.key === CUSTOM_HUE_STORAGE_KEY) customHueSnapshot = null;
     applyStoredAccentPreset();
     emit();
   });
@@ -312,9 +344,12 @@ export function useAccentPreset(): string {
 /** Same reactivity contract as `useAccentPreset`, for the stored custom hue —
  *  the Custom tile's slider reads this to seed its position, including after
  *  a cross-tab `storage` event re-applies a hue chosen elsewhere. Reads
- *  storage rather than the DOM (unlike `getSnapshot`): the hue is meaningful
- *  even while `"custom"` is not the active preset, and the ramp on `<html>`
- *  carries no independent record of the hue it was generated from. */
+ *  `getCustomHueSnapshot` rather than storage directly (unlike `getSnapshot`,
+ *  which reads the DOM): the hue is meaningful even while `"custom"` is not
+ *  the active preset, the ramp on `<html>` carries no independent record of
+ *  the hue it was generated from, and a `localStorage` write can fail after
+ *  the ramp has already applied — the in-memory snapshot is what keeps this
+ *  hook honest in that case. */
 export function useCustomHue(): number {
-  return useSyncExternalStore(subscribe, readStoredCustomHue, () => DEFAULT_CUSTOM_HUE);
+  return useSyncExternalStore(subscribe, getCustomHueSnapshot, () => DEFAULT_CUSTOM_HUE);
 }
