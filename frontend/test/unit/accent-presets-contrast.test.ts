@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { ACCENT_CONTRAST_BAR, evaluateAccentRamp } from "@/lib/accent-contrast";
-import { ACCENT_STEPS, generateCustomRamp, type AccentRamp } from "@/lib/accent-ramp";
+import { ACCENT_CONTRAST_BAR, evaluateAccentRamp, evaluateTintedNeutrals } from "@/lib/accent-contrast";
+import { ACCENT_STEPS, computeTintedNeutrals, generateCustomRamp, type AccentRamp } from "@/lib/accent-ramp";
 
 /**
  * The contrast gate (issue #2493, test-plan U4). Every curated accent preset —
@@ -182,5 +182,74 @@ describe("custom hue ramp", () => {
     // neighbourhood the brand already lives in must stay usable.
     expect(passCount).toBeGreaterThan(100);
     expect(failCount).toBeGreaterThan(50);
+  });
+});
+
+/**
+ * The canvas/chrome auto-tint (`theme-system-decision-addendum.md`): every
+ * accent application — curated, default, custom, Graphite — also sets
+ * `--canvas-tint-*`/`--chrome-tint-*`, and this is the gate on that, mirroring
+ * `describe("custom hue ramp", …)` above: read the real `index.css` anchor
+ * values rather than assume them, confirm the default reproduces today's
+ * exact pixels, and sweep contrast across the hue circle.
+ */
+describe("canvas/chrome auto-tint", () => {
+  function readVarOklch(name: string): { L: number; C: number; H: number } {
+    const m = new RegExp(`${name}:\\s*oklch\\(([\\d.]+)\\s+([\\d.]+)\\s+([\\d.]+)\\)`).exec(indexCss);
+    if (!m) throw new Error(`${name} not found in index.css`);
+    return { L: Number(m[1]), C: Number(m[2]), H: Number(m[3]) };
+  }
+
+  // `index.css`'s own four anchor hues (286.28°, 262.8°, 286.17°, 264.46°)
+  // are close to, but NOT identical to, violet's brand hue (285.51° —
+  // `CURATED_PRESET_HUE.default`) — dark mode's in particular differs by
+  // over 20°. Substituting the accent hue for "Default" would therefore be a
+  // small but real pixel change, not the zero-pixel-change
+  // `theme-system-decision-addendum.md` promises. `applyAccentPreset`
+  // resolves this the same way it already does for `--brand-*`: "Default"
+  // clears the inline override entirely (`clearTintedNeutrals`) rather than
+  // computing an approximation, so `:root`'s own authored values — asserted
+  // to still be exactly what they were before this feature, below — show
+  // through unmodified. That DOM behaviour is exercised by
+  // `test/e2e/accent-preset.spec.ts` (a real `getComputedStyle`, not a node
+  // approximation of one); this test only pins the anchor *source values*
+  // Default falls back to, so a future edit to one of them is caught here.
+  it("keeps index.css's own anchor values as the fallback \"default\" reproduces (via clearing, not approximation)", () => {
+    expect(readVarOklch("--canvas-tint-light")).toEqual({ L: 0.9776, C: 0.0066, H: 286.28 });
+    expect(readVarOklch("--canvas-tint-dark")).toEqual({ L: 0.1395, C: 0.0048, H: 262.8 });
+    expect(readVarOklch("--chrome-tint-light")).toEqual({ L: 0.9427, C: 0.012, H: 286.17 });
+    expect(readVarOklch("--chrome-tint-dark")).toEqual({ L: 0.1865, C: 0.0044, H: 264.46 });
+  });
+
+  it("computeTintedNeutrals at violet's hue is a close but not exact approximation of the anchors (documents why Default clears instead)", () => {
+    const tint = computeTintedNeutrals(285.51);
+    const parse = (v: string) => {
+      const m = /oklch\(([-\d.]+) ([-\d.]+) ([-\d.]+)\)/.exec(v)!;
+      return { H: Number(m[3]) };
+    };
+    // Close (light) ...
+    expect(Math.abs(parse(tint.canvasLight).H - 286.28)).toBeLessThan(1);
+    // ... but not exact, and dark drifts much further — this is exactly the
+    // gap that would have made Default a pixel change, not a reproduction.
+    expect(Math.abs(parse(tint.canvasDark).H - 262.8)).toBeGreaterThan(15);
+  });
+
+  it("goes fully achromatic for Graphite (hue: null), never an arbitrary hue at zero chroma", () => {
+    const tint = computeTintedNeutrals(null);
+    for (const value of [tint.canvasLight, tint.canvasDark, tint.chromeLight, tint.chromeDark]) {
+      expect(value).toContain(" 0 0)"); // chroma 0, hue 0
+    }
+    expect(evaluateTintedNeutrals(null).contrastOk).toBe(true);
+  });
+
+  it("clears every documented pair at the default hue", () => {
+    expect(evaluateTintedNeutrals(285.51).contrastOk).toBe(true);
+  });
+
+  it("sweeps the full hue circle and always clears the documented pairs — hue never affects contrast at this chroma", () => {
+    for (let hue = 0; hue < 360; hue += 5) {
+      const evaluation = evaluateTintedNeutrals(hue);
+      expect(evaluation.contrastOk, `hue ${hue}: ${JSON.stringify(evaluation.ratios)}`).toBe(true);
+    }
   });
 });

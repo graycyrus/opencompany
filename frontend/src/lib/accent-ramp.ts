@@ -191,3 +191,67 @@ export function generateCustomRamp(hue: number): AccentRamp {
 export function accentRampStepToOklch(step: AccentRampStep): string {
   return `oklch(${step.L} ${step.C} ${step.H})`;
 }
+
+/**
+ * Each curated preset's own hue, for the canvas/chrome tint below — not for
+ * `--brand-*` itself, which curated presets already carry as an authored
+ * `index.css` block and never touch this module for
+ * (`theme-system-decision-addendum.md`). `"default"` maps to violet's own
+ * hue, matching `DEFAULT_CUSTOM_HUE` in `accent-presets.ts` and reproducing
+ * today's authored `--canvas-tint-*`/`--chrome-tint-*` values exactly.
+ * `"graphite"` has none — see `computeTintedNeutrals`.
+ */
+export const CURATED_PRESET_HUE: Readonly<Record<string, number>> = {
+  default: 285.51,
+  violet: 285.51,
+  indigo: 268.0,
+  blue: 255.0,
+  teal: 195.0,
+  green: 145.0,
+  amber: 55.0,
+  rose: 15.0,
+};
+
+/** A tinted canvas/chrome pair, one value per theme mode. */
+export interface TintedNeutrals {
+  readonly canvasLight: string;
+  readonly canvasDark: string;
+  readonly chromeLight: string;
+  readonly chromeDark: string;
+}
+
+/**
+ * The four anchor lightness/chroma pairs `--canvas-tint-*`/`--chrome-tint-*`
+ * hold in `index.css` today (`oklch(0.9776 0.0066 286.28)` etc.) — read from
+ * that file, not invented. Kept apart from `ACCENT_STEPS`'s ratio tables
+ * above: these are four independent points, not a ten-step ramp, and carry
+ * no per-step drift.
+ */
+const NEUTRAL_ANCHORS = {
+  canvasLight: { L: 0.9776, C: 0.0066 },
+  canvasDark: { L: 0.1395, C: 0.0048 },
+  chromeLight: { L: 0.9427, C: 0.012 },
+  chromeDark: { L: 0.1865, C: 0.0044 },
+} as const;
+
+/**
+ * The canvas/chrome tint for a given hue — `null` for Graphite, whose whole
+ * point is chroma-zero at every step (`accent-presets.ts`'s comment on
+ * `ACCENT_PRESETS`); tinting its canvas with *some* hue at zero chroma would
+ * be a no-op anyway, but passing `null` here makes that a chroma-zero
+ * (fully achromatic) render rather than an arbitrary, meaningless hue number
+ * sitting unused in the value. Every other hue substitutes into the four
+ * anchors above, lightness and chroma untouched — selecting the shipped
+ * default (`hue = CURATED_PRESET_HUE.default`) reproduces the exact current
+ * `index.css` values.
+ */
+export function computeTintedNeutrals(hue: number | null): TintedNeutrals {
+  const h = hue === null ? 0 : normalizeHue(hue);
+  const c = (chroma: number) => (hue === null ? 0 : chroma);
+  return {
+    canvasLight: `oklch(${NEUTRAL_ANCHORS.canvasLight.L} ${c(NEUTRAL_ANCHORS.canvasLight.C)} ${h})`,
+    canvasDark: `oklch(${NEUTRAL_ANCHORS.canvasDark.L} ${c(NEUTRAL_ANCHORS.canvasDark.C)} ${h})`,
+    chromeLight: `oklch(${NEUTRAL_ANCHORS.chromeLight.L} ${c(NEUTRAL_ANCHORS.chromeLight.C)} ${h})`,
+    chromeDark: `oklch(${NEUTRAL_ANCHORS.chromeDark.L} ${c(NEUTRAL_ANCHORS.chromeDark.C)} ${h})`,
+  };
+}

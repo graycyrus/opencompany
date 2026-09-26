@@ -72,6 +72,22 @@
     --signature-500: oklch(0.5649 0.2236 285.51); /* #7153F0 */
     --signature-400: oklch(0.6614 0.1769 289.73); /* #937BF6 */
 
+    /* Canvas/chrome tint — the opposite decoupling from `--signature-*` above.
+       That pair holds a value apart from an operator's accent choice; these
+       four hold values `--background`/`--chrome` (below) resolve through
+       specifically so an accent choice CAN reach them, without also reaching
+       `--surface-dark-2` (which still backs `--muted` directly) the way
+       overriding that primitive itself would (issue #2493 follow-on,
+       `theme-system-decision-addendum.md`). Values below are today's authored
+       `--surface-light-bg`/`--surface-dark-bg`/`--surface-light-chrome`/
+       `--surface-dark-2`, unchanged — the operator's chosen accent hue
+       overrides only these four, at their existing lightness and chroma, so
+       selecting the shipped default reproduces today's pixels exactly. */
+    --canvas-tint-light: oklch(0.9776 0.0066 286.28);
+    --canvas-tint-dark: oklch(0.1395 0.0048 262.8);
+    --chrome-tint-light: oklch(0.9427 0.012 286.17);
+    --chrome-tint-dark: oklch(0.1865 0.0044 264.46);
+
     /*
      * Surfaces — the six-rung ladder, stated per theme.
      *
@@ -200,7 +216,7 @@
     /* Surfaces, from furthest back to closest to the operator. The canvas
        is a hair off white and cards are pure white, so a card lifts off the
        page by lightness alone — before any shadow is applied. */
-    --background: var(--surface-light-bg);
+    --background: var(--canvas-tint-light);
     --foreground: var(--ink-light-primary);
     --card: var(--surface-light-1);
     --card-foreground: var(--ink-light-primary);
@@ -252,7 +268,7 @@
        column and the frame around the card are the same continuous surface.
        Tinting them separately is what puts the seam back. See
        `components/content-surface.tsx`. */
-    --chrome: var(--surface-light-chrome);
+    --chrome: var(--chrome-tint-light);
     --chrome-border: var(--surface-light-4);
     /* Focus is branded. It is the most-seen interactive signal in the app
        and it was grey. */
@@ -458,7 +474,7 @@
        direction as light mode. The canvas is near-black, and each layer
        above it is a measured step up — never a translucent white wash,
        which tints unpredictably over whatever it lands on. */
-    --background: var(--surface-dark-bg);
+    --background: var(--canvas-tint-dark);
     --foreground: var(--ink-dark-primary);
     --card: var(--surface-dark-1);
     --card-foreground: var(--ink-dark-primary);
@@ -511,7 +527,7 @@
        for why the direction inverts here. The hairline takes the active rung
        rather than rung 4: rung 4 is only 1.04:1 against this ground, and a
        card edge nobody can see is the seam problem in reverse. */
-    --chrome: var(--surface-dark-2);
+    --chrome: var(--chrome-tint-dark);
     --chrome-border: var(--surface-dark-active);
 
     --status-idle: var(--ink-dark-muted);

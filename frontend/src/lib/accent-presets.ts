@@ -28,7 +28,14 @@
 
 import { useSyncExternalStore } from "react";
 
-import { accentRampStepToOklch, ACCENT_STEPS, generateCustomRamp, normalizeHue } from "@/lib/accent-ramp";
+import {
+  accentRampStepToOklch,
+  ACCENT_STEPS,
+  computeTintedNeutrals,
+  CURATED_PRESET_HUE,
+  generateCustomRamp,
+  normalizeHue,
+} from "@/lib/accent-ramp";
 import { evaluateAccentRamp } from "@/lib/accent-contrast";
 
 /** One curated accent preset. Colours live in `index.css`, never here. */
@@ -136,6 +143,48 @@ function clearInlineAccentRamp(root: HTMLElement): void {
   for (const property of CUSTOM_BRAND_PROPERTIES) root.style.removeProperty(property);
 }
 
+/** The four canvas/chrome custom-property names `applyTintedNeutrals` sets. */
+const TINTED_NEUTRAL_PROPERTIES = [
+  "--canvas-tint-light",
+  "--canvas-tint-dark",
+  "--chrome-tint-light",
+  "--chrome-tint-dark",
+] as const;
+
+/** Removes every inline canvas/chrome override, so `index.css`'s own
+ *  `:root` values — today's exact, authored pixels — show through
+ *  unapproximated. Used for `"default"` only: `CURATED_PRESET_HUE.default`
+ *  (violet's hue, 285.51°) is close to but not identical to the four
+ *  anchors' own authored hues (`--surface-light-bg`'s is 286.28°, and dark's
+ *  are further still, 262.8°/264.46°) — substituting it would be a small but
+ *  real pixel change, not the zero-pixel-change `theme-system-decision-
+ *  addendum.md` promises for Default. Same reasoning `clearInlineAccentRamp`
+ *  already applies to `--brand-*` for the same id. */
+function clearTintedNeutrals(root: HTMLElement): void {
+  for (const property of TINTED_NEUTRAL_PROPERTIES) root.style.removeProperty(property);
+}
+
+/** Sets a computed canvas/chrome tint for every id except `"default"`, which
+ *  clears instead (see `clearTintedNeutrals`). See `index.css`'s
+ *  `--canvas-tint-*`/`--chrome-tint-*` primitives and
+ *  `theme-system-decision-addendum.md`. */
+function applyTintedNeutrals(root: HTMLElement, hue: number | null): void {
+  const tint = computeTintedNeutrals(hue);
+  root.style.setProperty("--canvas-tint-light", tint.canvasLight);
+  root.style.setProperty("--canvas-tint-dark", tint.canvasDark);
+  root.style.setProperty("--chrome-tint-light", tint.chromeLight);
+  root.style.setProperty("--chrome-tint-dark", tint.chromeDark);
+}
+
+/** Graphite has no hue by design (`ACCENT_PRESETS`'s comment) — its canvas
+ *  and chrome go fully achromatic to match, per
+ *  `theme-system-decision-addendum.md`. Every other known id, including
+ *  `"default"`, resolves through `CURATED_PRESET_HUE`. */
+function neutralTintHueForPreset(id: string): number | null {
+  if (id === "graphite") return null;
+  return CURATED_PRESET_HUE[id] ?? CURATED_PRESET_HUE[DEFAULT_ACCENT_PRESET];
+}
+
 /** The stored preset id, or the default when nothing valid is stored.
  *  Never throws: a private window or blocked site data makes the
  *  `localStorage` getter itself throw (`crash-fallback.tsx` makes the same
@@ -186,14 +235,18 @@ export function applyAccentPreset(id: string, customHue?: number): boolean {
       root.style.setProperty(`--brand-${step}`, accentRampStepToOklch(ramp[step]));
     }
     root.dataset.accentPreset = CUSTOM_ACCENT_PRESET_ID;
+    applyTintedNeutrals(root, hue);
     return true;
   }
 
   clearInlineAccentRamp(root); // switching off "custom" must drop its inline override
-  if (id === DEFAULT_ACCENT_PRESET || !isKnownPreset(id)) {
+  const resolvedId = id === DEFAULT_ACCENT_PRESET || !isKnownPreset(id) ? DEFAULT_ACCENT_PRESET : id;
+  if (resolvedId === DEFAULT_ACCENT_PRESET) {
     delete root.dataset.accentPreset;
+    clearTintedNeutrals(root); // today's exact `:root` pixels, not an approximation of them
   } else {
-    root.dataset.accentPreset = id;
+    root.dataset.accentPreset = resolvedId;
+    applyTintedNeutrals(root, neutralTintHueForPreset(resolvedId));
   }
   return true;
 }

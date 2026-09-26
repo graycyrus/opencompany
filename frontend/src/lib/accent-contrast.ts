@@ -18,7 +18,7 @@
  * exemption from that gate, and no second colour representation to drift.
  */
 
-import { ACCENT_STEPS, type AccentRamp, type AccentRampStep } from "@/lib/accent-ramp";
+import { ACCENT_STEPS, computeTintedNeutrals, type AccentRamp, type AccentRampStep } from "@/lib/accent-ramp";
 
 /** oklch -> linear sRGB, Björn Ottosson's published matrices. */
 function oklchToLinearSrgb(L: number, C: number, hueDeg: number): [number, number, number] {
@@ -134,4 +134,66 @@ export function evaluateAccentRamp(ramp: AccentRamp): AccentContrastResult {
   const contrastOk = Object.values(ratios).every((ratio) => ratio >= ACCENT_CONTRAST_BAR);
 
   return { inGamut, contrastOk, ok: inGamut && contrastOk, ratios };
+}
+
+// The fixed ink anchors the canvas/chrome tint sweep below checks against —
+// never re-tinted themselves (`theme-system-decision-addendum.md`'s "what
+// does NOT change"), read as OKLCH triples from `index.css`'s `:root`/`.dark`,
+// same discipline as `LIGHT_CANVAS` etc. above.
+const INK_LIGHT_PRIMARY = resolveAccentColor({ L: 0.1505, C: 0.0214, H: 283.53 });
+const INK_LIGHT_MUTED = resolveAccentColor({ L: 0.526, C: 0.0155, H: 286.04 });
+const INK_DARK_MUTED = resolveAccentColor({ L: 0.619, C: 0.0163, H: 285.78 });
+
+/**
+ * The two pairs `theme-system-decision-addendum.md` calls for: body text on
+ * the canvas, and the chrome's faintest label (`--ink-*-muted`, the pair
+ * `index.css`'s own comment on `--surface-light-chrome` names explicitly) on
+ * the chrome. `--ink-dark-primary` is pure white — its ratio against any of
+ * these near-black/near-white low-chroma tints is nowhere near the 4.5 bar
+ * regardless of hue, so only the muted pair is checked for dark canvas/chrome;
+ * light checks both, since `--ink-light-primary` is the one anchor close
+ * enough to a bright canvas for a hue swap to matter in principle.
+ */
+export interface TintedNeutralContrastRatios {
+  readonly foregroundOnLightCanvas: number;
+  readonly mutedOnLightChrome: number;
+  readonly mutedOnDarkChrome: number;
+}
+
+export interface TintedNeutralContrastResult {
+  readonly contrastOk: boolean;
+  readonly ratios: TintedNeutralContrastRatios;
+}
+
+/**
+ * Evaluates one hue's canvas/chrome tint against the fixed ink anchors above
+ * — the live "does this still read" check for whatever hue is driving
+ * `computeTintedNeutrals`, using the exact same anchors and bar
+ * `evaluateAccentRamp` does. `hue: null` (Graphite) is always safe: it drops
+ * every one of these tints to chroma zero, strictly closer to the achromatic
+ * canvas/chrome the ink ratios above were originally measured against, never
+ * further from it.
+ */
+export function evaluateTintedNeutrals(hue: number | null): TintedNeutralContrastResult {
+  const tint = computeTintedNeutrals(hue);
+  const canvasLight = resolveAccentColor(parseOklch(tint.canvasLight));
+  const chromeLight = resolveAccentColor(parseOklch(tint.chromeLight));
+  const chromeDark = resolveAccentColor(parseOklch(tint.chromeDark));
+
+  const ratios: TintedNeutralContrastRatios = {
+    foregroundOnLightCanvas: accentContrastRatio(INK_LIGHT_PRIMARY, canvasLight),
+    mutedOnLightChrome: accentContrastRatio(INK_LIGHT_MUTED, chromeLight),
+    mutedOnDarkChrome: accentContrastRatio(INK_DARK_MUTED, chromeDark),
+  };
+  const contrastOk = Object.values(ratios).every((ratio) => ratio >= ACCENT_CONTRAST_BAR);
+  return { contrastOk, ratios };
+}
+
+/** Parses the `oklch(L C H)` strings `computeTintedNeutrals` renders, back
+ *  into the triple `resolveAccentColor` takes — avoids a second colour
+ *  representation drifting from `accentRampStepToOklch`'s own format. */
+function parseOklch(value: string): AccentRampStep {
+  const match = /oklch\(([-\d.]+) ([-\d.]+) ([-\d.]+)\)/.exec(value);
+  if (!match) throw new Error(`accent-contrast: could not parse "${value}" as oklch()`);
+  return { L: Number(match[1]), C: Number(match[2]), H: Number(match[3]) };
 }
