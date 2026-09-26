@@ -22,7 +22,9 @@ parent directory would split planning docs across two places.
 | [`rollout-plan.md`](rollout-plan.md) | Phased implementation order, sized for a brb-architectobot / brb-codecrusher run. |
 | [`test-plan.md`](test-plan.md) | Unit and e2e tests to add, modelled on the existing theme tests. |
 | [`open-questions.md`](open-questions.md) | What needs an operator or brand decision before (or during) implementation. |
-| [`full-chrome-theming.md`](full-chrome-theming.md) | **Scope correction, 2026-09-26:** the operator wants full sidebar/surface theming with gradients, matching Slack's actual behaviour, not just the interaction-hue-only scope this README originally described. Supersedes the "neutral surfaces stay fixed" non-goal below. |
+| [`full-chrome-theming.md`](full-chrome-theming.md) | Research into full sidebar/gradient theming, requested 2026-09-26. **Declined** — see `theme-system-decision.md`. Kept for its blast-radius evidence. |
+| [`font-picker.md`](font-picker.md) | Research into a real typeface picker, requested 2026-09-26. **Declined** — see `theme-system-decision.md`. Kept for its bundled-fonts/doctrine evidence. |
+| [`theme-system-decision.md`](theme-system-decision.md) | **The final call, 2026-09-26.** Declines full-chrome theming and the font picker; ships the accent-preset system as-is plus a new constrained hue-customize option. Implement against this file. |
 
 ## Problem
 
