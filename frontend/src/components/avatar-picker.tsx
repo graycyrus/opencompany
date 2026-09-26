@@ -18,10 +18,12 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   AVATAR_ACCEPT,
-  MASCOT_COLORWAYS,
-  MASCOT_COSTUME_COUNT,
-  MASCOT_COSTUME_NAMES,
+  DEFAULT_MASCOT_COSTUME,
+  MASCOT_COSTUMES,
+  MASCOT_HAND_COLORS,
   MASCOT_KINDS,
+  MASCOT_MODES,
+  MASCOT_SKIN_COLORS,
   MAX_AVATAR_MB,
   TINY_FLAVOURS,
   avatarRef,
@@ -54,27 +56,34 @@ interface Props {
   /** `undefined` means "back to the default", never "no face". */
   onChange: (avatar: string | undefined) => void;
   /**
-   * The mascot colorway in force, or `undefined` for the file's own default.
-   * Only read while `value` is a `mascot:` reference.
+   * The mascot's display mode in force (`"static"`/`"animated"`), or
+   * `undefined` for the file's own default (`"animated"`). Only read while
+   * `value` is a `mascot:` reference.
    */
-  mascotColorway?: string;
+  mascotMode?: string;
+  /** The mascot costume in force, or `undefined` for the file's own default. */
+  mascotCostume?: string;
+  /** The mascot's skin (body) color in force, or `undefined` for the file's own default. */
+  mascotSkinColor?: string;
+  /** The mascot's hand/accent color in force, or `undefined` for the file's own default. */
+  mascotHandColor?: string;
   /**
-   * The mascot costume in force, or `undefined` for the file's own default.
-   * Only read while `value` is a `mascot:` reference.
-   */
-  mascotCostume?: number;
-  /**
-   * Sets the mascot colorway; `undefined` resets to the file's own default.
+   * Sets the mascot's display mode; `undefined` resets to the file's own
+   * default (`"animated"`).
    *
-   * Omitting this (alongside {@link Props.onChangeMascotCostume}) hides the
-   * colorway/costume section entirely — the create-teammate dialog and the
-   * "you" profile picker have nowhere yet to persist either choice, so they
-   * pass neither and this picker falls back to offering only the mascot tile
-   * itself, exactly as before this section existed.
+   * Omitting this (alongside the other three `onChangeMascot*` callbacks)
+   * hides the mode/costume/color section entirely — the create-teammate
+   * dialog and the "you" profile picker have nowhere yet to persist any of
+   * these, so they pass none and this picker falls back to offering only the
+   * mascot tile itself, exactly as before this section existed.
    */
-  onChangeMascotColorway?: (colorway: string | undefined) => void;
+  onChangeMascotMode?: (mode: string | undefined) => void;
   /** Sets the mascot costume; `undefined` resets to the file's own default. */
-  onChangeMascotCostume?: (costume: number | undefined) => void;
+  onChangeMascotCostume?: (costume: string | undefined) => void;
+  /** Sets the mascot's skin color; `undefined` resets to the file's own default. */
+  onChangeMascotSkinColor?: (color: string | undefined) => void;
+  /** Sets the mascot's hand color; `undefined` resets to the file's own default. */
+  onChangeMascotHandColor?: (color: string | undefined) => void;
   /** Whether the picker is inert — a save in flight, or a teammate nobody may edit. */
   disabled?: boolean;
 }
@@ -95,10 +104,14 @@ export function AvatarPicker({
   name,
   tone,
   onChange,
-  mascotColorway,
+  mascotMode,
   mascotCostume,
-  onChangeMascotColorway,
+  mascotSkinColor,
+  mascotHandColor,
+  onChangeMascotMode,
   onChangeMascotCostume,
+  onChangeMascotSkinColor,
+  onChangeMascotHandColor,
   disabled,
 }: Props) {
   const [uploading, setUploading] = useState(false);
@@ -120,6 +133,11 @@ export function AvatarPicker({
     };
   }, []);
   const current = avatarRef(value, seed);
+  // Static is the one mode that must never wire hover up (`mascot-avatar.tsx`
+  // ignores `state` in that mode too, but the point of this flag is that the
+  // hover *handlers themselves* are never attached here either — a static
+  // mascot does not react, full stop, not merely "reacts to nothing visibly").
+  const isStaticPreview = (mascotMode ?? "animated") === "static";
 
   async function upload(file: File) {
     setUploading(true);
@@ -147,20 +165,35 @@ export function AvatarPicker({
     <div className="space-y-3">
       <div className="flex items-center gap-4">
         {isMascotRef(current) ? (
-          <span
-            onMouseEnter={() => setPreviewHovering(true)}
-            onMouseLeave={() => setPreviewHovering(false)}
-          >
+          isStaticPreview ? (
             <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
               <LazyMascotAvatar
-                state={previewHovering ? "hover" : "idle"}
-                colorway={mascotColorway}
+                mode="static"
                 costume={mascotCostume}
+                skinColor={mascotSkinColor}
+                handColor={mascotHandColor}
                 className="size-14"
                 data-testid="avatar-preview"
               />
             </Suspense>
-          </span>
+          ) : (
+            <span
+              onMouseEnter={() => setPreviewHovering(true)}
+              onMouseLeave={() => setPreviewHovering(false)}
+            >
+              <Suspense fallback={<Skeleton className="size-14 rounded-xl" />}>
+                <LazyMascotAvatar
+                  mode="animated"
+                  state={previewHovering ? "hover" : "idle"}
+                  costume={mascotCostume}
+                  skinColor={mascotSkinColor}
+                  handColor={mascotHandColor}
+                  className="size-14"
+                  data-testid="avatar-preview"
+                />
+              </Suspense>
+            </span>
+          )
         ) : (
           <TeammateAvatar
             name={name}
@@ -271,10 +304,15 @@ export function AvatarPicker({
                 selected ? "ring-primary" : "ring-transparent hover:ring-border",
               )}
             >
+              {/* The grid tile is a picker swatch, not a hero — it never wires
+                  hover, so it is always the cheap static render regardless of
+                  the teammate's own chosen mode. */}
               <Suspense fallback={<Skeleton className="size-9 rounded-md" />}>
                 <LazyMascotAvatar
-                  colorway={mascotColorway}
+                  mode="static"
                   costume={mascotCostume}
+                  skinColor={mascotSkinColor}
+                  handColor={mascotHandColor}
                   className="size-9"
                 />
               </Suspense>
@@ -282,89 +320,148 @@ export function AvatarPicker({
           );
         })}
       </div>
-      {isMascotRef(current) && (onChangeMascotColorway || onChangeMascotCostume) && (
-        <div className="space-y-3 rounded-lg border p-3" data-testid="avatar-mascot-appearance">
-          {onChangeMascotColorway && (
-            <div className="space-y-1.5">
-              <p className="text-xs font-medium text-muted-foreground">Colorway</p>
-              <div
-                className="flex flex-wrap gap-2"
-                role="radiogroup"
-                aria-label="Mascot colorway"
-                data-testid="avatar-mascot-colorways"
-              >
-                {MASCOT_COLORWAYS.map(({ name: colorwayName, hand, skin }) => {
-                  const selected = (mascotColorway ?? MASCOT_COLORWAYS[0].name) === colorwayName;
-                  return (
-                    <button
-                      key={colorwayName}
-                      type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      aria-label={colorwayName}
-                      title={colorwayName}
-                      disabled={disabled}
-                      onClick={() => onChangeMascotColorway(colorwayName)}
-                      data-testid={`avatar-mascot-colorway-${colorwayName}`}
-                      className={cn(
-                        "size-7 rounded-full ring-2 ring-offset-2 ring-offset-background transition-colors disabled:opacity-50",
-                        selected ? "ring-primary" : "ring-transparent hover:ring-border",
-                      )}
-                      style={{
-                        background: `linear-gradient(135deg, ${skin} 50%, ${hand} 50%)`,
-                      }}
-                    />
-                  );
-                })}
+      {isMascotRef(current) &&
+        (onChangeMascotMode ||
+          onChangeMascotCostume ||
+          onChangeMascotSkinColor ||
+          onChangeMascotHandColor) && (
+          <div className="space-y-3 rounded-lg border p-3" data-testid="avatar-mascot-appearance">
+            {onChangeMascotMode && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground">Animation</p>
+                <div
+                  className="inline-flex rounded-md border p-0.5"
+                  role="radiogroup"
+                  aria-label="Mascot animation mode"
+                  data-testid="avatar-mascot-modes"
+                >
+                  {MASCOT_MODES.map((mode) => {
+                    const selected = (mascotMode ?? "animated") === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        disabled={disabled}
+                        onClick={() => onChangeMascotMode(mode)}
+                        data-testid={`avatar-mascot-mode-${mode}`}
+                        className={cn(
+                          "rounded px-2.5 py-1 text-xs capitalize transition-colors disabled:opacity-50",
+                          selected
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {mode}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          )}
-          {onChangeMascotCostume && (
-            <div className="space-y-1.5">
-              <p className="text-xs font-medium text-muted-foreground">Costume</p>
-              <div
-                className="flex flex-wrap gap-1.5"
-                role="radiogroup"
-                aria-label="Mascot costume"
-                data-testid="avatar-mascot-costumes"
-              >
-                {MASCOT_COSTUME_NAMES.map((costumeName, i) => {
-                  const number = i + 1;
-                  const selected = (mascotCostume ?? 1) === number;
-                  return (
-                    <button
-                      key={number}
-                      type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      disabled={disabled}
-                      onClick={() => onChangeMascotCostume(number)}
-                      data-testid={`avatar-mascot-costume-${number}`}
-                      className={cn(
-                        "rounded-full border px-2.5 py-1 text-xs transition-colors disabled:opacity-50",
-                        selected
-                          ? "border-primary bg-primary/10 text-foreground"
-                          : "border-border text-muted-foreground hover:border-primary/50",
-                      )}
-                    >
-                      {costumeName}
-                    </button>
-                  );
-                })}
+            )}
+            {onChangeMascotCostume && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground">Costume</p>
+                <div
+                  className="flex flex-wrap gap-1.5"
+                  role="radiogroup"
+                  aria-label="Mascot costume"
+                  data-testid="avatar-mascot-costumes"
+                >
+                  {MASCOT_COSTUMES.map(({ id, label }) => {
+                    const selected = (mascotCostume ?? DEFAULT_MASCOT_COSTUME) === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        disabled={disabled}
+                        onClick={() => onChangeMascotCostume(id)}
+                        data-testid={`avatar-mascot-costume-${id}`}
+                        className={cn(
+                          "rounded-full border px-2.5 py-1 text-xs transition-colors disabled:opacity-50",
+                          selected
+                            ? "border-primary bg-primary/10 text-foreground"
+                            : "border-border text-muted-foreground hover:border-primary/50",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-              {/* Guards MASCOT_COSTUME_NAMES against silently drifting out of
-                  step with MASCOT_COSTUME_COUNT — a length mismatch would
-                  otherwise just render fewer/more buttons with nobody the wiser. */}
-              {MASCOT_COSTUME_NAMES.length !== MASCOT_COSTUME_COUNT && (
-                <p className="text-xs text-destructive">
-                  Costume names ({MASCOT_COSTUME_NAMES.length}) don&apos;t match the costume
-                  count ({MASCOT_COSTUME_COUNT}).
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+            )}
+            {onChangeMascotSkinColor && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground">Skin color</p>
+                <div
+                  className="flex flex-wrap gap-2"
+                  role="radiogroup"
+                  aria-label="Mascot skin color"
+                  data-testid="avatar-mascot-skin-colors"
+                >
+                  {MASCOT_SKIN_COLORS.map(({ id, hex }) => {
+                    const selected = (mascotSkinColor ?? "default") === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        aria-label={id}
+                        title={id}
+                        disabled={disabled}
+                        onClick={() => onChangeMascotSkinColor(id)}
+                        data-testid={`avatar-mascot-skin-${id}`}
+                        className={cn(
+                          "size-6 rounded-full ring-2 ring-offset-2 ring-offset-background transition-colors disabled:opacity-50",
+                          selected ? "ring-primary" : "ring-transparent hover:ring-border",
+                        )}
+                        style={{ background: hex }}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {onChangeMascotHandColor && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground">Hand color</p>
+                <div
+                  className="flex flex-wrap gap-2"
+                  role="radiogroup"
+                  aria-label="Mascot hand color"
+                  data-testid="avatar-mascot-hand-colors"
+                >
+                  {MASCOT_HAND_COLORS.map(({ id, hex }) => {
+                    const selected = (mascotHandColor ?? "default") === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        aria-label={id}
+                        title={id}
+                        disabled={disabled}
+                        onClick={() => onChangeMascotHandColor(id)}
+                        data-testid={`avatar-mascot-hand-${id}`}
+                        className={cn(
+                          "size-6 rounded-full ring-2 ring-offset-2 ring-offset-background transition-colors disabled:opacity-50",
+                          selected ? "ring-primary" : "ring-transparent hover:ring-border",
+                        )}
+                        style={{ background: hex }}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
     </div>
   );
 }
