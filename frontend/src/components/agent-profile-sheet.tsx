@@ -50,20 +50,41 @@ function AgentAvatar({
   name,
   tone,
   avatar,
-  mascotColorway,
+  mascotMode,
   mascotCostume,
+  mascotSkinColor,
+  mascotHandColor,
 }: {
   name: string;
   tone: string;
   avatar: string;
-  mascotColorway?: string;
-  mascotCostume?: number;
+  mascotMode?: string;
+  mascotCostume?: string;
+  mascotSkinColor?: string;
+  mascotHandColor?: string;
 }) {
   // Only the mascot branch needs this — a static tile has no state to track,
   // and hooks cannot sit behind the early return below, so it is declared
   // unconditionally like `AvatarTile`'s own hook in `teammate-avatar.tsx`.
   const [hovering, setHovering] = useState(false);
   if (isMascotRef(avatar)) {
+    // Static means static: the handlers that make the header react to a
+    // pointer are never attached in the first place, not merely fed a state
+    // `MascotAvatar` then ignores — see that component's own module docs.
+    if ((mascotMode ?? "animated") === "static") {
+      return (
+        <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
+          <LazyMascotAvatar
+            mode="static"
+            costume={mascotCostume}
+            skinColor={mascotSkinColor}
+            handColor={mascotHandColor}
+            className="size-12"
+            data-testid="agent-profile-avatar"
+          />
+        </Suspense>
+      );
+    }
     return (
       <span
         onMouseEnter={() => setHovering(true)}
@@ -71,9 +92,11 @@ function AgentAvatar({
       >
         <Suspense fallback={<Skeleton className="size-12 rounded-xl" />}>
           <LazyMascotAvatar
+            mode="animated"
             state={hovering ? "hover" : "idle"}
-            colorway={mascotColorway}
             costume={mascotCostume}
+            skinColor={mascotSkinColor}
+            handColor={mascotHandColor}
             className="size-12"
             data-testid="agent-profile-avatar"
           />
@@ -299,8 +322,10 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
             name={profile.display}
             tone={profile.tone}
             avatar={profile.avatar}
-            mascotColorway={agent.mascotColorway}
+            mascotMode={agent.mascotMode}
             mascotCostume={agent.mascotCostume}
+            mascotSkinColor={agent.mascotSkinColor}
+            mascotHandColor={agent.mascotHandColor}
           />
           <div className="min-w-0 flex-1">
             <SheetTitle className="truncate text-lg" data-testid="agent-profile-name">
