@@ -53,71 +53,115 @@ export const MASCOT_KINDS = ["animated"] as const;
 export type MascotKind = (typeof MASCOT_KINDS)[number];
 
 /**
- * A curated hand/skin color pair for the animated mascot, by name — the
- * `[handColor, skinColor]` hex pair `MascotAvatar` writes into the `.riv`
- * file's ViewModel.
+ * Whether a `mascot:animated` wearer's live canvas plays at all.
  *
- * **Must stay in step with `MASCOT_COLORWAYS` in `src/company/avatar.rs`**,
- * the same contract {@link MASCOT_KINDS} and {@link TINY_FLAVOURS} already
- * keep. Deliberately a short, curated list rather than a color picker — the
- * same "no arbitrary values" posture the rest of this grammar takes. Each
- * pair was picked and looked at rendered on the actual character; `"amber"`
- * is first and is the `.riv` file's own shipped default, so a teammate with
- * no chosen colorway renders exactly as it did before this list existed.
+ * **Must stay in step with `MASCOT_MODES` in `src/company/mascot.rs`.**
+ * `"static"` freezes on the chosen costume's resting frame with no hover or
+ * "replying" reactivity wired up at all — not merely visually still, the
+ * handlers themselves are never attached, since a mode is a fact about
+ * behaviour. `"animated"` is the live canvas already shipped: reactive to
+ * hover, landing on the chosen costume as its baseline. `"animated"` is the
+ * file's own default, so a teammate with no chosen mode renders exactly as
+ * every `mascot:animated` wearer already did before this override existed.
  */
-export const MASCOT_COLORWAYS = [
-  { name: "amber", hand: "#B4900B", skin: "#F7D145" },
-  { name: "teal", hand: "#0B6E69", skin: "#4DC9BF" },
-  { name: "rose", hand: "#B42A5C", skin: "#F29EBB" },
-  { name: "violet", hand: "#5B2E8A", skin: "#B08CDE" },
-  { name: "slate", hand: "#3F4B5C", skin: "#94A3B8" },
-  { name: "ember", hand: "#B23A0B", skin: "#F2884D" },
+export const MASCOT_MODES = ["static", "animated"] as const;
+
+export type MascotMode = (typeof MASCOT_MODES)[number];
+
+/**
+ * The nine costumes a `mascot:animated` wearer may land on, by id — a
+ * `mascotAnimationNumber` value, driving which of the file's states its
+ * canvas shows in both display modes.
+ *
+ * **Must stay in step with `MASCOT_COSTUMES` in `src/company/mascot.rs`**,
+ * the same contract {@link MASCOT_KINDS} and {@link TINY_FLAVOURS} already
+ * keep. Named and numbered from what was actually watched play — cycling
+ * `mascotAnimationNumber` 1–13 against a running instance of the file and
+ * screenshotting each landing frame — not from the `.riv` file's own typo'd
+ * internal clip names (`cap`/`hadband`/`hadphone`/`habibi`/`cardboard
+ * mask`/`glass1`-`glass4`). Number `4` is deliberately excluded: it renders a
+ * different resting frame depending on which costume the state machine was
+ * previously on, so it is not a stable, addressable costume the way the
+ * other nine are. See `crate::company::mascot` (Rust) for the full account.
+ */
+export const MASCOT_COSTUMES = [
+  { id: "cap", label: "Cap", number: 1 },
+  { id: "headphones", label: "Headphones", number: 2 },
+  { id: "headband", label: "Headband", number: 3 },
+  { id: "glass1", label: "Round goggles", number: 5 },
+  { id: "habibi", label: "Keffiyeh", number: 6 },
+  { id: "cardboard_mask", label: "Cardboard mask", number: 7 },
+  { id: "glass2", label: "Round glasses", number: 8 },
+  { id: "glass3", label: "Cat-eye sunglasses", number: 9 },
+  { id: "glass4", label: "Rectangle sunglasses", number: 10 },
 ] as const;
 
-export type MascotColorway = (typeof MASCOT_COLORWAYS)[number]["name"];
+export type MascotCostume = (typeof MASCOT_COSTUMES)[number]["id"];
+
+/** The mascot's own default costume — the file's resting frame. */
+export const DEFAULT_MASCOT_COSTUME: MascotCostume = "cap";
+
+/** The `mascotAnimationNumber` for a costume id, or the default's when unset/unrecognised. */
+export function mascotCostumeNumber(costume: string | undefined): number {
+  const match = MASCOT_COSTUMES.find((c) => c.id === costume);
+  return match ? match.number : MASCOT_COSTUMES[0].number;
+}
 
 /**
- * How many of the mascot's costume looks are pickable — valid costume numbers
- * are `1..=MASCOT_COSTUME_COUNT`.
+ * The six curated skin-color (body) swatches, by id, paired with a hex.
  *
- * **Must stay in step with `MASCOT_COSTUME_COUNT` in `src/company/avatar.rs`.**
- * The `.riv` file's `mascotAnimationNumber` Number input drives which costume
- * shows; confirmed live (screenshot by screenshot, driving the raw number
- * through a running instance) that `1`-`9` render nine distinct looks and `10`
- * renders identically to `9` — the input clamps rather than erroring or
- * wrapping past the file's real range.
+ * **Must stay in step with `MASCOT_SKIN_COLORS`/`MASCOT_SKIN_COLOR_HEXES` in
+ * `src/company/mascot.rs`.** Independent of {@link MASCOT_HAND_COLORS} — the
+ * mascot's `skinColor` and `handColor` are two separate `.riv` ViewModel
+ * properties. Curated rather than an open picker for the reason the Rust
+ * module docs give: `skinColor` is the character's literal body color, and
+ * which hues read as on-model is a call for whoever looks at it rendered.
+ * `"default"` is the file's own shipped color, first so a teammate with no
+ * chosen skin color renders unchanged.
  */
-export const MASCOT_COSTUME_COUNT = 9;
+export const MASCOT_SKIN_COLORS = [
+  { id: "default", hex: "#F7D145" },
+  { id: "peach", hex: "#F5B88A" },
+  { id: "mint", hex: "#A8E6C1" },
+  { id: "sky", hex: "#9CCDF0" },
+  { id: "lavender", hex: "#C9B6E4" },
+  { id: "coral", hex: "#F08A8A" },
+] as const;
+
+export type MascotSkinColor = (typeof MASCOT_SKIN_COLORS)[number]["id"];
 
 /**
- * Human-readable names for each costume number, `1`-indexed to match
- * `mascotAnimationNumber` (`names[0]` is costume `1`).
+ * The six curated hand/accent-color swatches, by id, paired with a hex.
  *
- * Named from what was actually seen on screen, not the `.riv` file's own
- * internal clip names — those are a typo'd, not-UI-ready internal set
- * (`cap`/`hadband`/`hadphone`/`habibi`/`face mask`/`cardboard
- * mask`/`glass1`-`glass4`, per `rive.animationNames`; see
- * `docs/issue/mascot-profile-avatar/open-questions.md` §1). "Hug" (costume 4)
- * is the one case where the visual difference from costume 1 is a pose and
- * blush rather than a different hat — both wear the same knit cap.
+ * **Must stay in step with `MASCOT_HAND_COLORS`/`MASCOT_HAND_COLOR_HEXES` in
+ * `src/company/mascot.rs`.** `"default"` is the file's own shipped color.
  */
+export const MASCOT_HAND_COLORS = [
+  { id: "default", hex: "#B4900B" },
+  { id: "charcoal", hex: "#3A3A3A" },
+  { id: "teal", hex: "#2F8F86" },
+  { id: "rose", hex: "#D86A8C" },
+  { id: "plum", hex: "#7A4F8C" },
+  { id: "forest", hex: "#3F7A45" },
+] as const;
+
+export type MascotHandColor = (typeof MASCOT_HAND_COLORS)[number]["id"];
+
 /** `"#RRGGBB"` → `[r, g, b]`, for `useViewModelInstanceColor`'s `setRgb`. */
 export function hexToRgb(hex: string): [number, number, number] {
   const n = parseInt(hex.replace("#", ""), 16);
   return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
 }
 
-export const MASCOT_COSTUME_NAMES: readonly string[] = [
-  "Beanie",
-  "Headphones",
-  "Bandana",
-  "Hug",
-  "Goggles",
-  "Headwrap",
-  "Cardboard Box",
-  "Round Glasses",
-  "Sunglasses",
-];
+/** The hex for a skin-color id, or the default's when unset/unrecognised. */
+export function mascotSkinColorHex(color: string | undefined): string {
+  return (MASCOT_SKIN_COLORS.find((c) => c.id === color) ?? MASCOT_SKIN_COLORS[0]).hex;
+}
+
+/** The hex for a hand-color id, or the default's when unset/unrecognised. */
+export function mascotHandColorHex(color: string | undefined): string {
+  return (MASCOT_HAND_COLORS.find((c) => c.id === color) ?? MASCOT_HAND_COLORS[0]).hex;
+}
 
 /** The image types an uploaded avatar may be — the `accept` a file input wants. */
 export const AVATAR_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
