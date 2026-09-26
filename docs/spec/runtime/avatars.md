@@ -63,6 +63,45 @@ The same reasoning is why a `blob:` reference is validated against its
 id, and one pointed at a 60 MB PDF would make every face on the page try to
 decode a PDF as an image, for everyone, on every load.
 
+### Mascot appearance: mode, costume and color
+
+`mascot:animated` stays the simple, closed form above — it names *which
+character*, and v1 ships exactly one. A wearer's four further choices (does
+the canvas play at all, which costume, which skin color, which hand color)
+are **not** encoded into that string. They are separate per-agent override
+fields (`AgentOverride::mascot_mode`/`mascot_costume`/`mascot_skin_color`/
+`mascot_hand_color`), the same closed-list, absent-means-default pattern
+every other field on that struct already uses, validated by
+`src/company/mascot.rs` and mirrored in `frontend/src/lib/avatar.ts`:
+
+| Field | Closed list | Default when unset |
+|---|---|---|
+| `mascot_mode` | `MASCOT_MODES` — `"animated"` \| `"static"` | `"animated"` |
+| `mascot_costume` | `MASCOT_COSTUMES` — nine ids | `"cap"` |
+| `mascot_skin_color` | `MASCOT_SKIN_COLORS` — six ids | `"default"` |
+| `mascot_hand_color` | `MASCOT_HAND_COLORS` — six ids | `"default"` |
+
+**Static** renders one frozen frame — the chosen costume, at rest — with no
+hover or "replying" reactivity wired up at all. That is a fact about
+behaviour, not paint: the frontend does not attach the hover handlers in
+static mode rather than attach them and let `MascotAvatar` ignore the
+resulting state change, at every hero surface that mounts it (the profile
+sheet, the agent detail page's header, the avatar picker preview).
+**Animated** is what v1 originally shipped: the live canvas, reactive to
+hover, landing on the chosen costume as its baseline — `hover`/`replying`
+stay the two fixed `mascotAnimationNumber` values that reactivity already
+used before a costume choice existed, rather than following the chosen
+costume, so a chosen "look" reads as one outfit rather than one outfit at
+rest and a different one on hover.
+
+The nine costume ids and their `mascotAnimationNumber` values were not
+guessed from the `.riv` file's internal clip names (a typo'd, pre-runtime
+string-table read got one wrong — see `crate::company::mascot`'s module
+docs) — they were watched play, live, screenshot by screenshot. Costume `4`
+is deliberately excluded from the nine: it renders a different resting frame
+depending on which costume the state machine was previously on, so it is not
+a stable, addressable choice the way the other nine are.
+
 ## Uploads
 
 ```text
@@ -98,6 +137,10 @@ one would reintroduce, inside a file, precisely what refusing URLs keeps out.
 | Subject | Field | Written by |
 |---|---|---|
 | A teammate | `AgentOverride::avatar` on the company record | `PATCH …/team/{agent_id}`, `POST …/team` |
+| A teammate's mascot mode | `AgentOverride::mascot_mode` | `PATCH …/team/{agent_id}` |
+| A teammate's mascot costume | `AgentOverride::mascot_costume` | `PATCH …/team/{agent_id}` |
+| A teammate's mascot skin color | `AgentOverride::mascot_skin_color` | `PATCH …/team/{agent_id}` |
+| A teammate's mascot hand color | `AgentOverride::mascot_hand_color` | `PATCH …/team/{agent_id}` |
 | A person | `UserRecord::avatar` | `PATCH …/auth/me` |
 
 A teammate's face rides on the **override** row rather than on `OverlayAgent`,
