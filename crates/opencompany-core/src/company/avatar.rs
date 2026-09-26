@@ -88,6 +88,70 @@ pub const TINY_FLAVOURS: [&str; 11] = [
 /// second character later is an addition to this list, not a grammar change.
 pub const MASCOT_KINDS: [&str; 1] = ["animated"];
 
+/// A curated hand/skin color pair for the animated mascot, by name.
+///
+/// **Must stay in step with `MASCOT_COLORWAYS` in `frontend/src/lib/avatar.ts`**,
+/// the same contract [`MASCOT_KINDS`] and [`TINY_FLAVOURS`] already keep. A raw
+/// color picker is deliberately not offered here — the same "no arbitrary
+/// values" posture the rest of this grammar takes (see the module docs): each
+/// pair was picked and looked at rendered on the actual character (issue
+/// `mascot-profile-avatar`, the colorway-picker follow-up), not typed in blind.
+/// `"amber"` is first and is the `.riv` file's own shipped default
+/// (`handColor=#B4900B`, `skinColor=#F7D145`), so an agent with no
+/// [`AgentOverride::mascot_colorway`](crate::ports::types::AgentOverride::mascot_colorway)
+/// renders identically to before this list existed.
+pub const MASCOT_COLORWAYS: [(&str, (u8, u8, u8), (u8, u8, u8)); 6] = [
+    ("amber", (0xB4, 0x90, 0x0B), (0xF7, 0xD1, 0x45)),
+    ("teal", (0x0B, 0x6E, 0x69), (0x4D, 0xC9, 0xBF)),
+    ("rose", (0xB4, 0x2A, 0x5C), (0xF2, 0x9E, 0xBB)),
+    ("violet", (0x5B, 0x2E, 0x8A), (0xB0, 0x8C, 0xDE)),
+    ("slate", (0x3F, 0x4B, 0x5C), (0x94, 0xA3, 0xB8)),
+    ("ember", (0xB2, 0x3A, 0x0B), (0xF2, 0x88, 0x4D)),
+];
+
+/// How many of the mascot's costume looks are pickable — valid
+/// [`AgentOverride::mascot_costume`](crate::ports::types::AgentOverride::mascot_costume)
+/// values are `1..=MASCOT_COSTUME_COUNT`.
+///
+/// The `.riv` file's `mascotAnimationNumber` ViewModel input drives which
+/// costume the artboard shows; `1`-`9` render nine visually distinct looks
+/// (confirmed live, screenshot by screenshot, against the shipped file) and
+/// `10` renders identically to `9` — the input clamps rather than wrapping or
+/// erroring past the file's real range. Named in
+/// `frontend/src/components/mascot-avatar.tsx`'s `COSTUME_NAMES`, from what was
+/// actually seen on screen rather than the `.riv` file's own internal clip
+/// names (`cap`/`hadband`/`hadphone`/`habibi`/`face mask`/`cardboard
+/// mask`/`glass1`-`glass4` — a typo'd, not-UI-ready set; see
+/// `docs/issue/mascot-profile-avatar/open-questions.md` §1).
+pub const MASCOT_COSTUME_COUNT: u8 = 9;
+
+/// Validates a submitted mascot colorway name against [`MASCOT_COLORWAYS`].
+pub fn validate_mascot_colorway(name: &str) -> Result<()> {
+    if MASCOT_COLORWAYS.iter().any(|(n, _, _)| *n == name) {
+        Ok(())
+    } else {
+        Err(OpenCompanyError::InvalidRequest(format!(
+            "\"{name}\" isn't one of the mascot colorways. Pick one of: {}.",
+            MASCOT_COLORWAYS
+                .iter()
+                .map(|(n, _, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+}
+
+/// Validates a submitted mascot costume number against [`MASCOT_COSTUME_COUNT`].
+pub fn validate_mascot_costume(number: u8) -> Result<()> {
+    if (1..=MASCOT_COSTUME_COUNT).contains(&number) {
+        Ok(())
+    } else {
+        Err(OpenCompanyError::InvalidRequest(format!(
+            "a mascot costume must be between 1 and {MASCOT_COSTUME_COUNT}."
+        )))
+    }
+}
+
 /// The longest an avatar reference may be.
 ///
 /// Both forms are a short prefix plus an identifier the host itself minted, so

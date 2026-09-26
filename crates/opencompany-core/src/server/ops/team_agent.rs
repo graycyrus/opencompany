@@ -127,13 +127,17 @@ pub(super) enum AgentSource {
 /// the others, so this is their union. It widens nothing on its own — `tools`,
 /// `model`, `harness` and `provider` stay admin-gated in [`edit_agent`], and
 /// [`EDITABLE_FIELDS_MEMBER`] is unchanged from what #1530 left it.
-const EDITABLE_FIELDS: [&str; 9] = [
+const EDITABLE_FIELDS: [&str; 13] = [
     "name",
     "role",
     "description",
     "tools",
     "instructions",
     "avatar",
+    "mascotMode",
+    "mascotCostume",
+    "mascotSkinColor",
+    "mascotHandColor",
     "model",
     "harness",
     "provider",
@@ -147,7 +151,17 @@ const EDITABLE_FIELDS: [&str; 9] = [
 /// gives: a console renders a field read-only exactly when the host says it is,
 /// so offering `tools` to a member who would meet a `403` on save is precisely
 /// the drift `editable` exists to remove.
-const EDITABLE_FIELDS_MEMBER: [&str; 5] = ["name", "role", "description", "instructions", "avatar"];
+const EDITABLE_FIELDS_MEMBER: [&str; 9] = [
+    "name",
+    "role",
+    "description",
+    "instructions",
+    "avatar",
+    "mascotMode",
+    "mascotCostume",
+    "mascotSkinColor",
+    "mascotHandColor",
+];
 
 /// One agent, in full — everything #264 lists as unreachable.
 #[derive(Debug, Serialize)]
@@ -226,6 +240,17 @@ pub(super) struct AgentDetailDto {
     /// console draws the mascot it hashes from the id.
     #[serde(skip_serializing_if = "Option::is_none")]
     avatar: Option<String>,
+    /// The mascot colorway this teammate wears, when somebody has chosen one
+    /// (`docs/spec/runtime/avatars.md`). Only meaningful when `avatar` is
+    /// `"mascot:animated"`. Absent means the `.riv` file's own default
+    /// colorway, not "no mascot".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mascot_colorway: Option<String>,
+    /// The mascot costume this teammate wears, when somebody has chosen one.
+    /// Only meaningful when `avatar` is `"mascot:animated"`. Absent means the
+    /// file's own default costume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mascot_costume: Option<u8>,
     /// The cap in force, its spend, and its attribution — the same fields and
     /// the same absent-means-uncapped contract as `GET …/team`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -584,6 +609,31 @@ pub(super) struct EditAgent {
     /// that reach the record name something this host already holds.
     #[serde(default, deserialize_with = "double_option")]
     avatar: Option<Option<String>>,
+    /// The mascot colorway this teammate wears. Same double-option contract as
+    /// `avatar`:
+    ///
+    /// | body | parses as | means |
+    /// |---|---|---|
+    /// | `{}` | `None` | leave the colorway alone |
+    /// | `{"mascotColorway": null}` | `Some(None)` | reset to the file's own default colorway |
+    /// | `{"mascotColorway": "teal"}` | `Some(Some(…))` | wear that colorway |
+    ///
+    /// Meaningful only alongside a `mascot:` `avatar`, but not refused when
+    /// sent without one — the same "store the choice, apply it once the right
+    /// avatar is worn" latitude a picker UI needs when it lets an operator
+    /// preview a colorway before committing the mascot itself. Validated by
+    /// [`crate::company::avatar::validate_mascot_colorway`] against the
+    /// curated, closed list — never a raw color. Open to any member, matching
+    /// `avatar`: picking a colleague's colorway is not a privilege boundary.
+    #[serde(default, deserialize_with = "double_option")]
+    mascot_colorway: Option<Option<String>>,
+    /// The mascot costume this teammate wears. Same double-option contract and
+    /// member-open gate as `mascot_colorway`; `null` resets to the file's own
+    /// default costume, a number sets it. Validated by
+    /// [`crate::company::avatar::validate_mascot_costume`] against
+    /// [`crate::company::avatar::MASCOT_COSTUME_COUNT`].
+    #[serde(default, deserialize_with = "double_option")]
+    mascot_costume: Option<Option<u8>>,
     /// The teammate's own model override (issue #1245's per-agent follow-up).
     /// A double option for the same reason as `description`: absent leaves it
     /// alone, `null` clears it back to the harness's own default, and a
@@ -748,6 +798,30 @@ async fn edit_agent(
                 }
                 None => Some(None),
             }
+        }
+    };
+
+    // The mascot colorway/costume need no I/O to validate — both are closed,
+    // in-memory lists — so unlike `avatar` they are checked here rather than
+    // resolved, and the checked values are what gets written under the lock
+    // below. Same double-option unwrap shape as `resolved_avatar`.
+    let resolved_mascot_colorway: Option<Option<String>> = match &body.mascot_colorway {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(name)) => {
+            let trimmed = name.trim();
+            crate::company::avatar::validate_mascot_colorway(trimmed)
+                .map_err(|e| ApiError(e).into_response())?;
+            Some(Some(trimmed.to_string()))
+        }
+    };
+    let resolved_mascot_costume: Option<Option<u8>> = match body.mascot_costume {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(number)) => {
+            crate::company::avatar::validate_mascot_costume(number)
+                .map_err(|e| ApiError(e).into_response())?;
+            Some(Some(number))
         }
     };
 
@@ -1136,6 +1210,30 @@ async fn edit_agent(
         }
     }
 
+    // The chosen mascot colorway/costume, written the same field-wise way as
+    // `avatar` — each validated above, with no I/O to get ahead of the write
+    // lock for.
+    if let Some(colorway) = resolved_mascot_colorway {
+        match colorway {
+            Some(name) => record.upsert_agent_override(AgentOverride {
+                agent_id: agent_id.clone(),
+                mascot_colorway: Some(name),
+                ..Default::default()
+            }),
+            None => record.clear_agent_mascot_colorway(&agent_id),
+        }
+    }
+    if let Some(costume) = resolved_mascot_costume {
+        match costume {
+            Some(number) => record.upsert_agent_override(AgentOverride {
+                agent_id: agent_id.clone(),
+                mascot_costume: Some(number),
+                ..Default::default()
+            }),
+            None => record.clear_agent_mascot_costume(&agent_id),
+        }
+    }
+
     company.runtime.store().save(&record).await?;
 
     // Release both locks before the possible rebuild below (PR #1875 review
@@ -1369,6 +1467,8 @@ async fn detail(
         budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.map(|entry| entry.at_millis),
         avatar: record.effective_avatar(agent_id),
+        mascot_colorway: record.effective_mascot_colorway(agent_id),
+        mascot_costume: record.effective_mascot_costume(agent_id),
     }))
 }
 

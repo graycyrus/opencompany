@@ -4128,6 +4128,28 @@ pub struct AgentOverride {
     /// choice of face is the same act whichever kind was clicked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    /// The mascot colorway this teammate wears, when somebody has chosen one —
+    /// a named pair from
+    /// [`crate::company::avatar::MASCOT_COLORWAYS`](crate::company::avatar::MASCOT_COLORWAYS),
+    /// validated the same way [`Self::avatar`] is before it is stored.
+    ///
+    /// Only meaningful alongside a `mascot:` [`Self::avatar`], but carried as
+    /// its own field rather than folded into that reference string: the
+    /// reference stays the closed, validated grammar
+    /// [`crate::company::avatar::AvatarRef`] documents it as (`docs/spec/runtime/avatars.md`'s
+    /// avatar-grammar notes), not a vector for encoding arbitrary per-agent
+    /// appearance state. `None` means **the file's own default colorway**,
+    /// not "no mascot" — the same absent-means-default contract [`Self::avatar`]
+    /// itself uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mascot_colorway: Option<String>,
+    /// The mascot costume this teammate wears, when somebody has chosen one —
+    /// a number in `1..=`[`MASCOT_COSTUME_COUNT`](crate::company::avatar::MASCOT_COSTUME_COUNT),
+    /// validated the same way. `None` means the file's own default costume
+    /// (the mascot's cap), the same absent-means-default contract as
+    /// [`Self::mascot_colorway`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mascot_costume: Option<u8>,
     /// The model this teammate runs, as an overlay on the blueprint.
     ///
     /// `Some("")` is the stored form of "cleared", matching `description`:
@@ -4472,6 +4494,8 @@ impl AgentOverride {
             && self.tools.is_none()
             && self.instructions.is_none()
             && self.avatar.is_none()
+            && self.mascot_colorway.is_none()
+            && self.mascot_costume.is_none()
             && self.model.is_none()
             && self.harness.is_none()
             && self.provider.is_none()
@@ -6215,6 +6239,12 @@ impl CompanyRecord {
             if entry.avatar.is_some() {
                 held.avatar = entry.avatar;
             }
+            if entry.mascot_colorway.is_some() {
+                held.mascot_colorway = entry.mascot_colorway;
+            }
+            if entry.mascot_costume.is_some() {
+                held.mascot_costume = entry.mascot_costume;
+            }
             if entry.model.is_some() {
                 held.model = entry.model;
             }
@@ -6503,6 +6533,48 @@ impl CompanyRecord {
         self.retain_nonempty_agent_edits();
     }
 
+    /// The mascot colorway in force for `agent_id`, or `None` for "the file's
+    /// own default colorway" — not "no mascot"; see
+    /// [`AgentOverride::mascot_colorway`].
+    pub fn effective_mascot_colorway(&self, agent_id: &str) -> Option<String> {
+        self.agent_override(agent_id)
+            .and_then(|o| o.mascot_colorway.clone())
+    }
+
+    /// Drops `agent_id`'s chosen mascot colorway so the file's own default
+    /// applies again. Same field-wise-clear contract as
+    /// [`Self::clear_agent_avatar`].
+    pub fn clear_agent_mascot_colorway(&mut self, agent_id: &str) {
+        if let Some(entry) = self
+            .overlay_agent_edits
+            .iter_mut()
+            .find(|entry| entry.agent_id == agent_id)
+        {
+            entry.mascot_colorway = None;
+        }
+        self.retain_nonempty_agent_edits();
+    }
+
+    /// The mascot costume in force for `agent_id`, or `None` for "the file's
+    /// own default costume"; see [`AgentOverride::mascot_costume`].
+    pub fn effective_mascot_costume(&self, agent_id: &str) -> Option<u8> {
+        self.agent_override(agent_id).and_then(|o| o.mascot_costume)
+    }
+
+    /// Drops `agent_id`'s chosen mascot costume so the file's own default
+    /// applies again. Same field-wise-clear contract as
+    /// [`Self::clear_agent_avatar`].
+    pub fn clear_agent_mascot_costume(&mut self, agent_id: &str) {
+        if let Some(entry) = self
+            .overlay_agent_edits
+            .iter_mut()
+            .find(|entry| entry.agent_id == agent_id)
+        {
+            entry.mascot_costume = None;
+        }
+        self.retain_nonempty_agent_edits();
+    }
+
     /// Drops any override row left carrying no edits at all.
     ///
     /// Shared by the two clear paths so neither can forget a field: a row that
@@ -6522,6 +6594,8 @@ impl CompanyRecord {
                 || entry.tools.is_some()
                 || entry.instructions.is_some()
                 || entry.avatar.is_some()
+                || entry.mascot_colorway.is_some()
+                || entry.mascot_costume.is_some()
                 || entry.model.is_some()
                 || entry.harness.is_some()
                 || entry.provider.is_some()
