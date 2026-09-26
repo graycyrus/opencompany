@@ -77,6 +77,15 @@ interface Props {
   handColor?: MascotHandColor | string;
   className?: string;
   "data-testid"?: string;
+  /**
+   * Fires once the canvas has actually been given its chosen costume and
+   * colors — the same `ready` gate that controls this component's own
+   * opacity (see the module docs above it). `MascotWarmer`
+   * (`teammate-avatar.tsx`) is the caller: it is the signal that the canvas
+   * now holds a real, correctly-costumed frame worth capturing with
+   * `canvas.toDataURL()`, rather than the file's un-costumed default one.
+   */
+  onReady?: () => void;
 }
 
 /**
@@ -127,6 +136,7 @@ export function MascotAvatar({
   handColor,
   className,
   "data-testid": testId,
+  onReady,
 }: Props) {
   const reducedMotion = usePrefersReducedMotion();
   const isStatic = mode === "static";
@@ -181,6 +191,18 @@ export function MascotAvatar({
   const { setRgb: setHandColor } = useViewModelInstanceColor("handColor", vmi);
   const { setRgb: setSkinColor } = useViewModelInstanceColor("skinColor", vmi);
 
+  // Whether the canvas has actually been given its chosen costume and colors
+  // at least once. `vmi` becoming truthy only means the file loaded and the
+  // ViewModel bound — the canvas itself keeps painting the file's own default
+  // (uncostumed) frame until the effects below write to it, which is a tick
+  // later. Gating visibility on this instead of on `vmi`/`rive` directly is
+  // what prevents a mount from ever showing the wrong costume, even for one
+  // frame, and — combined with staying transparent until then — is what lets
+  // a caller layer this over its own placeholder (`AvatarTile`'s tone tile,
+  // or a caller's own `Skeleton`) without that placeholder being replaced by
+  // a flash of the un-costumed default first.
+  const [ready, setReady] = useState(false);
+
   // The chosen colors, or the file's own defaults when unset or
   // unrecognised. Set whenever either changes — not just once — so a picker
   // preview updates live as an operator tries different swatches before
@@ -205,6 +227,22 @@ export function MascotAvatar({
         ? baseline
         : REACTIVE_NUMBERS[state];
     setAnimationNumber(number);
+    setReady(true);
+    if (!onReady) return;
+    // The ViewModel write above is not the paint: Rive applies it on its own
+    // render loop's next tick, and `canvas.toDataURL()` (what `onReady` exists
+    // for — see this component's own `Props.onReady` doc) needs a frame that
+    // has actually been drawn with it, not merely requested. One
+    // `requestAnimationFrame` is when the browser is about to paint; a second
+    // is the first opportunity to run *after* that paint has happened.
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => onReady());
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vmi, isStatic, state, reducedMotion, costume]);
 
@@ -214,7 +252,40 @@ export function MascotAvatar({
       data-testid={testId}
       aria-hidden
     >
-      <RiveComponent />
+      {/* The `.riv` file is ~1.7 MB and can take a couple of seconds to fetch
+          and instance even after this component's own chunk has loaded, and
+          an untouched canvas is fully transparent — painting nothing at all
+          is what read as "broken" (issue found live 2026-09-26). Opacity
+          rather than an unmount keeps `RiveComponent` mounted (and its
+          `autoplay` loop warm) throughout, so there is no second mount cost
+          once the file lands; only its visibility changes. Fully transparent
+          until `ready` means whatever a caller has placed behind this
+          (`AvatarTile`'s initials tile, or a caller's own `Skeleton`) is what
+          shows during the gap, instead of this component inventing its own
+          placeholder that would paint over — and hide — that one. */}
+      <RiveComponent
+        className={cn(
+          // `RiveComponent` renders its own wrapper around the actual
+          // `<canvas>` rather than spreading straight onto it (confirmed by
+          // inspecting the mounted DOM: `className` here lands on that
+          // wrapper, not the canvas). That wrapper has no size of its own —
+          // it is sized by its content — and the canvas in turn sizes itself
+          // to *its* parent (`shouldResizeCanvasToContainer`'s default),
+          // which is this very wrapper. With neither given an explicit size,
+          // that is a circular "auto" on both ends and the canvas resolves
+          // to a real width but a **zero height** (confirmed live: `<canvas
+          // width="56" height="0">`) — painting nothing, silently, no error
+          // anywhere. `size-full` breaks the circle: it is a definite size
+          // (100% of the outer `div` above, which this component's own
+          // `className` prop already sizes, one way or another, at every
+          // call site). Found live 2026-09-26 against the agent detail
+          // page's hero avatar, after the mascot had rendered correctly
+          // everywhere it was tested up to this point.
+          "size-full",
+          "transition-opacity duration-150",
+          ready ? "opacity-100" : "opacity-0",
+        )}
+      />
     </div>
   );
 }
