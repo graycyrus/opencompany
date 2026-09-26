@@ -65,11 +65,16 @@ export const DEFAULT_ACCENT_PRESET = "default";
  * deliberate twin of whatever `:root` currently declares (`architecture.md`
  * §2's Q1 follow-up: naming today's default now keeps it choosable later, if
  * a future brand decision ever moves the default away from violet). Six more
- * are spread around the hue circle, and "Graphite" is the deliberate
- * exception: chroma zero at every step, for the premium monochrome look
- * requested alongside this feature from the start — a hue choice would defeat
- * that, so it is the one preset with no hue at all. Every preset here is
- * individually verified against every pair in `docs/design-system/color.md`'s
+ * are spread around the hue circle, and "Graphite" and "Onyx" are the
+ * deliberate exceptions: chroma zero at every step, for the premium
+ * monochrome look requested alongside this feature from the start — a hue
+ * choice would defeat that, so these are the two presets with no hue at all.
+ * "Onyx" anchors much darker than "Graphite" (near-black rather than
+ * mid-gray) and, unlike every other preset, does not hold the shared
+ * lightness cadence either — see its comment in `index.css` for why a
+ * near-black 500 makes that impossible to combine with the contrast bars
+ * below. Every preset here is individually verified against every pair in
+ * `docs/design-system/color.md`'s
  * contrast table — see the `ACCENT PRESETS` section of `index.css` for the
  * measured ratios in each preset's leading comment, and
  * `accent-presets-contrast.test.ts` for the test that keeps them honest.
@@ -84,6 +89,7 @@ export const ACCENT_PRESETS: readonly AccentPreset[] = [
   { id: "amber", label: "Amber" },
   { id: "rose", label: "Rose" },
   { id: "graphite", label: "Graphite" },
+  { id: "onyx", label: "Onyx" },
 ];
 
 /** `oc.<area>.<name>` — the convention `oc.connections.v1`, `oc.presence.override`
@@ -181,12 +187,12 @@ function applyTintedNeutrals(root: HTMLElement, hue: number | null): void {
   root.style.setProperty("--accent-tint-dark", tint.accentDark);
 }
 
-/** Graphite has no hue by design (`ACCENT_PRESETS`'s comment) — its canvas
- *  and chrome go fully achromatic to match, per
+/** Graphite and Onyx have no hue by design (`ACCENT_PRESETS`'s comment) —
+ *  their canvas/chrome/accent tints go fully achromatic to match, per
  *  `theme-system-decision-addendum.md`. Every other known id, including
  *  `"default"`, resolves through `CURATED_PRESET_HUE`. */
 function neutralTintHueForPreset(id: string): number | null {
-  if (id === "graphite") return null;
+  if (id === "graphite" || id === "onyx") return null;
   return CURATED_PRESET_HUE[id] ?? CURATED_PRESET_HUE[DEFAULT_ACCENT_PRESET];
 }
 

@@ -88,8 +88,9 @@ by eye:
 | Amber | 4.86 | 4.55 | 6.13 | 6.03 | 7.08 |
 | Rose | 4.92 | 4.61 | 6.17 | 6.33 | 7.24 |
 | Graphite | 4.88 | 4.57 | 6.00 | 5.68 | 6.86 |
+| Onyx | 16.48 | 15.43 | 5.04 | 14.72 | 5.11 |
 
-All eight clear 4.5:1. None is asserted against `--accent` or `--chrome` — the
+All nine clear 4.5:1. None is asserted against `--accent` or `--chrome` — the
 default ramp already misses both (4.20:1, 4.22:1; a pre-existing gap this
 feature does not widen, tracked separately from issue #2493).
 
@@ -100,11 +101,24 @@ shape (scaled by a single factor so 500 clears 500/light-canvas), because a
 neutral ramp needs no hue to trade chroma against — see its comment in
 `index.css` for the exact derivation.
 
+**Onyx is a second, deeper exception — chroma zero AND a broken cadence:**
+anchored near-black (500 ≈ `oklch(0.24 0 0)`, `#1f1f1f`) rather than
+Graphite's mid-gray. Holding the shared lightness cadence at that anchor is
+not just undesirable here, it is provably impossible: `c400OnDarkCanvas` and
+`c300OnDarkActiveRung` are checked against fixed near-black anchors
+(`--surface-dark-bg`, `--surface-dark-active`), which floors step 400 at
+L≈0.571 and step 300 at L≈0.618 no matter how dark 500 is — scaling
+Graphite's whole cadence down only keeps every pair clearing for L500 in
+≈0.489–0.552, never lower. Onyx therefore holds 50–400 lifted above those
+floors (with margin) and lets 500–900 compress toward black on an
+independent, still-monotonically-decreasing run instead — see its comment in
+`index.css` for the derivation and the binary-searched floors.
+
 **Authoring a new preset:** tune in oklch, hold the brand ramp's own lightness
 cadence and hue-drift shape (stated where `--brand-*` is declared in
 `index.css`) rather than inventing a new one, and let the contrast test — not
 review — decide whether it ships. Prefer a darker 500 over a `-foreground`
-override when white text fails; none of the eight above needed one. An id, once
+override when white text fails; none of the nine above needed one. An id, once
 shipped, is never renamed (an operator's stored choice names it).
 
 ---

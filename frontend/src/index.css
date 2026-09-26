@@ -1486,3 +1486,34 @@
     --brand-800: oklch(0.3595 0 0); /* #3d3d3d */
     --brand-900: oklch(0.2881 0 0); /* #2b2b2b */
 }
+
+/* white/500 16.48 · 500/canvas 15.43 · 400/dark-canvas 5.04 · 700/100 14.72 ·
+   300/dark-active 5.11. Chroma zero at every step, like Graphite, but
+   anchored much darker (500 ≈ #1f1f1f) to read as near-black rather than
+   mid-gray.
+   Unlike Graphite, this ramp does NOT hold the shared step-lightness cadence
+   `accent-ramp.ts` derives from violet: doing so is provably incompatible
+   with a near-black 500. `c400OnDarkCanvas` and `c300OnDarkActiveRung`
+   (`accent-contrast.ts`) are checked against fixed near-black anchors
+   (`--surface-dark-bg` L 0.1395, `--surface-dark-active` L 0.2396), which
+   forces step 400 to at least L≈0.571 and step 300 to at least L≈0.618
+   regardless of how dark 500 is — verified by binary-searching those two
+   pairs in isolation, and by sweeping violet's cadence at every scale factor,
+   which only clears all five pairs for L500 in ≈0.489–0.552 and never below
+   it (both checked against this exact contrast implementation, not
+   eyeballed). So 50–400 are held light enough to clear those floors with
+   margin, and 500–900 compress toward black on their own independent,
+   still-decreasing run instead of scaling with them. A second, deliberate
+   exception to "hold the cadence" alongside Graphite's chroma-zero one. */
+[data-accent-preset="onyx"] {
+    --brand-50: oklch(0.9400 0 0); /* #ebebeb */
+    --brand-100: oklch(0.9000 0 0); /* #dedede */
+    --brand-200: oklch(0.8000 0 0); /* #bebebe */
+    --brand-300: oklch(0.6500 0 0); /* #8f8f8f */
+    --brand-400: oklch(0.6000 0 0); /* #808080 */
+    --brand-500: oklch(0.2400 0 0); /* #1f1f1f */
+    --brand-600: oklch(0.1900 0 0); /* #141414 */
+    --brand-700: oklch(0.1450 0 0); /* #0a0a0a */
+    --brand-800: oklch(0.1050 0 0); /* #040404 */
+    --brand-900: oklch(0.0700 0 0); /* #010101 */
+}

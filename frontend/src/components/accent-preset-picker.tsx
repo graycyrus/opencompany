@@ -42,7 +42,7 @@ const DEFAULT_SWATCH_PRESET_ID = "violet";
 
 /**
  * The accent-preset picker — a `role="radiogroup"` of named swatches, one per
- * `AccentPreset`, plus a tenth "Custom" tile (issue #2493 follow-on,
+ * `AccentPreset`, plus a trailing "Custom" tile (issue #2493 follow-on,
  * `docs/issues/accent-theme-presets/theme-system-decision.md`'s constrained
  * hue picker). See `docs/issues/accent-theme-presets/architecture.md` §10 for
  * the original nine.
@@ -75,7 +75,7 @@ export function AccentPresetPicker() {
         aria-label="Accent preset"
         value={current}
         onValueChange={(value) => setAccentPreset(value as string)}
-        className="grid grid-cols-4 gap-2 sm:grid-cols-10"
+        className="grid grid-cols-4 gap-2 sm:grid-cols-11"
       >
         {ACCENT_PRESETS.map((preset) => (
           <PresetSwatch key={preset.id} preset={preset} />
