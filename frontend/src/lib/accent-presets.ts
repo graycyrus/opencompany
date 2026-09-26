@@ -54,12 +54,15 @@ export const DEFAULT_ACCENT_PRESET = "default";
  * The curated set, target 6–8 per `open-questions.md` Q5. "Violet" is a
  * deliberate twin of whatever `:root` currently declares (`architecture.md`
  * §2's Q1 follow-up: naming today's default now keeps it choosable later, if
- * a future brand decision ever moves the default away from violet). The other
- * six are spread around the hue circle and each individually verified against
- * every pair in `docs/design-system/color.md`'s contrast table — see the
- * `ACCENT PRESETS` section of `index.css` for the measured ratios in each
- * preset's leading comment, and `accent-presets-contrast.test.ts` for the
- * test that keeps them honest.
+ * a future brand decision ever moves the default away from violet). Six more
+ * are spread around the hue circle, and "Graphite" is the deliberate
+ * exception: chroma zero at every step, for the premium monochrome look
+ * requested alongside this feature from the start — a hue choice would defeat
+ * that, so it is the one preset with no hue at all. Every preset here is
+ * individually verified against every pair in `docs/design-system/color.md`'s
+ * contrast table — see the `ACCENT PRESETS` section of `index.css` for the
+ * measured ratios in each preset's leading comment, and
+ * `accent-presets-contrast.test.ts` for the test that keeps them honest.
  */
 export const ACCENT_PRESETS: readonly AccentPreset[] = [
   { id: DEFAULT_ACCENT_PRESET, label: "Default" },
@@ -70,6 +73,7 @@ export const ACCENT_PRESETS: readonly AccentPreset[] = [
   { id: "green", label: "Green" },
   { id: "amber", label: "Amber" },
   { id: "rose", label: "Rose" },
+  { id: "graphite", label: "Graphite" },
 ];
 
 /** `oc.<area>.<name>` — the convention `oc.connections.v1`, `oc.presence.override`

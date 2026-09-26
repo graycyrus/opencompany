@@ -117,7 +117,7 @@ const BAR = 4.5;
 
 const rampsToCheck: Array<{ name: string; body: string }> = [
   { name: "default (:root)", body: blockBody(":root {") },
-  ...["violet", "indigo", "blue", "teal", "green", "amber", "rose"].map((id) => ({
+  ...["violet", "indigo", "blue", "teal", "green", "amber", "rose", "graphite"].map((id) => ({
     name: id,
     body: blockBody(`[data-accent-preset="${id}"] {`),
   })),

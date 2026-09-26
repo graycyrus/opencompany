@@ -1426,3 +1426,25 @@
     --brand-800: oklch(0.3723 0.1238 14.81); /* #73192b */
     --brand-900: oklch(0.2984 0.0945 16.00); /* #53121d */
 }
+
+/* white/500 4.88 · 500/canvas 4.57 · 400/dark-canvas 6.00 · 700/100 5.68 · 300/dark-active 6.86.
+   Chroma zero at every step — the one preset with no hue at all, for the
+   monochrome look requested alongside this feature from the start. Every
+   other preset holds violet's lightness cadence and scales chroma to its own
+   hue's gamut; this one holds the cadence and scales chroma to zero instead,
+   which is why its L values are the violet ramp's own values scaled by a
+   single factor (0.9737) rather than independently searched — there is no
+   chroma to trade against lightness here, so the shape carries over exactly
+   and only the overall level needed adjusting to clear 500/canvas. */
+[data-accent-preset="graphite"] {
+    --brand-50: oklch(0.9277 0 0); /* #e7e7e7 */
+    --brand-100: oklch(0.8889 0 0); /* #dadada */
+    --brand-200: oklch(0.8193 0 0); /* #c4c4c4 */
+    --brand-300: oklch(0.7295 0 0); /* #a7a7a7 */
+    --brand-400: oklch(0.6444 0 0); /* #8d8d8d */
+    --brand-500: oklch(0.5504 0 0); /* #717171 */
+    --brand-600: oklch(0.5009 0 0); /* #636363 */
+    --brand-700: oklch(0.4338 0 0); /* #515151 */
+    --brand-800: oklch(0.3595 0 0); /* #3d3d3d */
+    --brand-900: oklch(0.2881 0 0); /* #2b2b2b */
+}

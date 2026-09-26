@@ -57,7 +57,7 @@ export function AccentPresetPicker() {
       aria-label="Accent preset"
       value={current}
       onValueChange={(value) => setAccentPreset(value as string)}
-      className="grid grid-cols-4 gap-2 sm:grid-cols-8"
+      className="grid grid-cols-4 gap-2 sm:grid-cols-9"
     >
       {ACCENT_PRESETS.map((preset) => (
         <PresetSwatch key={preset.id} preset={preset} />

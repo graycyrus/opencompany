@@ -87,16 +87,24 @@ by eye:
 | Green | 4.83 | 4.52 | 5.99 | 5.45 | 6.74 |
 | Amber | 4.86 | 4.55 | 6.13 | 6.03 | 7.08 |
 | Rose | 4.92 | 4.61 | 6.17 | 6.33 | 7.24 |
+| Graphite | 4.88 | 4.57 | 6.00 | 5.68 | 6.86 |
 
-All seven clear 4.5:1. None is asserted against `--accent` or `--chrome` — the
+All eight clear 4.5:1. None is asserted against `--accent` or `--chrome` — the
 default ramp already misses both (4.20:1, 4.22:1; a pre-existing gap this
 feature does not widen, tracked separately from issue #2493).
+
+**Graphite is the one exception to "hold the hue-drift shape":** chroma zero
+at every step, for the premium monochrome look asked for alongside this
+feature from the start. Its lightness cadence is still the brand ramp's own
+shape (scaled by a single factor so 500 clears 500/light-canvas), because a
+neutral ramp needs no hue to trade chroma against — see its comment in
+`index.css` for the exact derivation.
 
 **Authoring a new preset:** tune in oklch, hold the brand ramp's own lightness
 cadence and hue-drift shape (stated where `--brand-*` is declared in
 `index.css`) rather than inventing a new one, and let the contrast test — not
 review — decide whether it ships. Prefer a darker 500 over a `-foreground`
-override when white text fails; none of the seven above needed one. An id, once
+override when white text fails; none of the eight above needed one. An id, once
 shipped, is never renamed (an operator's stored choice names it).
 
 ---
