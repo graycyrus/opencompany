@@ -145,19 +145,25 @@ const INK_LIGHT_MUTED = resolveAccentColor({ L: 0.526, C: 0.0155, H: 286.04 });
 const INK_DARK_MUTED = resolveAccentColor({ L: 0.619, C: 0.0163, H: 285.78 });
 
 /**
- * The two pairs `theme-system-decision-addendum.md` calls for: body text on
- * the canvas, and the chrome's faintest label (`--ink-*-muted`, the pair
- * `index.css`'s own comment on `--surface-light-chrome` names explicitly) on
- * the chrome. `--ink-dark-primary` is pure white — its ratio against any of
- * these near-black/near-white low-chroma tints is nowhere near the 4.5 bar
- * regardless of hue, so only the muted pair is checked for dark canvas/chrome;
- * light checks both, since `--ink-light-primary` is the one anchor close
- * enough to a bright canvas for a hue swap to matter in principle.
+ * The pairs `theme-system-decision-addendum.md`/`-addendum-2.md` call for:
+ * body text on the canvas, the chrome's faintest label (`--ink-*-muted`, the
+ * pair `index.css`'s own comment on `--surface-light-chrome` names
+ * explicitly) on the chrome, and `--accent-foreground` (`--ink-light-primary`
+ * in light mode) on `--accent` — the same pairing `text-accent-foreground`
+ * sits on in the ~40 `bg-accent` call sites this fix touches.
+ * `--ink-dark-primary` is pure white — its ratio against any of these
+ * near-black/near-white low-chroma tints (including dark's own `--accent`,
+ * L=0.2396) is nowhere near the 4.5 bar regardless of hue, so only the muted
+ * pair is checked for dark canvas/chrome and dark `--accent` needs no check
+ * at all; light checks every one of its pairs, since `--ink-light-primary`
+ * and `--ink-light-muted` are the anchors close enough to a bright surface
+ * for a hue swap to matter in principle.
  */
 export interface TintedNeutralContrastRatios {
   readonly foregroundOnLightCanvas: number;
   readonly mutedOnLightChrome: number;
   readonly mutedOnDarkChrome: number;
+  readonly foregroundOnLightAccent: number;
 }
 
 export interface TintedNeutralContrastResult {
@@ -179,11 +185,13 @@ export function evaluateTintedNeutrals(hue: number | null): TintedNeutralContras
   const canvasLight = resolveAccentColor(parseOklch(tint.canvasLight));
   const chromeLight = resolveAccentColor(parseOklch(tint.chromeLight));
   const chromeDark = resolveAccentColor(parseOklch(tint.chromeDark));
+  const accentLight = resolveAccentColor(parseOklch(tint.accentLight));
 
   const ratios: TintedNeutralContrastRatios = {
     foregroundOnLightCanvas: accentContrastRatio(INK_LIGHT_PRIMARY, canvasLight),
     mutedOnLightChrome: accentContrastRatio(INK_LIGHT_MUTED, chromeLight),
     mutedOnDarkChrome: accentContrastRatio(INK_DARK_MUTED, chromeDark),
+    foregroundOnLightAccent: accentContrastRatio(INK_LIGHT_PRIMARY, accentLight),
   };
   const contrastOk = Object.values(ratios).every((ratio) => ratio >= ACCENT_CONTRAST_BAR);
   return { contrastOk, ratios };

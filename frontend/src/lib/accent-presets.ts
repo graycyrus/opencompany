@@ -143,22 +143,25 @@ function clearInlineAccentRamp(root: HTMLElement): void {
   for (const property of CUSTOM_BRAND_PROPERTIES) root.style.removeProperty(property);
 }
 
-/** The four canvas/chrome custom-property names `applyTintedNeutrals` sets. */
+/** The canvas/chrome/accent custom-property names `applyTintedNeutrals` sets. */
 const TINTED_NEUTRAL_PROPERTIES = [
   "--canvas-tint-light",
   "--canvas-tint-dark",
   "--chrome-tint-light",
   "--chrome-tint-dark",
+  "--accent-tint-light",
+  "--accent-tint-dark",
 ] as const;
 
-/** Removes every inline canvas/chrome override, so `index.css`'s own
+/** Removes every inline canvas/chrome/accent override, so `index.css`'s own
  *  `:root` values — today's exact, authored pixels — show through
  *  unapproximated. Used for `"default"` only: `CURATED_PRESET_HUE.default`
- *  (violet's hue, 285.51°) is close to but not identical to the four
- *  anchors' own authored hues (`--surface-light-bg`'s is 286.28°, and dark's
- *  are further still, 262.8°/264.46°) — substituting it would be a small but
- *  real pixel change, not the zero-pixel-change `theme-system-decision-
- *  addendum.md` promises for Default. Same reasoning `clearInlineAccentRamp`
+ *  (violet's hue, 285.51°) is close to but not identical to these anchors'
+ *  own authored hues (`--surface-light-bg`'s is 286.28°, dark's are further
+ *  still at 262.8°/264.46°, and `--surface-light-active`/`-dark-active` sit
+ *  at 293.15°/284.87°) — substituting it would be a small but real pixel
+ *  change, not the zero-pixel-change `theme-system-decision-addendum.md`/
+ *  `-addendum-2.md` promise for Default. Same reasoning `clearInlineAccentRamp`
  *  already applies to `--brand-*` for the same id. */
 function clearTintedNeutrals(root: HTMLElement): void {
   for (const property of TINTED_NEUTRAL_PROPERTIES) root.style.removeProperty(property);
@@ -174,6 +177,8 @@ function applyTintedNeutrals(root: HTMLElement, hue: number | null): void {
   root.style.setProperty("--canvas-tint-dark", tint.canvasDark);
   root.style.setProperty("--chrome-tint-light", tint.chromeLight);
   root.style.setProperty("--chrome-tint-dark", tint.chromeDark);
+  root.style.setProperty("--accent-tint-light", tint.accentLight);
+  root.style.setProperty("--accent-tint-dark", tint.accentDark);
 }
 
 /** Graphite has no hue by design (`ACCENT_PRESETS`'s comment) — its canvas

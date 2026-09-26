@@ -88,6 +88,18 @@
     --chrome-tint-light: oklch(0.9427 0.012 286.17);
     --chrome-tint-dark: oklch(0.1865 0.0044 264.46);
 
+    /* Accent tint — the same decoupling, for `--accent` (the menu-row/
+       list-item/settings-rail hover-active tint, `--accent` below and dark
+       mode's `--sidebar-accent`). `--accent` was always meant to read as
+       brand-tinted, but was wired straight to `--surface-light-active`/
+       `--surface-dark-active` — fixed primitives, so it silently never
+       followed an accent choice while `--primary`/`--ring` did (bug, not
+       scope: `theme-system-decision-addendum-2.md`). Values below are those
+       primitives' own today, unchanged, so the shipped default still
+       reproduces today's pixels exactly. */
+    --accent-tint-light: oklch(0.942 0.0256 293.15);
+    --accent-tint-dark: oklch(0.2396 0.019 284.87);
+
     /*
      * Surfaces — the six-rung ladder, stated per theme.
      *
@@ -253,8 +265,12 @@
        nav. Brand-tinted, but the *text* on it stays neutral — 40 call
        sites pair `bg-accent` with `text-accent-foreground`, and indigo
        text on every hover would make the console strobe. The one place
-       brand ink is allowed is the active sidebar row, below. */
-    --accent: var(--surface-light-active);
+       brand ink is allowed is the active sidebar row, below.
+
+       Resolves through `--accent-tint-light`, not `--surface-light-active`
+       directly, so an accent choice can reach it the same way it reaches
+       `--background`/`--chrome` above (`theme-system-decision-addendum-2.md`). */
+    --accent: var(--accent-tint-light);
     --accent-foreground: var(--ink-light-primary);
 
     --destructive: var(--red-text);
@@ -506,7 +522,9 @@
     --ink-hint: var(--ink-dark-hint);
     --ink-muted: var(--ink-dark-muted);
 
-    --accent: var(--surface-dark-active);
+    /* `--accent-tint-dark`, not `--surface-dark-active` directly — see the
+       light-mode comment above. */
+    --accent: var(--accent-tint-dark);
     --accent-foreground: var(--ink-dark-primary);
 
     --destructive: var(--red-bright);
@@ -579,7 +597,11 @@
     --sidebar-foreground: var(--ink-dark-primary);
     --sidebar-primary: var(--brand-400);
     --sidebar-primary-foreground: var(--surface-dark-bg);
-    --sidebar-accent: var(--surface-dark-active);
+    /* Same primitive `--accent` above resolves through in dark mode — reuse
+       it rather than a second computation (`theme-system-decision-addendum-2.md`).
+       Light mode's `--sidebar-accent` already correctly uses `--brand-100`,
+       untouched. */
+    --sidebar-accent: var(--accent-tint-dark);
     --sidebar-accent-foreground: var(--brand-300);
     --sidebar-border: var(--surface-dark-4);
     --sidebar-ring: var(--brand-400);

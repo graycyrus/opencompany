@@ -200,25 +200,28 @@ describe("canvas/chrome auto-tint", () => {
     return { L: Number(m[1]), C: Number(m[2]), H: Number(m[3]) };
   }
 
-  // `index.css`'s own four anchor hues (286.28°, 262.8°, 286.17°, 264.46°)
-  // are close to, but NOT identical to, violet's brand hue (285.51° —
-  // `CURATED_PRESET_HUE.default`) — dark mode's in particular differs by
-  // over 20°. Substituting the accent hue for "Default" would therefore be a
-  // small but real pixel change, not the zero-pixel-change
-  // `theme-system-decision-addendum.md` promises. `applyAccentPreset`
-  // resolves this the same way it already does for `--brand-*`: "Default"
-  // clears the inline override entirely (`clearTintedNeutrals`) rather than
-  // computing an approximation, so `:root`'s own authored values — asserted
-  // to still be exactly what they were before this feature, below — show
-  // through unmodified. That DOM behaviour is exercised by
-  // `test/e2e/accent-preset.spec.ts` (a real `getComputedStyle`, not a node
-  // approximation of one); this test only pins the anchor *source values*
-  // Default falls back to, so a future edit to one of them is caught here.
+  // `index.css`'s own six anchor hues (286.28°, 262.8°, 286.17°, 264.46°,
+  // 293.15°, 284.87°) are close to, but NOT identical to, violet's brand hue
+  // (285.51° — `CURATED_PRESET_HUE.default`) — dark mode's in particular
+  // differs by over 20°. Substituting the accent hue for "Default" would
+  // therefore be a small but real pixel change, not the zero-pixel-change
+  // `theme-system-decision-addendum.md`/`-addendum-2.md` promises.
+  // `applyAccentPreset` resolves this the same way it already does for
+  // `--brand-*`: "Default" clears the inline override entirely
+  // (`clearTintedNeutrals`) rather than computing an approximation, so
+  // `:root`'s own authored values — asserted to still be exactly what they
+  // were before this feature, below — show through unmodified. That DOM
+  // behaviour is exercised by `test/e2e/accent-preset.spec.ts` (a real
+  // `getComputedStyle`, not a node approximation of one); this test only pins
+  // the anchor *source values* Default falls back to, so a future edit to
+  // one of them is caught here.
   it("keeps index.css's own anchor values as the fallback \"default\" reproduces (via clearing, not approximation)", () => {
     expect(readVarOklch("--canvas-tint-light")).toEqual({ L: 0.9776, C: 0.0066, H: 286.28 });
     expect(readVarOklch("--canvas-tint-dark")).toEqual({ L: 0.1395, C: 0.0048, H: 262.8 });
     expect(readVarOklch("--chrome-tint-light")).toEqual({ L: 0.9427, C: 0.012, H: 286.17 });
     expect(readVarOklch("--chrome-tint-dark")).toEqual({ L: 0.1865, C: 0.0044, H: 264.46 });
+    expect(readVarOklch("--accent-tint-light")).toEqual({ L: 0.942, C: 0.0256, H: 293.15 });
+    expect(readVarOklch("--accent-tint-dark")).toEqual({ L: 0.2396, C: 0.019, H: 284.87 });
   });
 
   it("computeTintedNeutrals at violet's hue is a close but not exact approximation of the anchors (documents why Default clears instead)", () => {
@@ -236,7 +239,14 @@ describe("canvas/chrome auto-tint", () => {
 
   it("goes fully achromatic for Graphite (hue: null), never an arbitrary hue at zero chroma", () => {
     const tint = computeTintedNeutrals(null);
-    for (const value of [tint.canvasLight, tint.canvasDark, tint.chromeLight, tint.chromeDark]) {
+    for (const value of [
+      tint.canvasLight,
+      tint.canvasDark,
+      tint.chromeLight,
+      tint.chromeDark,
+      tint.accentLight,
+      tint.accentDark,
+    ]) {
       expect(value).toContain(" 0 0)"); // chroma 0, hue 0
     }
     expect(evaluateTintedNeutrals(null).contrastOk).toBe(true);
